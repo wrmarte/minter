@@ -1,5 +1,7 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits } = require('discord.js');
+console.log('📦 DB URL from ENV:', process.env.DATABASE_URL);
+
 const { Client: PgClient } = require('pg');
 const fs = require('fs');
 const path = require('path');
