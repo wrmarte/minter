@@ -1,4 +1,5 @@
 const { SlashCommandBuilder } = require('discord.js');
+console.log('🧪 /channels command triggered');
 
 module.exports = {
   data: new SlashCommandBuilder()
