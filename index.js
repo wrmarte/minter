@@ -4,7 +4,6 @@ const { Client: PgClient } = require('pg');
 const fs = require('fs');
 const path = require('path');
 
-
 const trackContract = require('./services/trackContract');
 const { TOKEN_NAME_TO_ADDRESS } = require('./utils/constants');
 const onInteraction = require('./events/interactionCreate');
