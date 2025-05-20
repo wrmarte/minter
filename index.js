@@ -9,10 +9,11 @@ const { TOKEN_NAME_TO_ADDRESS } = require('./utils/constants.js');
 const onInteraction = require('./events/interactionCreate.js');
 const onReady = require('./events/ready.js');
 
-const pg = new PgClient({
+const db = new PgClient({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
+
 pg.connect();
 
 const client = new Client({
