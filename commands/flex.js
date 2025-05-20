@@ -10,12 +10,14 @@ const abi = [
   'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)'
 ];
 
-module.exports = {
-  data: new SlashCommandBuilder()
-    .setName('flex')
-    .setDescription('Flex a random minted NFT from the tracked contract'),
+const data = new SlashCommandBuilder()
+  .setName('flex')
+  .setDescription('Flex a random minted NFT from the tracked contract');
 
+module.exports = {
+  data,
   async execute(interaction, { pg }) {
+    console.log('🧪 /flex triggered');
     await interaction.deferReply();
 
     const channelId = interaction.channel.id;
@@ -81,8 +83,9 @@ module.exports = {
 
         return interaction.editReply({ embeds: [embed] });
 
-      } catch {
-        continue; // Try another tokenId
+      } catch (err) {
+        console.warn(`⚠️ Flex error on token #${tokenId}: ${err.message}`);
+        continue;
       }
     }
 
@@ -91,3 +94,4 @@ module.exports = {
     });
   }
 };
+
