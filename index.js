@@ -4,10 +4,10 @@ const { Client: PgClient } = require('pg');
 const fs = require('fs');
 const path = require('path');
 
-const trackContract = require('./services/trackContract');
-const { TOKEN_NAME_TO_ADDRESS } = require('./utils/constants');
-const onInteraction = require('./events/interactionCreate');
-const onReady = require('./events/ready');
+const trackContract = require('./services/trackContract.js');
+const { TOKEN_NAME_TO_ADDRESS } = require('./utils/constants.js');
+const onInteraction = require('./events/interactionCreate.js');
+const onReady = require('./events/ready.js');
 
 const pg = new PgClient({
   connectionString: process.env.DATABASE_URL,
