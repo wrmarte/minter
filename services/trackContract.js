@@ -26,7 +26,7 @@ module.exports = async function trackContract({ name, address, mint_price, mint_
     'function tokenURI(uint256 tokenId) view returns (string)'
   ];
   const iface = new Interface(abi);
-  const provider = new ethers.JsonRpcProvider(process.env.RPC_URL); // or pass provider into this module if needed
+  const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
   const contract = new Contract(address, abi, provider);
 
   let seenMints = new Set(loadJson(seenPath(name)) || []);
@@ -80,8 +80,8 @@ module.exports = async function trackContract({ name, address, mint_price, mint_
 
     if (mints.length) {
       const total = mint_price * mints.length;
-
       const tokenAddr = TOKEN_NAME_TO_ADDRESS[mint_token_symbol.toUpperCase()] || mint_token;
+
       let ethValue = await getRealDexPriceForToken(total, tokenAddr);
       if (!ethValue) {
         const fallback = await getEthPriceFromToken(tokenAddr);
@@ -115,6 +115,86 @@ module.exports = async function trackContract({ name, address, mint_price, mint_
           await ch.send({ embeds: [embed], components: [row] });
         } catch (e) {
           console.warn(`❌ Failed to send to ${id}: ${e.message}`);
+        }
+      }
+    }
+
+    // === SALE EMBEDS ===
+    for (const sale of sales) {
+      let image = 'https://via.placeholder.com/400x400?text=SOLD';
+      let tokenAmount = null;
+      let ethValue = null;
+      let methodUsed = null;
+
+      try {
+        let uri = await contract.tokenURI(sale.tokenId);
+        if (uri.startsWith('ipfs://')) uri = uri.replace('ipfs://', 'https://ipfs.io/ipfs/');
+        const meta = await fetch(uri).then(r => r.json());
+        if (meta?.image) {
+          image = meta.image.startsWith('ipfs://')
+            ? meta.image.replace('ipfs://', 'https://ipfs.io/ipfs/')
+            : meta.image;
+        }
+      } catch {}
+
+      let tx, receipt;
+      try {
+        tx = await provider.getTransaction(sale.txHash);
+        receipt = await provider.getTransactionReceipt(sale.txHash);
+      } catch {}
+
+      if (tx?.value && tx.value > 0n) {
+        tokenAmount = parseFloat(ethers.formatEther(tx.value));
+        ethValue = tokenAmount;
+        methodUsed = '🟦 ETH';
+      }
+
+      if (!ethValue && receipt) {
+        const transferTopic = id('Transfer(address,address,uint256)');
+        for (const log of receipt.logs) {
+          if (log.topics[0] === transferTopic && log.address !== address) {
+            try {
+              const to = ethers.getAddress('0x' + log.topics[2].slice(26));
+              if (to.toLowerCase() === sale.from.toLowerCase()) {
+                const tokenContract = log.address;
+                tokenAmount = parseFloat(ethers.formatUnits(log.data, 18));
+                ethValue = await getRealDexPriceForToken(tokenAmount, tokenContract);
+                if (!ethValue) {
+                  const fallback = await getEthPriceFromToken(tokenContract);
+                  ethValue = fallback ? tokenAmount * fallback : null;
+                }
+                methodUsed = '🟨 Token';
+                break;
+              }
+            } catch {}
+          }
+        }
+      }
+
+      if (!tokenAmount || !ethValue) continue;
+
+      const embed = new EmbedBuilder()
+        .setTitle(`💸 NFT SOLD – ${name} #${sale.tokenId}`)
+        .setDescription(`Token \`#${sale.tokenId}\` just sold!`)
+        .addFields(
+          { name: '👤 Seller', value: shortWalletLink(sale.from), inline: true },
+          { name: '🧑‍💻 Buyer', value: shortWalletLink(sale.to), inline: true },
+          { name: `💰 Paid`, value: `${tokenAmount.toFixed(4)}`, inline: true },
+          { name: `⇄ ETH Value`, value: `${ethValue.toFixed(4)} ETH`, inline: true },
+          { name: `💳 Method`, value: methodUsed || 'Unknown', inline: true }
+        )
+        .setThumbnail(image)
+        .setURL(`https://opensea.io/assets/base/${address}/${sale.tokenId}`)
+        .setFooter({ text: 'Powered by PimpsDev' })
+        .setColor(0x66cc66)
+        .setTimestamp();
+
+      for (const id of channel_ids) {
+        try {
+          const ch = await provider._client.channels.fetch(id);
+          await ch.send({ embeds: [embed] });
+        } catch (e) {
+          console.warn(`❌ Failed to send sale alert to ${id}: ${e.message}`);
         }
       }
     }
