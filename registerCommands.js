@@ -4,16 +4,12 @@ const fs = require('fs');
 const path = require('path');
 
 const commands = [];
-const commandPath = path.join(__dirname, 'commands');
-const commandFiles = fs.readdirSync(commandPath).filter(file => file.endsWith('.js'));
+const commandFiles = fs.readdirSync(path.join(__dirname, 'commands')).filter(file => file.endsWith('.js'));
 
-// Load command definitions
 for (const file of commandFiles) {
-  const command = require(path.join(commandPath, file));
-  if (command?.data?.name) {
+  const command = require(`./commands/${file}`);
+  if (command?.data) {
     commands.push(command.data.toJSON());
-  } else {
-    console.warn(`⚠️ Skipped invalid command file: ${file}`);
   }
 }
 
@@ -21,14 +17,14 @@ const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_BOT_TOKEN)
 
 (async () => {
   try {
-    console.log('🔃 Registering slash commands...');
+    console.log('🔃 Registering commands to guild...');
     await rest.put(
-      Routes.applicationCommands(process.env.CLIENT_ID),
+      Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
       { body: commands }
     );
-    console.log(`✅ Registered ${commands.length} slash command(s).`);
+    console.log(`✅ Registered ${commands.length} command(s) to guild.`);
   } catch (error) {
-    console.error('❌ Error registering slash commands:', error);
+    console.error('❌ Slash registration failed:', error);
   }
 })();
 
