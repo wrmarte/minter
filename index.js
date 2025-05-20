@@ -9,12 +9,15 @@ const { TOKEN_NAME_TO_ADDRESS } = require('./utils/constants.js');
 const onInteraction = require('./events/interactionCreate.js');
 const onReady = require('./events/ready.js');
 
-const db = new PgClient({
+// ✅ Correctly initialized pg client
+const pg = new PgClient({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-pg.connect();
+pg.connect()
+  .then(() => console.log('✅ Connected to PostgreSQL'))
+  .catch(err => console.error('❌ PostgreSQL connection error:', err));
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages]
@@ -33,3 +36,4 @@ client.on('interactionCreate', interaction =>
 );
 
 client.login(process.env.DISCORD_BOT_TOKEN);
+
