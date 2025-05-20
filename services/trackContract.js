@@ -20,7 +20,7 @@ function salesPath(name) {
   return path.join(__dirname, `../../sales_${name}.json`);
 }
 
-module.exports = async function trackContract({ name, address, mint_price, mint_token, mint_token_symbol, channel_ids }) {
+module.exports = async function trackContract({ name, address, mint_price, mint_token, mint_token_symbol, channel_ids }, client) {
   const abi = [
     'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
     'function tokenURI(uint256 tokenId) view returns (string)'
@@ -111,7 +111,7 @@ module.exports = async function trackContract({ name, address, mint_price, mint_
 
       for (const id of channel_ids) {
         try {
-          const ch = await provider._client.channels.fetch(id);
+          const ch = await client.channels.fetch(id);
           await ch.send({ embeds: [embed], components: [row] });
         } catch (e) {
           console.warn(`❌ Failed to send to ${id}: ${e.message}`);
@@ -119,7 +119,6 @@ module.exports = async function trackContract({ name, address, mint_price, mint_
       }
     }
 
-    // === SALE EMBEDS ===
     for (const sale of sales) {
       let image = 'https://via.placeholder.com/400x400?text=SOLD';
       let tokenAmount = null;
@@ -191,7 +190,7 @@ module.exports = async function trackContract({ name, address, mint_price, mint_
 
       for (const id of channel_ids) {
         try {
-          const ch = await provider._client.channels.fetch(id);
+          const ch = await client.channels.fetch(id);
           await ch.send({ embeds: [embed] });
         } catch (e) {
           console.warn(`❌ Failed to send sale alert to ${id}: ${e.message}`);
@@ -203,4 +202,5 @@ module.exports = async function trackContract({ name, address, mint_price, mint_
     saveJson(salesPath(name), [...seenSales]);
   });
 };
+
 
