@@ -1,14 +1,20 @@
+require('dotenv').config();
 const { REST, Routes } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
-require('dotenv').config();
 
 const commands = [];
-const commandFiles = fs.readdirSync(path.join(__dirname, 'commands')).filter(file => file.endsWith('.js'));
+const commandPath = path.join(__dirname, 'commands');
+const commandFiles = fs.readdirSync(commandPath).filter(file => file.endsWith('.js'));
 
+// Load command definitions
 for (const file of commandFiles) {
-  const command = require(`./commands/${file}`);
-  commands.push(command.data.toJSON());
+  const command = require(path.join(commandPath, file));
+  if (command?.data?.name) {
+    commands.push(command.data.toJSON());
+  } else {
+    console.warn(`⚠️ Skipped invalid command file: ${file}`);
+  }
 }
 
 const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_BOT_TOKEN);
@@ -20,8 +26,9 @@ const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_BOT_TOKEN)
       Routes.applicationCommands(process.env.CLIENT_ID),
       { body: commands }
     );
-    console.log('✅ Slash commands registered.');
+    console.log(`✅ Registered ${commands.length} slash command(s).`);
   } catch (error) {
     console.error('❌ Error registering slash commands:', error);
   }
 })();
+
