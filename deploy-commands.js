@@ -7,10 +7,10 @@ console.log('Loaded TOKEN:', process.env.TOKEN?.slice(0, 10));
 console.log('Loaded CLIENT_ID:', process.env.CLIENT_ID);
 
 const commands = [];
-const commandFiles = fs.readdirSync('./minter/commands').filter(file => file.endsWith('.js'));
+const commandFiles = fs.readdirSync('./commands').filter(file => file.endsWith('.js'));
 
 for (const file of commandFiles) {
-  const command = require(`./minter/commands/${file}`);
+  const command = require(`./commands/${file}`);
   if ('data' in command && 'execute' in command) {
     commands.push(command.data.toJSON());
   } else {
