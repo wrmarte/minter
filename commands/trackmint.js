@@ -1,66 +1,33 @@
-const { SlashCommandBuilder, PermissionsBitField } = require('discord.js');
+const { SlashCommandBuilder } = require('discord.js');
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('trackmint')
-    .setDescription('Track a new minting contract')
-    .addStringOption(opt => opt.setName('name').setDescription('Contract name').setRequired(true))
-    .addStringOption(opt => opt.setName('address').setDescription('Contract address').setRequired(true))
-    .addNumberOption(opt => opt.setName('price').setDescription('Mint price per NFT').setRequired(true))
-    .addStringOption(opt => opt.setName('token').setDescription('Token symbol or address').setRequired(false)),
+    .setDescription('Track an NFT contract for minting alerts')
+    .addStringOption(option =>
+      option.setName('address')
+        .setDescription('NFT contract address to track')
+        .setRequired(true)),
 
-  async execute(interaction, { pg, trackContract, TOKEN_NAME_TO_ADDRESS }) {
-    const { member, channel, options } = interaction;
+  async execute(interaction, { pg }) {
+    await interaction.deferReply({ ephemeral: true });
 
-    if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-      return interaction.reply({ content: '❌ Admin only.', ephemeral: true });
+    const contract = interaction.options.getString('address');
+    const channel = interaction.channel.id;
+
+    try {
+      await pg.query(`
+        INSERT INTO contract_watchlist (contract_address, channel_ids)
+        VALUES ($1, ARRAY[$2]::text[])
+        ON CONFLICT (contract_address)
+        DO UPDATE SET channel_ids = array_cat(contract_watchlist.channel_ids, ARRAY[$2]::text[])
+        WHERE NOT contract_watchlist.channel_ids @> ARRAY[$2]::text[]
+      `, [contract.toLowerCase(), channel]);
+
+      await interaction.editReply(`✅ Now tracking mint activity for \`${contract}\` in this channel.`);
+    } catch (err) {
+      console.error(err);
+      await interaction.editReply('❌ Failed to track this contract.');
     }
-
-    const name = options.getString('name');
-    const address = options.getString('address');
-    const mint_price = options.getNumber('price');
-    const tokenSymbol = options.getString('token') || 'ETH';
-    const resolvedSymbol = tokenSymbol.toUpperCase();
-    const tokenAddr = TOKEN_NAME_TO_ADDRESS[resolvedSymbol] || tokenSymbol;
-    const currentChannel = channel.id;
-
-    const res = await pg.query(`SELECT * FROM contract_watchlist WHERE name = $1`, [name]);
-
-    if (res.rows.length > 0) {
-      const existing = res.rows[0].channel_ids || [];
-      const channel_ids = [...new Set([...existing, currentChannel])];
-
-      await pg.query(
-        `UPDATE contract_watchlist SET channel_ids = $1 WHERE name = $2`,
-        [channel_ids, name]
-      );
-
-      const updated = await pg.query(`SELECT * FROM contract_watchlist WHERE name = $1`, [name]);
-      await trackContract(updated.rows[0]);
-
-      return interaction.reply(`✅ Updated tracking for **${name}** and added this channel.`);
-    }
-
-    const channel_ids = [currentChannel];
-
-    await pg.query(
-      `INSERT INTO contract_watchlist (name, address, mint_price, mint_token, mint_token_symbol, channel_ids)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [name, address, mint_price, tokenAddr, resolvedSymbol, channel_ids]
-    );
-
-    const newRow = {
-      name,
-      address,
-      mint_price,
-      mint_token: tokenAddr,
-      mint_token_symbol: resolvedSymbol,
-      channel_ids
-    };
-
-    await trackContract(newRow);
-
-    return interaction.reply(`✅ Now tracking **${name}** using token \`${resolvedSymbol}\`.`);
   }
 };
-
