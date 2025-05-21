@@ -6,12 +6,13 @@ module.exports = async (interaction, commands, context) => {
 
   try {
     await command.execute(interaction, context);
-  } catch (err) {
-    console.error(`❌ Error executing /${interaction.commandName}:`, err);
+  } catch (error) {
+    console.error(`❌ Error running command /${interaction.commandName}:`, error);
     if (interaction.replied || interaction.deferred) {
-      await interaction.editReply({ content: '❌ Error running command.' });
+      await interaction.followUp({ content: '❌ Something went wrong.', ephemeral: true });
     } else {
-      await interaction.reply({ content: '❌ Failed to run command.', ephemeral: true });
+      await interaction.reply({ content: '❌ Something went wrong.', ephemeral: true });
     }
   }
 };
+
