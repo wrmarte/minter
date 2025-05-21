@@ -1,43 +1,38 @@
-require('dotenv').config();
 const { REST, Routes } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
+require('dotenv').config();
 
+const TOKEN = process.env.DISCORD_BOT_TOKEN;
+const CLIENT_ID = process.env.CLIENT_ID;
+
+if (!TOKEN || !CLIENT_ID) {
+  console.error('❌ Missing DISCORD_BOT_TOKEN or CLIENT_ID in env.');
+  process.exit(1);
+}
 
 const commands = [];
 const commandFiles = fs.readdirSync(path.join(__dirname, 'commands')).filter(file => file.endsWith('.js'));
 
 for (const file of commandFiles) {
   const command = require(`./commands/${file}`);
-  if (command?.data) {
+  if ('data' in command && 'execute' in command) {
     commands.push(command.data.toJSON());
+    console.log(`✅ Prepared /${command.data.name}`);
+  } else {
+    console.warn(`⚠️ Skipping ${file} — missing "data" or "execute"`);
   }
 }
 
-const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_BOT_TOKEN);
+const rest = new REST({ version: '10' }).setToken(TOKEN);
 
 (async () => {
   try {
-    const mode = process.argv[2]; // "guild" or "global"
-
-    if (mode === 'guild') {
-      console.log('🎯 Registering GUILD slash commands...');
-      await rest.put(
-        Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
-        { body: commands }
-      );
-      console.log(`✅ Registered ${commands.length} command(s) to guild ${process.env.GUILD_ID}`);
-    } else {
-      console.log('🌐 Registering GLOBAL slash commands...');
-      await rest.put(
-        Routes.applicationCommands(process.env.CLIENT_ID),
-        { body: commands }
-      );
-      console.log(`✅ Registered ${commands.length} command(s) globally`);
-    }
-
+    console.log('🔁 Registering slash commands globally...');
+    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+    console.log('✅ Slash commands registered successfully!');
   } catch (err) {
-    console.error('❌ Slash command registration error:', err);
+    console.error('❌ Failed to register slash commands:', err);
   }
 })();
 
