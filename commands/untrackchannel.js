@@ -3,21 +3,24 @@ const { SlashCommandBuilder } = require('discord.js');
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('untrackchannel')
-    .setDescription('Remove this channel from a contract’s alerts')
-    .addStringOption(opt => opt.setName('name').setDescription('Contract name').setRequired(true)),
+    .setDescription('Stop this channel from tracking all contracts'),
 
   async execute(interaction, { pg }) {
-    const name = interaction.options.getString('name');
+    await interaction.deferReply({ ephemeral: true });
+
     const channelId = interaction.channel.id;
 
-    const res = await pg.query(`SELECT * FROM contract_watchlist WHERE name = $1`, [name]);
-    if (!res.rows.length) {
-      return interaction.reply({ content: '❌ Contract not found.', ephemeral: true });
+    try {
+      await pg.query(`
+        UPDATE contract_watchlist
+        SET channel_ids = array_remove(channel_ids, $1)
+        WHERE $1 = ANY(channel_ids)
+      `, [channelId]);
+
+      await interaction.editReply(`🛑 This channel has been removed from all contract tracking.`);
+    } catch (err) {
+      console.error('❌ Error untracking channel:', err);
+      await interaction.editReply('❌ Could not untrack this channel.');
     }
-
-    const filtered = res.rows[0].channel_ids.filter(id => id !== channelId);
-    await pg.query(`UPDATE contract_watchlist SET channel_ids = $1 WHERE name = $2`, [filtered, name]);
-
-    return interaction.reply(`✅ This channel was removed from **${name}** alerts.`);
   }
 };
