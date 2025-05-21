@@ -3,27 +3,26 @@ const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('helpmint')
-    .setDescription('Show all available mint bot commands'),
+    .setDescription('Show help for minting commands'),
 
   async execute(interaction) {
-    await interaction.deferReply({ ephemeral: true });
-
     const embed = new EmbedBuilder()
-      .setTitle('🤖 Mint Bot Help Menu')
-      .setColor(0x3498db)
-      .setDescription(`
-Here’s what I can do, boss:
+      .setTitle('📖 Mint Bot Help Menu')
+      .setDescription('Master the art of mint and sale tracking 🔍🧪')
+      .addFields(
+        { name: '📌 /trackmint', value: 'Track a contract with token + price' },
+        { name: '🚫 /untrackmint', value: 'Stop tracking a contract' },
+        { name: '📡 /channels', value: 'See all alert channels for a contract' },
+        { name: '📤 /untrackchannel', value: 'Unsubscribe this channel' },
+        { name: '🧪 /mintest', value: 'Simulate a mint' },
+        { name: '💸 /selltest', value: 'Simulate a sale' },
+        { name: '🆘 /helpmint', value: 'Show help menu' }
+      )
+      .setColor(0x00b0f4)
+      .setThumbnail('https://iili.io/3PMk5GV.jpg')
+      .setFooter({ text: 'Base Network • Mint & Sale Bot by PimpsDev' })
+      .setTimestamp();
 
-🟢 **/trackmint** — Track mints for a contract in this channel  
-🔴 **/untrackmint** — Stop tracking mints for a contract  
-📵 **/untrackchannel** — Remove this channel from all tracking  
-🧪 **/mintest** — Simulate a mint embed (test only)  
-💸 **/selltest** — Simulate a token-based sale embed (test only)  
-📺 **/channels** — List all channels tracking each contract  
-❓ **/helpmint** — You're looking at it!
-      `)
-      .setFooter({ text: 'Powered by PimpsDev • Stay minty 🍃' });
-
-    await interaction.editReply({ embeds: [embed] });
+    return interaction.reply({ embeds: [embed], ephemeral: true });
   }
 };

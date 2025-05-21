@@ -3,26 +3,20 @@ const { SlashCommandBuilder } = require('discord.js');
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('channels')
-    .setDescription('List which contracts are tracked in which channels'),
+    .setDescription('View all alert channels for a contract')
+    .addStringOption(opt => opt.setName('name').setDescription('Contract name').setRequired(true)),
 
   async execute(interaction, { pg }) {
-    await interaction.deferReply();
+    const name = interaction.options.getString('name');
+    const res = await pg.query(`SELECT * FROM contract_watchlist WHERE name = $1`, [name]);
 
-    try {
-      const { rows } = await pg.query('SELECT * FROM contract_watchlist');
-      if (!rows.length) {
-        return interaction.editReply('No contracts are currently being tracked.');
-      }
-
-      const response = rows.map(row => {
-        return `🔗 \`${row.contract_address}\`\n📺 Channels: ${row.channel_ids.map(id => `<#${id}>`).join(', ')}`;
-      }).join('\n\n');
-
-      await interaction.editReply({ content: response });
-    } catch (err) {
-      console.error('❌ Error listing tracked channels:', err);
-      await interaction.editReply('❌ Could not retrieve tracked contracts.');
+    if (!res.rows.length) {
+      return interaction.reply({ content: '❌ Contract not found.', ephemeral: true });
     }
+
+    const ids = res.rows[0].channel_ids;
+    const mentions = ids.map(id => `<#${id}>`).join(', ');
+
+    return interaction.reply(`🔔 **${name}** alerts go to: ${mentions}`);
   }
 };
-
