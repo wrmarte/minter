@@ -1,3 +1,11 @@
+client.on('ready', () => {
+  console.log(`✅ Bot is ready as ${client.user.tag}`);
+});
+
+client.on('interactionCreate', async interaction => {
+  console.log('🟢 Received interaction:', interaction.commandName);
+});
+
 const { Client, GatewayIntentBits, Events, Collection, SlashCommandBuilder } = require('discord.js');
 require('dotenv').config();
 
