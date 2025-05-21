@@ -5,7 +5,7 @@ const path = require('path');
 // ✅ Load Railway-provided ENV variables
 const TOKEN = process.env.DISCORD_BOT_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
-const COMMANDS_PATH = path.join(__dirname, 'minter', 'commands');
+const COMMANDS_PATH = path.join(__dirname, 'commands'); // or 'src/commands', etc
 
 // ✅ Sanity check logs
 console.log('TOKEN loaded:', TOKEN ? TOKEN.slice(0, 10) + '...' : '❌ MISSING');
