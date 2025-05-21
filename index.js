@@ -42,21 +42,24 @@ for (const file of commandFiles) {
 client.on(Events.InteractionCreate, async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
+  console.log(`🟡 Command triggered: /${interaction.commandName}`); // 👈 ADD THIS
+
   const command = client.commands.get(interaction.commandName);
   if (!command) return;
 
   try {
+    console.log(`⚙️ Running command: /${interaction.commandName}`);
     await command.execute(interaction, { pg });
   } catch (error) {
     console.error('❌ Error in command:', error);
-
-    if (interaction.deferred || interaction.replied) {
-      await interaction.editReply({ content: '❌ Something went wrong while executing the command.' });
+    if (interaction.replied || interaction.deferred) {
+      await interaction.editReply({ content: '❌ Command error' });
     } else {
-      await interaction.reply({ content: '❌ Failed to execute command.', ephemeral: true });
+      await interaction.reply({ content: '❌ Command crash', ephemeral: true });
     }
   }
 });
+
 
 // ✅ Bot Ready
 client.once(Events.ClientReady, c => {
