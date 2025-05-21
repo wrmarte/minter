@@ -1,22 +1,14 @@
-client.on('ready', () => {
-  console.log(`✅ Bot is ready as ${client.user.tag}`);
-});
-
-client.on('interactionCreate', async interaction => {
-  console.log('🟢 Received interaction:', interaction.commandName);
-});
-
-const { Client, GatewayIntentBits, Events, Collection, SlashCommandBuilder } = require('discord.js');
 require('dotenv').config();
+const { Client, GatewayIntentBits, Events, Collection, SlashCommandBuilder } = require('discord.js');
 
+// ✅ Initialize bot
 const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
-// Load commands manually
+// ✅ Register commands in memory
 client.commands = new Collection();
 
-// ✅ Register /ping directly in memory
 client.commands.set('ping', {
   data: new SlashCommandBuilder()
     .setName('ping')
@@ -27,9 +19,12 @@ client.commands.set('ping', {
   }
 });
 
-// ✅ Interaction handler
+// ✅ On interaction create
 client.on(Events.InteractionCreate, async interaction => {
   if (!interaction.isChatInputCommand()) return;
+
+  console.log('🟢 Received interaction:', interaction.commandName);
+
   const command = client.commands.get(interaction.commandName);
   if (!command) return;
 
@@ -46,9 +41,13 @@ client.on(Events.InteractionCreate, async interaction => {
   }
 });
 
-// ✅ Ready log
+// ✅ On bot ready
 client.once(Events.ClientReady, () => {
-  console.log(`🤖 Logged in as ${client.user.tag}`);
+  console.log(`🤖 Bot is ready as ${client.user.tag}`);
 });
 
-client.login(process.env.DISCORD_BOT_TOKEN);
+// ✅ Login with error handling
+client.login(process.env.DISCORD_BOT_TOKEN)
+  .then(() => console.log('✅ Successfully called client.login()'))
+  .catch(err => console.error('❌ client.login() failed:', err));
+
