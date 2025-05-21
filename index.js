@@ -1,53 +1,64 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, Events, Collection, SlashCommandBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, Collection, Events } = require('discord.js');
+const fs = require('fs');
+const path = require('path');
+const { Client: PgClient } = require('pg');
 
-// ✅ Initialize bot
+// PostgreSQL
+const pg = new PgClient({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
+pg.connect().then(() => console.log('✅ Connected to PostgreSQL')).catch(console.error);
+
+// Discord client
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds]
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.MessageContent
+  ]
 });
 
-// ✅ Register commands in memory
 client.commands = new Collection();
 
-client.commands.set('ping', {
-  data: new SlashCommandBuilder()
-    .setName('ping')
-    .setDescription('Check if bot responds'),
-  async execute(interaction) {
-    console.log('✅ Ping triggered!');
-    await interaction.reply('🏓 Pong!');
+const commandsPath = path.join(__dirname, 'minter', 'commands');
+const commandFiles = fs.readdirSync(commandsPath).filter(file => file.endsWith('.js'));
+
+for (const file of commandFiles) {
+  const command = require(path.join(commandsPath, file));
+  if ('data' in command && 'execute' in command) {
+    client.commands.set(command.data.name, command);
+    console.log(`📦 Loaded command: /${command.data.name}`);
+  } else {
+    console.warn(`⚠️ Skipped ${file}: missing 'data' or 'execute'`);
   }
+}
+
+client.once(Events.ClientReady, () => {
+  console.log(`🤖 Logged in as ${client.user.tag}`);
 });
 
-// ✅ On interaction create
 client.on(Events.InteractionCreate, async interaction => {
   if (!interaction.isChatInputCommand()) return;
-
-  console.log('🟢 Received interaction:', interaction.commandName);
 
   const command = client.commands.get(interaction.commandName);
   if (!command) return;
 
   try {
-    console.log(`⚙️ Executing /${interaction.commandName}`);
-    await command.execute(interaction);
-  } catch (err) {
-    console.error('❌ Command error:', err);
-    if (interaction.deferred || interaction.replied) {
-      await interaction.editReply({ content: '❌ Error running command.' });
+    await command.execute(interaction, { pg });
+  } catch (error) {
+    console.error(`❌ Error in /${interaction.commandName}:`, error);
+    if (interaction.replied || interaction.deferred) {
+      await interaction.editReply({ content: '❌ Command error.' });
     } else {
-      await interaction.reply({ content: '❌ Could not run.', ephemeral: true });
+      await interaction.reply({ content: '❌ Failed to execute command.', ephemeral: true });
     }
   }
 });
 
-// ✅ On bot ready
-client.once(Events.ClientReady, () => {
-  console.log(`🤖 Bot is ready as ${client.user.tag}`);
-});
-
-// ✅ Login with error handling
 client.login(process.env.DISCORD_BOT_TOKEN)
-  .then(() => console.log('✅ Successfully called client.login()'))
-  .catch(err => console.error('❌ client.login() failed:', err));
+  .then(() => console.log('✅ Bot login successful'))
+  .catch(err => console.error('❌ Bot login failed:', err));
 
