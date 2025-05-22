@@ -4,11 +4,9 @@ const { Client: PgClient } = require('pg');
 const fs = require('fs');
 const path = require('path');
 
-
-const trackContract = require('./services/trackContract');
-const { TOKEN_NAME_TO_ADDRESS } = require('./utils/constants');
-const onInteraction = require('./events/interactionCreate');
-const onReady = require('./events/ready');
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages]
+});
 
 const pg = new PgClient({
   connectionString: process.env.DATABASE_URL,
@@ -16,20 +14,14 @@ const pg = new PgClient({
 });
 pg.connect();
 
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages]
-});
+client.pg = pg;
 
-const commands = new Map();
-const commandFiles = fs.readdirSync(path.join(__dirname, 'commands')).filter(f => f.endsWith('.js'));
-for (const file of commandFiles) {
-  const command = require(`./commands/${file}`);
-  commands.set(command.data.name, command);
+// Register all events
+const eventFiles = fs.readdirSync(path.join(__dirname, 'events'));
+for (const file of eventFiles) {
+  const event = require(`./events/${file}`);
+  event(client);
 }
 
-client.once('ready', () => onReady(client, pg, trackContract));
-client.on('interactionCreate', interaction =>
-  onInteraction(interaction, commands, { pg, trackContract, TOKEN_NAME_TO_ADDRESS })
-);
-
+// Start bot
 client.login(process.env.DISCORD_BOT_TOKEN);
