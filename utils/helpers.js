@@ -1,10 +1,11 @@
+const fs = require('fs');
+const path = require('path'); // ← this line MUST come before you use `path`
+
 const storageDir = path.join(__dirname, '../storage');
 if (!fs.existsSync(storageDir)) {
   fs.mkdirSync(storageDir);
 }
 
-const fs = require('fs');
-const path = require('path');
 
 // Shortens a wallet address and returns a clickable OpenSea link
 function shortWalletLink(address) {
