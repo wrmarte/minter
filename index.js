@@ -7,19 +7,19 @@ const fs = require('fs');
 const path = require('path');
 console.log("👀 Current dir:", __dirname);
 
+// === Discord Client ===
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages]
 });
 
-// === PostgreSQL Client ===
-const { Client: PgClient } = require('pg');
+// === PostgreSQL Setup ===
 const pg = new PgClient({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 pg.connect();
 
-// ✅ Existing table
+// ✅ Create necessary tables
 pg.query(`CREATE TABLE IF NOT EXISTS contract_watchlist (
   name TEXT PRIMARY KEY,
   address TEXT NOT NULL,
@@ -29,13 +29,14 @@ pg.query(`CREATE TABLE IF NOT EXISTS contract_watchlist (
   channel_ids TEXT[]
 )`);
 
-// ✅ Add this block:
 pg.query(`CREATE TABLE IF NOT EXISTS flex_projects (
   name TEXT PRIMARY KEY,
   address TEXT NOT NULL,
   network TEXT NOT NULL
 )`);
 
+// Attach pg to client so commands can use it
+client.pg = pg;
 
 // === Command Loader ===
 client.commands = new Map();
@@ -57,4 +58,5 @@ for (const file of eventFiles) {
 
 // === Start the bot ===
 client.login(process.env.DISCORD_BOT_TOKEN);
+
 
