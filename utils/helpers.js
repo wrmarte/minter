@@ -1,3 +1,8 @@
+const storageDir = path.join(__dirname, '../storage');
+if (!fs.existsSync(storageDir)) {
+  fs.mkdirSync(storageDir);
+}
+
 const fs = require('fs');
 const path = require('path');
 
