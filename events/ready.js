@@ -1,4 +1,5 @@
-const { trackAllContracts } = require('../services/tracker');
+const { trackAllContracts } = require('./../services/tracker');
+
 
 module.exports = client => {
   client.once('ready', async () => {
