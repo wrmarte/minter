@@ -24,6 +24,7 @@ for (const file of commandFiles) {
   }
 }
 
+
 const rest = new REST({ version: '10' }).setToken(TOKEN);
 
 (async () => {
