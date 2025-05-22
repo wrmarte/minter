@@ -1,13 +1,13 @@
-module.exports = async (client, pg, trackContract) => {
-  console.log(`✅ Logged in as ${client.user.tag}`);
+const { trackAllContracts } = require('../services/tracker');
 
-  try {
-    const result = await pg.query(`SELECT * FROM contract_watchlist`);
-    for (const row of result.rows) {
-      await trackContract(row); // Track each contract in the DB
+module.exports = client => {
+  client.once('ready', async () => {
+    console.log(`✅ Logged in as ${client.user.tag}`);
+    const res = await client.pg.query(`SELECT * FROM contract_watchlist`);
+    for (const row of res.rows) {
+      await trackAllContracts(client, row);
     }
-  } catch (err) {
-    console.error('❌ Error loading contracts from DB:', err);
-  }
+  });
 };
+
 
