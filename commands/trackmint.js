@@ -2,6 +2,8 @@ const { SlashCommandBuilder, PermissionsBitField } = require('discord.js');
 const { TOKEN_NAME_TO_ADDRESS } = require('../constants') || {}; // If you have this
 const { trackAllContracts } = require('../services/trackContracts');
 
+
+
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('trackmint')
