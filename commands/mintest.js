@@ -1,22 +1,27 @@
 const { SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+const { getEthPriceFromToken, getRealDexPriceForToken } = require('../services/price');
 const { shortWalletLink } = require('../utils/helpers');
-const { getRealDexPriceForToken, getEthPriceFromToken } = require('../utils/pricing');
+const { Client: PgClient } = require('pg');
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('mintest')
     .setDescription('Simulate a mint test'),
 
-  async execute(interaction, { pg }) {
+  async execute(interaction) {
+    const pg = interaction.client.pg;
     const channelId = interaction.channel.id;
-    const result = await pg.query(`SELECT * FROM contract_watchlist`);
 
-    const contracts = result.rows.filter(row => row.channel_ids.includes(channelId));
-    if (!contracts.length) {
-      return interaction.reply('❌ No tracked contracts for this channel.');
+    await interaction.deferReply({ ephemeral: true });
+
+    const result = await pg.query(`SELECT * FROM contract_watchlist`);
+    const filtered = result.rows.filter(row => row.channel_ids.includes(channelId));
+
+    if (!filtered.length) {
+      return interaction.editReply('❌ No tracked contracts for this channel.');
     }
 
-    for (const { name, address, mint_price, mint_token, mint_token_symbol } of contracts) {
+    for (const { name, address, mint_price, mint_token, mint_token_symbol } of filtered) {
       const fakeQty = 3;
       const tokenAmount = mint_price * fakeQty;
 
@@ -30,7 +35,7 @@ module.exports = {
         .setTitle(`🧪 Simulated Mint: ${name}`)
         .setDescription(`Minted by: ${shortWalletLink('0xFAKEWALLET123456789')}`)
         .addFields(
-          { name: '🆔 Token IDs', value: '#1, #2, #3' },
+          { name: '🆔 Token IDs', value: '#1, #2, #3', inline: false },
           { name: `💰 Spent (${mint_token_symbol})`, value: tokenAmount.toFixed(4), inline: true },
           { name: `⇄ ETH Value`, value: ethValue ? `${ethValue.toFixed(4)} ETH` : 'N/A', inline: true },
           { name: '🔢 Total Minted', value: `${fakeQty}`, inline: true }
@@ -43,13 +48,5 @@ module.exports = {
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
           .setLabel('🔗 View on OpenSea')
-          .setStyle(ButtonStyle.Link)
-          .setURL(`https://opensea.io/assets/base/${address}/1`)
-      );
+          .set
 
-      await interaction.channel.send({ embeds: [embed], components: [row] });
-    }
-
-    return interaction.reply({ content: '✅ Mint test sent.', ephemeral: true });
-  }
-};
