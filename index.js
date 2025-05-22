@@ -12,12 +12,30 @@ const client = new Client({
 });
 
 // === PostgreSQL Client ===
+const { Client: PgClient } = require('pg');
 const pg = new PgClient({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 pg.connect();
-client.pg = pg;
+
+// ✅ Existing table
+pg.query(`CREATE TABLE IF NOT EXISTS contract_watchlist (
+  name TEXT PRIMARY KEY,
+  address TEXT NOT NULL,
+  mint_price NUMERIC NOT NULL,
+  mint_token TEXT DEFAULT 'ETH',
+  mint_token_symbol TEXT DEFAULT 'ETH',
+  channel_ids TEXT[]
+)`);
+
+// ✅ Add this block:
+pg.query(`CREATE TABLE IF NOT EXISTS flex_projects (
+  name TEXT PRIMARY KEY,
+  address TEXT NOT NULL,
+  network TEXT NOT NULL
+)`);
+
 
 // === Command Loader ===
 client.commands = new Map();
