@@ -6,6 +6,7 @@ require('dotenv').config();
 const TOKEN = process.env.DISCORD_BOT_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 
+
 if (!TOKEN || !CLIENT_ID) {
   console.error('❌ Missing DISCORD_BOT_TOKEN or CLIENT_ID in env.');
   process.exit(1);
