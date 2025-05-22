@@ -7,7 +7,7 @@ const fs = require('fs');
 const path = require('path');
 console.log("👀 Current dir:", __dirname);
 
-// === Discord Client ===
+// === Discord Client ====
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages]
 });
