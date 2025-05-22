@@ -8,6 +8,7 @@ module.exports = {
       opt.setName('name')
         .setDescription('Contract name')
         .setRequired(true)
+        .setAutocomplete(true)
     ),
 
   async execute(interaction) {
@@ -16,10 +17,7 @@ module.exports = {
     const currentChannelId = interaction.channel.id;
 
     if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-      return interaction.reply({
-        content: '🚫 Only admins can use this command.',
-        ephemeral: true
-      });
+      return interaction.reply({ content: '🚫 Admins only.', ephemeral: true });
     }
 
     await interaction.deferReply({ ephemeral: true });
@@ -28,11 +26,7 @@ module.exports = {
       const result = await pg.query(`SELECT * FROM contract_watchlist WHERE name = $1`, [name]);
 
       if (!result.rows.length) {
-        const fallback = await pg.query(`SELECT name FROM contract_watchlist`);
-        const available = fallback.rows.map(r => `\`${r.name}\``).join(', ') || 'None';
-        return interaction.editReply(
-          `❌ Contract **${name}** not found.\n📄 Available contracts: ${available}`
-        );
+        return interaction.editReply(`❌ Contract **${name}** not found.`);
       }
 
       const existingChannels = result.rows[0].channel_ids || [];
@@ -55,9 +49,27 @@ module.exports = {
       }
     } catch (err) {
       console.error('❌ Error in /untrackchannel:', err);
-      return interaction.editReply(
-        '⚠️ Something went wrong while removing this channel. Check logs.'
+      return interaction.editReply('⚠️ Failed to execute `/untrackchannel`.');
+    }
+  },
+
+  async autocomplete(interaction) {
+    const pg = interaction.client.pg;
+    const focusedValue = interaction.options.getFocused();
+
+    try {
+      const res = await pg.query(`SELECT name FROM contract_watchlist`);
+      const choices = res.rows
+        .map(row => row.name)
+        .filter(name => name.toLowerCase().includes(focusedValue.toLowerCase()))
+        .slice(0, 25) // max Discord limit
+
+      await interaction.respond(
+        choices.map(name => ({ name, value: name }))
       );
+    } catch (err) {
+      console.error('❌ Autocomplete error in /untrackchannel:', err);
+      await interaction.respond([]);
     }
   }
 };
