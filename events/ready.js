@@ -1,4 +1,5 @@
-const { trackAllContracts } = require('./../services/tracker');
+const { trackAllContracts } = require('../services/trackContracts');
+
 
 
 module.exports = client => {
