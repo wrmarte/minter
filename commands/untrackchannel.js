@@ -6,7 +6,7 @@ module.exports = {
     .setDescription('Remove this channel from a contract’s alerts')
     .addStringOption(opt =>
       opt.setName('name')
-        .setDescription('Contract name')
+        .setDescription('Select contract name')
         .setRequired(true)
         .setAutocomplete(true)
     ),
@@ -17,7 +17,10 @@ module.exports = {
     const currentChannelId = interaction.channel.id;
 
     if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-      return interaction.reply({ content: '🚫 Admins only.', ephemeral: true });
+      return interaction.reply({
+        content: '🚫 Admins only.',
+        ephemeral: true
+      });
     }
 
     await interaction.deferReply({ ephemeral: true });
@@ -40,42 +43,39 @@ module.exports = {
       if (updatedChannels.length) {
         const mentions = updatedChannels.map(id => `<#${id}>`).join(', ');
         return interaction.editReply(
-          `✅ Removed <#${currentChannelId}> from **${name}** alerts.\n📡 Remaining channels: ${mentions}`
+          `✅ Removed <#${currentChannelId}> from **${name}** alerts.\n📡 Still tracking in: ${mentions}`
         );
       } else {
         return interaction.editReply(
-          `✅ Removed <#${currentChannelId}> from **${name}** alerts.\n⚠️ No channels are now tracking this contract.`
+          `✅ Removed <#${currentChannelId}> from **${name}** alerts.\n⚠️ No channels are tracking this anymore.`
         );
       }
     } catch (err) {
       console.error('❌ Error in /untrackchannel:', err);
-      return interaction.editReply('⚠️ Failed to execute `/untrackchannel`.');
+      return interaction.editReply('⚠️ Something went wrong.');
     }
   },
 
-async autocomplete(interaction) {
-  const pg = interaction.client.pg;
-  const focusedValue = interaction.options.getFocused();
+  async autocomplete(interaction) {
+    try {
+      const pg = interaction.client.pg;
+      const focused = interaction.options.getFocused();
 
-  try {
-    const result = await pg.query(`SELECT name FROM contract_watchlist`);
-    const allContracts = result.rows.map(r => r.name);
+      const res = await pg.query(`SELECT name FROM contract_watchlist`);
+      const contracts = res.rows.map(r => r.name);
 
-    const filtered = allContracts
-      .filter(name => name.toLowerCase().includes(focusedValue.toLowerCase()))
-      .slice(0, 25);
+      const filtered = contracts
+        .filter(n => n.toLowerCase().includes(focused.toLowerCase()))
+        .slice(0, 25);
 
-    console.log('📊 Autocomplete options:', filtered); // <== Watch logs
+      console.log('📊 Sending autocomplete choices:', filtered);
 
-    await interaction.respond(
-      filtered.map(name => ({ name, value: name }))
-    );
-  } catch (err) {
-    console.error('❌ Autocomplete error:', err);
-    await interaction.respond([]);
+      await interaction.respond(
+        filtered.map(name => ({ name, value: name }))
+      );
+    } catch (err) {
+      console.error('❌ Autocomplete error in /untrackchannel:', err);
+      await interaction.respond([]);
+    }
   }
-}
-
-
 };
-
