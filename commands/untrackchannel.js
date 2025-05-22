@@ -53,24 +53,27 @@ module.exports = {
     }
   },
 
-  async autocomplete(interaction) {
-    const pg = interaction.client.pg;
-    const focusedValue = interaction.options.getFocused();
+async autocomplete(interaction) {
+  const pg = interaction.client.pg;
+  const focusedValue = interaction.options.getFocused() || '';
 
-    try {
-      const res = await pg.query(`SELECT name FROM contract_watchlist`);
-      const choices = res.rows
-        .map(row => row.name)
-        .filter(name => name.toLowerCase().includes(focusedValue.toLowerCase()))
-        .slice(0, 25) // max Discord limit
+  try {
+    const res = await pg.query(`SELECT name FROM contract_watchlist`);
+    console.log('📊 Autocomplete loaded contracts:', res.rows);
 
-      await interaction.respond(
-        choices.map(name => ({ name, value: name }))
-      );
-    } catch (err) {
-      console.error('❌ Autocomplete error in /untrackchannel:', err);
-      await interaction.respond([]);
-    }
+    const choices = res.rows
+      .map(row => row.name)
+      .filter(name => name.toLowerCase().includes(focusedValue.toLowerCase()))
+      .slice(0, 25);
+
+    await interaction.respond(
+      choices.map(name => ({ name, value: name }))
+    );
+  } catch (err) {
+    console.error('❌ Autocomplete error in /untrackchannel:', err);
+    await interaction.respond([]);
   }
+}
+
 };
 
