@@ -55,25 +55,27 @@ module.exports = {
 
 async autocomplete(interaction) {
   const pg = interaction.client.pg;
-  const focusedValue = interaction.options.getFocused() || '';
+  const focusedValue = interaction.options.getFocused();
 
   try {
-    const res = await pg.query(`SELECT name FROM contract_watchlist`);
-    console.log('📊 Autocomplete loaded contracts:', res.rows);
+    const result = await pg.query(`SELECT name FROM contract_watchlist`);
+    const allContracts = result.rows.map(r => r.name);
 
-    const choices = res.rows
-      .map(row => row.name)
+    const filtered = allContracts
       .filter(name => name.toLowerCase().includes(focusedValue.toLowerCase()))
       .slice(0, 25);
 
+    console.log('📊 Autocomplete options:', filtered); // <== Watch logs
+
     await interaction.respond(
-      choices.map(name => ({ name, value: name }))
+      filtered.map(name => ({ name, value: name }))
     );
   } catch (err) {
-    console.error('❌ Autocomplete error in /untrackchannel:', err);
+    console.error('❌ Autocomplete error:', err);
     await interaction.respond([]);
   }
 }
+
 
 };
 
