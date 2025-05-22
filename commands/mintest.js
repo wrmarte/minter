@@ -31,19 +31,20 @@ module.exports = {
         ethValue = fallback ? tokenAmount * fallback : null;
       }
 
-      const embed = new EmbedBuilder()
-        .setTitle(`🧪 Simulated Mint: ${name}`)
-        .setDescription(`Minted by: ${shortWalletLink('0xFAKEWALLET123456789')}`)
-        .addFields(
-          { name: '🆔 Token IDs', value: '#1, #2, #3', inline: false },
-          { name: `💰 Spent (${mint_token_symbol})`, value: tokenAmount.toFixed(4), inline: true },
-          { name: `⇄ ETH Value`, value: ethValue ? `${ethValue.toFixed(4)} ETH` : 'N/A', inline: true },
-          { name: '🔢 Total Minted', value: `${fakeQty}`, inline: true }
-        )
-        .setThumbnail('https://via.placeholder.com/400x400.png?text=Mint')
-        .setColor(0x3498db)
-        .setFooter({ text: 'Simulation Mode • Not Real' })
-        .setTimestamp();
+const embed = new EmbedBuilder()
+  .setTitle(`🧪 Simulated Mint: ${name}`)
+  .setDescription(`Minted by: ${shortWalletLink('0xFAKEWALLET123456789')}`)
+  .addFields(
+    { name: '🆔 Token IDs', value: '#1, #2, #3', inline: false },
+    { name: `💰 Spent (${mint_token_symbol})`, value: tokenAmount.toFixed(4), inline: true },
+    { name: `⇄ ETH Value`, value: ethValue ? `${ethValue.toFixed(4)} ETH` : 'N/A', inline: true },
+    { name: '🔢 Total Minted', value: `${fakeQty}`, inline: true }
+  )
+  .setThumbnail('https://via.placeholder.com/400x400.png?text=Mint')
+  .setColor(0x3498db)
+  .setFooter({ text: 'Simulation Mode • Not Real' })
+  .setTimestamp(); // ✅ ← this was likely broken
+
 
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
