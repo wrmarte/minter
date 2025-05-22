@@ -5,6 +5,7 @@ const { Client, GatewayIntentBits } = require('discord.js');
 const { Client: PgClient } = require('pg');
 const fs = require('fs');
 const path = require('path');
+console.log("👀 Current dir:", __dirname);
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages]
