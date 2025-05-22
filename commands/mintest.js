@@ -1,7 +1,12 @@
-const { SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
-const { getEthPriceFromToken, getRealDexPriceForToken } = require('../services/price');
+const {
+  SlashCommandBuilder,
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle
+} = require('discord.js');
+const { getRealDexPriceForToken, getEthPriceFromToken } = require('../services/price');
 const { shortWalletLink } = require('../utils/helpers');
-const { Client: PgClient } = require('pg');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -31,23 +36,30 @@ module.exports = {
         ethValue = fallback ? tokenAmount * fallback : null;
       }
 
-const embed = new EmbedBuilder()
-  .setTitle(`🧪 Simulated Mint: ${name}`)
-  .setDescription(`Minted by: ${shortWalletLink('0xFAKEWALLET123456789')}`)
-  .addFields(
-    { name: '🆔 Token IDs', value: '#1, #2, #3', inline: false },
-    { name: `💰 Spent (${mint_token_symbol})`, value: tokenAmount.toFixed(4), inline: true },
-    { name: `⇄ ETH Value`, value: ethValue ? `${ethValue.toFixed(4)} ETH` : 'N/A', inline: true },
-    { name: '🔢 Total Minted', value: `${fakeQty}`, inline: true }
-  )
-  .setThumbnail('https://via.placeholder.com/400x400.png?text=Mint')
-  .setColor(0x3498db)
-  .setFooter({ text: 'Simulation Mode • Not Real' })
-  .setTimestamp(); // ✅ ← this was likely broken
-
+      const embed = new EmbedBuilder()
+        .setTitle(`🧪 Simulated Mint: ${name}`)
+        .setDescription(`Minted by: ${shortWalletLink('0xFAKEWALLET123456789')}`)
+        .addFields(
+          { name: '🆔 Token IDs', value: '#1, #2, #3', inline: false },
+          { name: `💰 Spent (${mint_token_symbol})`, value: tokenAmount.toFixed(4), inline: true },
+          { name: `⇄ ETH Value`, value: ethValue ? `${ethValue.toFixed(4)} ETH` : 'N/A', inline: true },
+          { name: '🔢 Total Minted', value: `${fakeQty}`, inline: true }
+        )
+        .setThumbnail('https://via.placeholder.com/400x400.png?text=Mint')
+        .setColor(0x3498db)
+        .setFooter({ text: 'Simulation Mode • Not Real' })
+        .setTimestamp();
 
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
           .setLabel('🔗 View on OpenSea')
-          .set
+          .setStyle(ButtonStyle.Link)
+          .setURL(`https://opensea.io/assets/base/${address}/1`)
+      );
 
+      await interaction.channel.send({ embeds: [embed], components: [row] });
+    }
+
+    return interaction.editReply('✅ Mint test sent.');
+  }
+};
