@@ -42,12 +42,13 @@ module.exports = async function trackTokenSales(client) {
       lastBlock = blockNumber;
 
       try {
-        const logs = await provider.getLogs({
-          address,
-          fromBlock: blockNumber - 1,
-          toBlock: blockNumber,
-          topics: [erc20Iface.getEventTopic('Transfer')]
-        });
+const logs = await provider.getLogs({
+  address,
+  fromBlock: blockNumber - 1,
+  toBlock: blockNumber,
+  topics: [erc20Iface.getEvent('Transfer').topicHash] // ✅ fixed
+});
+
 
         for (const log of logs) {
           const parsed = erc20Iface.parseLog(log);
