@@ -50,13 +50,14 @@ for (const file of commandFiles) {
 }
 
 // === Event Loader ===
-// === Command Loader ===
 client.commands = new Map();
-const commandFiles = fs.readdirSync(path.join(__dirname, 'commands')).filter(file => file.endsWith('.js'));
+
+const commandDir = path.join(__dirname, 'commands');
+const commandFiles = fs.readdirSync(commandDir).filter(file => file.endsWith('.js'));
 
 for (const file of commandFiles) {
   try {
-    const command = require(`./commands/${file}`);
+    const command = require(path.join(commandDir, file));
 
     if (command.data && command.execute) {
       client.commands.set(command.data.name, command);
@@ -69,6 +70,7 @@ for (const file of commandFiles) {
     console.error(`❌ Failed to load command: ${file}`, err);
   }
 }
+
 
 // === Start the bot ===
 client.login(process.env.DISCORD_BOT_TOKEN)
