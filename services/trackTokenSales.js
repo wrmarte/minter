@@ -51,7 +51,7 @@ module.exports = async function trackTokenSales(client) {
           address,
           fromBlock: blockNumber - 1,
           toBlock: blockNumber,
-          topics: [erc20Iface.getEventTopic('Transfer')]
+          topics: [erc20Iface.getEvent('Transfer').topicHash]
         });
 
         console.log(`🔍 Found ${logs.length} logs for ${name} in block ${blockNumber}`);
@@ -113,6 +113,7 @@ async function getMarketCapUSD(address) {
     return 0;
   }
 }
+
 
 
 
