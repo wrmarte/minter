@@ -1,16 +1,17 @@
 module.exports = client => {
   client.on('interactionCreate', async interaction => {
-    console.log('🎯 interaction received:', interaction.commandName); // Log which command hit
-
     if (!interaction.isChatInputCommand()) return;
+
+    console.log(`🎯 Received slash command: /${interaction.commandName}`);
 
     const command = client.commands.get(interaction.commandName);
     if (!command) {
-      console.log(`❌ Command not found in map: ${interaction.commandName}`);
+      console.warn(`❌ No command found for: /${interaction.commandName}`);
       return;
     }
 
     try {
+      // Execute command logic
       await command.execute(interaction);
     } catch (error) {
       console.error(`❌ Error executing /${interaction.commandName}:`, error);
@@ -21,8 +22,8 @@ module.exports = client => {
         } else {
           await interaction.reply({ content: '⚠️ Error executing command.', ephemeral: true });
         }
-      } catch (err) {
-        console.error('⚠️ Failed to send error response:', err.message);
+      } catch (fallbackError) {
+        console.error('⚠️ Failed to send error message:', fallbackError.message);
       }
     }
   });
