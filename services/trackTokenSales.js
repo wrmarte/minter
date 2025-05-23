@@ -10,20 +10,17 @@ const erc20Iface = new Interface([
   'event Transfer(address indexed from, address indexed to, uint amount)'
 ]);
 
-// List of known routers (Uniswap v2, v3, Sushi, etc. on Base)
 const ROUTERS = [
-  '0x327Df1E6de05895d2ab08513aaDD9313Fe505d86', // Uniswap V2
-  '0x7f2e954d4b0da905485ace594a165f0e8271b82d'  // BeetsFi (new)
-  '0x5615CDAb10dc425a742d643d949a7F474C01abc4', // Alien Base
-  '0xa49d7499271cc2cda79ffdb78d2c975f3a34db38', // Aerodrome
-  '0x8df340de57c02d8df8d7c3eb6a4267e4de7e3e6e', // Velodrome V2
-  '0xc161a4ca5c8edc5d880a76d3907b3c2d1a4b0317'  // SushiSwap (example)
+  '0x327Df1E6de05895d2ab08513aaDD9313Fe505d86', // Uniswap Base
+  '0x420dd381b31aef6683e2c581f93b119eee7e3f4d', // Aerodrome
+  '0xfbeef911dc5821886e1dda23b3e4f3eaffdd7930', // Alien Base
+  '0x812e79c9c37eD676fdbdd1212D6a4e47EFfC6a42', // Sushi Base
+  '0xa5e0829CaCEd8fFDD4De3c43696c57F7D7A678ff'  // Other?
 ];
 
 module.exports = async function trackTokenSales(client) {
   const pg = client.pg;
 
-  // Ensure the tracked_tokens table exists
   await pg.query(`
     CREATE TABLE IF NOT EXISTS tracked_tokens (
       name TEXT,
@@ -49,19 +46,24 @@ module.exports = async function trackTokenSales(client) {
       lastBlock = blockNumber;
 
       try {
+        console.log(`📦 Scanning block ${blockNumber} for ${name}`);
         const logs = await provider.getLogs({
           address,
           fromBlock: blockNumber - 1,
           toBlock: blockNumber,
-          topics: [erc20Iface.getEvent('Transfer').topicHash]
+          topics: [erc20Iface.getEventTopic('Transfer')]
         });
+
+        console.log(`🔍 Found ${logs.length} logs for ${name} in block ${blockNumber}`);
 
         for (const log of logs) {
           const parsed = erc20Iface.parseLog(log);
           const { from, to, amount } = parsed.args;
 
-          const isRouter = ROUTERS.some(router => router.toLowerCase() === from.toLowerCase());
-          if (isRouter) {
+          console.log(`📤 Transfer from ${from} to ${to} amount ${amount.toString()}`);
+          console.log(`⚙️ Checking if from (${from}) is router`);
+
+          if (ROUTERS.includes(from.toLowerCase())) {
             const tokenAmount = parseFloat(formatUnits(amount, 18));
             const tokenPrice = await getTokenPriceUSD(address);
             const usdValue = tokenAmount * tokenPrice;
@@ -111,6 +113,7 @@ async function getMarketCapUSD(address) {
     return 0;
   }
 }
+
 
 
 
