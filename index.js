@@ -1,13 +1,12 @@
-// /minter/index.js
-
 require('dotenv').config();
 const { Client, GatewayIntentBits } = require('discord.js');
 const { Client: PgClient } = require('pg');
 const fs = require('fs');
 const path = require('path');
-console.log("👀 Current dir:", __dirname);
 
-// === Discord Client ====
+console.log("👀 Booting from:", __dirname);
+
+// === Discord Client ===
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages]
 });
@@ -19,7 +18,9 @@ const pg = new PgClient({
 });
 pg.connect();
 
-// ✅ Create necessary tables
+client.pg = pg;
+
+// ✅ Create Tables
 pg.query(`CREATE TABLE IF NOT EXISTS contract_watchlist (
   name TEXT PRIMARY KEY,
   address TEXT NOT NULL,
@@ -35,21 +36,6 @@ pg.query(`CREATE TABLE IF NOT EXISTS flex_projects (
   network TEXT NOT NULL
 )`);
 
-// Attach pg to client so commands can use it
-client.pg = pg;
-
-// === Command Loader ===
-client.commands = new Map();
-const commandFiles = fs.readdirSync(path.join(__dirname, 'commands')).filter(file => file.endsWith('.js'));
-
-for (const file of commandFiles) {
-  const command = require(`./commands/${file}`);
-  if (command.data && command.execute) {
-    client.commands.set(command.data.name, command);
-  }
-}
-
-// === Event Loader ===
 // === Command Loader ===
 client.commands = new Map();
 
@@ -70,15 +56,28 @@ try {
   console.error('❌ Error loading commands:', err);
 }
 
+// === Event Loader ===
+const eventFiles = fs.readdirSync(path.join(__dirname, 'events')).filter(file => file.endsWith('.js'));
 
-// === Start the bot ===
+for (const file of eventFiles) {
+  try {
+    const registerEvent = require(`./events/${file}`);
+    registerEvent(client);
+    console.log(`📡 Event loaded: ${file}`);
+  } catch (err) {
+    console.error(`❌ Failed to load event ${file}:`, err);
+  }
+}
+
+// === Start the Bot ===
 client.login(process.env.DISCORD_BOT_TOKEN)
   .then(() => {
     console.log(`✅ Logged in as ${client.user.tag}`);
   })
-  .catch((err) => {
+  .catch(err => {
     console.error('❌ Discord login failed:', err);
   });
+
 
 
 
