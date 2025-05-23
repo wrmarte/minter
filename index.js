@@ -57,6 +57,13 @@ for (const file of eventFiles) {
 }
 
 // === Start the bot ===
-client.login(process.env.DISCORD_BOT_TOKEN);
+client.login(process.env.DISCORD_BOT_TOKEN)
+  .then(() => {
+    console.log(`✅ Logged in as ${client.user.tag}`);
+  })
+  .catch((err) => {
+    console.error('❌ Discord login failed:', err);
+  });
+
 
 
