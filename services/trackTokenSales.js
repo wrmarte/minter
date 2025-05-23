@@ -41,20 +41,28 @@ module.exports = async function trackTokenSales(client) {
       if (blockNumber === lastBlock) return;
       lastBlock = blockNumber;
 
-      try {
-const logs = await provider.getLogs({
-  address,
-  fromBlock: blockNumber - 1,
-  toBlock: blockNumber,
-  topics: [erc20Iface.getEvent('Transfer').topicHash] // ✅ fixed
-});
+      console.log(`📦 Scanning block ${blockNumber} for ${name}`);
 
+      try {
+        const logs = await provider.getLogs({
+          address,
+          fromBlock: blockNumber - 1,
+          toBlock: blockNumber,
+          topics: [erc20Iface.getEvent('Transfer').topicHash]
+        });
+
+        console.log(`🔍 Found ${logs.length} logs for ${name} in block ${blockNumber}`);
 
         for (const log of logs) {
           const parsed = erc20Iface.parseLog(log);
           const { from, to, amount } = parsed.args;
 
+          console.log(`📤 Transfer from ${from} to ${to} amount ${amount}`);
+          console.log(`⚙️ Checking if from (${from}) is router (${router})`);
+
           if (from.toLowerCase() === router.toLowerCase()) {
+            console.log(`✅ Matched buy for ${name}`);
+
             const tokenAmount = parseFloat(formatUnits(amount, 18));
             const tokenPrice = await getTokenPriceUSD(address);
             const usdValue = tokenAmount * tokenPrice;
@@ -104,5 +112,6 @@ async function getMarketCapUSD(address) {
     return 0;
   }
 }
+
 
 
