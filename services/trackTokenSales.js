@@ -11,12 +11,14 @@ const erc20Iface = new Interface([
 ]);
 
 const WETH = '0x4200000000000000000000000000000000000006';
-const router = '0x327Df1E6de05895d2ab08513aaDD9313Fe505d86';
+const routers = [
+  '0x95EBfcb1c6b345fdA69cF56C51E30421e5a35aeC', // Uniswap
+  '0x327Df1E6de05895d2ab08513aaDD9313Fe505d86'  // Aerodrome
+];
 
 module.exports = async function trackTokenSales(client) {
   const pg = client.pg;
 
-  // Ensure the tracked_tokens table exists
   await pg.query(`
     CREATE TABLE IF NOT EXISTS tracked_tokens (
       name TEXT,
@@ -41,9 +43,9 @@ module.exports = async function trackTokenSales(client) {
       if (blockNumber === lastBlock) return;
       lastBlock = blockNumber;
 
-      console.log(`📦 Scanning block ${blockNumber} for ${name}`);
-
       try {
+        console.log(`\n📦 Scanning block ${blockNumber} for ${name}`);
+
         const logs = await provider.getLogs({
           address,
           fromBlock: blockNumber - 1,
@@ -57,12 +59,10 @@ module.exports = async function trackTokenSales(client) {
           const parsed = erc20Iface.parseLog(log);
           const { from, to, amount } = parsed.args;
 
-          console.log(`📤 Transfer from ${from} to ${to} amount ${amount}`);
-          console.log(`⚙️ Checking if from (${from}) is router (${router})`);
+          console.log(`📤 Transfer from ${from} to ${to} amount ${amount.toString()}`);
+          console.log(`⚙️ Checking if from (${from}) is router (${routers.join(', ')})`);
 
-          if (from.toLowerCase() === router.toLowerCase()) {
-            console.log(`✅ Matched buy for ${name}`);
-
+          if (routers.includes(from.toLowerCase())) {
             const tokenAmount = parseFloat(formatUnits(amount, 18));
             const tokenPrice = await getTokenPriceUSD(address);
             const usdValue = tokenAmount * tokenPrice;
