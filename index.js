@@ -50,10 +50,24 @@ for (const file of commandFiles) {
 }
 
 // === Event Loader ===
-const eventFiles = fs.readdirSync(path.join(__dirname, 'events')).filter(file => file.endsWith('.js'));
-for (const file of eventFiles) {
-  const registerEvent = require(`./events/${file}`);
-  registerEvent(client);
+// === Command Loader ===
+client.commands = new Map();
+const commandFiles = fs.readdirSync(path.join(__dirname, 'commands')).filter(file => file.endsWith('.js'));
+
+for (const file of commandFiles) {
+  try {
+    const command = require(`./commands/${file}`);
+
+    if (command.data && command.execute) {
+      client.commands.set(command.data.name, command);
+      console.log(`✅ Loaded command: /${command.data.name}`);
+    } else {
+      console.warn(`⚠️ Skipped ${file} — missing .data or .execute`);
+    }
+
+  } catch (err) {
+    console.error(`❌ Failed to load command: ${file}`, err);
+  }
 }
 
 // === Start the bot ===
