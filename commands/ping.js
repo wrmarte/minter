@@ -1,41 +1,31 @@
-const { REST, Routes } = require('discord.js');
-const fs = require('fs');
-const path = require('path');
-require('dotenv').config();
+const { SlashCommandBuilder } = require('discord.js');
 
-const TOKEN = process.env.DISCORD_BOT_TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID;
+module.exports = {
+  data: new SlashCommandBuilder()
+    .setName('ping')
+    .setDescription('Ping the bot'),
 
-if (!TOKEN || !CLIENT_ID) {
-  console.error('❌ Missing DISCORD_BOT_TOKEN or CLIENT_ID in env.');
-  process.exit(1);
-}
+  async execute(interaction) {
+    console.log('✅ /ping command triggered');
 
-const commands = [];
-const commandFiles = fs.readdirSync(path.join(__dirname, 'commands')).filter(file => file.endsWith('.js'));
+    try {
+      await interaction.reply({ content: '🏓 Pong!', ephemeral: true });
+    } catch (err) {
+      console.error('❌ Error executing /ping:', err.message);
 
-for (const file of commandFiles) {
-  const command = require(`./commands/${file}`);
-  if ('data' in command && 'execute' in command) {
-    commands.push(command.data.toJSON());
-    console.log(`✅ Prepared /${command.data.name}`);
-  } else {
-    console.warn(`⚠️ Skipping ${file} — missing "data" or "execute"`);
+      try {
+        if (interaction.replied || interaction.deferred) {
+          await interaction.editReply('⚠️ Failed to pong.');
+        } else {
+          await interaction.reply({ content: '⚠️ Pong failed.', ephemeral: true });
+        }
+      } catch (nestedErr) {
+        console.error('❌ Failed to send fallback ping error:', nestedErr.message);
+      }
+    }
   }
-}
+};
 
-const rest = new REST({ version: '10' }).setToken(TOKEN);
-
-
-(async () => {
-  try {
-    console.log('🔁 Registering slash commands globally...');
-    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
-    console.log('✅ Slash commands registered successfully!');
-  } catch (err) {
-    console.error('❌ Failed to register slash commands:', err);
-  }
-})();
 
 
 
