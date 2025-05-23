@@ -1,5 +1,10 @@
 const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 const fetch = require('node-fetch');
+const { JsonRpcProvider, Contract } = require('ethers');
+
+const abi = [
+  'function tokenURI(uint256 tokenId) view returns (string)'
+];
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -23,6 +28,11 @@ module.exports = {
 
       const { address, network } = res.rows[0];
       const chain = (network === 'base') ? 'base' : 'ethereum';
+      const provider = new JsonRpcProvider(
+        chain === 'base'
+          ? 'https://mainnet.base.org'
+          : 'https://eth.llamarpc.com'
+      );
 
       const apiUrl = `https://api.reservoir.tools/tokens/v6?chain=${chain}&contract=${address}&limit=50&sortBy=floorAskPrice`;
       const headers = { 'x-api-key': process.env.RESERVOIR_API_KEY };
@@ -30,17 +40,45 @@ module.exports = {
       const data = await fetch(apiUrl, { headers }).then(res => res.json());
 
       console.log(`📡 Reservoir API for /flex ${name}:`);
-      console.log(JSON.stringify(data, null, 2)); // full response
+      console.log(JSON.stringify(data, null, 2));
 
       const tokens = data?.tokens?.filter(t => t.token?.tokenId) || [];
 
       if (!tokens.length) {
-        return interaction.editReply('⚠️ No minted NFTs found yet for this contract.');
+        console.warn('⚠️ Reservoir returned no tokens, trying fallback using tokenURI()...');
+
+        const contract = new Contract(address, abi, provider);
+        for (let i = 0; i < 20; i++) {
+          try {
+            const tokenId = i.toString();
+            const uriRaw = await contract.tokenURI(tokenId);
+            const uri = uriRaw.replace('ipfs://', 'https://ipfs.io/ipfs/');
+            const meta = await fetch(uri).then(res => res.json());
+            const image = meta?.image?.replace('ipfs://', 'https://ipfs.io/ipfs/') || null;
+
+            if (image) {
+              const embed = new EmbedBuilder()
+                .setTitle(`🖼️ Flexing from ${name}`)
+                .setDescription(`Token #${tokenId}`)
+                .setImage(image)
+                .setURL(`https://opensea.io/assets/${chain}/${address}/${tokenId}`)
+                .setColor(0x3498db)
+                .setFooter({ text: `Network: ${network.toUpperCase()} (Fallback)` })
+                .setTimestamp();
+
+              return await interaction.editReply({ embeds: [embed] });
+            }
+          } catch (e) {
+            continue;
+          }
+        }
+
+        return interaction.editReply('⚠️ No NFTs could be flexed. Nothing minted or accessible yet.');
       }
 
       const random = tokens[Math.floor(Math.random() * tokens.length)].token;
-
       const image = random.image || 'https://via.placeholder.com/400x400.png?text=NFT';
+
       const embed = new EmbedBuilder()
         .setTitle(`🖼️ Flexing from ${name}`)
         .setDescription(`Token #${random.tokenId}`)
@@ -57,3 +95,4 @@ module.exports = {
     }
   }
 };
+
