@@ -50,14 +50,14 @@ for (const file of commandFiles) {
 }
 
 // === Event Loader ===
+// === Command Loader ===
 client.commands = new Map();
 
-const commandDir = path.join(__dirname, 'commands');
-const commandFiles = fs.readdirSync(commandDir).filter(file => file.endsWith('.js'));
+try {
+  const commandFiles = fs.readdirSync(path.join(__dirname, 'commands')).filter(file => file.endsWith('.js'));
 
-for (const file of commandFiles) {
-  try {
-    const command = require(path.join(commandDir, file));
+  for (const file of commandFiles) {
+    const command = require(`./commands/${file}`);
 
     if (command.data && command.execute) {
       client.commands.set(command.data.name, command);
@@ -65,10 +65,9 @@ for (const file of commandFiles) {
     } else {
       console.warn(`⚠️ Skipped ${file} — missing .data or .execute`);
     }
-
-  } catch (err) {
-    console.error(`❌ Failed to load command: ${file}`, err);
   }
+} catch (err) {
+  console.error('❌ Error loading commands:', err);
 }
 
 
