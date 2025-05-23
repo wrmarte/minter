@@ -15,6 +15,17 @@ const router = '0x327Df1E6de05895d2ab08513aaDD9313Fe505d86';
 
 module.exports = async function trackTokenSales(client) {
   const pg = client.pg;
+
+  // Ensure the tracked_tokens table exists
+  await pg.query(`
+    CREATE TABLE IF NOT EXISTS tracked_tokens (
+      name TEXT,
+      address TEXT NOT NULL,
+      guild_id TEXT NOT NULL,
+      PRIMARY KEY (address, guild_id)
+    )
+  `);
+
   const res = await pg.query(`SELECT * FROM tracked_tokens`);
   const tracked = res.rows;
 
@@ -92,3 +103,4 @@ async function getMarketCapUSD(address) {
     return 0;
   }
 }
+
