@@ -1,9 +1,14 @@
 module.exports = client => {
   client.on('interactionCreate', async interaction => {
+    console.log('🎯 interaction received:', interaction.commandName); // Log which command hit
+
     if (!interaction.isChatInputCommand()) return;
 
     const command = client.commands.get(interaction.commandName);
-    if (!command) return;
+    if (!command) {
+      console.log(`❌ Command not found in map: ${interaction.commandName}`);
+      return;
+    }
 
     try {
       await command.execute(interaction);
