@@ -22,11 +22,13 @@ module.exports = {
       }
 
       const { address, network } = res.rows[0];
-      const apiUrl = `https://api.reservoir.tools/tokens/v6?contract=${address}&limit=50&sortBy=floorAskPrice&acceptsParams=true`;
+      const chain = (network === 'base') ? 'base' : 'ethereum';
+
+      const apiUrl = `https://api.reservoir.tools/tokens/v6?chain=${chain}&contract=${address}&limit=50&sortBy=floorAskPrice`;
       const headers = { 'x-api-key': process.env.RESERVOIR_API_KEY };
 
       const data = await fetch(apiUrl, { headers }).then(res => res.json());
-      const tokens = data?.tokens?.filter(t => t.token?.tokenId) || [];
+      const tokens = data?.tokens?.filter(t => t.token?.tokenId && t.token?.image) || [];
 
       if (!tokens.length) {
         return interaction.editReply('⚠️ No minted NFTs found yet for this contract.');
@@ -38,7 +40,7 @@ module.exports = {
         .setTitle(`🖼️ Flexing from ${name}`)
         .setDescription(`Token #${random.tokenId}`)
         .setImage(random.image)
-        .setURL(`https://opensea.io/assets/${network}/${address}/${random.tokenId}`)
+        .setURL(`https://opensea.io/assets/${chain}/${address}/${random.tokenId}`)
         .setColor(0x3498db)
         .setFooter({ text: `Network: ${network.toUpperCase()}` })
         .setTimestamp();
@@ -50,3 +52,4 @@ module.exports = {
     }
   }
 };
+
