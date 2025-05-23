@@ -1,5 +1,5 @@
 // /minter/commands/tracktoken.js
-const { SlashCommandBuilder, PermissionsBitField } = require('discord.js');
+const { SlashCommandBuilder, PermissionsBitField, EmbedBuilder } = require('discord.js');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -38,7 +38,18 @@ module.exports = {
         ON CONFLICT (address, guild_id) DO UPDATE SET name = $1
       `, [name, address, guildId]);
 
-      return interaction.reply(`✅ Now tracking **${name.toUpperCase()}** sales for this server.`);
+      const embed = new EmbedBuilder()
+        .setTitle('📈 Token Tracking Enabled')
+        .addFields(
+          { name: '🪙 Token', value: name.toUpperCase(), inline: true },
+          { name: '🔗 Contract', value: address, inline: false },
+          { name: '🏠 Server', value: interaction.guild.name, inline: false }
+        )
+        .setColor(0x00cc99)
+        .setFooter({ text: 'Now watching for token buys!' })
+        .setTimestamp();
+
+      return interaction.reply({ embeds: [embed] });
     } catch (err) {
       console.error('❌ Error tracking token:', err);
       return interaction.reply({ content: '⚠️ Something went wrong.', ephemeral: true });
