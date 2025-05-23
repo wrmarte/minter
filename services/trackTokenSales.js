@@ -13,7 +13,7 @@ const erc20Iface = new Interface([
 // List of known routers (Uniswap v2, v3, Sushi, etc. on Base)
 const ROUTERS = [
   '0x327Df1E6de05895d2ab08513aaDD9313Fe505d86', // Uniswap V2
-  '0x0000000000000000000000000000000000000000', // Example, replace with real
+  '0x7f2e954d4b0da905485ace594a165f0e8271b82d'  // BeetsFi (new)
   '0x5615CDAb10dc425a742d643d949a7F474C01abc4', // Alien Base
   '0xa49d7499271cc2cda79ffdb78d2c975f3a34db38', // Aerodrome
   '0x8df340de57c02d8df8d7c3eb6a4267e4de7e3e6e', // Velodrome V2
