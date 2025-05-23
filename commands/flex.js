@@ -48,9 +48,16 @@ module.exports = {
         console.warn('⚠️ Reservoir returned no tokens, trying fallback using tokenURI()...');
 
         const contract = new Contract(address, abi, provider);
-        for (let i = 0; i < 20; i++) {
-          try {
-            const tokenId = i.toString();
+       const tokenIds = Array.from({ length: 20 }, (_, i) => i);
+for (let i = tokenIds.length - 1; i > 0; i--) {
+  const j = Math.floor(Math.random() * (i + 1));
+  [tokenIds[i], tokenIds[j]] = [tokenIds[j], tokenIds[i]];
+}
+
+for (const tokenIdNum of tokenIds) {
+  try {
+    const tokenId = tokenIdNum.toString();
+
             const uriRaw = await contract.tokenURI(tokenId);
             const uri = uriRaw.replace('ipfs://', 'https://ipfs.io/ipfs/');
             const meta = await fetch(uri).then(res => res.json());
@@ -80,9 +87,8 @@ module.exports = {
       const image = random.image || 'https://via.placeholder.com/400x400.png?text=NFT';
 
       const embed = new EmbedBuilder()
-        .setTitle(`🖼️ Flexing from ${name}`)
-        .setDescription(`Token #${random.tokenId}`)
-        .setImage(image)
+        .setTitle(`🖼️ Flexing: ${name} #${tokenId}`)
+         .setImage(image)
         .setURL(`https://opensea.io/assets/${chain}/${address}/${random.tokenId}`)
         .setColor(0x3498db)
         .setFooter({ text: `Network: ${network.toUpperCase()}` })
