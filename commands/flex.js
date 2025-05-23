@@ -28,7 +28,11 @@ module.exports = {
       const headers = { 'x-api-key': process.env.RESERVOIR_API_KEY };
 
       const data = await fetch(apiUrl, { headers }).then(res => res.json());
-      const tokens = data?.tokens?.filter(t => t.token?.tokenId && t.token?.image) || [];
+
+      console.log(`📡 Reservoir API for /flex ${name}:`);
+      console.log(JSON.stringify(data, null, 2)); // full response
+
+      const tokens = data?.tokens?.filter(t => t.token?.tokenId) || [];
 
       if (!tokens.length) {
         return interaction.editReply('⚠️ No minted NFTs found yet for this contract.');
@@ -36,10 +40,11 @@ module.exports = {
 
       const random = tokens[Math.floor(Math.random() * tokens.length)].token;
 
+      const image = random.image || 'https://via.placeholder.com/400x400.png?text=NFT';
       const embed = new EmbedBuilder()
         .setTitle(`🖼️ Flexing from ${name}`)
         .setDescription(`Token #${random.tokenId}`)
-        .setImage(random.image)
+        .setImage(image)
         .setURL(`https://opensea.io/assets/${chain}/${address}/${random.tokenId}`)
         .setColor(0x3498db)
         .setFooter({ text: `Network: ${network.toUpperCase()}` })
@@ -48,8 +53,7 @@ module.exports = {
       await interaction.editReply({ embeds: [embed] });
     } catch (err) {
       console.error('❌ Error in /flex:', err);
-      await interaction.editReply('⚠️ Something went wrong.');
+      await interaction.editReply('⚠️ Something went wrong while flexing.');
     }
   }
 };
-
