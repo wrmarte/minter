@@ -52,12 +52,17 @@ module.exports = async function trackTokenSales(client) {
   const res = await pg.query(`SELECT * FROM tracked_tokens`);
   const tracked = res.rows;
 
+  // group by contract address
+  const addressMap = new Map();
   for (const token of tracked) {
-    const address = token.address.toLowerCase();
-    const name = token.name.toUpperCase();
-    const guildId = token.guild_id;
-    const trackedChannelId = token.channel_id;
+    const addr = token.address.toLowerCase();
+    if (!addressMap.has(addr)) {
+      addressMap.set(addr, []);
+    }
+    addressMap.get(addr).push(token);
+  }
 
+  for (const [address, tokenGroup] of addressMap.entries()) {
     let lastBlock = await provider.getBlockNumber();
 
     provider.on('block', async (blockNumber) => {
@@ -115,43 +120,49 @@ module.exports = async function trackTokenSales(client) {
 
           const embedColor = getRedBlueBlendColor(intensity);
 
-          const embed = new EmbedBuilder()
-            .setTitle(`${name} Buy!`)
-            .setDescription(`${rocketLine}`)
-            .setImage('https://iili.io/3tSecKP.gif')
-            .addFields(
-              { name: '💸 Spent', value: `$${usdSpent.toFixed(4)} / ${ethSpent.toFixed(4)} ETH`, inline: true },
-              { name: '🎯 Got', value: `${tokenAmount.toLocaleString()} ${name}`, inline: true },
-              { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
-              { name: '📊 MCap', value: marketCap && marketCap > 0 ? `$${marketCap.toLocaleString()}` : 'Fetching...', inline: true },
-              { name: '📡 Tracked In', value: trackedChannelId ? `<#${trackedChannelId}>` : 'Unknown', inline: false }
-            )
-            .setURL(`https://www.geckoterminal.com/base/pools/${address}`)
-            .setColor(embedColor)
-            .setFooter({ text: 'Live on Base • Powered by PimpsDev' })
-            .setTimestamp();
+          for (const token of tokenGroup) {
+            const guildId = token.guild_id;
+            const trackedChannelId = token.channel_id;
+            const name = token.name.toUpperCase();
 
-          const guild = client.guilds.cache.get(guildId);
-          if (!guild) continue;
+            const embed = new EmbedBuilder()
+              .setTitle(`${name} Buy!`)
+              .setDescription(`${rocketLine}`)
+              .setImage('https://iili.io/3tSecKP.gif')
+              .addFields(
+                { name: '💸 Spent', value: `$${usdSpent.toFixed(4)} / ${ethSpent.toFixed(4)} ETH`, inline: true },
+                { name: '🎯 Got', value: `${tokenAmount.toLocaleString()} ${name}`, inline: true },
+                { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
+                { name: '📊 MCap', value: marketCap && marketCap > 0 ? `$${marketCap.toLocaleString()}` : 'Fetching...', inline: true },
+                { name: '📡 Tracked In', value: trackedChannelId ? `<#${trackedChannelId}>` : 'Unknown', inline: false }
+              )
+              .setURL(`https://www.geckoterminal.com/base/pools/${address}`)
+              .setColor(embedColor)
+              .setFooter({ text: 'Live on Base • Powered by PimpsDev' })
+              .setTimestamp();
 
-          let channel = null;
+            const guild = client.guilds.cache.get(guildId);
+            if (!guild) continue;
 
-          if (trackedChannelId) {
-            channel = guild.channels.cache.get(trackedChannelId);
-          }
+            let channel = null;
 
-          if (!channel || !channel.isTextBased() || !channel.permissionsFor(guild.members.me).has('SendMessages')) {
-            channel = guild.channels.cache.find(c =>
-              c.isTextBased() && c.permissionsFor(guild.members.me).has('SendMessages')
-            );
-          }
+            if (trackedChannelId) {
+              channel = guild.channels.cache.get(trackedChannelId);
+            }
 
-          if (channel) {
-            await channel.send({ embeds: [embed] });
+            if (!channel || !channel.isTextBased() || !channel.permissionsFor(guild.members.me).has('SendMessages')) {
+              channel = guild.channels.cache.find(c =>
+                c.isTextBased() && c.permissionsFor(guild.members.me).has('SendMessages')
+              );
+            }
+
+            if (channel) {
+              await channel.send({ embeds: [embed] });
+            }
           }
         }
       } catch (err) {
-        console.warn(`⚠️ Error checking token ${name}:`, err.message);
+        console.warn(`⚠️ Error checking token group for ${address}: ${err.message}`);
         if (err.code === 'SERVER_ERROR' && err.responseStatus === '504 Gateway Time-out') {
           rotateProvider();
         }
@@ -190,6 +201,7 @@ async function getMarketCapUSD(address) {
     return 0;
   }
 }
+
 
 
 
