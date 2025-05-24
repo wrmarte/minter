@@ -2,9 +2,25 @@ const { JsonRpcProvider, Interface, formatUnits } = require('ethers');
 const { EmbedBuilder } = require('discord.js');
 const fetch = require('node-fetch');
 
-const BASE_RPC = 'https://mainnet.base.org';
-const provider = new JsonRpcProvider(BASE_RPC);
+// --- Multi-RPC setup ---
+const baseRpcs = [
+  'https://mainnet.base.org',
+  'https://base.publicnode.com',
+  'https://1rpc.io/base',
+  'https://base.llamarpc.com',
+  'https://base.meowrpc.com'
+];
 
+let currentRpcIndex = 0;
+let provider = new JsonRpcProvider(baseRpcs[currentRpcIndex]);
+
+function rotateProvider() {
+  currentRpcIndex = (currentRpcIndex + 1) % baseRpcs.length;
+  console.warn(`🔁 Switching to fallback Base RPC: ${baseRpcs[currentRpcIndex]}`);
+  provider = new JsonRpcProvider(baseRpcs[currentRpcIndex]);
+}
+
+// --- Interfaces and constants ---
 const erc20Iface = new Interface([
   'event Transfer(address indexed from, address indexed to, uint amount)'
 ]);
@@ -28,6 +44,7 @@ module.exports = async function trackTokenSales(client) {
       name TEXT,
       address TEXT NOT NULL,
       guild_id TEXT NOT NULL,
+      channel_id TEXT,
       PRIMARY KEY (address, guild_id)
     )
   `);
@@ -39,6 +56,7 @@ module.exports = async function trackTokenSales(client) {
     const address = token.address.toLowerCase();
     const name = token.name.toUpperCase();
     const guildId = token.guild_id;
+    const trackedChannelId = token.channel_id;
 
     let lastBlock = await provider.getBlockNumber();
 
@@ -105,7 +123,8 @@ module.exports = async function trackTokenSales(client) {
               { name: '💸 Spent', value: `$${usdSpent.toFixed(4)} / ${ethSpent.toFixed(4)} ETH`, inline: true },
               { name: '🎯 Got', value: `${tokenAmount.toLocaleString()} ${name}`, inline: true },
               { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
-              { name: '📊 MCap', value: marketCap && marketCap > 0 ? `$${marketCap.toLocaleString()}` : 'Fetching...', inline: true }
+              { name: '📊 MCap', value: marketCap && marketCap > 0 ? `$${marketCap.toLocaleString()}` : 'Fetching...', inline: true },
+              { name: '📡 Tracked In', value: trackedChannelId ? `<#${trackedChannelId}>` : 'Unknown', inline: false }
             )
             .setURL(`https://www.geckoterminal.com/base/pools/${address}`)
             .setColor(embedColor)
@@ -114,13 +133,28 @@ module.exports = async function trackTokenSales(client) {
 
           const guild = client.guilds.cache.get(guildId);
           if (!guild) continue;
-          const channel = guild.channels.cache.find(c =>
-            c.isTextBased() && c.permissionsFor(guild.members.me).has('SendMessages')
-          );
-          if (channel) await channel.send({ embeds: [embed] });
+
+          let channel = null;
+
+          if (trackedChannelId) {
+            channel = guild.channels.cache.get(trackedChannelId);
+          }
+
+          if (!channel || !channel.isTextBased() || !channel.permissionsFor(guild.members.me).has('SendMessages')) {
+            channel = guild.channels.cache.find(c =>
+              c.isTextBased() && c.permissionsFor(guild.members.me).has('SendMessages')
+            );
+          }
+
+          if (channel) {
+            await channel.send({ embeds: [embed] });
+          }
         }
       } catch (err) {
         console.warn(`⚠️ Error checking token ${name}:`, err.message);
+        if (err.code === 'SERVER_ERROR' && err.responseStatus === '504 Gateway Time-out') {
+          rotateProvider();
+        }
       }
     });
   }
