@@ -1,12 +1,6 @@
-const { SlashCommandBuilder, AttachmentBuilder, EmbedBuilder } = require('discord.js');
+const { SlashCommandBuilder, EmbedBuilder, AttachmentBuilder } = require('discord.js');
 const fetch = require('node-fetch');
-const { createCanvas, loadImage } = require('@napi-rs/canvas');
-
-const { JsonRpcProvider, Contract } = require('ethers');
-
-const abi = [
-  'function tokenURI(uint256 tokenId) view returns (string)'
-];
+const { createCanvas, loadImage } = require('canvas');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -28,27 +22,44 @@ module.exports = {
       }
 
       const { address, network } = res.rows[0];
-      const chain = (network === 'base') ? 'base' : 'ethereum';
-      const provider = new JsonRpcProvider(
-        chain === 'base'
-          ? 'https://mainnet.base.org'
-          : 'https://eth.llamarpc.com'
-      );
+      const chain = network === 'base' ? 'base' : 'eth';
 
-      const apiUrl = `https://api.reservoir.tools/tokens/v6?chain=${chain}&contract=${address}&limit=50&sortBy=floorAskPrice&includeTopBid=true&includeAttributes=true`;
-      const headers = { 'x-api-key': process.env.RESERVOIR_API_KEY };
-      const data = await fetch(apiUrl, { headers }).then(res => res.json());
-      const tokens = data?.tokens?.filter(t => t.token?.image) || [];
+      const url = `https://deep-index.moralis.io/api/v2.2/nft/${address}?chain=${chain}&format=decimal&limit=50`;
+      const headers = {
+        accept: 'application/json',
+        'X-API-Key': process.env.MORALIS_API_KEY
+      };
 
-      if (!tokens.length) {
-        return interaction.editReply('⚠️ No tokens found to flex.');
+      const moralisData = await fetch(url, { headers }).then(res => res.json());
+      const nfts = moralisData?.result?.filter(n => n.metadata) || [];
+
+      if (!nfts.length) {
+        return interaction.editReply('⚠️ No NFTs found via Moralis.');
       }
 
-      const selected = tokens.sort(() => 0.5 - Math.random()).slice(0, 6).map(t => t.token.image);
+      const selected = nfts.sort(() => 0.5 - Math.random()).slice(0, 6);
       const images = await Promise.all(
-        selected.map(async url => {
+        selected.map(async nft => {
+          let meta;
           try {
-            return await loadImage(url);
+            meta = JSON.parse(nft.metadata || '{}');
+          } catch {
+            return null;
+          }
+
+          let img = null;
+          if (meta.image) {
+            img = meta.image.startsWith('ipfs://')
+              ? meta.image.replace('ipfs://', 'https://ipfs.io/ipfs/')
+              : meta.image;
+          } else if (meta.image_url) {
+            img = meta.image_url.startsWith('ipfs://')
+              ? meta.image_url.replace('ipfs://', 'https://ipfs.io/ipfs/')
+              : meta.image_url;
+          }
+
+          try {
+            return await loadImage(img);
           } catch {
             return null;
           }
@@ -65,7 +76,7 @@ module.exports = {
         ctx.drawImage(img, x, y, 300, 300);
       });
 
-      const buffer = await canvas.encode('png');
+      const buffer = canvas.toBuffer('image/png');
       const attachment = new AttachmentBuilder(buffer, { name: 'flexplus.png' });
 
       const embed = new EmbedBuilder()
@@ -83,3 +94,4 @@ module.exports = {
     }
   }
 };
+
