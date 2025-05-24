@@ -38,7 +38,6 @@ module.exports = {
       const headers = { 'x-api-key': process.env.RESERVOIR_API_KEY };
 
       const data = await fetch(apiUrl, { headers }).then(res => res.json());
-
       const tokens = data?.tokens?.filter(t => t.token?.tokenId) || [];
 
       if (!tokens.length) {
@@ -55,7 +54,6 @@ module.exports = {
             const image = meta?.image?.replace('ipfs://', 'https://ipfs.io/ipfs/') || null;
 
             const traits = (meta?.attributes || [])
-              .slice(0, 3)
               .map(attr => `• **${attr.trait_type}**: ${attr.value}`)
               .join('\n') || 'None found';
 
@@ -67,6 +65,7 @@ module.exports = {
                 .setURL(`https://opensea.io/assets/${chain}/${address}/${tokenId}`)
                 .setColor(network === 'base' ? 0x1d9bf0 : 0xf5851f)
                 .addFields({ name: '🧬 Traits', value: traits, inline: false })
+                .addFields({ name: '🔍 Rarity', value: 'N/A (Fallback Mode)', inline: true })
                 .setFooter({ text: `Network: ${network.toUpperCase()} (Fallback)` })
                 .setTimestamp();
 
@@ -84,13 +83,29 @@ module.exports = {
       const image = random.image || 'https://via.placeholder.com/400x400.png?text=NFT';
       const tokenId = random.tokenId;
 
+      // Collect traits if present
+      const attributes = random.attributes || [];
+      const traitLines = attributes.length
+        ? attributes.map(attr => `• **${attr.key}**: ${attr.value} (${attr.rarityPercent?.toFixed(2) || '?'}%)`).join('\n')
+        : 'None found';
+
+      // Rarity score + rank
+      const rarityRank = random.rarity?.rank;
+      const rarityScore = random.rarity?.score;
+      const rarityText = (rarityRank && rarityScore)
+        ? `Rank #${rarityRank} • Score: ${rarityScore.toFixed(2)}`
+        : 'Not available';
+
       const embed = new EmbedBuilder()
         .setTitle(`🖼️ Flexing: ${name} #${tokenId}`)
         .setDescription(`🎲 Randomly flexed from ${name}`)
         .setImage(image)
         .setURL(`https://opensea.io/assets/${chain}/${address}/${tokenId}`)
         .setColor(network === 'base' ? 0x1d9bf0 : 0xf5851f)
-        .addFields({ name: '🔍 Rarity', value: 'Fetching...', inline: true })
+        .addFields(
+          { name: '🧬 Traits', value: traitLines, inline: false },
+          { name: '🔍 Rarity', value: rarityText, inline: true }
+        )
         .setFooter({ text: `Network: ${network.toUpperCase()}` })
         .setTimestamp();
 
@@ -101,6 +116,3 @@ module.exports = {
     }
   }
 };
-
-
-
