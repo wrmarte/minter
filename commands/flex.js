@@ -34,7 +34,8 @@ module.exports = {
           : 'https://eth.llamarpc.com'
       );
 
-      const apiUrl = `https://api.reservoir.tools/tokens/v6?chain=${chain}&contract=${address}&limit=50&sortBy=floorAskPrice`;
+      const apiUrl = `https://api.reservoir.tools/tokens/v6?chain=${chain}&contract=${address}&limit=50&sortBy=floorAskPrice&includeTopBid=true&includeAttributes=true`;
+
       const headers = { 'x-api-key': process.env.RESERVOIR_API_KEY };
 
       const data = await fetch(apiUrl, { headers }).then(res => res.json());
