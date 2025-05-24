@@ -98,7 +98,32 @@ module.exports = async function trackTokenSales(client) {
               { name: '📊 MCap', value: marketCap && marketCap > 0 ? `$${marketCap.toLocaleString()}` : 'Fetching...', inline: true }
             )
             .setURL(`https://www.geckoterminal.com/base/pools/${address}`)
-            .setColor(0x3498db)
+            // Dynamic Red-Blue blend based on intensity
+function getRedBlueBlendColor(intensity) {
+  const maxIntensity = 50; // You can adjust this cap
+  const clampedIntensity = Math.min(intensity, maxIntensity);
+  const red = Math.floor(255 * (clampedIntensity / maxIntensity));
+  const blue = 255 - red;
+  return (red << 16) + (0 << 8) + blue; // RGB to decimal
+}
+
+const embedColor = getRedBlueBlendColor(intensity);
+
+const embed = new EmbedBuilder()
+  .setTitle(`${name} Buy!`)
+  .setDescription(`${rocketLine}`)
+  .setImage('https://iili.io/3tSecKP.gif')
+  .addFields(
+    { name: '💸 Spent', value: `$${usdSpent.toFixed(4)} / ${ethSpent.toFixed(4)} ETH`, inline: true },
+    { name: '🎯 Got', value: `${tokenAmount.toLocaleString()} ${name}`, inline: true },
+    { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
+    { name: '📊 MCap', value: marketCap && marketCap > 0 ? `$${marketCap.toLocaleString()}` : 'Fetching...', inline: true }
+  )
+  .setURL(`https://www.geckoterminal.com/base/pools/${address}`)
+  .setColor(embedColor)
+  .setFooter({ text: 'Live on Base • Powered by PimpsDev' })
+  .setTimestamp();
+
             .setFooter({ text: 'Live on Base • Powered by PimpsDev' })
             .setTimestamp();
 
