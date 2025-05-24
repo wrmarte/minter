@@ -39,25 +39,16 @@ module.exports = {
 
       const data = await fetch(apiUrl, { headers }).then(res => res.json());
 
-      console.log(`📡 Reservoir API for /flex ${name}:`);
-      console.log(JSON.stringify(data, null, 2));
-
       const tokens = data?.tokens?.filter(t => t.token?.tokenId) || [];
 
       if (!tokens.length) {
-        console.warn('⚠️ Reservoir returned no tokens, trying fallback using tokenURI()...');
-
+        // Fallback to tokenURI scraping
         const contract = new Contract(address, abi, provider);
-       const tokenIds = Array.from({ length: 20 }, (_, i) => i);
-for (let i = tokenIds.length - 1; i > 0; i--) {
-  const j = Math.floor(Math.random() * (i + 1));
-  [tokenIds[i], tokenIds[j]] = [tokenIds[j], tokenIds[i]];
-}
+        const tokenIds = Array.from({ length: 20 }, (_, i) => i).sort(() => 0.5 - Math.random());
 
-for (const tokenIdNum of tokenIds) {
-  try {
-    const tokenId = tokenIdNum.toString();
-
+        for (const tokenIdNum of tokenIds) {
+          try {
+            const tokenId = tokenIdNum.toString();
             const uriRaw = await contract.tokenURI(tokenId);
             const uri = uriRaw.replace('ipfs://', 'https://ipfs.io/ipfs/');
             const meta = await fetch(uri).then(res => res.json());
@@ -66,16 +57,17 @@ for (const tokenIdNum of tokenIds) {
             if (image) {
               const embed = new EmbedBuilder()
                 .setTitle(`🖼️ Flexing from ${name}`)
-                .setDescription(`Token #${tokenId}`)
+                .setDescription(`Token #${tokenId} • 🎲 Random flex`)
                 .setImage(image)
                 .setURL(`https://opensea.io/assets/${chain}/${address}/${tokenId}`)
-                .setColor(0x3498db)
+                .setColor(network === 'base' ? 0x1d9bf0 : 0xf5851f)
+                .addFields({ name: '🔍 Rarity', value: 'Fetching...', inline: true })
                 .setFooter({ text: `Network: ${network.toUpperCase()} (Fallback)` })
                 .setTimestamp();
 
               return await interaction.editReply({ embeds: [embed] });
             }
-          } catch (e) {
+          } catch {
             continue;
           }
         }
@@ -85,12 +77,15 @@ for (const tokenIdNum of tokenIds) {
 
       const random = tokens[Math.floor(Math.random() * tokens.length)].token;
       const image = random.image || 'https://via.placeholder.com/400x400.png?text=NFT';
+      const tokenId = random.tokenId;
 
       const embed = new EmbedBuilder()
         .setTitle(`🖼️ Flexing: ${name} #${tokenId}`)
-         .setImage(image)
-        .setURL(`https://opensea.io/assets/${chain}/${address}/${random.tokenId}`)
-        .setColor(0x3498db)
+        .setDescription(`🎲 Randomly flexed from ${name}`)
+        .setImage(image)
+        .setURL(`https://opensea.io/assets/${chain}/${address}/${tokenId}`)
+        .setColor(network === 'base' ? 0x1d9bf0 : 0xf5851f)
+        .addFields({ name: '🔍 Rarity', value: 'Fetching...', inline: true })
         .setFooter({ text: `Network: ${network.toUpperCase()}` })
         .setTimestamp();
 
@@ -101,4 +96,5 @@ for (const tokenIdNum of tokenIds) {
     }
   }
 };
+
 
