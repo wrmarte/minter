@@ -10,7 +10,6 @@ const erc20Iface = new Interface([
   'event Transfer(address indexed from, address indexed to, uint amount)'
 ]);
 
-// Known routers that usually signal a token buy
 const ROUTERS = [
   '0x327df1e6de05895d2ab08513aadd9313fe505d86', // Uniswap
   '0x420dd381b31aef6683e2c581f93b119eee7e3f4d', // Aerodrome
@@ -114,6 +113,7 @@ async function getMarketCapUSD(address) {
     return 0;
   }
 }
+
 
 
 
