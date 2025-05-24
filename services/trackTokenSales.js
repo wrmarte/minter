@@ -15,10 +15,8 @@ const ROUTERS = [
   '0x420dd381b31aef6683e2c581f93b119eee7e3f4d', // Aerodrome
   '0xfbeef911dc5821886e1dda23b3e4f3eaffdd7930', // Alien Base
   '0x812e79c9c37eD676fdbdd1212D6a4e47EFfC6a42', // Sushi Base
-  '0xa5e0829CaCEd8fFDD4De3c43696c57F7D7A678ff', // QuickSwap/Other
-  '0xeA7dFfD9c7f3445B2fDd79EddcEA2F6906c56A2E', // Zyberswap
-  '0x2bD22F01C0d37cDc5813aF7566A40D7030339D71', // RocketSwap
-  '0x0000000000000000000000000000000000000000' // fallback (burn or test case)
+  '0xa5e0829CaCEd8fFDD4De3c43696c57F7D7A678ff', // Other
+  '0x95ebfcb1c6b345fda69cf56c51e30421e5a35aec'  // New Adrian Router
 ];
 
 module.exports = async function trackTokenSales(client) {
@@ -54,7 +52,7 @@ module.exports = async function trackTokenSales(client) {
           address,
           fromBlock: blockNumber - 1,
           toBlock: blockNumber,
-          topics: [erc20Iface.getEvent('Transfer').topicHash || erc20Iface.getEventTopic('Transfer')]
+          topics: [erc20Iface.getEvent('Transfer').topicHash]
         });
 
         console.log(`🔍 Found ${logs.length} logs for ${name} in block ${blockNumber}`);
@@ -66,6 +64,10 @@ module.exports = async function trackTokenSales(client) {
           console.log(`📤 Transfer from ${from} to ${to} amount ${amount.toString()}`);
           console.log(`⚙️ Checking if from (${from}) is router`);
 
+          if (!ROUTERS.includes(from.toLowerCase())) {
+            console.log(`❗ Unknown router: ${from}`);
+          }
+
           if (ROUTERS.includes(from.toLowerCase())) {
             const tokenAmount = parseFloat(formatUnits(amount, 18));
             const tokenPrice = await getTokenPriceUSD(address);
@@ -73,21 +75,19 @@ module.exports = async function trackTokenSales(client) {
             const marketCap = await getMarketCapUSD(address);
 
             const embed = new EmbedBuilder()
-              .setTitle(`📈 ${name} Buy Alert!`)
-              .setDescription(`🟦🟥 A juicy buy just dropped on Base`)
+              .setTitle(`${name} Buy!`)
+              .setDescription(`🟥🟦🚀🟥🟦🚀🟥🟦🚀`)
               .addFields(
-                { name: '💸 Spent (USD)', value: `$${usdValue.toFixed(2)}`, inline: true },
+                { name: '💸 Spent', value: `$${usdValue.toFixed(2)}`, inline: true },
                 { name: '🎯 Got', value: `${tokenAmount.toLocaleString()} ${name}`, inline: true },
                 { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
-                { name: '📊 Market Cap', value: `$${marketCap.toLocaleString()}`, inline: true }
+                { name: '📊 MCap', value: `$${marketCap.toLocaleString()}`, inline: true }
               )
-              .setColor(0x1abc9c)
-              .setFooter({ text: 'Live from Base • Powered by PimpsDev' })
+              .setColor(0xff4444)
               .setTimestamp();
 
             const guild = client.guilds.cache.get(guildId);
             if (!guild) continue;
-
             const channel = guild.channels.cache.find(c => c.isTextBased() && c.permissionsFor(guild.members.me).has('SendMessages'));
             if (channel) channel.send({ embeds: [embed] });
           }
@@ -118,6 +118,7 @@ async function getMarketCapUSD(address) {
     return 0;
   }
 }
+
 
 
 
