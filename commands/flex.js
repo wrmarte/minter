@@ -35,7 +35,6 @@ module.exports = {
       );
 
       const apiUrl = `https://api.reservoir.tools/tokens/v6?chain=${chain}&contract=${address}&limit=50&sortBy=floorAskPrice&includeTopBid=true&includeAttributes=true`;
-
       const headers = { 'x-api-key': process.env.RESERVOIR_API_KEY };
 
       const data = await fetch(apiUrl, { headers }).then(res => res.json());
@@ -80,19 +79,18 @@ module.exports = {
         return interaction.editReply('⚠️ No NFTs could be flexed. Nothing minted or accessible yet.');
       }
 
-      const random = tokens[Math.floor(Math.random() * tokens.length)].token;
-      const image = random.image || 'https://via.placeholder.com/400x400.png?text=NFT';
-      const tokenId = random.tokenId;
+      const randomToken = tokens[Math.floor(Math.random() * tokens.length)];
+      const token = randomToken.token;
+      const image = token.image || 'https://via.placeholder.com/400x400.png?text=NFT';
+      const tokenId = token.tokenId;
 
-      // Collect traits if present
-      const attributes = random.attributes || [];
+      const attributes = token.attributes || [];
       const traitLines = attributes.length
         ? attributes.map(attr => `• **${attr.key}**: ${attr.value} (${attr.rarityPercent?.toFixed(2) || '?'}%)`).join('\n')
         : 'None found';
 
-      // Rarity score + rank
-      const rarityRank = random.rarity?.rank;
-      const rarityScore = random.rarity?.score;
+      const rarityRank = token.rarity?.rank;
+      const rarityScore = token.rarity?.score;
       const rarityText = (rarityRank && rarityScore)
         ? `Rank #${rarityRank} • Score: ${rarityScore.toFixed(2)}`
         : 'Not available';
@@ -117,3 +115,4 @@ module.exports = {
     }
   }
 };
+
