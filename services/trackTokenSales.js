@@ -18,7 +18,7 @@ const ROUTERS = [
   '0x95ebfcb1c6b345fda69cf56c51e30421e5a35aec'
 ];
 
-const seenTx = new Set();
+const seenHashes = new Set();
 
 module.exports = async function trackTokenSales(client) {
   const pg = client.pg;
@@ -40,6 +40,7 @@ module.exports = async function trackTokenSales(client) {
     const name = token.name.toUpperCase();
     const guildId = token.guild_id;
 
+    const contract = new Contract(address, erc20Iface, provider);
     let lastBlock = await provider.getBlockNumber();
 
     provider.on('block', async (blockNumber) => {
@@ -55,46 +56,41 @@ module.exports = async function trackTokenSales(client) {
         });
 
         for (const log of logs) {
-          if (seenTx.has(log.transactionHash)) continue;
-          seenTx.add(log.transactionHash);
+          if (seenHashes.has(log.transactionHash)) continue;
+          seenHashes.add(log.transactionHash);
 
           const parsed = erc20Iface.parseLog(log);
           const { from, to, amount } = parsed.args;
 
           const fromAddr = from.toLowerCase();
+          const toAddr = to.toLowerCase();
           if (!ROUTERS.includes(fromAddr)) continue;
-          if (to.toLowerCase() === '0x0000000000000000000000000000000000000000') continue;
+          if (toAddr === '0x0000000000000000000000000000000000000000') continue;
 
           const tokenAmount = parseFloat(formatUnits(amount, 18));
           const tokenPrice = await getTokenPriceUSD(address);
+          const usdValue = tokenAmount * tokenPrice;
+          const ethPrice = await getETHPrice();
+          const ethValue = ethPrice > 0 ? usdValue / ethPrice : 0;
           const marketCap = await getMarketCapUSD(address);
 
-          let usdSpent = 0;
-          let ethSpent = 0;
-
-          try {
-            const tx = await provider.getTransaction(log.transactionHash);
-            const ethPrice = await getETHPrice();
-
-            if (tx?.value) {
-              ethSpent = parseFloat(formatUnits(tx.value, 18));
-              usdSpent = ethSpent * ethPrice;
-            }
-          } catch (err) {
-            console.warn(`⚠️ TX fetch failed: ${err.message}`);
-          }
+          const sets = Math.min(Math.floor(usdValue / 2.5), 10);
+          const emojiBlast = '🟥🟦🚀'.repeat(sets) || '🟥🟦🚀';
+          const gifUrl = 'https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExajc3OXdpd2J5a3F2MG94ZGRuYzRjd3F0cW0xbDBjYzJrZzI1dG5zZCZlcD12MV9naWZzX3NlYXJjaCZjdD1n/qgQUggAC3Pfv687qPC/giphy.gif';
 
           const embed = new EmbedBuilder()
             .setTitle(`${name} Buy!`)
-            .setDescription(`🟥🟦🚀🟥🟦🚀🟥🟦🚀`)
+            .setDescription(emojiBlast)
             .addFields(
-              { name: '💸 Spent', value: `$${usdSpent.toFixed(4)} / ${ethSpent.toFixed(4)} ETH`, inline: true },
+              { name: '💸 Spent', value: `$${usdValue.toFixed(4)} / ${ethValue.toFixed(4)} ETH`, inline: true },
               { name: '🎯 Got', value: `${tokenAmount.toLocaleString()} ${name}`, inline: true },
               { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
-              { name: '📊 MCap', value: marketCap && marketCap > 0 ? `$${marketCap.toLocaleString()}` : 'Fetching...', inline: true }
+              { name: '📊 MCap', value: marketCap > 0 ? `$${marketCap.toLocaleString()}` : 'N/A', inline: true }
             )
-            .setColor(0x3498db)
+            .setImage(gifUrl)
+            .setColor(0xff3333)
             .setFooter({ text: 'Live on Base • Powered by PimpsDev' })
+            .setURL(`https://www.geckoterminal.com/base/pools?query=${address}`)
             .setTimestamp();
 
           const guild = client.guilds.cache.get(guildId);
@@ -124,8 +120,8 @@ async function getTokenPriceUSD(address) {
     const res = await fetch(`https://api.geckoterminal.com/api/v2/simple/networks/base/token_price/${address}`);
     const data = await res.json();
     const prices = data?.data?.attributes?.token_prices || {};
-    const price = prices[address.toLowerCase()];
-    return parseFloat(price || '0');
+    const key = Object.keys(prices)[0];
+    return parseFloat(prices[key] || '0');
   } catch {
     return 0;
   }
@@ -135,12 +131,12 @@ async function getMarketCapUSD(address) {
   try {
     const res = await fetch(`https://api.geckoterminal.com/api/v2/networks/base/tokens/${address}`);
     const data = await res.json();
-    const mcap = data?.data?.attributes?.fdv_usd || data?.data?.attributes?.market_cap_usd || '0';
-    return parseFloat(mcap);
+    return parseFloat(data?.data?.attributes?.market_cap_usd || '0');
   } catch {
     return 0;
   }
 }
+
 
 
 
