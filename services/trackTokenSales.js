@@ -1,4 +1,3 @@
-// /minter/services/trackTokenSales.js
 const { JsonRpcProvider, Contract, Interface, formatUnits } = require('ethers');
 const { EmbedBuilder } = require('discord.js');
 const fetch = require('node-fetch');
@@ -41,6 +40,7 @@ module.exports = async function trackTokenSales(client) {
     const name = token.name.toUpperCase();
     const guildId = token.guild_id;
 
+    const contract = new Contract(address, erc20Iface, provider);
     let lastBlock = await provider.getBlockNumber();
 
     provider.on('block', async (blockNumber) => {
@@ -69,28 +69,29 @@ module.exports = async function trackTokenSales(client) {
 
           const tokenAmount = parseFloat(formatUnits(amount, 18));
           const tokenPrice = await getTokenPriceUSD(address);
-          const usdValue = tokenPrice ? tokenAmount * tokenPrice : 0;
+          const usdValue = tokenAmount * tokenPrice;
 
           const ethPrice = await getETHPrice();
           const ethValue = ethPrice > 0 ? usdValue / ethPrice : 0;
 
           const marketCap = await getMarketCapUSD(address);
+          const formattedMarketCap = marketCap && marketCap > 0 ? `$${Math.round(marketCap).toLocaleString()}` : 'N/A';
 
           console.log(`[DEBUG] ${name} → tokenAmount: ${tokenAmount}`);
-console.log(`[DEBUG] ${name} → tokenPrice: ${tokenPrice}`);
-console.log(`[DEBUG] ${name} → usdValue: ${usdValue}`);
-console.log(`[DEBUG] ${name} → ethPrice: ${ethPrice}`);
-console.log(`[DEBUG] ${name} → ethValue: ${ethValue}`);
-console.log(`[DEBUG] ${name} → marketCap: ${marketCap}`);
+          console.log(`[DEBUG] ${name} → tokenPrice: ${tokenPrice}`);
+          console.log(`[DEBUG] ${name} → usdValue: ${usdValue}`);
+          console.log(`[DEBUG] ${name} → ethPrice: ${ethPrice}`);
+          console.log(`[DEBUG] ${name} → ethValue: ${ethValue}`);
+          console.log(`[DEBUG] ${name} → marketCap: ${formattedMarketCap}`);
 
           const embed = new EmbedBuilder()
             .setTitle(`${name} Buy!`)
             .setDescription(`🟥🟦🚀🟥🟦🚀🟥🟦🚀`)
             .addFields(
-              { name: '💸 Spent', value: `$${usdValue.toFixed(2)} / ${ethValue.toFixed(4)} ETH`, inline: true },
+              { name: '💸 Spent', value: `$${usdValue.toFixed(4)} / ${ethValue.toFixed(6)} ETH`, inline: true },
               { name: '🎯 Got', value: `${tokenAmount.toLocaleString()} ${name}`, inline: true },
               { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
-              { name: '📊 MCap', value: `$${marketCap.toLocaleString()}`, inline: true }
+              { name: '📊 MCap', value: formattedMarketCap, inline: true }
             )
             .setColor(0x3498db)
             .setFooter({ text: 'Live on Base • Powered by PimpsDev' })
@@ -124,8 +125,8 @@ async function getTokenPriceUSD(address) {
   try {
     const res = await fetch(`https://api.geckoterminal.com/api/v2/simple/networks/base/token_price/${address}`);
     const data = await res.json();
-    const key = Object.keys(data?.data?.attributes?.token_prices || {})[0];
-    return parseFloat(data?.data?.attributes?.token_prices?.[key] || '0');
+    const raw = data?.data?.attributes?.token_prices?.[address.toLowerCase()];
+    return raw ? parseFloat(raw) : 0;
   } catch {
     return 0;
   }
@@ -140,6 +141,7 @@ async function getMarketCapUSD(address) {
     return 0;
   }
 }
+
 
 
 
