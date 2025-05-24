@@ -56,13 +56,13 @@ try {
   console.error('❌ Error loading commands:', err);
 }
 
-// === Event Loader ===
+// === Event Loader (now passes pg to each event) ===
 const eventFiles = fs.readdirSync(path.join(__dirname, 'events')).filter(file => file.endsWith('.js'));
 
 for (const file of eventFiles) {
   try {
     const registerEvent = require(`./events/${file}`);
-    registerEvent(client);
+    registerEvent(client, pg); // ✅ patched to pass pg
     console.log(`📡 Event loaded: ${file}`);
   } catch (err) {
     console.error(`❌ Failed to load event ${file}:`, err);
