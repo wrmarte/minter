@@ -36,6 +36,17 @@ pg.query(`CREATE TABLE IF NOT EXISTS flex_projects (
   network TEXT NOT NULL
 )`);
 
+pg.query(`CREATE TABLE IF NOT EXISTS tracked_tokens (
+  name TEXT,
+  address TEXT NOT NULL,
+  guild_id TEXT NOT NULL,
+  channel_id TEXT,
+  PRIMARY KEY (address, guild_id)
+)`);
+
+// 🔧 Patch for older tracked_tokens missing channel_id column
+pg.query(`ALTER TABLE tracked_tokens ADD COLUMN IF NOT EXISTS channel_id TEXT`);
+
 // === Command Loader ===
 client.commands = new Map();
 
@@ -62,7 +73,7 @@ const eventFiles = fs.readdirSync(path.join(__dirname, 'events')).filter(file =>
 for (const file of eventFiles) {
   try {
     const registerEvent = require(`./events/${file}`);
-    registerEvent(client, pg); // ✅ patched to pass pg
+    registerEvent(client, pg); // ✅ pass pg
     console.log(`📡 Event loaded: ${file}`);
   } catch (err) {
     console.error(`❌ Failed to load event ${file}:`, err);
@@ -77,6 +88,7 @@ client.login(process.env.DISCORD_BOT_TOKEN)
   .catch(err => {
     console.error('❌ Discord login failed:', err);
   });
+
 
 
 
