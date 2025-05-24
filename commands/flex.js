@@ -65,8 +65,7 @@ module.exports = {
                 .setURL(`https://opensea.io/assets/${chain}/${address}/${tokenId}`)
                 .setColor(network === 'base' ? 0x1d9bf0 : 0xf5851f)
                 .addFields({ name: '🧬 Traits', value: traits, inline: false })
-                .addFields({ name: '🔍 Rarity', value: 'N/A (Fallback Mode)', inline: true })
-                .setFooter({ text: `Network: ${network.toUpperCase()} (Fallback)` })
+                .setFooter({ text: 'Powered by PimpsDev' })
                 .setTimestamp();
 
               return await interaction.editReply({ embeds: [embed] });
@@ -89,23 +88,14 @@ module.exports = {
         ? attributes.map(attr => `• **${attr.key}**: ${attr.value} (${attr.rarityPercent?.toFixed(2) || '?'}%)`).join('\n')
         : 'None found';
 
-      const rarityRank = token.rarity?.rank;
-      const rarityScore = token.rarity?.score;
-      const rarityText = (rarityRank && rarityScore)
-        ? `Rank #${rarityRank} • Score: ${rarityScore.toFixed(2)}`
-        : 'Not available';
-
       const embed = new EmbedBuilder()
         .setTitle(`🖼️ Flexing: ${name} #${tokenId}`)
         .setDescription(`🎲 Randomly flexed from ${name}`)
         .setImage(image)
         .setURL(`https://opensea.io/assets/${chain}/${address}/${tokenId}`)
         .setColor(network === 'base' ? 0x1d9bf0 : 0xf5851f)
-        .addFields(
-          { name: '🧬 Traits', value: traitLines, inline: false },
-          { name: '🔍 Rarity', value: rarityText, inline: true }
-        )
-        .setFooter({ text: `Network: ${network.toUpperCase()}` })
+        .addFields({ name: '🧬 Traits', value: traitLines, inline: false })
+        .setFooter({ text: 'Powered by PimpsDev' })
         .setTimestamp();
 
       await interaction.editReply({ embeds: [embed] });
@@ -115,4 +105,5 @@ module.exports = {
     }
   }
 };
+
 
