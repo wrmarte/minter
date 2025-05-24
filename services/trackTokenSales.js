@@ -15,7 +15,7 @@ const ROUTERS = [
   '0xfbeef911dc5821886e1dda23b3e4f3eaffdd7930', // AlienBase
   '0x812e79c9c37eD676fdbdd1212D6a4e47EFfC6a42', // Sushi
   '0xa5e0829CaCEd8fFDD4De3c43696c57F7D7A678ff', // Other
-  '0x95ebfcb1c6b345fda69cf56c51e30421e5a35aec'  // Detected real router
+  '0x95ebfcb1c6b345fda69cf56c51e30421e5a35aec'  // Real router
 ];
 
 const seenHashes = new Set();
@@ -76,6 +76,13 @@ module.exports = async function trackTokenSales(client) {
 
           const marketCap = await getMarketCapUSD(address);
 
+          console.log(`[DEBUG] ${name} → tokenAmount: ${tokenAmount}`);
+          console.log(`[DEBUG] ${name} → tokenPrice: ${tokenPrice}`);
+          console.log(`[DEBUG] ${name} → usdValue: ${usdValue}`);
+          console.log(`[DEBUG] ${name} → ethPrice: ${ethPrice}`);
+          console.log(`[DEBUG] ${name} → ethValue: ${ethValue}`);
+          console.log(`[DEBUG] ${name} → marketCap: ${marketCap}`);
+
           const embed = new EmbedBuilder()
             .setTitle(`${name} Buy!`)
             .setDescription(`🟥🟦🚀🟥🟦🚀🟥🟦🚀`)
@@ -83,7 +90,7 @@ module.exports = async function trackTokenSales(client) {
               { name: '💸 Spent', value: `$${usdValue.toFixed(4)} / ${ethValue.toFixed(6)} ETH`, inline: true },
               { name: '🎯 Got', value: `${tokenAmount.toLocaleString()} ${name}`, inline: true },
               { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
-              { name: '📊 MCap', value: marketCap ? `$${marketCap.toLocaleString()}` : 'N/A', inline: true }
+              { name: '📊 MCap', value: marketCap > 0 ? `$${marketCap.toLocaleString()}` : 'N/A', inline: true }
             )
             .setColor(0x3498db)
             .setFooter({ text: 'Live on Base • Powered by PimpsDev' })
@@ -117,9 +124,8 @@ async function getTokenPriceUSD(address) {
   try {
     const res = await fetch(`https://api.geckoterminal.com/api/v2/simple/networks/base/token_price/${address}`);
     const data = await res.json();
-    const priceMap = data?.data?.attributes?.token_prices || {};
-    const key = Object.keys(priceMap)[0];
-    return parseFloat(priceMap[key] || '0');
+    const value = Object.values(data?.data?.attributes?.token_prices || {})[0];
+    return parseFloat(value || '0');
   } catch {
     return 0;
   }
@@ -134,6 +140,7 @@ async function getMarketCapUSD(address) {
     return 0;
   }
 }
+
 
 
 
