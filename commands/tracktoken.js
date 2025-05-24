@@ -10,9 +10,13 @@ module.exports = {
       opt.setName('address').setDescription('Token contract address').setRequired(true)),
 
   async execute(interaction) {
-    if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-      return interaction.reply({ content: '🚫 Admin only.', ephemeral: true });
-    }
+const isAdmin = interaction.member.permissions.has(PermissionsBitField.Flags.Administrator);
+const isOwner = interaction.user.id === process.env.BOT_OWNER_ID;
+
+if (!isAdmin && !isOwner) {
+  return interaction.reply({ content: '🚫 Admins only. (Bot owner bypass not detected)', ephemeral: true });
+}
+
 
     const pg = interaction.client.pg;
     const guildId = interaction.guildId;
