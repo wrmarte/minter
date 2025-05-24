@@ -10,12 +10,13 @@ const erc20Iface = new Interface([
   'event Transfer(address indexed from, address indexed to, uint amount)'
 ]);
 
+// Known routers that usually signal a token buy
 const ROUTERS = [
-  '0x327Df1E6de05895d2ab08513aaDD9313Fe505d86', // Uniswap Base
+  '0x327df1e6de05895d2ab08513aadd9313fe505d86', // Uniswap
   '0x420dd381b31aef6683e2c581f93b119eee7e3f4d', // Aerodrome
   '0xfbeef911dc5821886e1dda23b3e4f3eaffdd7930', // Alien Base
-  '0x812e79c9c37eD676fdbdd1212D6a4e47EFfC6a42', // Sushi Base
-  '0xa5e0829CaCEd8fFDD4De3c43696c57F7D7A678ff'  // Other?
+  '0x812e79c9c37ed676fdbdd1212d6a4e47effc6a42', // Sushi
+  '0xa5e0829caced8ffdd4de3c43696c57f7d7a678ff'  // Other
 ];
 
 module.exports = async function trackTokenSales(client) {
@@ -60,36 +61,32 @@ module.exports = async function trackTokenSales(client) {
           const parsed = erc20Iface.parseLog(log);
           const { from, to, amount } = parsed.args;
 
-          console.log(`📤 Transfer from ${from} to ${to} amount ${formatUnits(amount, 18)}`);
+          const fromLower = from.toLowerCase();
+          if (!ROUTERS.includes(fromLower)) continue;
 
-          const isLikelyBuy =
-            ROUTERS.includes(from.toLowerCase()) || ROUTERS.includes(to.toLowerCase());
+          const tokenAmount = parseFloat(formatUnits(amount, 18));
+          if (!tokenAmount || isNaN(tokenAmount) || tokenAmount < 0.0001) continue;
 
-          if (isLikelyBuy) {
-            const tokenAmount = parseFloat(formatUnits(amount, 18));
-            const tokenPrice = await getTokenPriceUSD(address);
-            const usdValue = tokenAmount * tokenPrice;
-            const marketCap = await getMarketCapUSD(address);
+          const tokenPrice = await getTokenPriceUSD(address);
+          const usdValue = tokenPrice * tokenAmount;
+          const marketCap = await getMarketCapUSD(address);
 
-            if (usdValue < 0.01 || !tokenPrice || !marketCap) continue;
+          const embed = new EmbedBuilder()
+            .setTitle(`${name} Buy!`)
+            .setDescription(`🟥🟦🚀🟥🟦🚀🟥🟦🚀`)
+            .addFields(
+              { name: '💸 Spent', value: `$${usdValue.toFixed(2)}`, inline: true },
+              { name: '🎯 Got', value: `${tokenAmount.toLocaleString()} ${name}`, inline: true },
+              { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
+              { name: '📊 MCap', value: `$${marketCap.toLocaleString()}`, inline: true }
+            )
+            .setColor(0xff4444)
+            .setTimestamp();
 
-            const embed = new EmbedBuilder()
-              .setTitle(`${name} Buy!`)
-              .setDescription(`🟥🟦🚀🟥🟦🚀🟥🟦🚀`)
-              .addFields(
-                { name: '💸 Spent', value: `$${usdValue.toFixed(2)}`, inline: true },
-                { name: '🎯 Got', value: `${tokenAmount.toLocaleString()} ${name}`, inline: true },
-                { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
-                { name: '📊 MCap', value: `$${marketCap.toLocaleString()}`, inline: true }
-              )
-              .setColor(0xff4444)
-              .setTimestamp();
-
-            const guild = client.guilds.cache.get(guildId);
-            if (!guild) continue;
-            const channel = guild.channels.cache.find(c => c.isTextBased() && c.permissionsFor(guild.members.me).has('SendMessages'));
-            if (channel) channel.send({ embeds: [embed] });
-          }
+          const guild = client.guilds.cache.get(guildId);
+          if (!guild) continue;
+          const channel = guild.channels.cache.find(c => c.isTextBased() && c.permissionsFor(guild.members.me).has('SendMessages'));
+          if (channel) channel.send({ embeds: [embed] });
         }
       } catch (err) {
         console.warn(`⚠️ Error checking token ${name}:`, err.message);
@@ -117,6 +114,7 @@ async function getMarketCapUSD(address) {
     return 0;
   }
 }
+
 
 
 
