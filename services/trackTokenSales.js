@@ -91,7 +91,7 @@ module.exports = async function trackTokenSales(client) {
               { name: '💸 Spent', value: `$${usdSpent.toFixed(4)} / ${ethSpent.toFixed(4)} ETH`, inline: true },
               { name: '🎯 Got', value: `${tokenAmount.toLocaleString()} ${name}`, inline: true },
               { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
-              { name: '📊 MCap', value: marketCap ? `$${marketCap.toLocaleString()}` : 'N/A', inline: true }
+              { name: '📊 MCap', value: marketCap && marketCap > 0 ? `$${marketCap.toLocaleString()}` : 'Fetching...', inline: true }
             )
             .setColor(0x3498db)
             .setFooter({ text: 'Live on Base • Powered by PimpsDev' })
@@ -135,11 +135,13 @@ async function getMarketCapUSD(address) {
   try {
     const res = await fetch(`https://api.geckoterminal.com/api/v2/networks/base/tokens/${address}`);
     const data = await res.json();
-    return parseFloat(data?.data?.attributes?.market_cap_usd || '0');
+    const mcap = data?.data?.attributes?.fdv_usd || data?.data?.attributes?.market_cap_usd || '0';
+    return parseFloat(mcap);
   } catch {
     return 0;
   }
 }
+
 
 
 
