@@ -1,3 +1,4 @@
+// /minter/services/trackTokenSales.js
 const { JsonRpcProvider, Contract, Interface, formatUnits } = require('ethers');
 const { EmbedBuilder } = require('discord.js');
 const fetch = require('node-fetch');
@@ -40,7 +41,6 @@ module.exports = async function trackTokenSales(client) {
     const name = token.name.toUpperCase();
     const guildId = token.guild_id;
 
-    const contract = new Contract(address, erc20Iface, provider);
     let lastBlock = await provider.getBlockNumber();
 
     provider.on('block', async (blockNumber) => {
@@ -69,7 +69,7 @@ module.exports = async function trackTokenSales(client) {
 
           const tokenAmount = parseFloat(formatUnits(amount, 18));
           const tokenPrice = await getTokenPriceUSD(address);
-          const usdValue = tokenAmount * tokenPrice;
+          const usdValue = tokenPrice ? tokenAmount * tokenPrice : 0;
 
           const ethPrice = await getETHPrice();
           const ethValue = ethPrice > 0 ? usdValue / ethPrice : 0;
@@ -83,9 +83,9 @@ module.exports = async function trackTokenSales(client) {
               { name: '💸 Spent', value: `$${usdValue.toFixed(2)} / ${ethValue.toFixed(4)} ETH`, inline: true },
               { name: '🎯 Got', value: `${tokenAmount.toLocaleString()} ${name}`, inline: true },
               { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
-              { name: '📊 MCap', value: marketCap ? `$${marketCap.toLocaleString()}` : 'N/A', inline: true }
+              { name: '📊 MCap', value: `$${marketCap.toLocaleString()}`, inline: true }
             )
-            .setColor(0x66cc66)
+            .setColor(0x3498db)
             .setFooter({ text: 'Live on Base • Powered by PimpsDev' })
             .setTimestamp();
 
@@ -133,6 +133,7 @@ async function getMarketCapUSD(address) {
     return 0;
   }
 }
+
 
 
 
