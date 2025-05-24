@@ -31,7 +31,7 @@ module.exports = {
       };
 
       const moralisData = await fetch(url, { headers }).then(res => res.json());
-      const nfts = moralisData?.result?.filter(n => n.metadata) || [];
+      const nfts = moralisData?.result || [];
 
       if (!nfts.length) {
         return interaction.editReply('⚠️ No NFTs found via Moralis.');
@@ -40,9 +40,15 @@ module.exports = {
       const selected = nfts.sort(() => 0.5 - Math.random()).slice(0, 6);
       const images = await Promise.all(
         selected.map(async nft => {
-          let meta;
+          let meta = {};
           try {
-            meta = JSON.parse(nft.metadata || '{}');
+            if (nft.metadata) {
+              meta = JSON.parse(nft.metadata || '{}');
+            }
+            if ((!meta || !meta.image) && nft.token_uri) {
+              const uri = nft.token_uri.replace('ipfs://', 'https://ipfs.io/ipfs/');
+              meta = await fetch(uri).then(res => res.json());
+            }
           } catch {
             return null;
           }
@@ -94,4 +100,5 @@ module.exports = {
     }
   }
 };
+
 
