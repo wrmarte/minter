@@ -1,4 +1,4 @@
-module.exports = client => {
+module.exports = (client, pg) => {
   client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
 
@@ -11,8 +11,8 @@ module.exports = client => {
     }
 
     try {
-      // Execute command logic
-      await command.execute(interaction);
+      // ✅ Pass pg to the command
+      await command.execute(interaction, { pg });
     } catch (error) {
       console.error(`❌ Error executing /${interaction.commandName}:`, error);
 
@@ -28,6 +28,7 @@ module.exports = client => {
     }
   });
 };
+
 
 
 
