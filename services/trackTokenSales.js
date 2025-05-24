@@ -1,4 +1,4 @@
-const { JsonRpcProvider, Contract, Interface, formatUnits } = require('ethers');
+const { JsonRpcProvider, Interface, formatUnits } = require('ethers');
 const { EmbedBuilder } = require('discord.js');
 const fetch = require('node-fetch');
 
@@ -87,6 +87,16 @@ module.exports = async function trackTokenSales(client) {
           const intensity = Math.max(1, Math.floor(usdSpent / 5));
           const rocketLine = '🟥🟦🚀'.repeat(intensity);
 
+          const getRedBlueBlendColor = (intensity) => {
+            const maxIntensity = 50;
+            const clamped = Math.min(intensity, maxIntensity);
+            const red = Math.floor(255 * (clamped / maxIntensity));
+            const blue = 255 - red;
+            return (red << 16) + (0 << 8) + blue;
+          };
+
+          const embedColor = getRedBlueBlendColor(intensity);
+
           const embed = new EmbedBuilder()
             .setTitle(`${name} Buy!`)
             .setDescription(`${rocketLine}`)
@@ -98,38 +108,15 @@ module.exports = async function trackTokenSales(client) {
               { name: '📊 MCap', value: marketCap && marketCap > 0 ? `$${marketCap.toLocaleString()}` : 'Fetching...', inline: true }
             )
             .setURL(`https://www.geckoterminal.com/base/pools/${address}`)
-            // Dynamic Red-Blue blend based on intensity
-function getRedBlueBlendColor(intensity) {
-  const maxIntensity = 50; // You can adjust this cap
-  const clampedIntensity = Math.min(intensity, maxIntensity);
-  const red = Math.floor(255 * (clampedIntensity / maxIntensity));
-  const blue = 255 - red;
-  return (red << 16) + (0 << 8) + blue; // RGB to decimal
-}
-
-const embedColor = getRedBlueBlendColor(intensity);
-
-const embed = new EmbedBuilder()
-  .setTitle(`${name} Buy!`)
-  .setDescription(`${rocketLine}`)
-  .setImage('https://iili.io/3tSecKP.gif')
-  .addFields(
-    { name: '💸 Spent', value: `$${usdSpent.toFixed(4)} / ${ethSpent.toFixed(4)} ETH`, inline: true },
-    { name: '🎯 Got', value: `${tokenAmount.toLocaleString()} ${name}`, inline: true },
-    { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
-    { name: '📊 MCap', value: marketCap && marketCap > 0 ? `$${marketCap.toLocaleString()}` : 'Fetching...', inline: true }
-  )
-  .setURL(`https://www.geckoterminal.com/base/pools/${address}`)
-  .setColor(embedColor)
-  .setFooter({ text: 'Live on Base • Powered by PimpsDev' })
-  .setTimestamp();
-
+            .setColor(embedColor)
             .setFooter({ text: 'Live on Base • Powered by PimpsDev' })
             .setTimestamp();
 
           const guild = client.guilds.cache.get(guildId);
           if (!guild) continue;
-          const channel = guild.channels.cache.find(c => c.isTextBased() && c.permissionsFor(guild.members.me).has('SendMessages'));
+          const channel = guild.channels.cache.find(c =>
+            c.isTextBased() && c.permissionsFor(guild.members.me).has('SendMessages')
+          );
           if (channel) await channel.send({ embeds: [embed] });
         }
       } catch (err) {
@@ -154,8 +141,7 @@ async function getTokenPriceUSD(address) {
     const res = await fetch(`https://api.geckoterminal.com/api/v2/simple/networks/base/token_price/${address}`);
     const data = await res.json();
     const prices = data?.data?.attributes?.token_prices || {};
-    const price = prices[address.toLowerCase()];
-    return parseFloat(price || '0');
+    return parseFloat(prices[address.toLowerCase()] || '0');
   } catch {
     return 0;
   }
@@ -165,12 +151,12 @@ async function getMarketCapUSD(address) {
   try {
     const res = await fetch(`https://api.geckoterminal.com/api/v2/networks/base/tokens/${address}`);
     const data = await res.json();
-    const mcap = data?.data?.attributes?.fdv_usd || data?.data?.attributes?.market_cap_usd || '0';
-    return parseFloat(mcap);
+    return parseFloat(data?.data?.attributes?.fdv_usd || data?.data?.attributes?.market_cap_usd || '0');
   } catch {
     return 0;
   }
 }
+
 
 
 
