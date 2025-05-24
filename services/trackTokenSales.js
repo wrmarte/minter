@@ -1,3 +1,4 @@
+// /minter/services/trackTokenSales.js
 const { JsonRpcProvider, Contract, Interface, formatUnits } = require('ethers');
 const { EmbedBuilder } = require('discord.js');
 const fetch = require('node-fetch');
@@ -69,29 +70,20 @@ module.exports = async function trackTokenSales(client) {
 
           const tokenAmount = parseFloat(formatUnits(amount, 18));
           const tokenPrice = await getTokenPriceUSD(address);
-          const usdValue = tokenAmount * tokenPrice;
-
+          const usdValue = parseFloat((tokenAmount * tokenPrice).toFixed(6));
           const ethPrice = await getETHPrice();
-          const ethValue = ethPrice > 0 ? usdValue / ethPrice : 0;
-
-          const marketCap = await getMarketCapUSD(address);
-          const formattedMarketCap = marketCap && marketCap > 0 ? `$${Math.round(marketCap).toLocaleString()}` : 'N/A';
-
-          console.log(`[DEBUG] ${name} → tokenAmount: ${tokenAmount}`);
-          console.log(`[DEBUG] ${name} → tokenPrice: ${tokenPrice}`);
-          console.log(`[DEBUG] ${name} → usdValue: ${usdValue}`);
-          console.log(`[DEBUG] ${name} → ethPrice: ${ethPrice}`);
-          console.log(`[DEBUG] ${name} → ethValue: ${ethValue}`);
-          console.log(`[DEBUG] ${name} → marketCap: ${formattedMarketCap}`);
+          const ethValue = ethPrice > 0 ? parseFloat((usdValue / ethPrice).toFixed(6)) : 0;
+          let marketCap = await getMarketCapUSD(address);
+          if (!marketCap || isNaN(marketCap)) marketCap = 'N/A';
 
           const embed = new EmbedBuilder()
             .setTitle(`${name} Buy!`)
             .setDescription(`🟥🟦🚀🟥🟦🚀🟥🟦🚀`)
             .addFields(
-              { name: '💸 Spent', value: `$${usdValue.toFixed(4)} / ${ethValue.toFixed(6)} ETH`, inline: true },
+              { name: '💸 Spent', value: `$${usdValue} / ${ethValue} ETH`, inline: true },
               { name: '🎯 Got', value: `${tokenAmount.toLocaleString()} ${name}`, inline: true },
               { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
-              { name: '📊 MCap', value: formattedMarketCap, inline: true }
+              { name: '📊 MCap', value: typeof marketCap === 'string' ? marketCap : `$${marketCap.toLocaleString()}`, inline: true }
             )
             .setColor(0x3498db)
             .setFooter({ text: 'Live on Base • Powered by PimpsDev' })
@@ -125,8 +117,7 @@ async function getTokenPriceUSD(address) {
   try {
     const res = await fetch(`https://api.geckoterminal.com/api/v2/simple/networks/base/token_price/${address}`);
     const data = await res.json();
-    const raw = data?.data?.attributes?.token_prices?.[address.toLowerCase()];
-    return raw ? parseFloat(raw) : 0;
+    return parseFloat(Object.values(data?.data?.attributes?.token_prices || {})[0] || '0');
   } catch {
     return 0;
   }
@@ -141,6 +132,7 @@ async function getMarketCapUSD(address) {
     return 0;
   }
 }
+
 
 
 
