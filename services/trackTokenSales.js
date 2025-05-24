@@ -107,7 +107,9 @@ module.exports = async function trackTokenSales(client) {
             console.warn(`⚠️ TX fetch failed: ${err.message}`);
           }
 
-        const rocketLine = usdSpent >= 20 ? '🟢🟢🚀' : usdSpent >= 10 ? '🟥🟦🚀' : '🟥🟦🚀';
+        const rocketIntensity = Math.min(Math.floor(tokenAmount / 100), 10); // Cap at 10 rockets
+        const rocketLine = '🟥🟦🚀'.repeat(Math.max(1, rocketIntensity));
+
 
 const getColorByUsdSpent = (usd) => {
   if (usd < 10) return 0xff0000; // 🔴 Red
