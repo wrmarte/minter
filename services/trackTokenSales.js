@@ -1,21 +1,25 @@
+// /minter/services/trackTokenSales.js
 const { JsonRpcProvider, Contract, Interface, formatUnits } = require('ethers');
 const { EmbedBuilder } = require('discord.js');
 const fetch = require('node-fetch');
 
+// === RPC Setup ===
 const BASE_RPC = 'https://mainnet.base.org';
 const provider = new JsonRpcProvider(BASE_RPC);
 
+// === ERC20 Transfer Interface ===
 const erc20Iface = new Interface([
   'event Transfer(address indexed from, address indexed to, uint amount)'
 ]);
 
+// === Known Base Routers ===
 const ROUTERS = [
-  '0x327Df1E6de05895d2ab08513aaDD9313Fe505d86', // Uniswap
+  '0x327df1e6de05895d2ab08513aadd9313fe505d86', // Uniswap
   '0x420dd381b31aef6683e2c581f93b119eee7e3f4d', // Aerodrome
-  '0xfbeef911dc5821886e1dda23b3e4f3eaffdd7930', // AlienBase
-  '0x812e79c9c37eD676fdbdd1212D6a4e47EFfC6a42', // Sushi
-  '0xa5e0829CaCEd8fFDD4De3c43696c57F7D7A678ff', // Other
-  '0x95ebfcb1c6b345fda69cf56c51e30421e5a35aec'  // Detected real router
+  '0xfbeef911dc5821886e1dda23b3e4f3eaffdd7930', // Alien Base
+  '0x812e79c9c37ed676fdbdd1212d6a4e47effc6a42', // Sushi
+  '0xa5e0829caced8ffdd4de3c43696c57f7d7a678ff', // Other
+  '0x95ebfcb1c6b345fda69cf56c51e30421e5a35aec'  // Detected live router
 ];
 
 const seenHashes = new Set();
@@ -64,8 +68,9 @@ module.exports = async function trackTokenSales(client) {
 
           const fromAddr = from.toLowerCase();
           const toAddr = to.toLowerCase();
-          if (!ROUTERS.includes(fromAddr)) continue;
-          if (toAddr === '0x0000000000000000000000000000000000000000') continue;
+
+          if (!ROUTERS.includes(fromAddr)) continue; // skip taxes
+          if (toAddr === '0x0000000000000000000000000000000000000000') continue; // skip burns
 
           const tokenAmount = parseFloat(formatUnits(amount, 18));
           const tokenPrice = await getTokenPriceUSD(address);
@@ -117,9 +122,8 @@ async function getTokenPriceUSD(address) {
   try {
     const res = await fetch(`https://api.geckoterminal.com/api/v2/simple/networks/base/token_price/${address}`);
     const data = await res.json();
-    const prices = data?.data?.attributes?.token_prices;
-    const price = prices ? Object.values(prices)[0] : '0';
-    return parseFloat(price);
+    const key = Object.keys(data?.data?.attributes?.token_prices || {})[0];
+    return parseFloat(data?.data?.attributes?.token_prices?.[key] || '0');
   } catch {
     return 0;
   }
@@ -134,22 +138,3 @@ async function getMarketCapUSD(address) {
     return 0;
   }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
