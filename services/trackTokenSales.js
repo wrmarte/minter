@@ -107,18 +107,16 @@ module.exports = async function trackTokenSales(client) {
             console.warn(`⚠️ TX fetch failed: ${err.message}`);
           }
 
-          const intensity = Math.max(1, Math.floor(usdSpent / 5));
-          const rocketLine = '🟥🟦🚀'.repeat(intensity);
+        const rocketLine = usdSpent >= 20 ? '🟢🚀' : usdSpent >= 10 ? '🟦🚀' : '🟥🚀';
 
-          const getRedBlueBlendColor = (intensity) => {
-            const maxIntensity = 50;
-            const clamped = Math.min(intensity, maxIntensity);
-            const red = Math.floor(255 * (clamped / maxIntensity));
-            const blue = 255 - red;
-            return (red << 16) + (0 << 8) + blue;
-          };
+const getColorByUsdSpent = (usd) => {
+  if (usd < 10) return 0xff0000; // 🔴 Red
+  if (usd < 20) return 0x3498db; // 🟦 Blue
+  return 0x00cc66;               // 🟢 Green
+};
 
-          const embedColor = getRedBlueBlendColor(intensity);
+const embedColor = getColorByUsdSpent(usdSpent);
+
 
           for (const token of tokenGroup) {
             const guildId = token.guild_id;
