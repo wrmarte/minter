@@ -1,3 +1,4 @@
+// /minter/services/trackTokenSales.js
 const { JsonRpcProvider, Contract, Interface, formatUnits } = require('ethers');
 const { EmbedBuilder } = require('discord.js');
 const fetch = require('node-fetch');
@@ -70,27 +71,28 @@ module.exports = async function trackTokenSales(client) {
           const tokenAmount = parseFloat(formatUnits(amount, 18));
           const tokenPrice = await getTokenPriceUSD(address);
           const usdValue = tokenAmount * tokenPrice;
+
           const ethPrice = await getETHPrice();
           const ethValue = ethPrice > 0 ? usdValue / ethPrice : 0;
           const marketCap = await getMarketCapUSD(address);
 
-          const sets = Math.min(Math.floor(usdValue / 2.5), 10);
-          const emojiBlast = '🟥🟦🚀'.repeat(sets) || '🟥🟦🚀';
-          const gifUrl = 'https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExajc3OXdpd2J5a3F2MG94ZGRuYzRjd3F0cW0xbDBjYzJrZzI1dG5zZCZlcD12MV9naWZzX3NlYXJjaCZjdD1n/qgQUggAC3Pfv687qPC/giphy.gif';
+          // 🔥 Dynamic icon logic
+          const iconRepeats = Math.max(1, Math.floor(usdValue / 5));
+          const emojiBlast = '🟥🟦🚀'.repeat(iconRepeats);
 
           const embed = new EmbedBuilder()
             .setTitle(`${name} Buy!`)
-            .setDescription(emojiBlast)
+            .setDescription(`${emojiBlast}`)
+            .setImage('https://iili.io/3tSecKP.gif') // Example GIF
             .addFields(
               { name: '💸 Spent', value: `$${usdValue.toFixed(4)} / ${ethValue.toFixed(4)} ETH`, inline: true },
               { name: '🎯 Got', value: `${tokenAmount.toLocaleString()} ${name}`, inline: true },
               { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
-              { name: '📊 MCap', value: marketCap > 0 ? `$${marketCap.toLocaleString()}` : 'N/A', inline: true }
+              { name: '📊 MCap', value: marketCap ? `$${parseFloat(marketCap).toLocaleString()}` : 'N/A', inline: true }
             )
-            .setImage(gifUrl)
-            .setColor(0xff3333)
+            .setURL(`https://www.geckoterminal.com/base/pools/${address}`)
             .setFooter({ text: 'Live on Base • Powered by PimpsDev' })
-            .setURL(`https://www.geckoterminal.com/base/pools?query=${address}`)
+            .setColor(0x3498db)
             .setTimestamp();
 
           const guild = client.guilds.cache.get(guildId);
@@ -105,6 +107,16 @@ module.exports = async function trackTokenSales(client) {
   }
 };
 
+async function getTokenPriceUSD(address) {
+  try {
+    const res = await fetch(`https://api.geckoterminal.com/api/v2/simple/networks/base/token_price/${address}`);
+    const data = await res.json();
+    return parseFloat(Object.values(data?.data?.attributes?.token_prices || {})[0]) || 0;
+  } catch {
+    return 0;
+  }
+}
+
 async function getETHPrice() {
   try {
     const res = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd');
@@ -115,27 +127,16 @@ async function getETHPrice() {
   }
 }
 
-async function getTokenPriceUSD(address) {
-  try {
-    const res = await fetch(`https://api.geckoterminal.com/api/v2/simple/networks/base/token_price/${address}`);
-    const data = await res.json();
-    const prices = data?.data?.attributes?.token_prices || {};
-    const key = Object.keys(prices)[0];
-    return parseFloat(prices[key] || '0');
-  } catch {
-    return 0;
-  }
-}
-
 async function getMarketCapUSD(address) {
   try {
     const res = await fetch(`https://api.geckoterminal.com/api/v2/networks/base/tokens/${address}`);
     const data = await res.json();
-    return parseFloat(data?.data?.attributes?.market_cap_usd || '0');
+    return data?.data?.attributes?.market_cap_usd || 'N/A';
   } catch {
-    return 0;
+    return 'N/A';
   }
 }
+
 
 
 
