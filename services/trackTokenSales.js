@@ -129,13 +129,13 @@ module.exports = async function trackTokenSales(client) {
               .setTitle(`${name} Buy!`)
               .setDescription(`${rocketLine}`)
               .setImage('https://iili.io/3tSecKP.gif')
-              .addFields(
-                { name: '💸 Spent', value: `$${usdSpent.toFixed(4)} / ${ethSpent.toFixed(4)} ETH`, inline: true },
-                { name: '🎯 Got', value: `${tokenAmount.toLocaleString()} ${name}`, inline: true },
-                { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
-                { name: '📊 MCap', value: marketCap && marketCap > 0 ? `$${marketCap.toLocaleString()}` : 'Fetching...', inline: true },
-                { name: '📡 Tracked In', value: trackedChannelId ? `<#${trackedChannelId}>` : 'Unknown', inline: false }
-              )
+.addFields(
+  { name: '💸 Spent', value: `$${usdSpent.toFixed(4)} / ${ethSpent.toFixed(4)} ETH`, inline: true },
+  { name: '🎯 Got', value: `${tokenAmount.toLocaleString()} ${name}`, inline: true },
+  { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
+  { name: '📊 MCap', value: marketCap && marketCap > 0 ? `$${marketCap.toLocaleString()}` : 'Fetching...', inline: true }
+)
+
               .setURL(`https://www.geckoterminal.com/base/pools/${address}`)
               .setColor(embedColor)
               .setFooter({ text: 'Live on Base • Powered by PimpsDev' })
