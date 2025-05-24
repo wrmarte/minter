@@ -11,12 +11,12 @@ const erc20Iface = new Interface([
 ]);
 
 const ROUTERS = [
-  '0x327Df1E6de05895d2ab08513aaDD9313Fe505d86', // Uniswap Base
+  '0x327df1e6de05895d2ab08513aadd9313fe505d86', // Uniswap Base
   '0x420dd381b31aef6683e2c581f93b119eee7e3f4d', // Aerodrome
   '0xfbeef911dc5821886e1dda23b3e4f3eaffdd7930', // Alien Base
-  '0x812e79c9c37eD676fdbdd1212D6a4e47EFfC6a42', // Sushi Base
-  '0xa5e0829CaCEd8fFDD4De3c43696c57F7D7A678ff', // Other?
-  '0x95ebfcb1c6b345fda69cf56c51e30421e5a35aec'  // Known Base Router for Adrian
+  '0x812e79c9c37ed676fdbdd1212d6a4e47effc6a42', // Sushi Base
+  '0xa5e0829caced8ffdd4de3c43696c57f7d7a678ff', // other?
+  '0x95ebfcb1c6b345fda69cf56c51e30421e5a35aec'  // ✅ Working Router
 ];
 
 module.exports = async function trackTokenSales(client) {
@@ -47,7 +47,6 @@ module.exports = async function trackTokenSales(client) {
       lastBlock = blockNumber;
 
       try {
-        console.log(`📦 Scanning block ${blockNumber} for ${name}`);
         const logs = await provider.getLogs({
           address,
           fromBlock: blockNumber - 1,
@@ -55,19 +54,12 @@ module.exports = async function trackTokenSales(client) {
           topics: [erc20Iface.getEvent('Transfer').topicHash]
         });
 
-        console.log(`🔍 Found ${logs.length} logs for ${name} in block ${blockNumber}`);
-
         for (const log of logs) {
           const parsed = erc20Iface.parseLog(log);
           const { from, to, amount } = parsed.args;
 
-          console.log(`📤 Transfer from ${from} to ${to} amount ${amount.toString()}`);
-          console.log(`⚙️ Checking if from (${from}) is router`);
-
           if (ROUTERS.includes(from.toLowerCase())) {
             const tokenAmount = parseFloat(formatUnits(amount, 18));
-            if (!tokenAmount || tokenAmount < 0.00001) continue;
-
             const tokenPrice = await getTokenPriceUSD(address);
             const usdValue = tokenAmount * tokenPrice;
             const marketCap = await getMarketCapUSD(address);
@@ -86,7 +78,10 @@ module.exports = async function trackTokenSales(client) {
 
             const guild = client.guilds.cache.get(guildId);
             if (!guild) continue;
-            const channel = guild.channels.cache.find(c => c.isTextBased() && c.permissionsFor(guild.members.me).has('SendMessages'));
+            const channel = guild.channels.cache.find(c =>
+              c.isTextBased() &&
+              c.permissionsFor(guild.members.me).has('SendMessages')
+            );
             if (channel) channel.send({ embeds: [embed] });
           }
         }
@@ -116,6 +111,7 @@ async function getMarketCapUSD(address) {
     return 0;
   }
 }
+
 
 
 
