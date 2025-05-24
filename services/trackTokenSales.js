@@ -78,8 +78,6 @@ module.exports = async function trackTokenSales(client) {
 
           const marketCap = await getMarketCapUSD(address);
 
-          if (!tokenPrice || !usdValue || !ethPrice || !marketCap) continue;
-
           const embed = new EmbedBuilder()
             .setTitle(`${name} Buy!`)
             .setDescription(`🟥🟦🚀🟥🟦🚀🟥🟦🚀`)
@@ -138,4 +136,5 @@ async function getMarketCapUSD(address) {
     return 0;
   }
 }
+
 
