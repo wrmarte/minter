@@ -10,12 +10,12 @@ const erc20Iface = new Interface([
 ]);
 
 const ROUTERS = [
-  '0x327Df1E6de05895d2ab08513aaDD9313Fe505d86', // Uniswap
-  '0x420dd381b31aef6683e2c581f93b119eee7e3f4d', // Aerodrome
-  '0xfbeef911dc5821886e1dda23b3e4f3eaffdd7930', // AlienBase
-  '0x812e79c9c37eD676fdbdd1212D6a4e47EFfC6a42', // Sushi
-  '0xa5e0829CaCEd8fFDD4De3c43696c57F7D7A678ff', // Other
-  '0x95ebfcb1c6b345fda69cf56c51e30421e5a35aec'  // Detected router
+  '0x327Df1E6de05895d2ab08513aaDD9313Fe505d86',
+  '0x420dd381b31aef6683e2c581f93b119eee7e3f4d',
+  '0xfbeef911dc5821886e1dda23b3e4f3eaffdd7930',
+  '0x812e79c9c37eD676fdbdd1212D6a4e47EFfC6a42',
+  '0xa5e0829CaCEd8fFDD4De3c43696c57F7D7A678ff',
+  '0x95ebfcb1c6b345fda69cf56c51e30421e5a35aec'
 ];
 
 const seenHashes = new Set();
@@ -70,8 +70,10 @@ module.exports = async function trackTokenSales(client) {
           const tokenAmount = parseFloat(formatUnits(amount, 18));
           const tokenPrice = await getTokenPriceUSD(address);
           const usdValue = tokenAmount * tokenPrice;
+
           const ethPrice = await getETHPrice();
           const ethValue = ethPrice > 0 ? usdValue / ethPrice : 0;
+
           const marketCap = await getMarketCapUSD(address);
 
           const embed = new EmbedBuilder()
@@ -115,7 +117,8 @@ async function getTokenPriceUSD(address) {
   try {
     const res = await fetch(`https://api.geckoterminal.com/api/v2/simple/networks/base/token_price/${address}`);
     const data = await res.json();
-    return parseFloat(data?.data?.attributes?.token_prices?.[address.toLowerCase()] || '0');
+    const price = Object.values(data?.data?.attributes?.token_prices || {})[0];
+    return parseFloat(price || '0');
   } catch {
     return 0;
   }
@@ -130,5 +133,6 @@ async function getMarketCapUSD(address) {
     return 0;
   }
 }
+
 
 
