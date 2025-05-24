@@ -1,5 +1,5 @@
 // /minter/services/trackTokenSales.js
-const { JsonRpcProvider, Contract, Interface, formatUnits } = require('ethers');
+const { JsonRpcProvider, Contract, Interface, formatUnits, parseUnits } = require('ethers');
 const { EmbedBuilder } = require('discord.js');
 const fetch = require('node-fetch');
 
@@ -58,30 +58,29 @@ module.exports = async function trackTokenSales(client) {
           const parsed = erc20Iface.parseLog(log);
           const { from, to, amount } = parsed.args;
 
-          if (ROUTERS.includes(from.toLowerCase())) {
+          if (ROUTERS.includes(from.toLowerCase()) && to.toLowerCase() !== '0x0000000000000000000000000000000000000000') {
             const tokenAmount = parseFloat(formatUnits(amount, 18));
             const tokenPrice = await getTokenPriceUSD(address);
             const usdValue = tokenAmount * tokenPrice;
+            const ethValue = await getTokenPriceETH(address) * tokenAmount;
             const marketCap = await getMarketCapUSD(address);
 
             const embed = new EmbedBuilder()
               .setTitle(`${name} Buy!`)
               .setDescription(`🟥🟦🚀🟥🟦🚀🟥🟦🚀`)
               .addFields(
-                { name: '💸 Spent', value: `$${usdValue.toFixed(2)}`, inline: true },
+                { name: '💸 Spent', value: `$${usdValue.toFixed(2)} / ${ethValue.toFixed(4)} ETH`, inline: true },
                 { name: '🎯 Got', value: `${tokenAmount.toLocaleString()} ${name}`, inline: true },
                 { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
                 { name: '📊 MCap', value: `$${marketCap.toLocaleString()}`, inline: true }
               )
               .setColor(0xff4444)
+              .setFooter({ text: `Live on Base • Powered by PimpsDev` })
               .setTimestamp();
 
             const guild = client.guilds.cache.get(guildId);
             if (!guild) continue;
-            const channel = guild.channels.cache.find(c =>
-              c.isTextBased() &&
-              c.permissionsFor(guild.members.me).has('SendMessages')
-            );
+            const channel = guild.channels.cache.find(c => c.isTextBased() && c.permissionsFor(guild.members.me).has('SendMessages'));
             if (channel) channel.send({ embeds: [embed] });
           }
         }
@@ -102,6 +101,16 @@ async function getTokenPriceUSD(address) {
   }
 }
 
+async function getTokenPriceETH(address) {
+  try {
+    const res = await fetch(`https://api.geckoterminal.com/api/v2/networks/base/tokens/${address}`);
+    const data = await res.json();
+    return parseFloat(data?.data?.attributes?.price_usd || 0) / parseFloat(data?.data?.attributes?.base_token_price_usd || 1);
+  } catch {
+    return 0;
+  }
+}
+
 async function getMarketCapUSD(address) {
   try {
     const res = await fetch(`https://api.geckoterminal.com/api/v2/networks/base/tokens/${address}`);
@@ -111,6 +120,7 @@ async function getMarketCapUSD(address) {
     return 0;
   }
 }
+
 
 
 
