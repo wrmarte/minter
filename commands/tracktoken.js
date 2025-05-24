@@ -1,4 +1,3 @@
-// /minter/commands/tracktoken.js
 const { SlashCommandBuilder, PermissionsBitField, EmbedBuilder } = require('discord.js');
 
 module.exports = {
@@ -17,33 +16,36 @@ module.exports = {
 
     const pg = interaction.client.pg;
     const guildId = interaction.guildId;
+    const channelId = interaction.channel.id;
     const name = interaction.options.getString('name').toLowerCase();
     const address = interaction.options.getString('address').toLowerCase();
 
     try {
-      // Create SQL table if not exists
+      // Ensure table has channel_id column
       await pg.query(`
         CREATE TABLE IF NOT EXISTS tracked_tokens (
           name TEXT,
           address TEXT NOT NULL,
           guild_id TEXT NOT NULL,
+          channel_id TEXT,
           PRIMARY KEY (address, guild_id)
         )
       `);
 
-      // Upsert tracked token
+      // Upsert token + channel
       await pg.query(`
-        INSERT INTO tracked_tokens (name, address, guild_id)
-        VALUES ($1, $2, $3)
-        ON CONFLICT (address, guild_id) DO UPDATE SET name = $1
-      `, [name, address, guildId]);
+        INSERT INTO tracked_tokens (name, address, guild_id, channel_id)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (address, guild_id) DO UPDATE SET name = $1, channel_id = $4
+      `, [name, address, guildId, channelId]);
 
       const embed = new EmbedBuilder()
         .setTitle('📈 Token Tracking Enabled')
         .addFields(
           { name: '🪙 Token', value: name.toUpperCase(), inline: true },
           { name: '🔗 Contract', value: address, inline: false },
-          { name: '🏠 Server', value: interaction.guild.name, inline: false }
+          { name: '🏠 Server', value: interaction.guild.name, inline: false },
+          { name: '📡 Channel', value: `<#${channelId}>`, inline: false }
         )
         .setColor(0x00cc99)
         .setFooter({ text: 'Now watching for token buys!' })
@@ -56,3 +58,4 @@ module.exports = {
     }
   }
 };
+
