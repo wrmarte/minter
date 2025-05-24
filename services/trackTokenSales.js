@@ -107,7 +107,7 @@ module.exports = async function trackTokenSales(client) {
             console.warn(`⚠️ TX fetch failed: ${err.message}`);
           }
 
-        const rocketLine = usdSpent >= 20 ? '🟢🚀' : usdSpent >= 10 ? '🟦🚀' : '🟥🚀';
+        const rocketLine = usdSpent >= 20 ? '🟢🟢🚀' : usdSpent >= 10 ? '🟥🟦🚀' : '🟥🟦🚀';
 
 const getColorByUsdSpent = (usd) => {
   if (usd < 10) return 0xff0000; // 🔴 Red
