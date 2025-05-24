@@ -54,6 +54,11 @@ module.exports = {
             const meta = await fetch(uri).then(res => res.json());
             const image = meta?.image?.replace('ipfs://', 'https://ipfs.io/ipfs/') || null;
 
+            const traits = (meta?.attributes || [])
+              .slice(0, 3)
+              .map(attr => `• **${attr.trait_type}**: ${attr.value}`)
+              .join('\n') || 'None found';
+
             if (image) {
               const embed = new EmbedBuilder()
                 .setTitle(`🖼️ Flexing from ${name}`)
@@ -61,7 +66,7 @@ module.exports = {
                 .setImage(image)
                 .setURL(`https://opensea.io/assets/${chain}/${address}/${tokenId}`)
                 .setColor(network === 'base' ? 0x1d9bf0 : 0xf5851f)
-                .addFields({ name: '🔍 Rarity', value: 'Fetching...', inline: true })
+                .addFields({ name: '🧬 Traits', value: traits, inline: false })
                 .setFooter({ text: `Network: ${network.toUpperCase()} (Fallback)` })
                 .setTimestamp();
 
@@ -96,5 +101,6 @@ module.exports = {
     }
   }
 };
+
 
 
