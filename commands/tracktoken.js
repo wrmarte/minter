@@ -45,13 +45,12 @@ if (!isAdmin && !isOwner) {
 
       const embed = new EmbedBuilder()
         .setTitle('📈 Token Tracking Enabled')
-.addFields(
-  { name: '💸 Spent', value: `$${usdSpent.toFixed(4)} / ${ethSpent.toFixed(4)} ETH`, inline: true },
-  { name: '🎯 Got', value: `${tokenAmount.toLocaleString()} ${name}`, inline: true },
-  { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
-  { name: '📊 MCap', value: marketCap && marketCap > 0 ? `$${marketCap.toLocaleString()}` : 'Fetching...', inline: true }
-)
-
+        .addFields(
+          { name: '🪙 Token', value: name.toUpperCase(), inline: true },
+          { name: '🔗 Contract', value: address, inline: false },
+          { name: '🏠 Server', value: interaction.guild.name, inline: false },
+          { name: '📡 Channel', value: `<#${channelId}>`, inline: false }
+        )
         .setColor(0x00cc99)
         .setFooter({ text: 'Now watching for token buys!' })
         .setTimestamp();
