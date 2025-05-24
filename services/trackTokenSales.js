@@ -1,4 +1,3 @@
-// /minter/services/trackTokenSales.js
 const { JsonRpcProvider, Contract, Interface, formatUnits } = require('ethers');
 const { EmbedBuilder } = require('discord.js');
 const fetch = require('node-fetch');
@@ -16,7 +15,7 @@ const ROUTERS = [
   '0xfbeef911dc5821886e1dda23b3e4f3eaffdd7930', // AlienBase
   '0x812e79c9c37eD676fdbdd1212D6a4e47EFfC6a42', // Sushi
   '0xa5e0829CaCEd8fFDD4De3c43696c57F7D7A678ff', // Other
-  '0x95ebfcb1c6b345fda69cf56c51e30421e5a35aec'  // Detected router
+  '0x95ebfcb1c6b345fda69cf56c51e30421e5a35aec'  // Detected real router
 ];
 
 const seenHashes = new Set();
@@ -65,8 +64,6 @@ module.exports = async function trackTokenSales(client) {
 
           const fromAddr = from.toLowerCase();
           const toAddr = to.toLowerCase();
-
-          // 🧤 Skip if not router or it's a burn/tax address
           if (!ROUTERS.includes(fromAddr)) continue;
           if (toAddr === '0x0000000000000000000000000000000000000000') continue;
 
@@ -120,7 +117,9 @@ async function getTokenPriceUSD(address) {
   try {
     const res = await fetch(`https://api.geckoterminal.com/api/v2/simple/networks/base/token_price/${address}`);
     const data = await res.json();
-    return parseFloat(data?.data?.attributes?.token_prices?.usd || '0');
+    const prices = data?.data?.attributes?.token_prices;
+    const price = prices ? Object.values(prices)[0] : '0';
+    return parseFloat(price);
   } catch {
     return 0;
   }
@@ -135,6 +134,7 @@ async function getMarketCapUSD(address) {
     return 0;
   }
 }
+
 
 
 
