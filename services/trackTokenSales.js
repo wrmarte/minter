@@ -76,6 +76,13 @@ module.exports = async function trackTokenSales(client) {
 
           const marketCap = await getMarketCapUSD(address);
 
+          console.log(`[DEBUG] ${name} → tokenAmount: ${tokenAmount}`);
+console.log(`[DEBUG] ${name} → tokenPrice: ${tokenPrice}`);
+console.log(`[DEBUG] ${name} → usdValue: ${usdValue}`);
+console.log(`[DEBUG] ${name} → ethPrice: ${ethPrice}`);
+console.log(`[DEBUG] ${name} → ethValue: ${ethValue}`);
+console.log(`[DEBUG] ${name} → marketCap: ${marketCap}`);
+
           const embed = new EmbedBuilder()
             .setTitle(`${name} Buy!`)
             .setDescription(`🟥🟦🚀🟥🟦🚀🟥🟦🚀`)
