@@ -51,50 +51,27 @@ module.exports = {
 
       const selected = nfts.sort(() => 0.5 - Math.random()).slice(0, 6);
 
-      // 💎 Layout setup
+      // 💎 Symmetrical layout
       const columns = 3;
       const rows = 2;
       const imgSize = 280;
-      const gridSpacing = 20;
-      const edgePadding = 40;
-      const textHeight = 40;
+      const spacing = 20;
+      const padding = 40;
 
-      const gridWidth = columns * imgSize + (columns - 1) * gridSpacing;
-      const gridHeight = rows * imgSize + (rows - 1) * gridSpacing;
+      const gridWidth = columns * imgSize + (columns - 1) * spacing;
+      const gridHeight = rows * imgSize + (rows - 1) * spacing;
 
-      const canvasWidth = gridWidth + edgePadding * 2;
-      const canvasHeight = edgePadding + textHeight + gridSpacing + gridHeight + edgePadding;
+      const canvasWidth = gridWidth + padding * 2;
+      const canvasHeight = gridHeight + padding * 2;
 
       const canvas = createCanvas(canvasWidth, canvasHeight);
       const ctx = canvas.getContext('2d');
 
-      // 🎨 Background
+      // 🖤 Background
       ctx.fillStyle = '#0d1117';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      // 🖋️ Gradient Title
-      const label = '🔥 FLEXING: ';
-      const highlight = name.toUpperCase();
-      ctx.font = 'bold 42px Arial';
-
-      const labelWidth = ctx.measureText(label).width;
-      const nameWidth = ctx.measureText(highlight).width;
-      const totalWidth = labelWidth + nameWidth;
-      const startX = (canvasWidth - totalWidth) / 2;
-      const textY = edgePadding + textHeight;
-
-      const gradient = ctx.createLinearGradient(startX, 0, startX + labelWidth, 0);
-      gradient.addColorStop(0, '#FFD700');
-      gradient.addColorStop(1, '#FF69B4');
-      ctx.fillStyle = gradient;
-      ctx.fillText(label, startX, textY);
-
-      ctx.fillStyle = '#00ffff'; // cyan highlight for project name
-      ctx.fillText(highlight, startX + labelWidth, textY);
-
-      // 🧱 Grid start
-      const gridStartY = edgePadding + textHeight + gridSpacing;
-
+      // 🧱 Draw grid centered
       for (let i = 0; i < selected.length; i++) {
         const nft = selected[i];
         let meta = {};
@@ -128,16 +105,16 @@ module.exports = {
           continue;
         }
 
-        const x = edgePadding + (i % columns) * (imgSize + gridSpacing);
-        const y = gridStartY + Math.floor(i / columns) * (imgSize + gridSpacing);
+        const x = padding + (i % columns) * (imgSize + spacing);
+        const y = padding + Math.floor(i / columns) * (imgSize + spacing);
 
-        // 🖼️ Draw image
+        // Draw rounded image
         ctx.save();
         roundRect(ctx, x, y, imgSize, imgSize);
         ctx.drawImage(nftImage, x, y, imgSize, imgSize);
         ctx.restore();
 
-        // 🟫 Border
+        // Border
         ctx.strokeStyle = '#d3d3d3';
         ctx.lineWidth = 6;
         ctx.strokeRect(x + 3, y + 3, imgSize - 6, imgSize - 6);
@@ -161,6 +138,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
