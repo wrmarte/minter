@@ -51,7 +51,6 @@ module.exports = {
 
       const selected = nfts.sort(() => 0.5 - Math.random()).slice(0, 6);
 
-      // Canvas layout config
       const padding = 20;
       const columns = 3;
       const imgSize = 280;
@@ -107,39 +106,48 @@ module.exports = {
           meta.attributes?.find(attr => attr.trait_type?.toLowerCase() === 'rank')?.value ||
           'N/A';
 
-        const parsedRank = parseInt(rawRank);
-        const rarityEmoji = !isNaN(parsedRank)
-          ? parsedRank <= 10
-            ? '🥇'
-            : parsedRank <= 50
-            ? '🥈'
-            : '🥉'
-          : '❓';
+        let parsedRank = parseInt(rawRank);
+        if (isNaN(parsedRank)) parsedRank = 'N/A';
 
-        let borderColor = 'silver';
-        if (!isNaN(parsedRank)) {
+        const rarityEmoji =
+          parsedRank !== 'N/A'
+            ? parsedRank <= 10
+              ? '🥇'
+              : parsedRank <= 50
+              ? '🥈'
+              : '🥉'
+            : '❓';
+
+        // Distinct light gray border
+        let borderColor = '#d3d3d3';
+        if (parsedRank !== 'N/A') {
           if (parsedRank <= 10) borderColor = 'gold';
           else if (parsedRank <= 50) borderColor = 'purple';
           else if (parsedRank <= 100) borderColor = 'dodgerblue';
         }
 
-        // Draw NFT with rounded corners
+        // Draw image
         ctx.save();
         roundRect(ctx, x, y, imgSize, imgSize);
         ctx.drawImage(nftImage, x, y, imgSize, imgSize);
         ctx.restore();
 
-        // Border inside
+        // Border
         ctx.strokeStyle = borderColor;
         ctx.lineWidth = 6;
         ctx.strokeRect(x + 3, y + 3, imgSize - 6, imgSize - 6);
 
-        // Overlay bar
+        // Info overlay bar
         ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
         ctx.fillRect(x, y + imgSize - 32, imgSize, 32);
+
+        // Text with shadow
         ctx.fillStyle = '#ffffff';
         ctx.font = 'bold 18px Arial';
-        ctx.fillText(`#${tokenId} | ${rarityEmoji} Rank ${rawRank}`, x + 12, y + imgSize - 10);
+        ctx.shadowColor = 'black';
+        ctx.shadowBlur = 2;
+        ctx.fillText(`#${tokenId} | ${rarityEmoji} Rank ${parsedRank}`, x + 12, y + imgSize - 10);
+        ctx.shadowBlur = 0;
       }
 
       const buffer = canvas.toBuffer('image/png');
@@ -160,6 +168,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
