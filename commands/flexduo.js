@@ -1,4 +1,4 @@
-const { SlashCommandBuilder, AttachmentBuilder } = require('discord.js');
+const { SlashCommandBuilder, AttachmentBuilder, EmbedBuilder } = require('discord.js');
 const { JsonRpcProvider, Contract } = require('ethers');
 const fetch = require('node-fetch');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
@@ -23,6 +23,12 @@ function rotateProvider() {
   rpcIndex = (rpcIndex + 1) % baseRpcs.length;
   provider = new JsonRpcProvider(baseRpcs[rpcIndex]);
   console.warn(`🔁 RPC switched to: ${baseRpcs[rpcIndex]}`);
+}
+
+function getTodayFormatted() {
+  return new Date().toLocaleDateString('en-US', {
+    year: 'numeric', month: 'short', day: 'numeric'
+  });
 }
 
 module.exports = {
@@ -91,12 +97,19 @@ module.exports = {
       ctx.drawImage(img1, 20, 20);
       ctx.drawImage(img2, img1.width + 40, 20);
 
-      const attachment = new AttachmentBuilder(canvas.toBuffer('image/png'), {
+      const buffer = canvas.toBuffer('image/png');
+      const attachment = new AttachmentBuilder(buffer, {
         name: `duo-${tokenId}.png`
       });
 
+      const embed = new EmbedBuilder()
+        .setTitle(`🎭 ${name.toUpperCase()} Duo #${tokenId}`)
+        .setImage(`attachment://duo-${tokenId}.png`)
+        .setColor(0x0099ff)
+        .setFooter({ text: `${getTodayFormatted()} • Powered by PimpsDev` });
+
       await interaction.editReply({
-        content: `🧬 Duo Flex #${tokenId}`,
+        embeds: [embed],
         files: [attachment]
       });
 
@@ -107,4 +120,5 @@ module.exports = {
     }
   }
 };
+
 
