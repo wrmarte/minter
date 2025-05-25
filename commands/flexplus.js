@@ -55,8 +55,9 @@ module.exports = {
       const columns = 3;
       const imgSize = 280;
       const spacing = 20;
+      const titleHeight = 80;
       const canvasWidth = padding * 2 + columns * imgSize + (columns - 1) * spacing;
-      const canvasHeight = padding * 2 + 2 * imgSize + spacing + 80;
+      const canvasHeight = titleHeight + padding * 2 + 2 * imgSize + spacing;
 
       const canvas = createCanvas(canvasWidth, canvasHeight);
       const ctx = canvas.getContext('2d');
@@ -65,16 +66,17 @@ module.exports = {
       ctx.fillStyle = '#0d1117';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      // 🔥 Gradient Title
+      // 🔥 Gradient Title (fix centered + style)
       const titleText = `🔥 FLEXING: ${name.toUpperCase()} 🔥`;
       ctx.font = 'bold 42px Arial';
-      const gradient = ctx.createLinearGradient(0, 0, canvas.width, 0);
+      const textMetrics = ctx.measureText(titleText);
+      const titleX = (canvasWidth - textMetrics.width) / 2;
+
+      const gradient = ctx.createLinearGradient(titleX, 0, titleX + textMetrics.width, 0);
       gradient.addColorStop(0, '#FFD700');
       gradient.addColorStop(1, '#FF69B4');
-      ctx.fillStyle = gradient;
 
-      const textMetrics = ctx.measureText(titleText);
-      const titleX = (canvas.width - textMetrics.width) / 2;
+      ctx.fillStyle = gradient;
       ctx.fillText(titleText, titleX, 55);
 
       for (let i = 0; i < selected.length; i++) {
@@ -111,15 +113,15 @@ module.exports = {
         }
 
         const x = (i % columns) * (imgSize + spacing) + padding;
-        const y = Math.floor(i / columns) * (imgSize + spacing) + padding + 80;
+        const y = Math.floor(i / columns) * (imgSize + spacing) + padding + titleHeight;
 
-        // Draw image with rounded corners
+        // Draw image
         ctx.save();
         roundRect(ctx, x, y, imgSize, imgSize);
         ctx.drawImage(nftImage, x, y, imgSize, imgSize);
         ctx.restore();
 
-        // Draw light gray border
+        // Border
         ctx.strokeStyle = '#d3d3d3';
         ctx.lineWidth = 6;
         ctx.strokeRect(x + 3, y + 3, imgSize - 6, imgSize - 6);
