@@ -51,16 +51,18 @@ module.exports = {
 
       const selected = nfts.sort(() => 0.5 - Math.random()).slice(0, 6);
 
-      // Grid Config
-      const padding = 20;
+      // Layout configuration
       const columns = 3;
       const rows = 2;
       const imgSize = 280;
       const spacing = 20;
-      const titleSpace = 80;
+      const gridHeight = rows * imgSize + (rows - 1) * spacing;
+      const gridWidth = columns * imgSize + (columns - 1) * spacing;
+      const sidePadding = 20;
+      const verticalPadding = 80;
 
-      const canvasWidth = padding * 2 + columns * imgSize + (columns - 1) * spacing;
-      const canvasHeight = titleSpace + padding * 2 + rows * imgSize + (rows - 1) * spacing;
+      const canvasWidth = gridWidth + sidePadding * 2;
+      const canvasHeight = gridHeight + verticalPadding * 2;
 
       const canvas = createCanvas(canvasWidth, canvasHeight);
       const ctx = canvas.getContext('2d');
@@ -69,21 +71,28 @@ module.exports = {
       ctx.fillStyle = '#0d1117';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      // Title
-      const titleText = `🔥 FLEXING: ${name.toUpperCase()} 🔥`;
+      // Gradient Title with highlighted project name
+      const label = '🔥 FLEXING: ';
+      const highlight = name.toUpperCase();
       ctx.font = 'bold 42px Arial';
-      const titleMetrics = ctx.measureText(titleText);
-      const titleX = (canvasWidth - titleMetrics.width) / 2;
 
-      const gradient = ctx.createLinearGradient(titleX, 0, titleX + titleMetrics.width, 0);
-      gradient.addColorStop(0, '#FFD700'); // gold
-      gradient.addColorStop(1, '#FF69B4'); // hot pink
+      const labelWidth = ctx.measureText(label).width;
+      const nameWidth = ctx.measureText(highlight).width;
+      const totalWidth = labelWidth + nameWidth;
+      const startX = (canvasWidth - totalWidth) / 2;
+
+      // Gradient for label
+      const gradient = ctx.createLinearGradient(startX, 0, startX + labelWidth, 0);
+      gradient.addColorStop(0, '#FFD700');
+      gradient.addColorStop(1, '#FF69B4');
       ctx.fillStyle = gradient;
-      ctx.fillText(titleText, titleX, 55);
+      ctx.fillText(label, startX, verticalPadding - 20);
 
-      // Grid Start Y below title
-      const startY = titleSpace + padding;
+      // Solid color for project name
+      ctx.fillStyle = '#00ffff'; // cyan-ish standout
+      ctx.fillText(highlight, startX + labelWidth, verticalPadding - 20);
 
+      // NFT Grid
       for (let i = 0; i < selected.length; i++) {
         const nft = selected[i];
         let meta = {};
@@ -117,14 +126,16 @@ module.exports = {
           continue;
         }
 
-        const x = (i % columns) * (imgSize + spacing) + padding;
-        const y = Math.floor(i / columns) * (imgSize + spacing) + startY;
+        const x = sidePadding + (i % columns) * (imgSize + spacing);
+        const y = verticalPadding + (Math.floor(i / columns) * (imgSize + spacing));
 
+        // Draw NFT image
         ctx.save();
         roundRect(ctx, x, y, imgSize, imgSize);
         ctx.drawImage(nftImage, x, y, imgSize, imgSize);
         ctx.restore();
 
+        // Light gray border
         ctx.strokeStyle = '#d3d3d3';
         ctx.lineWidth = 6;
         ctx.strokeRect(x + 3, y + 3, imgSize - 6, imgSize - 6);
@@ -148,6 +159,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
