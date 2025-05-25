@@ -56,20 +56,16 @@ module.exports = {
       }
 
       const { contract1, contract2 } = result.rows[0];
-      console.log(`📦 Using contracts:\n1️⃣ ${contract1}\n2️⃣ ${contract2}`);
-
       const nft1 = new Contract(contract1, abi, provider);
       const nft2 = new Contract(contract2, abi, provider);
 
       const totalSupply = await nft1.totalSupply();
       const total = typeof totalSupply === 'number' ? totalSupply : Number(totalSupply);
-
       if (total === 0) {
         return interaction.editReply('❌ No tokens minted yet.');
       }
 
       const tokenId = Math.floor(Math.random() * total);
-      console.log(`🎯 Token ID: ${tokenId}`);
 
       const uri1 = await nft1.tokenURI(tokenId);
       const uri2 = await nft2.tokenURI(tokenId);
@@ -79,7 +75,6 @@ module.exports = {
 
       const image1 = meta1.image?.replace('ipfs://', 'https://ipfs.io/ipfs/');
       const image2 = meta2.image?.replace('ipfs://', 'https://ipfs.io/ipfs/');
-
       if (!image1 || !image2) {
         throw new Error('Missing image URLs in metadata');
       }
@@ -87,36 +82,34 @@ module.exports = {
       const img1 = await loadImage(image1);
       const img2 = await loadImage(image2);
 
-      // Adjusted canvas for better spacing
-      const canvasPadding = 50;
-      const labelHeight = 40;
-      const width = img1.width + img2.width + canvasPadding * 2;
-      const height = Math.max(img1.height, img2.height) + labelHeight * 2;
+      const canvasPadding = 30;
+      const labelHeight = 50;
 
-      const canvas = createCanvas(width, height);
+      const canvasWidth = img1.width + img2.width + canvasPadding * 3;
+      const canvasHeight = Math.max(img1.height, img2.height) + labelHeight;
+
+      const canvas = createCanvas(canvasWidth, canvasHeight);
       const ctx = canvas.getContext('2d');
 
       // Background
       ctx.fillStyle = '#000';
-      ctx.fillRect(0, 0, width, height);
+      ctx.fillRect(0, 0, canvasWidth, canvasHeight);
 
-      // Title text on top
-      ctx.fillStyle = '#ffffff';
-      ctx.font = 'bold 30px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText(`${name.toUpperCase()} DUO #${tokenId}`, width / 2, 40);
+      // Centered positions
+      const x1 = canvasPadding;
+      const x2 = x1 + img1.width + canvasPadding;
+      const y = 10;
 
       // Draw images
-      const imgY = labelHeight + 10;
-      ctx.drawImage(img1, canvasPadding, imgY);
-      ctx.drawImage(img2, canvasPadding + img1.width + canvasPadding, imgY);
+      ctx.drawImage(img1, x1, y);
+      ctx.drawImage(img2, x2, y);
 
-      // Token labels under images
-      ctx.fillStyle = '#dddddd';
+      // Labels
+      ctx.fillStyle = '#ccc';
       ctx.font = '22px sans-serif';
       ctx.textAlign = 'center';
-      ctx.fillText(`#${tokenId}`, canvasPadding + img1.width / 2, imgY + img1.height + 30);
-      ctx.fillText(`#${tokenId}`, canvasPadding * 2 + img1.width + img2.width / 2, imgY + img2.height + 30);
+      ctx.fillText(meta1.name || `#${tokenId}`, x1 + img1.width / 2, img1.height + 35);
+      ctx.fillText(meta2.name || `#${tokenId}`, x2 + img2.width / 2, img2.height + 35);
 
       const buffer = canvas.toBuffer('image/png');
       const attachment = new AttachmentBuilder(buffer, { name: `duo-${tokenId}.png` });
@@ -136,6 +129,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
