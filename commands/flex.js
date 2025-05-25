@@ -2,11 +2,8 @@ const { SlashCommandBuilder, EmbedBuilder, AttachmentBuilder } = require('discor
 const fetch = require('node-fetch');
 const { JsonRpcProvider, Contract } = require('ethers');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
-const path = require('path');
 
-const abi = [
-  'function tokenURI(uint256 tokenId) view returns (string)'
-];
+const abi = ['function tokenURI(uint256 tokenId) view returns (string)'];
 
 function roundRect(ctx, x, y, width, height, radius = 20) {
   ctx.beginPath();
@@ -30,7 +27,6 @@ module.exports = {
   async execute(interaction) {
     const pg = interaction.client.pg;
     const name = interaction.options.getString('name').toLowerCase();
-
     await interaction.deferReply();
 
     try {
@@ -40,7 +36,7 @@ module.exports = {
       }
 
       const { address, network } = res.rows[0];
-      const chain = (network === 'base') ? 'base' : 'ethereum';
+      const chain = network === 'base' ? 'base' : 'ethereum';
       const provider = new JsonRpcProvider(
         chain === 'base'
           ? 'https://mainnet.base.org'
@@ -53,29 +49,23 @@ module.exports = {
       const data = await fetch(apiUrl, { headers }).then(res => res.json());
       const tokens = data?.tokens?.filter(t => t.token?.tokenId) || [];
 
-      // Reservoir success
       if (tokens.length) {
-        const randomToken = tokens[Math.floor(Math.random() * tokens.length)];
-        const token = randomToken.token;
-        const imageUrl = token.image || 'https://via.placeholder.com/400x400.png?text=NFT';
+        const token = tokens[Math.floor(Math.random() * tokens.length)].token;
         const tokenId = token.tokenId;
+        const imageUrl = token.image || 'https://via.placeholder.com/400x400.png?text=NFT';
 
-        // 🧬 Traits with percentages
         const attributes = token.attributes || [];
         const traitLines = attributes.length
-          ? attributes.map(attr =>
-              `• **${attr.key}**: ${attr.value} (${attr.rarityPercent?.toFixed(2) || '?'}%)`
-            ).join('\n')
+          ? attributes.map(attr => `• **${attr.key}**: ${attr.value}`).join('\n')
           : 'None found';
 
-        // 🖼️ Load and round image
         const image = await loadImage(imageUrl);
-        const canvas = createCanvas(400, 400);
+        const canvas = createCanvas(480, 480);
         const ctx = canvas.getContext('2d');
         ctx.fillStyle = '#0d1117';
-        ctx.fillRect(0, 0, 400, 400);
-        roundRect(ctx, 0, 0, 400, 400);
-        ctx.drawImage(image, 0, 0, 400, 400);
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        roundRect(ctx, 0, 0, 480, 480, 30);
+        ctx.drawImage(image, 0, 0, 480, 480);
         const buffer = canvas.toBuffer('image/png');
         const attachment = new AttachmentBuilder(buffer, { name: 'flex.png' });
 
@@ -86,13 +76,13 @@ module.exports = {
           .setURL(`https://opensea.io/assets/${chain}/${address}/${tokenId}`)
           .setColor(network === 'base' ? 0x1d9bf0 : 0xf5851f)
           .addFields({ name: '🧬 Traits', value: traitLines, inline: false })
-          .setFooter({ text: 'Powered by PimpsDev' })
+          .setFooter({ text: '🔧 Powered by PimpsDev' })
           .setTimestamp();
 
         return await interaction.editReply({ embeds: [embed], files: [attachment] });
       }
 
-      // Fallback to tokenURI method
+      // Fallback to tokenURI
       const contract = new Contract(address, abi, provider);
       const tokenIds = Array.from({ length: 20 }, (_, i) => i).sort(() => 0.5 - Math.random());
 
@@ -110,12 +100,12 @@ module.exports = {
 
           if (imageUrl) {
             const image = await loadImage(imageUrl);
-            const canvas = createCanvas(400, 400);
+            const canvas = createCanvas(480, 480);
             const ctx = canvas.getContext('2d');
             ctx.fillStyle = '#0d1117';
-            ctx.fillRect(0, 0, 400, 400);
-            roundRect(ctx, 0, 0, 400, 400);
-            ctx.drawImage(image, 0, 0, 400, 400);
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            roundRect(ctx, 0, 0, 480, 480, 30);
+            ctx.drawImage(image, 0, 0, 480, 480);
             const buffer = canvas.toBuffer('image/png');
             const attachment = new AttachmentBuilder(buffer, { name: 'flex.png' });
 
@@ -126,7 +116,7 @@ module.exports = {
               .setURL(`https://opensea.io/assets/${chain}/${address}/${tokenId}`)
               .setColor(network === 'base' ? 0x1d9bf0 : 0xf5851f)
               .addFields({ name: '🧬 Traits', value: traits, inline: false })
-              .setFooter({ text: 'Powered by PimpsDev' })
+              .setFooter({ text: '🔧 Powered by PimpsDev' })
               .setTimestamp();
 
             return await interaction.editReply({ embeds: [embed], files: [attachment] });
@@ -143,6 +133,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
