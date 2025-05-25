@@ -8,7 +8,7 @@ module.exports = {
   async execute(interaction) {
     const embed = new EmbedBuilder()
       .setTitle('📖 Mint & Sale Bot Command Guide')
-      .setDescription('Master your minting ops, flex NFTs, and track token buys across the Base network. Powered by **PimpsDev** 🧪')
+      .setDescription('Master mint alerts, flex NFTs, and track tokens across the Base network. Powered by **PimpsDev** 🧪')
       .addFields(
         {
           name: '🧱 MINTING COMMANDS',
@@ -33,8 +33,11 @@ module.exports = {
         {
           name: '🖼️ FLEX COMMANDS',
           value:
-            '• `/addflex` — Register a flex NFT contract to your server [NEW]\n' +
-            '• `/flex` — Display a random minted NFT from your tracked flex project'
+            '• `/addflex` — Register a flex NFT contract to your server\n' +
+            '• `/flex` — Display a random minted NFT from your tracked flex project\n' +
+            '• `/flexplus` — Show 6 random NFTs from your flex project as a collage\n' +
+            '• `/addflexduo` — Register two paired contracts as a duo\n' +
+            '• `/flexduo` — Display matching NFTs from two paired collections'
         },
         {
           name: '🛠️ UTILITIES',
@@ -51,5 +54,6 @@ module.exports = {
     await interaction.reply({ embeds: [embed], ephemeral: true });
   }
 };
+
 
 
