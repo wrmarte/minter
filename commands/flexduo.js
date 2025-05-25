@@ -22,6 +22,7 @@ let provider = new JsonRpcProvider(baseRpcs[rpcIndex]);
 function rotateProvider() {
   rpcIndex = (rpcIndex + 1) % baseRpcs.length;
   provider = new JsonRpcProvider(baseRpcs[rpcIndex]);
+  console.warn(`🔁 RPC switched to: ${baseRpcs[rpcIndex]}`);
 }
 
 module.exports = {
@@ -38,40 +39,54 @@ module.exports = {
     const name = interaction.options.getString('name').toLowerCase();
     const guildId = interaction.guild.id;
 
-    const result = await pg.query(
-      'SELECT * FROM flex_duo WHERE guild_id = $1 AND name = $2',
-      [guildId, name]
-    );
-
-    if (!result.rows.length)
-      return interaction.editReply('❌ Duo not found. Use `/addflexduo` first.');
-
-    const { contract1, contract2 } = result.rows[0];
-
     try {
+      const result = await pg.query(
+        'SELECT * FROM flex_duo WHERE guild_id = $1 AND name = $2',
+        [guildId, name]
+      );
+
+      if (!result.rows.length) {
+        return interaction.editReply('❌ Duo not found. Use `/addflexduo` first.');
+      }
+
+      const { contract1, contract2 } = result.rows[0];
+      console.log(`📦 Using contracts:\n1️⃣ ${contract1}\n2️⃣ ${contract2}`);
+
       const nft1 = new Contract(contract1, abi, provider);
       const nft2 = new Contract(contract2, abi, provider);
 
-      const total = await nft1.totalSupply();
-      const tokenId = Math.floor(Math.random() * total.toNumber());
+      const totalSupply = await nft1.totalSupply();
+      const total = typeof totalSupply === 'number' ? totalSupply : Number(totalSupply);
+
+      if (total === 0) {
+        return interaction.editReply('❌ No tokens minted yet.');
+      }
+
+      const tokenId = Math.floor(Math.random() * total);
+      console.log(`🎯 Token ID: ${tokenId}`);
 
       const uri1 = await nft1.tokenURI(tokenId);
       const uri2 = await nft2.tokenURI(tokenId);
+      console.log(`🔗 URIs:\n1️⃣ ${uri1}\n2️⃣ ${uri2}`);
 
       const meta1 = await fetch(uri1.replace('ipfs://', 'https://ipfs.io/ipfs/')).then(res => res.json());
       const meta2 = await fetch(uri2.replace('ipfs://', 'https://ipfs.io/ipfs/')).then(res => res.json());
 
-      const img1 = await loadImage(meta1.image.replace('ipfs://', 'https://ipfs.io/ipfs/'));
-      const img2 = await loadImage(meta2.image.replace('ipfs://', 'https://ipfs.io/ipfs/'));
+      const image1 = meta1.image?.replace('ipfs://', 'https://ipfs.io/ipfs/');
+      const image2 = meta2.image?.replace('ipfs://', 'https://ipfs.io/ipfs/');
 
-      const width = img1.width + img2.width + 60;
-      const height = Math.max(img1.height, img2.height) + 40;
+      if (!image1 || !image2) {
+        throw new Error('Missing image URLs in metadata');
+      }
 
-      const canvas = createCanvas(width, height);
+      const img1 = await loadImage(image1);
+      const img2 = await loadImage(image2);
+
+      const canvas = createCanvas(img1.width + img2.width + 60, Math.max(img1.height, img2.height) + 40);
       const ctx = canvas.getContext('2d');
 
-      ctx.fillStyle = '#111';
-      ctx.fillRect(0, 0, width, height);
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
 
       ctx.drawImage(img1, 20, 20);
       ctx.drawImage(img2, img1.width + 40, 20);
@@ -88,7 +103,8 @@ module.exports = {
     } catch (err) {
       rotateProvider();
       console.error('❌ FlexDuo error:', err);
-      return interaction.editReply('Something went wrong flexing that duo 😵‍💫');
+      return interaction.editReply('❌ Something went wrong flexing that duo.\nCheck bot logs for more.');
     }
   }
 };
+
