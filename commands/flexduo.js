@@ -1,7 +1,7 @@
 const { SlashCommandBuilder, AttachmentBuilder, EmbedBuilder } = require('discord.js');
 const { JsonRpcProvider, Contract } = require('ethers');
 const fetch = require('node-fetch');
-const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
+const { createCanvas, loadImage } = require('@napi-rs/canvas');
 
 const abi = [
   'function tokenURI(uint256 tokenId) view returns (string)',
@@ -87,8 +87,12 @@ module.exports = {
       const img1 = await loadImage(image1);
       const img2 = await loadImage(image2);
 
-      const width = img1.width + img2.width + 60;
-      const height = Math.max(img1.height, img2.height) + 110;
+      // Adjusted canvas for better spacing
+      const canvasPadding = 50;
+      const labelHeight = 40;
+      const width = img1.width + img2.width + canvasPadding * 2;
+      const height = Math.max(img1.height, img2.height) + labelHeight * 2;
+
       const canvas = createCanvas(width, height);
       const ctx = canvas.getContext('2d');
 
@@ -96,22 +100,23 @@ module.exports = {
       ctx.fillStyle = '#000';
       ctx.fillRect(0, 0, width, height);
 
-      // Title Text
-      ctx.fillStyle = '#fff';
-      ctx.font = '28px sans-serif';
+      // Title text on top
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 30px sans-serif';
       ctx.textAlign = 'center';
-      ctx.fillText(`${name.toUpperCase()} DUO #${tokenId}`, width / 2, 35);
+      ctx.fillText(`${name.toUpperCase()} DUO #${tokenId}`, width / 2, 40);
 
-      // Draw Images
-      ctx.drawImage(img1, 20, 50);
-      ctx.drawImage(img2, img1.width + 40, 50);
+      // Draw images
+      const imgY = labelHeight + 10;
+      ctx.drawImage(img1, canvasPadding, imgY);
+      ctx.drawImage(img2, canvasPadding + img1.width + canvasPadding, imgY);
 
-      // Image Captions
+      // Token labels under images
+      ctx.fillStyle = '#dddddd';
       ctx.font = '22px sans-serif';
-      ctx.textAlign = 'left';
-      ctx.fillText(`#${tokenId}`, 20, img1.height + 85);
-      ctx.textAlign = 'right';
-      ctx.fillText(`#${tokenId}`, width - 20, img2.height + 85);
+      ctx.textAlign = 'center';
+      ctx.fillText(`#${tokenId}`, canvasPadding + img1.width / 2, imgY + img1.height + 30);
+      ctx.fillText(`#${tokenId}`, canvasPadding * 2 + img1.width + img2.width / 2, imgY + img2.height + 30);
 
       const buffer = canvas.toBuffer('image/png');
       const attachment = new AttachmentBuilder(buffer, { name: `duo-${tokenId}.png` });
@@ -120,7 +125,7 @@ module.exports = {
         .setTitle(`🎭 ${name.toUpperCase()} Duo #${tokenId}`)
         .setImage(`attachment://duo-${tokenId}.png`)
         .setColor(0x0099ff)
-        .setFooter({ text: `${getTodayFormatted()} • Powered by PimpsDev` });
+        .setFooter({ text: `Powered by PimpsDev • ${getTodayFormatted()}` });
 
       await interaction.editReply({ embeds: [embed], files: [attachment] });
 
@@ -131,6 +136,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
