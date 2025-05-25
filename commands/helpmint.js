@@ -23,12 +23,13 @@ module.exports = {
             '• `/untrackchannel` — Unsubscribe this channel\n' +
             '• `/mintest` — Simulate a mint alert'
         },
-        {
-          name: '💸 SALE COMMANDS',
-          value:
-            '• `/selltest` — Simulate a sale alert'
-            '• `/tracksale` — Track NFT sales'
-        },
+{
+  name: '💸 SALE COMMANDS',
+  value:
+    '• `/selltest` — Simulate a sale alert\n' +
+    '• `/tracksale` — Track NFT sales'
+},
+
         {
           name: '💰 TOKEN TRACKER',
           value:
