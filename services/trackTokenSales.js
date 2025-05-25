@@ -107,18 +107,16 @@ module.exports = async function trackTokenSales(client) {
             console.warn(`⚠️ TX fetch failed: ${err.message}`);
           }
 
-        const rocketIntensity = Math.min(Math.floor(tokenAmount / 100), 10); // Cap at 10 rockets
-        const rocketLine = '🟥🟦🚀'.repeat(Math.max(1, rocketIntensity));
+          const rocketIntensity = Math.min(Math.floor(tokenAmount / 100), 10);
+          const rocketLine = '🟥🟦🚀'.repeat(Math.max(1, rocketIntensity));
 
+          const getColorByUsdSpent = (usd) => {
+            if (usd < 10) return 0xff0000;
+            if (usd < 20) return 0x3498db;
+            return 0x00cc66;
+          };
 
-const getColorByUsdSpent = (usd) => {
-  if (usd < 10) return 0xff0000; // 🔴 Red
-  if (usd < 20) return 0x3498db; // 🟦 Blue
-  return 0x00cc66;               // 🟢 Green
-};
-
-const embedColor = getColorByUsdSpent(usdSpent);
-
+          const embedColor = getColorByUsdSpent(usdSpent);
 
           for (const token of tokenGroup) {
             const guildId = token.guild_id;
@@ -129,13 +127,12 @@ const embedColor = getColorByUsdSpent(usdSpent);
               .setTitle(`${name} Buy!`)
               .setDescription(`${rocketLine}`)
               .setImage('https://iili.io/3tSecKP.gif')
-.addFields(
-  { name: '💸 Spent', value: `$${usdSpent.toFixed(4)} / ${ethSpent.toFixed(4)} ETH`, inline: true },
-  { name: '🎯 Got', value: `${tokenAmount.toLocaleString()} ${name}`, inline: true },
-  { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
-  { name: '📊 MCap', value: marketCap && marketCap > 0 ? `$${marketCap.toLocaleString()}` : 'Fetching...', inline: true }
-)
-
+              .addFields(
+                { name: '💸 Spent', value: `$${usdSpent.toFixed(4)} / ${ethSpent.toFixed(4)} ETH`, inline: true },
+                { name: '🎯 Got', value: `${tokenAmount.toLocaleString()} ${name}`, inline: true },
+                { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
+                { name: '📊 MCap', value: marketCap && marketCap > 0 ? `$${marketCap.toLocaleString()}` : 'Fetching...', inline: true }
+              )
               .setURL(`https://www.geckoterminal.com/base/pools/${address}`)
               .setColor(embedColor)
               .setFooter({ text: 'Live on Base • Powered by PimpsDev' })
@@ -163,7 +160,7 @@ const embedColor = getColorByUsdSpent(usdSpent);
         }
       } catch (err) {
         console.warn(`⚠️ Error checking token group for ${address}: ${err.message}`);
-        if (err.code === 'SERVER_ERROR' && err.responseStatus === '504 Gateway Time-out') {
+        if (err.code === 'SERVER_ERROR' || err.message?.includes('504')) {
           rotateProvider();
         }
       }
@@ -201,6 +198,7 @@ async function getMarketCapUSD(address) {
     return 0;
   }
 }
+
 
 
 
