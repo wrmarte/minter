@@ -51,13 +51,16 @@ module.exports = {
 
       const selected = nfts.sort(() => 0.5 - Math.random()).slice(0, 6);
 
+      // Grid Config
       const padding = 20;
       const columns = 3;
+      const rows = 2;
       const imgSize = 280;
       const spacing = 20;
-      const titleHeight = 80;
+      const titleSpace = 80;
+
       const canvasWidth = padding * 2 + columns * imgSize + (columns - 1) * spacing;
-      const canvasHeight = titleHeight + padding * 2 + 2 * imgSize + spacing;
+      const canvasHeight = titleSpace + padding * 2 + rows * imgSize + (rows - 1) * spacing;
 
       const canvas = createCanvas(canvasWidth, canvasHeight);
       const ctx = canvas.getContext('2d');
@@ -66,18 +69,20 @@ module.exports = {
       ctx.fillStyle = '#0d1117';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      // 🔥 Gradient Title (fix centered + style)
+      // Title
       const titleText = `🔥 FLEXING: ${name.toUpperCase()} 🔥`;
       ctx.font = 'bold 42px Arial';
-      const textMetrics = ctx.measureText(titleText);
-      const titleX = (canvasWidth - textMetrics.width) / 2;
+      const titleMetrics = ctx.measureText(titleText);
+      const titleX = (canvasWidth - titleMetrics.width) / 2;
 
-      const gradient = ctx.createLinearGradient(titleX, 0, titleX + textMetrics.width, 0);
-      gradient.addColorStop(0, '#FFD700');
-      gradient.addColorStop(1, '#FF69B4');
-
+      const gradient = ctx.createLinearGradient(titleX, 0, titleX + titleMetrics.width, 0);
+      gradient.addColorStop(0, '#FFD700'); // gold
+      gradient.addColorStop(1, '#FF69B4'); // hot pink
       ctx.fillStyle = gradient;
       ctx.fillText(titleText, titleX, 55);
+
+      // Grid Start Y below title
+      const startY = titleSpace + padding;
 
       for (let i = 0; i < selected.length; i++) {
         const nft = selected[i];
@@ -113,15 +118,13 @@ module.exports = {
         }
 
         const x = (i % columns) * (imgSize + spacing) + padding;
-        const y = Math.floor(i / columns) * (imgSize + spacing) + padding + titleHeight;
+        const y = Math.floor(i / columns) * (imgSize + spacing) + startY;
 
-        // Draw image
         ctx.save();
         roundRect(ctx, x, y, imgSize, imgSize);
         ctx.drawImage(nftImage, x, y, imgSize, imgSize);
         ctx.restore();
 
-        // Border
         ctx.strokeStyle = '#d3d3d3';
         ctx.lineWidth = 6;
         ctx.strokeRect(x + 3, y + 3, imgSize - 6, imgSize - 6);
@@ -145,6 +148,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
