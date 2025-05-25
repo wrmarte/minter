@@ -51,27 +51,28 @@ module.exports = {
 
       const selected = nfts.sort(() => 0.5 - Math.random()).slice(0, 6);
 
-      // Layout configuration
+      // 💎 Layout setup
       const columns = 3;
       const rows = 2;
       const imgSize = 280;
-      const spacing = 20;
-      const gridHeight = rows * imgSize + (rows - 1) * spacing;
-      const gridWidth = columns * imgSize + (columns - 1) * spacing;
-      const sidePadding = 20;
-      const verticalPadding = 80;
+      const gridSpacing = 20;
+      const edgePadding = 40;
+      const textHeight = 40;
 
-      const canvasWidth = gridWidth + sidePadding * 2;
-      const canvasHeight = gridHeight + verticalPadding * 2;
+      const gridWidth = columns * imgSize + (columns - 1) * gridSpacing;
+      const gridHeight = rows * imgSize + (rows - 1) * gridSpacing;
+
+      const canvasWidth = gridWidth + edgePadding * 2;
+      const canvasHeight = edgePadding + textHeight + gridSpacing + gridHeight + edgePadding;
 
       const canvas = createCanvas(canvasWidth, canvasHeight);
       const ctx = canvas.getContext('2d');
 
-      // Background
+      // 🎨 Background
       ctx.fillStyle = '#0d1117';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      // Gradient Title with highlighted project name
+      // 🖋️ Gradient Title
       const label = '🔥 FLEXING: ';
       const highlight = name.toUpperCase();
       ctx.font = 'bold 42px Arial';
@@ -80,19 +81,20 @@ module.exports = {
       const nameWidth = ctx.measureText(highlight).width;
       const totalWidth = labelWidth + nameWidth;
       const startX = (canvasWidth - totalWidth) / 2;
+      const textY = edgePadding + textHeight;
 
-      // Gradient for label
       const gradient = ctx.createLinearGradient(startX, 0, startX + labelWidth, 0);
       gradient.addColorStop(0, '#FFD700');
       gradient.addColorStop(1, '#FF69B4');
       ctx.fillStyle = gradient;
-      ctx.fillText(label, startX, verticalPadding - 20);
+      ctx.fillText(label, startX, textY);
 
-      // Solid color for project name
-      ctx.fillStyle = '#00ffff'; // cyan-ish standout
-      ctx.fillText(highlight, startX + labelWidth, verticalPadding - 20);
+      ctx.fillStyle = '#00ffff'; // cyan highlight for project name
+      ctx.fillText(highlight, startX + labelWidth, textY);
 
-      // NFT Grid
+      // 🧱 Grid start
+      const gridStartY = edgePadding + textHeight + gridSpacing;
+
       for (let i = 0; i < selected.length; i++) {
         const nft = selected[i];
         let meta = {};
@@ -126,16 +128,16 @@ module.exports = {
           continue;
         }
 
-        const x = sidePadding + (i % columns) * (imgSize + spacing);
-        const y = verticalPadding + (Math.floor(i / columns) * (imgSize + spacing));
+        const x = edgePadding + (i % columns) * (imgSize + gridSpacing);
+        const y = gridStartY + Math.floor(i / columns) * (imgSize + gridSpacing);
 
-        // Draw NFT image
+        // 🖼️ Draw image
         ctx.save();
         roundRect(ctx, x, y, imgSize, imgSize);
         ctx.drawImage(nftImage, x, y, imgSize, imgSize);
         ctx.restore();
 
-        // Light gray border
+        // 🟫 Border
         ctx.strokeStyle = '#d3d3d3';
         ctx.lineWidth = 6;
         ctx.strokeRect(x + 3, y + 3, imgSize - 6, imgSize - 6);
@@ -159,6 +161,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
