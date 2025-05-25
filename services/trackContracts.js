@@ -63,16 +63,24 @@ async function trackAllContracts(client, contractRow) {
 
   provider.on('block', async (blockNumber) => {
     const fromBlock = Math.max(blockNumber - 1, 0);
-    let logs;
+    const toBlock = blockNumber;
 
+    if (fromBlock >= toBlock) {
+      console.warn(`🛑 Skipping invalid block range: fromBlock=${fromBlock}, toBlock=${toBlock}`);
+      return;
+    }
+
+    let logs;
     try {
       logs = await provider.getLogs({
         fromBlock,
-        toBlock: blockNumber,
+        toBlock,
         address,
         topics: [id('Transfer(address,address,uint256)')]
       });
-    } catch {
+    } catch (err) {
+      console.warn(`⚠️ getLogs failed: ${err.message}`);
+      await new Promise(r => setTimeout(r, 500)); // cooldown to avoid RPC spam
       return;
     }
 
@@ -245,4 +253,5 @@ async function trackAllContracts(client, contractRow) {
 module.exports = {
   trackAllContracts
 };
+
 
