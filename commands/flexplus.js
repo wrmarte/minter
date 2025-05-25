@@ -51,7 +51,15 @@ module.exports = {
 
       const selected = nfts.sort(() => 0.5 - Math.random()).slice(0, 6);
 
-      const canvas = createCanvas(960, 640);
+      // Canvas layout config
+      const padding = 20;
+      const columns = 3;
+      const imgSize = 280;
+      const spacing = 20;
+      const canvasWidth = padding * 2 + columns * imgSize + (columns - 1) * spacing;
+      const canvasHeight = padding * 2 + 2 * imgSize + spacing;
+
+      const canvas = createCanvas(canvasWidth, canvasHeight);
       const ctx = canvas.getContext('2d');
       ctx.fillStyle = '#0d1117';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -89,52 +97,49 @@ module.exports = {
           continue;
         }
 
-        const x = (i % 3) * 320 + 20;
-        const y = Math.floor(i / 3) * 320 + 40;
-        const width = 300;
-        const height = 300;
+        const x = (i % columns) * (imgSize + spacing) + padding;
+        const y = Math.floor(i / columns) * (imgSize + spacing) + padding;
 
         const tokenId = nft.token_id || nft.tokenId || meta.name?.match(/#?(\d+)/)?.[1] || '???';
-        const rarity =
+        let rawRank =
           meta.rarity_rank ||
           meta.rank ||
           meta.attributes?.find(attr => attr.trait_type?.toLowerCase() === 'rank')?.value ||
           'N/A';
 
-        const rarityEmoji =
-          typeof rarity === 'number'
-            ? rarity <= 10
-              ? '🥇'
-              : rarity <= 50
-              ? '🥈'
-              : '🥉'
-            : '❓';
+        const parsedRank = parseInt(rawRank);
+        const rarityEmoji = !isNaN(parsedRank)
+          ? parsedRank <= 10
+            ? '🥇'
+            : parsedRank <= 50
+            ? '🥈'
+            : '🥉'
+          : '❓';
 
         let borderColor = 'silver';
-        const rarityNum = parseInt(rarity);
-        if (!isNaN(rarityNum)) {
-          if (rarityNum <= 10) borderColor = 'gold';
-          else if (rarityNum <= 50) borderColor = 'purple';
-          else if (rarityNum <= 100) borderColor = 'dodgerblue';
+        if (!isNaN(parsedRank)) {
+          if (parsedRank <= 10) borderColor = 'gold';
+          else if (parsedRank <= 50) borderColor = 'purple';
+          else if (parsedRank <= 100) borderColor = 'dodgerblue';
         }
 
-        // Draw image
+        // Draw NFT with rounded corners
         ctx.save();
-        roundRect(ctx, x, y, width, height);
-        ctx.drawImage(nftImage, x, y, width, height);
+        roundRect(ctx, x, y, imgSize, imgSize);
+        ctx.drawImage(nftImage, x, y, imgSize, imgSize);
         ctx.restore();
 
-        // Border drawn inside
+        // Border inside
         ctx.strokeStyle = borderColor;
         ctx.lineWidth = 6;
-        ctx.strokeRect(x + 3, y + 3, width - 6, height - 6);
+        ctx.strokeRect(x + 3, y + 3, imgSize - 6, imgSize - 6);
 
-        // Info overlay
+        // Overlay bar
         ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
-        ctx.fillRect(x, y + height - 32, width, 32);
+        ctx.fillRect(x, y + imgSize - 32, imgSize, 32);
         ctx.fillStyle = '#ffffff';
         ctx.font = 'bold 18px Arial';
-        ctx.fillText(`#${tokenId} | ${rarityEmoji} Rank ${rarity}`, x + 12, y + height - 10);
+        ctx.fillText(`#${tokenId} | ${rarityEmoji} Rank ${rawRank}`, x + 12, y + imgSize - 10);
       }
 
       const buffer = canvas.toBuffer('image/png');
@@ -155,6 +160,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
