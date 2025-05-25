@@ -52,7 +52,6 @@ module.exports = async function trackTokenSales(client) {
   const res = await pg.query(`SELECT * FROM tracked_tokens`);
   const tracked = res.rows;
 
-  // group by contract address
   const addressMap = new Map();
   for (const token of tracked) {
     const addr = token.address.toLowerCase();
@@ -67,13 +66,21 @@ module.exports = async function trackTokenSales(client) {
 
     provider.on('block', async (blockNumber) => {
       if (blockNumber === lastBlock) return;
+      const fromBlock = Math.max(blockNumber - 1, 0);
+      const toBlock = blockNumber;
+
+      if (fromBlock >= toBlock) {
+        console.warn(`🛑 Skipping invalid block range: ${fromBlock} >= ${toBlock}`);
+        return;
+      }
+
       lastBlock = blockNumber;
 
       try {
         const logs = await provider.getLogs({
           address,
-          fromBlock: blockNumber - 1,
-          toBlock: blockNumber,
+          fromBlock,
+          toBlock,
           topics: [erc20Iface.getEvent('Transfer').topicHash]
         });
 
@@ -98,7 +105,6 @@ module.exports = async function trackTokenSales(client) {
           try {
             const tx = await provider.getTransaction(log.transactionHash);
             const ethPrice = await getETHPrice();
-
             if (tx?.value) {
               ethSpent = parseFloat(formatUnits(tx.value, 18));
               usdSpent = ethSpent * ethPrice;
@@ -160,9 +166,15 @@ module.exports = async function trackTokenSales(client) {
         }
       } catch (err) {
         console.warn(`⚠️ Error checking token group for ${address}: ${err.message}`);
-        if (err.code === 'SERVER_ERROR' || err.message?.includes('504')) {
+        if (
+          err.code === 'SERVER_ERROR' ||
+          err.message?.includes('504') ||
+          err.message?.includes('invalid block range')
+        ) {
           rotateProvider();
         }
+
+        await new Promise((r) => setTimeout(r, 500)); // Cooldown to prevent hammering
       }
     });
   }
@@ -198,6 +210,7 @@ async function getMarketCapUSD(address) {
     return 0;
   }
 }
+
 
 
 
