@@ -108,16 +108,11 @@ module.exports = {
         const x = padding + (i % columns) * (imgSize + spacing);
         const y = padding + Math.floor(i / columns) * (imgSize + spacing);
 
-        // Draw rounded image
+        // Draw only image with rounded corners, no border
         ctx.save();
         roundRect(ctx, x, y, imgSize, imgSize);
         ctx.drawImage(nftImage, x, y, imgSize, imgSize);
         ctx.restore();
-
-        // Border
-        ctx.strokeStyle = '#d3d3d3';
-        ctx.lineWidth = 6;
-        ctx.strokeRect(x + 3, y + 3, imgSize - 6, imgSize - 6);
       }
 
       const buffer = canvas.toBuffer('image/png');
@@ -138,6 +133,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
