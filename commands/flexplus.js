@@ -53,7 +53,7 @@ module.exports = {
 
       const canvas = createCanvas(960, 640);
       const ctx = canvas.getContext('2d');
-      ctx.fillStyle = '#0d1117'; // Dark clean background
+      ctx.fillStyle = '#0d1117';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
       for (let i = 0; i < selected.length; i++) {
@@ -94,17 +94,28 @@ module.exports = {
         const width = 300;
         const height = 300;
 
-        const tokenId = nft.token_id || nft.tokenId || '???';
-        const rarity = nft.rarity_rank ?? nft.rarity?.rank ?? 'N/A';
-        const rarityEmoji = typeof rarity === 'number'
-          ? (rarity <= 10 ? '🥇' : rarity <= 50 ? '🥈' : '🥉')
-          : '❓';
+        const tokenId = nft.token_id || nft.tokenId || meta.name?.match(/#?(\d+)/)?.[1] || '???';
+        const rarity =
+          meta.rarity_rank ||
+          meta.rank ||
+          meta.attributes?.find(attr => attr.trait_type?.toLowerCase() === 'rank')?.value ||
+          'N/A';
+
+        const rarityEmoji =
+          typeof rarity === 'number'
+            ? rarity <= 10
+              ? '🥇'
+              : rarity <= 50
+              ? '🥈'
+              : '🥉'
+            : '❓';
 
         let borderColor = 'silver';
-        if (typeof rarity === 'number') {
-          if (rarity <= 10) borderColor = 'gold';
-          else if (rarity <= 50) borderColor = 'purple';
-          else if (rarity <= 100) borderColor = 'dodgerblue';
+        const rarityNum = parseInt(rarity);
+        if (!isNaN(rarityNum)) {
+          if (rarityNum <= 10) borderColor = 'gold';
+          else if (rarityNum <= 50) borderColor = 'purple';
+          else if (rarityNum <= 100) borderColor = 'dodgerblue';
         }
 
         // Draw image
@@ -113,10 +124,10 @@ module.exports = {
         ctx.drawImage(nftImage, x, y, width, height);
         ctx.restore();
 
-        // Border
+        // Border drawn inside
         ctx.strokeStyle = borderColor;
         ctx.lineWidth = 6;
-        ctx.strokeRect(x, y, width, height);
+        ctx.strokeRect(x + 3, y + 3, width - 6, height - 6);
 
         // Info overlay
         ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
@@ -144,6 +155,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
