@@ -6,9 +6,13 @@ module.exports = {
     .setDescription('Show help menu for minting, sales, flexing, and token tracking'),
 
   async execute(interaction) {
+    const today = new Date().toLocaleDateString('en-US', {
+      year: 'numeric', month: 'short', day: 'numeric'
+    });
+
     const embed = new EmbedBuilder()
       .setTitle('📖 Mint & Sale Bot Command Guide')
-      .setDescription('Master mint alerts, flex NFTs, and track tokens across the Base network. Powered by **PimpsDev** 🧪')
+      .setDescription('Master mint alerts, Flex NFT, track tokens & NFT Sales across the Base/ETH network.')
       .addFields(
         {
           name: '🧱 MINTING COMMANDS',
@@ -23,6 +27,7 @@ module.exports = {
           name: '💸 SALE COMMANDS',
           value:
             '• `/selltest` — Simulate a sale alert'
+            '• `/tracksale` — Track NFT sales'
         },
         {
           name: '💰 TOKEN TRACKER',
@@ -48,12 +53,15 @@ module.exports = {
       )
       .setColor(0x00b0f4)
       .setThumbnail('https://iili.io/3PMk5GV.jpg')
-      .setFooter({ text: 'Base Network • Mint & Sale Bot by PimpsDev' })
+      .setFooter({ text: `Powered by PimpsDev 🧪 • ${today}` })
       .setTimestamp();
 
     await interaction.reply({ embeds: [embed], ephemeral: true });
   }
 };
+
+      
+
 
 
 
