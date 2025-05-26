@@ -53,7 +53,7 @@ module.exports = {
       )
       .setColor(0x00b0f4)
       .setThumbnail('https://iili.io/3PMk5GV.jpg')
-      .setFooter({ text: `Powered by PimpsDev 🧪 • ${today}` })
+      .setFooter({ text: 'Powered by PimpsDev 🧪' })
       .setTimestamp();
 
     await interaction.reply({ embeds: [embed], ephemeral: true });
