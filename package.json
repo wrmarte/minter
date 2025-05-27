@@ -17,11 +17,9 @@
     "@napi-rs/canvas": "^0.1.43",
     "pg": "^8.11.3",
     "gifencoder": "2.0.1"
-  },
-  "overrides": {
-    "gifencoder/canvas": false
   }
 }
+
 
 
 
