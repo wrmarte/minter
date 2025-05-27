@@ -22,7 +22,12 @@ module.exports = (client, pg) => {
           rows = res.rows;
         }
 
-        if ((commandName === 'flex' || commandName === 'flexplus') && focused.name === 'name') {
+        if (
+          (commandName === 'flex' ||
+           commandName === 'flexplus' ||
+           commandName === 'flexspin') &&
+          focused.name === 'name'
+        ) {
           const res = await pg.query(
             `SELECT name FROM flex_projects WHERE guild_id = $1`,
             [guildId]
@@ -72,6 +77,7 @@ module.exports = (client, pg) => {
     }
   });
 };
+
 
 
 
