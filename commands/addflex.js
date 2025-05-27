@@ -30,7 +30,7 @@ module.exports = {
     const guildId = interaction.guild.id;
 
     try {
-      // ✅ Ensure table has guild_id column
+      // ✅ Ensure table exists
       await pg.query(`
         CREATE TABLE IF NOT EXISTS flex_projects (
           guild_id TEXT,
@@ -41,6 +41,21 @@ module.exports = {
         )
       `);
 
+      // ✅ Ensure guild_id column exists even if table was previously created without it
+      await pg.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'flex_projects' AND column_name = 'guild_id'
+          ) THEN
+            ALTER TABLE flex_projects ADD COLUMN guild_id TEXT;
+          END IF;
+        END
+        $$;
+      `);
+
+      // ✅ Insert or update the project
       await pg.query(`
         INSERT INTO flex_projects (guild_id, name, address, network)
         VALUES ($1, $2, $3, $4)
@@ -56,5 +71,6 @@ module.exports = {
     }
   }
 };
+
 
 
