@@ -36,7 +36,10 @@ module.exports = {
     .setName('flexduo')
     .setDescription('Display a side-by-side duo of NFTs')
     .addStringOption(opt =>
-      opt.setName('name').setDescription('Duo name').setRequired(true)
+      opt.setName('name')
+        .setDescription('Duo name')
+        .setRequired(true)
+        .setAutocomplete(true) // ✅ Enable autocomplete
     )
     .addIntegerOption(opt =>
       opt.setName('tokenid').setDescription('Token ID to flex (optional)')
@@ -128,6 +131,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
