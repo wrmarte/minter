@@ -39,7 +39,7 @@ module.exports = {
       opt.setName('name')
         .setDescription('Duo name')
         .setRequired(true)
-        .setAutocomplete(true) // ✅ Enable autocomplete
+        .setAutocomplete(true)
     )
     .addIntegerOption(opt =>
       opt.setName('tokenid').setDescription('Token ID to flex (optional)')
@@ -88,29 +88,35 @@ module.exports = {
       const img1 = await loadImage(image1);
       const img2 = await loadImage(image2);
 
+      // ✅ Fixed dimensions
+      const targetWidth = 400;
+      const targetHeight = 400;
       const canvasPadding = 30;
       const labelHeight = 50;
-      const canvasWidth = img1.width + img2.width + canvasPadding * 3;
-      const canvasHeight = Math.max(img1.height, img2.height) + labelHeight;
+
+      const canvasWidth = targetWidth * 2 + canvasPadding * 3;
+      const canvasHeight = targetHeight + labelHeight + canvasPadding * 2;
 
       const canvas = createCanvas(canvasWidth, canvasHeight);
       const ctx = canvas.getContext('2d');
 
+      // 🎨 Background
       ctx.fillStyle = '#000';
       ctx.fillRect(0, 0, canvasWidth, canvasHeight);
 
       const x1 = canvasPadding;
-      const x2 = x1 + img1.width + canvasPadding;
-      const y = 10;
+      const x2 = x1 + targetWidth + canvasPadding;
+      const y = canvasPadding;
 
-      ctx.drawImage(img1, x1, y);
-      ctx.drawImage(img2, x2, y);
+      ctx.drawImage(img1, x1, y, targetWidth, targetHeight);
+      ctx.drawImage(img2, x2, y, targetWidth, targetHeight);
 
+      // 🏷️ Labels
       ctx.fillStyle = '#ccc';
       ctx.font = '22px sans-serif';
       ctx.textAlign = 'center';
-      ctx.fillText(meta1.name || `#${tokenId}`, x1 + img1.width / 2, img1.height + 35);
-      ctx.fillText(meta2.name || `#${tokenId}`, x2 + img2.width / 2, img2.height + 35);
+      ctx.fillText(meta1.name || `#${tokenId}`, x1 + targetWidth / 2, y + targetHeight + 35);
+      ctx.fillText(meta2.name || `#${tokenId}`, x2 + targetWidth / 2, y + targetHeight + 35);
 
       const buffer = canvas.toBuffer('image/png');
       const attachment = new AttachmentBuilder(buffer, { name: `duo-${tokenId}.png` });
@@ -131,6 +137,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
