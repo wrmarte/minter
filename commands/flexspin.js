@@ -2,12 +2,13 @@ const { SlashCommandBuilder, AttachmentBuilder } = require('discord.js');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
 const path = require('path');
 const fs = require('fs');
+const fetch = require('node-fetch');
+const { JsonRpcProvider, Contract } = require('ethers');
 
-// Create /temp folder if it doesn't exist
 const tempDir = path.join(__dirname, '..', 'temp');
-if (!fs.existsSync(tempDir)) {
-  fs.mkdirSync(tempDir, { recursive: true });
-}
+if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+
+const abi = ['function totalSupply() view returns (uint256)', 'function tokenURI(uint256) view returns (string)'];
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -28,26 +29,56 @@ module.exports = {
 
     try {
       const res = await pg.query(`SELECT * FROM flex_projects WHERE name = $1 AND guild_id = $2`, [name, guildId]);
-      if (!res.rows.length) {
-        return interaction.editReply('❌ Project not found for this server. Use `/addflex` first.');
-      }
+      if (!res.rows.length) return interaction.editReply('❌ Project not found for this server. Use `/addflex` first.');
 
       const { address, network } = res.rows[0];
 
-      // Random token ID for display purposes
-      const tokenId = Math.floor(Math.random() * 10000);
-      const imageUrl = `https://api.reservoir.tools/render/${network}/${address}/${tokenId}`;
+      let imageUrl = null;
+      let tokenId = null;
+
+      // --- Step 1: Try Reservoir first ---
+      try {
+        const reservoirUrl = `https://api.reservoir.tools/tokens/v6?collection=${address}&limit=1&sortBy=random&network=${network}`;
+        const reservoirRes = await fetch(reservoirUrl, {
+          headers: { 'x-api-key': process.env.RESERVOIR_API_KEY }
+        });
+        const json = await reservoirRes.json();
+        const token = json?.tokens?.[0]?.token;
+        if (token?.image && token?.tokenId) {
+          imageUrl = token.image;
+          tokenId = token.tokenId;
+        }
+      } catch (err) {
+        console.warn('⚠️ Reservoir fallback triggered');
+      }
+
+      // --- Step 2: Moralis fallback if no image found ---
+      if (!imageUrl) {
+        const rpc = network === 'base' ? 'https://mainnet.base.org' : 'https://rpc.ankr.com/eth';
+        const provider = new JsonRpcProvider(rpc);
+        const contract = new Contract(address, abi, provider);
+        const totalSupply = await contract.totalSupply().then(x => x.toString());
+        tokenId = Math.floor(Math.random() * totalSupply);
+
+        const moralisUrl = `https://deep-index.moralis.io/api/v2.2/nft/${address}/${tokenId}?chain=${network}&format=decimal`;
+        const metadataRes = await fetch(moralisUrl, {
+          headers: { 'X-API-Key': process.env.MORALIS_API_KEY }
+        });
+        const metadata = await metadataRes.json();
+        const rawImage = metadata?.metadata ? JSON.parse(metadata.metadata).image : null;
+        imageUrl = rawImage?.replace('ipfs://', 'https://ipfs.io/ipfs/') || null;
+      }
+
+      if (!imageUrl) return interaction.editReply('⚠️ Could not load NFT image from either API.');
 
       const canvas = createCanvas(512, 512);
       const ctx = canvas.getContext('2d');
 
-      const bg = '#000000';
-      ctx.fillStyle = bg;
+      ctx.fillStyle = '#000';
       ctx.fillRect(0, 0, 512, 512);
 
-      // Round rect mask
-      const radius = 50;
       ctx.save();
+      const radius = 50;
       ctx.beginPath();
       ctx.moveTo(radius, 0);
       ctx.lineTo(512 - radius, 0);
@@ -65,13 +96,12 @@ module.exports = {
       ctx.drawImage(nftImage, 0, 0, 512, 512);
       ctx.restore();
 
-      // Glowing ring
       ctx.beginPath();
       ctx.arc(256, 256, 240, 0, 2 * Math.PI);
       ctx.lineWidth = 20;
-      ctx.strokeStyle = 'rgba(0,255,255,0.6)';
+      ctx.strokeStyle = 'rgba(255,105,180,0.6)';
       ctx.shadowBlur = 30;
-      ctx.shadowColor = '#0ff';
+      ctx.shadowColor = '#ff69b4';
       ctx.stroke();
 
       const buffer = canvas.toBuffer('image/png');
@@ -82,7 +112,7 @@ module.exports = {
       const attachment = new AttachmentBuilder(filepath).setName(filename);
 
       return interaction.editReply({
-        content: `🎰 **Spin Flex:** \`${name}\` #${tokenId}\nReady to reveal...`,
+        content: `🎰 **Flex Spin:** \`${name}\` #${tokenId}\nLet it rip!`,
         files: [attachment]
       });
 
@@ -92,6 +122,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
