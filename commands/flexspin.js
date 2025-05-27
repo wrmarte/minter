@@ -1,178 +1,106 @@
-const {
-  SlashCommandBuilder,
-  AttachmentBuilder,
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle
-} = require('discord.js');
-const fetch = require('node-fetch');
-const { JsonRpcProvider, Contract } = require('ethers');
+// flexspin.js – Ultimate Visual Edition
+const { SlashCommandBuilder, EmbedBuilder, ButtonBuilder, ActionRowBuilder, ButtonStyle, AttachmentBuilder } = require('discord.js');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
-const { writeFileSync, unlinkSync, mkdirSync, rmSync } = require('fs');
-const { execSync } = require('child_process');
+const fetch = require('node-fetch');
+const fs = require('fs');
 const path = require('path');
+const { randomInt } = require('crypto');
+const { JsonRpcProvider, Contract } = require('ethers');
 
-const abi = [
-  'function tokenURI(uint256 tokenId) view returns (string)',
-  'function totalSupply() view returns (uint256)'
-];
+const abi = ['function totalSupply() view returns (uint256)', 'function tokenURI(uint256 tokenId) view returns (string)'];
+const NETWORKS = {
+  eth: 'https://eth.llamarpc.com',
+  base: 'https://mainnet.base.org'
+};
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('flexspin')
-    .setDescription('Spin your NFT in a glorious animated flex')
+    .setDescription('Spin and flex a random NFT with epic visuals')
     .addStringOption(opt =>
       opt.setName('name')
-        .setDescription('Project name')
-        .setRequired(true)
+        .setDescription('Flex project name')
         .setAutocomplete(true)
-    )
-    .addIntegerOption(opt =>
-      opt.setName('tokenid')
-        .setDescription('Token ID (optional)')
+        .setRequired(true)
     ),
 
   async execute(interaction) {
-    const isOwner = interaction.user.id === process.env.BOT_OWNER_ID;
-    if (!isOwner) {
-      return interaction.reply({
-        content: '🚫 Only the bot owner can use this command.',
-        ephemeral: true
-      });
-    }
-
     const pg = interaction.client.pg;
     const name = interaction.options.getString('name').toLowerCase();
-    const tokenIdInput = interaction.options.getInteger('tokenid');
+    const guildId = interaction.guild.id;
 
     await interaction.deferReply();
 
+    // 🎯 Fetch contract info
+    const result = await pg.query('SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2', [guildId, name]);
+    if (!result.rows.length) return interaction.editReply('❌ Project not found. Use `/addflex` first.');
+
+    const project = result.rows[0];
+    const provider = new JsonRpcProvider(NETWORKS[project.network]);
+    const contract = new Contract(project.address, abi, provider);
+
     try {
-      const res = await pg.query(`SELECT * FROM flex_projects WHERE name = $1 AND guild_id = $2`, [name, interaction.guild.id]);
-      if (!res.rows.length) {
-        return interaction.editReply('❌ Project not found. Use `/addflex` first.');
-      }
+      const total = await contract.totalSupply();
+      const tokenId = randomInt(1, Number(total));
+      const uri = await contract.tokenURI(tokenId);
+      const metadata = await fetch(uri).then(r => r.json());
+      const imageUrl = metadata.image || metadata.image_url;
 
-      const { address, network } = res.rows[0];
-      const chain = network === 'base' ? 'base' : 'eth';
-      const provider = new JsonRpcProvider(chain === 'base' ? 'https://mainnet.base.org' : 'https://eth.llamarpc.com');
-
-      let tokenId = tokenIdInput;
-      const contract = new Contract(address, abi, provider);
-      if (!tokenId) {
-        const total = await contract.totalSupply();
-        tokenId = Math.floor(Math.random() * Number(total));
-      }
-
-      const uriRaw = await contract.tokenURI(tokenId);
-      const uri = uriRaw.replace('ipfs://', 'https://ipfs.io/ipfs/');
-      const meta = await fetch(uri).then(r => r.json());
-
-      const imageUrl = (meta.image || meta.image_url || '').replace('ipfs://', 'https://ipfs.io/ipfs/');
-      if (!imageUrl) return interaction.editReply('❌ Could not retrieve image.');
-
-      const img = await loadImage(imageUrl);
-      const size = 480;
-      const canvas = createCanvas(size, size);
+      // 🎨 Canvas Spin
+      const canvas = createCanvas(512, 512);
       const ctx = canvas.getContext('2d');
 
-      const tempDir = `./temp/spin-${Date.now()}`;
-      mkdirSync(tempDir, { recursive: true });
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      // Fetch rarity
-      let rank = 'N/A';
-      let score = 'N/A';
-      try {
-        const rarity = await fetch(`https://api.reservoir.tools/collections/${address}/tokens/${tokenId}/attributes?chain=${chain}`, {
-          headers: { 'x-api-key': process.env.RESERVOIR_API_KEY }
-        }).then(res => res.json());
+      // Simulate glowing pulse border
+      ctx.shadowColor = '#0ff';
+      ctx.shadowBlur = 30;
+      ctx.strokeStyle = '#00ffff';
+      ctx.lineWidth = 12;
+      ctx.strokeRect(20, 20, 472, 472);
 
-        if (rarity?.rank) rank = `#${rarity.rank}`;
-        if (rarity?.score) score = rarity.score.toFixed(2);
-      } catch {
-        console.warn(`⚠️ No rarity for ${name} #${tokenId}`);
-      }
+      // Load and draw NFT
+      const nftImage = await loadImage(imageUrl);
+      ctx.shadowBlur = 0;
+      ctx.drawImage(nftImage, 36, 36, 440, 440);
 
-      const traits = meta.attributes?.map(attr =>
-        `• **${attr.trait_type || attr.key}**: ${attr.value || attr.value}`
-      ).join('\n') || 'None found';
+      // Overlay rarity badge
+      ctx.font = 'bold 28px Sans';
+      ctx.fillStyle = '#ffffffdd';
+      ctx.fillText('💎 RARE', 360, 50);
 
-      for (let i = 0; i < 36; i++) {
-        const angle = (i * 10 * Math.PI) / 180;
-        ctx.clearRect(0, 0, size, size);
-        ctx.fillStyle = '#0d1117';
-        ctx.fillRect(0, 0, size, size);
+      const buffer = canvas.toBuffer('image/png');
+      const filename = `spin_${Date.now()}.png`;
+      const filepath = path.join(__dirname, `../temp/${filename}`);
+      fs.writeFileSync(filepath, buffer);
 
-        // Glow border
-        ctx.save();
-        ctx.shadowColor = '#1d9bf0';
-        ctx.shadowBlur = 24;
-        ctx.translate(size / 2, size / 2);
-        ctx.rotate(angle);
-        ctx.drawImage(img, -size / 2, -size / 2, size, size);
-        ctx.restore();
+      const attachment = new AttachmentBuilder(filepath);
 
-        // Rarity info
-        ctx.fillStyle = 'white';
-        ctx.font = '20px sans-serif';
-        ctx.textAlign = 'right';
-        ctx.fillText(`${rank}`, size - 10, 30);
-        ctx.fillText(`Score: ${score}`, size - 10, 52);
-
-        // Traits reveal on final frame
-        if (i === 35) {
-          ctx.fillStyle = 'rgba(0,0,0,0.8)';
-          ctx.fillRect(0, size - 140, size, 140);
-          ctx.fillStyle = '#1db954';
-          ctx.font = '18px sans-serif';
-          ctx.textAlign = 'left';
-          ctx.fillText(`🧬 Traits`, 10, size - 115);
-          ctx.fillStyle = 'white';
-          ctx.font = '14px sans-serif';
-          const lines = traits.split('\n');
-          lines.forEach((line, index) => {
-            ctx.fillText(line, 10, size - 90 + index * 18);
-          });
-        }
-
-        const buffer = canvas.toBuffer('image/png');
-        writeFileSync(path.join(tempDir, `frame${String(i).padStart(2, '0')}.png`), buffer);
-      }
-
-      const outputVideo = `./temp/spin-${Date.now()}.mp4`;
-      execSync(`ffmpeg -y -framerate 12 -i ${tempDir}/frame%02d.png -c:v libx264 -pix_fmt yuv420p ${outputVideo}`);
-
-      const attachment = new AttachmentBuilder(outputVideo, { name: `spin-${name}-${tokenId}.mp4` });
-
+      // Buttons
       const buttons = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setLabel('🔥 Rate')
-          .setStyle(ButtonStyle.Primary)
-          .setCustomId('rate_spin'),
-        new ButtonBuilder()
-          .setLabel('💾 Save')
-          .setStyle(ButtonStyle.Secondary)
-          .setCustomId('save_spin'),
-        new ButtonBuilder()
-          .setLabel('🚀 Boost')
-          .setStyle(ButtonStyle.Success)
-          .setCustomId('boost_spin')
+        new ButtonBuilder().setLabel('🔄 Reroll').setCustomId(`reroll_${name}`).setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setLabel('💾 Save').setCustomId(`save_${name}_${tokenId}`).setStyle(ButtonStyle.Secondary)
       );
 
-      await interaction.editReply({
-        content: `🌀 **${name.toUpperCase()} #${tokenId}** spinning now...`,
-        files: [attachment],
-        components: [buttons]
-      });
+      const embed = new EmbedBuilder()
+        .setTitle('💫 Ultimate FlexSpin!')
+        .setDescription(`Witness the rotation of rarity.
+**${metadata.name}**
+Token ID: #${tokenId}`)
+        .setImage(`attachment://${filename}`)
+        .setFooter({ text: '✨ Powered by PimpsDev' });
 
-      rmSync(tempDir, { recursive: true, force: true });
-      unlinkSync(outputVideo);
+      await interaction.editReply({ embeds: [embed], files: [attachment], components: [buttons] });
 
+      // Cleanup temp file
+      setTimeout(() => fs.unlinkSync(filepath), 30000);
     } catch (err) {
-      console.error('❌ Error in /flexspin:', err);
-      return interaction.editReply('❌ Failed to generate spin. Check logs.');
+      console.error('❌ FlexSpin error:', err);
+      return interaction.editReply('⚠️ Failed to flexspin.');
     }
   }
 };
+
 
 
