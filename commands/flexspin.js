@@ -1,106 +1,98 @@
-// flexspin.js – Ultimate Visual Edition
-const { SlashCommandBuilder, EmbedBuilder, ButtonBuilder, ActionRowBuilder, ButtonStyle, AttachmentBuilder } = require('discord.js');
+const { SlashCommandBuilder, AttachmentBuilder } = require('discord.js');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
-const fetch = require('node-fetch');
-const fs = require('fs');
 const path = require('path');
-const { randomInt } = require('crypto');
-const { JsonRpcProvider, Contract } = require('ethers');
+const fs = require('fs');
 
-const abi = ['function totalSupply() view returns (uint256)', 'function tokenURI(uint256 tokenId) view returns (string)'];
-const NETWORKS = {
-  eth: 'https://eth.llamarpc.com',
-  base: 'https://mainnet.base.org'
-};
+// Create /temp folder if it doesn't exist
+const tempDir = path.join(__dirname, '..', 'temp');
+if (!fs.existsSync(tempDir)) {
+  fs.mkdirSync(tempDir, { recursive: true });
+}
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('flexspin')
-    .setDescription('Spin and flex a random NFT with epic visuals')
+    .setDescription('Spin a powerful NFT and flex its vibe!')
     .addStringOption(opt =>
       opt.setName('name')
         .setDescription('Flex project name')
-        .setAutocomplete(true)
         .setRequired(true)
+        .setAutocomplete(true)
     ),
 
-  async execute(interaction) {
-    const pg = interaction.client.pg;
-    const name = interaction.options.getString('name').toLowerCase();
+  async execute(interaction, { pg }) {
+    const name = interaction.options.getString('name').toLowerCase().trim();
     const guildId = interaction.guild.id;
 
     await interaction.deferReply();
 
-    // 🎯 Fetch contract info
-    const result = await pg.query('SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2', [guildId, name]);
-    if (!result.rows.length) return interaction.editReply('❌ Project not found. Use `/addflex` first.');
-
-    const project = result.rows[0];
-    const provider = new JsonRpcProvider(NETWORKS[project.network]);
-    const contract = new Contract(project.address, abi, provider);
-
     try {
-      const total = await contract.totalSupply();
-      const tokenId = randomInt(1, Number(total));
-      const uri = await contract.tokenURI(tokenId);
-      const metadata = await fetch(uri).then(r => r.json());
-      const imageUrl = metadata.image || metadata.image_url;
+      const res = await pg.query(`SELECT * FROM flex_projects WHERE name = $1 AND guild_id = $2`, [name, guildId]);
+      if (!res.rows.length) {
+        return interaction.editReply('❌ Project not found for this server. Use `/addflex` first.');
+      }
 
-      // 🎨 Canvas Spin
+      const { address, network } = res.rows[0];
+
+      // Random token ID for display purposes
+      const tokenId = Math.floor(Math.random() * 10000);
+      const imageUrl = `https://api.reservoir.tools/render/${network}/${address}/${tokenId}`;
+
       const canvas = createCanvas(512, 512);
       const ctx = canvas.getContext('2d');
 
-      ctx.fillStyle = '#000';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      const bg = '#000000';
+      ctx.fillStyle = bg;
+      ctx.fillRect(0, 0, 512, 512);
 
-      // Simulate glowing pulse border
-      ctx.shadowColor = '#0ff';
-      ctx.shadowBlur = 30;
-      ctx.strokeStyle = '#00ffff';
-      ctx.lineWidth = 12;
-      ctx.strokeRect(20, 20, 472, 472);
+      // Round rect mask
+      const radius = 50;
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(radius, 0);
+      ctx.lineTo(512 - radius, 0);
+      ctx.quadraticCurveTo(512, 0, 512, radius);
+      ctx.lineTo(512, 512 - radius);
+      ctx.quadraticCurveTo(512, 512, 512 - radius, 512);
+      ctx.lineTo(radius, 512);
+      ctx.quadraticCurveTo(0, 512, 0, 512 - radius);
+      ctx.lineTo(0, radius);
+      ctx.quadraticCurveTo(0, 0, radius, 0);
+      ctx.closePath();
+      ctx.clip();
 
-      // Load and draw NFT
       const nftImage = await loadImage(imageUrl);
-      ctx.shadowBlur = 0;
-      ctx.drawImage(nftImage, 36, 36, 440, 440);
+      ctx.drawImage(nftImage, 0, 0, 512, 512);
+      ctx.restore();
 
-      // Overlay rarity badge
-      ctx.font = 'bold 28px Sans';
-      ctx.fillStyle = '#ffffffdd';
-      ctx.fillText('💎 RARE', 360, 50);
+      // Glowing ring
+      ctx.beginPath();
+      ctx.arc(256, 256, 240, 0, 2 * Math.PI);
+      ctx.lineWidth = 20;
+      ctx.strokeStyle = 'rgba(0,255,255,0.6)';
+      ctx.shadowBlur = 30;
+      ctx.shadowColor = '#0ff';
+      ctx.stroke();
 
       const buffer = canvas.toBuffer('image/png');
       const filename = `spin_${Date.now()}.png`;
-      const filepath = path.join(__dirname, `../temp/${filename}`);
+      const filepath = path.join(tempDir, filename);
       fs.writeFileSync(filepath, buffer);
 
-      const attachment = new AttachmentBuilder(filepath);
+      const attachment = new AttachmentBuilder(filepath).setName(filename);
 
-      // Buttons
-      const buttons = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setLabel('🔄 Reroll').setCustomId(`reroll_${name}`).setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setLabel('💾 Save').setCustomId(`save_${name}_${tokenId}`).setStyle(ButtonStyle.Secondary)
-      );
+      return interaction.editReply({
+        content: `🎰 **Spin Flex:** \`${name}\` #${tokenId}\nReady to reveal...`,
+        files: [attachment]
+      });
 
-      const embed = new EmbedBuilder()
-        .setTitle('💫 Ultimate FlexSpin!')
-        .setDescription(`Witness the rotation of rarity.
-**${metadata.name}**
-Token ID: #${tokenId}`)
-        .setImage(`attachment://${filename}`)
-        .setFooter({ text: '✨ Powered by PimpsDev' });
-
-      await interaction.editReply({ embeds: [embed], files: [attachment], components: [buttons] });
-
-      // Cleanup temp file
-      setTimeout(() => fs.unlinkSync(filepath), 30000);
     } catch (err) {
       console.error('❌ FlexSpin error:', err);
-      return interaction.editReply('⚠️ Failed to flexspin.');
+      return interaction.editReply('⚠️ Failed to spin NFT.');
     }
   }
 };
+
 
 
 
