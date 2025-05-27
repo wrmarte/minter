@@ -36,26 +36,29 @@ module.exports = {
           guild_id TEXT,
           name TEXT,
           address TEXT,
-          network TEXT,
-          PRIMARY KEY (guild_id, name)
-        )
+          network TEXT
+        );
       `);
 
-      // ✅ Ensure guild_id column exists even if table was created previously
+      // ✅ Ensure composite unique constraint exists
       await pg.query(`
         DO $$
         BEGIN
           IF NOT EXISTS (
-            SELECT 1 FROM information_schema.columns
-            WHERE table_name = 'flex_projects' AND column_name = 'guild_id'
+            SELECT 1
+            FROM pg_indexes
+            WHERE tablename = 'flex_projects'
+              AND indexname = 'flex_projects_guild_name_unique'
           ) THEN
-            ALTER TABLE flex_projects ADD COLUMN guild_id TEXT;
+            ALTER TABLE flex_projects
+            ADD CONSTRAINT flex_projects_guild_name_unique
+            UNIQUE (guild_id, name);
           END IF;
         END
         $$;
       `);
 
-      // ✅ Insert or update the project
+      // ✅ Insert or update
       await pg.query(`
         INSERT INTO flex_projects (guild_id, name, address, network)
         VALUES ($1, $2, $3, $4)
@@ -67,8 +70,6 @@ module.exports = {
       return interaction.reply(`✅ Project **${name}** added for flexing on **${network}**.`);
     } catch (err) {
       console.error('❌ Error in /addflex:', err);
-
-      // ✅ Show full error message to the user for debugging
       return interaction.reply({
         content: `❌ Error while saving project:\n\`\`\`${err.message || err.toString()}\`\`\``,
         ephemeral: true
@@ -76,6 +77,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
