@@ -41,7 +41,7 @@ module.exports = {
         )
       `);
 
-      // ✅ Ensure guild_id column exists even if table was previously created without it
+      // ✅ Ensure guild_id column exists even if table was created previously
       await pg.query(`
         DO $$
         BEGIN
@@ -67,10 +67,16 @@ module.exports = {
       return interaction.reply(`✅ Project **${name}** added for flexing on **${network}**.`);
     } catch (err) {
       console.error('❌ Error in /addflex:', err);
-      return interaction.reply({ content: '⚠️ Could not add project.', ephemeral: true });
+
+      // ✅ Show full error message to the user for debugging
+      return interaction.reply({
+        content: `❌ Error while saving project:\n\`\`\`${err.message || err.toString()}\`\`\``,
+        ephemeral: true
+      });
     }
   }
 };
+
 
 
 
