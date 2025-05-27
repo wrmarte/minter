@@ -37,7 +37,7 @@ module.exports = {
       let imageUrl = null;
       let tokenId = null;
 
-      // Step 1: Try Reservoir
+      // 1. Reservoir
       try {
         const reservoirUrl = `https://api.reservoir.tools/tokens/v6?collection=${address}&limit=1&sortBy=random&network=${network}`;
         const reservoirRes = await fetch(reservoirUrl, {
@@ -53,7 +53,7 @@ module.exports = {
         console.warn('⚠️ Reservoir fallback triggered:', err.message);
       }
 
-      // Step 2: Try Moralis
+      // 2. Moralis
       if (!imageUrl) {
         try {
           const rpc = network === 'base' ? 'https://mainnet.base.org' : 'https://rpc.ankr.com/eth';
@@ -76,7 +76,7 @@ module.exports = {
         }
       }
 
-      // Step 3: tokenURI fallback
+      // 3. tokenURI
       if (!imageUrl) {
         try {
           const rpc = network === 'base' ? 'https://mainnet.base.org' : 'https://rpc.ankr.com/eth';
@@ -99,25 +99,7 @@ module.exports = {
       const canvas = createCanvas(512, 512);
       const ctx = canvas.getContext('2d');
 
-      // SPIN EFFECT
-      const steps = 8;
-      const radius = 250;
-      const angleStep = (Math.PI * 2) / steps;
-
-      for (let i = 0; i < steps; i++) {
-        ctx.clearRect(0, 0, 512, 512);
-        ctx.save();
-        ctx.translate(256, 256);
-        ctx.rotate(i * angleStep);
-        ctx.beginPath();
-        ctx.arc(0, 0, radius, 0, 2 * Math.PI);
-        ctx.clip();
-        ctx.drawImage(image, -256, -256, 512, 512);
-        ctx.restore();
-      }
-
-      // Final full image
-      ctx.clearRect(0, 0, 512, 512);
+      // Spin aesthetic effect - radial glow mask + circular crop
       ctx.save();
       ctx.beginPath();
       ctx.arc(256, 256, 250, 0, 2 * Math.PI);
@@ -125,12 +107,23 @@ module.exports = {
       ctx.drawImage(image, 0, 0, 512, 512);
       ctx.restore();
 
+      // Add glow spin visual
+      const gradient = ctx.createRadialGradient(256, 256, 100, 256, 256, 256);
+      gradient.addColorStop(0, 'rgba(255,255,255,0)');
+      gradient.addColorStop(1, 'rgba(0,255,255,0.3)');
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, 512, 512);
+
       const buffer = canvas.toBuffer('image/png');
       const filePath = path.join('/tmp', `spin_${Date.now()}.png`);
       fs.writeFileSync(filePath, buffer);
       const attachment = new AttachmentBuilder(filePath, { name: 'spin.png' });
 
-      await interaction.editReply({ content: `🎰 **FlexSpin Complete!** Here's your spin from **${name}** #${tokenId}`, files: [attachment] });
+      await interaction.editReply({
+        content: `🎰 **FlexSpin Complete!** Here's your spin from **${name}** #${tokenId}`,
+        files: [attachment]
+      });
+
       setTimeout(() => fs.existsSync(filePath) && fs.unlinkSync(filePath), 60000);
 
     } catch (err) {
@@ -139,6 +132,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
