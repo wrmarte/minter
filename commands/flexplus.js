@@ -19,7 +19,10 @@ module.exports = {
     .setName('flexplus')
     .setDescription('Flex a collage of 6 random NFTs from a project')
     .addStringOption(opt =>
-      opt.setName('name').setDescription('Project name').setRequired(true)
+      opt.setName('name')
+        .setDescription('Project name')
+        .setRequired(true)
+        .setAutocomplete(true) // ✅ Enable dynamic suggestions
     ),
 
   async execute(interaction) {
@@ -51,7 +54,7 @@ module.exports = {
 
       const selected = nfts.sort(() => 0.5 - Math.random()).slice(0, 6);
 
-      // 💎 Symmetrical layout
+      // 💎 Canvas layout
       const columns = 3;
       const rows = 2;
       const imgSize = 280;
@@ -60,25 +63,24 @@ module.exports = {
 
       const gridWidth = columns * imgSize + (columns - 1) * spacing;
       const gridHeight = rows * imgSize + (rows - 1) * spacing;
-
       const canvasWidth = gridWidth + padding * 2;
       const canvasHeight = gridHeight + padding * 2;
 
       const canvas = createCanvas(canvasWidth, canvasHeight);
       const ctx = canvas.getContext('2d');
 
-      // 🖤 Background
       ctx.fillStyle = '#0d1117';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      // 🧱 Draw grid centered
       for (let i = 0; i < selected.length; i++) {
         const nft = selected[i];
         let meta = {};
+
         try {
           if (nft.metadata) {
             meta = JSON.parse(nft.metadata || '{}');
           }
+
           if ((!meta || !meta.image) && nft.token_uri) {
             const uri = nft.token_uri.replace('ipfs://', 'https://ipfs.io/ipfs/');
             meta = await fetch(uri).then(res => res.json());
@@ -108,7 +110,6 @@ module.exports = {
         const x = padding + (i % columns) * (imgSize + spacing);
         const y = padding + Math.floor(i / columns) * (imgSize + spacing);
 
-        // Draw only image with rounded corners, no border
         ctx.save();
         roundRect(ctx, x, y, imgSize, imgSize);
         ctx.drawImage(nftImage, x, y, imgSize, imgSize);
@@ -133,6 +134,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
