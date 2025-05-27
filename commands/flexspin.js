@@ -2,9 +2,14 @@ const { SlashCommandBuilder, AttachmentBuilder } = require('discord.js');
 const fetch = require('node-fetch');
 const { JsonRpcProvider, Contract } = require('ethers');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
-const GIFEncoder = require('gifencoder');
+const { writeFileSync, unlinkSync, mkdirSync, rmSync } = require('fs');
+const { execSync } = require('child_process');
+const path = require('path');
 
-const abi = ['function tokenURI(uint256 tokenId) view returns (string)', 'function totalSupply() view returns (uint256)'];
+const abi = [
+  'function tokenURI(uint256 tokenId) view returns (string)',
+  'function totalSupply() view returns (uint256)'
+];
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -36,9 +41,7 @@ module.exports = {
 
       const { address, network } = res.rows[0];
       const chain = network === 'base' ? 'base' : 'eth';
-      const provider = new JsonRpcProvider(
-        chain === 'base' ? 'https://mainnet.base.org' : 'https://eth.llamarpc.com'
-      );
+      const provider = new JsonRpcProvider(chain === 'base' ? 'https://mainnet.base.org' : 'https://eth.llamarpc.com');
 
       let tokenId = tokenIdInput;
       if (!tokenId) {
@@ -57,42 +60,41 @@ module.exports = {
 
       const img = await loadImage(imageUrl);
       const size = 480;
-
-      const encoder = new GIFEncoder(size, size);
       const canvas = createCanvas(size, size);
       const ctx = canvas.getContext('2d');
 
-      const bufferChunks = [];
-      encoder.createReadStream().on('data', chunk => bufferChunks.push(chunk));
-      encoder.start();
-      encoder.setRepeat(0);
-      encoder.setDelay(60); // ms
-      encoder.setQuality(10);
+      const tempDir = `./temp/spin-${Date.now()}`;
+      mkdirSync(tempDir, { recursive: true });
 
+      // Generate 36 frames rotating image
       for (let i = 0; i < 36; i++) {
         const angle = (i * 10 * Math.PI) / 180;
         ctx.clearRect(0, 0, size, size);
         ctx.fillStyle = '#0d1117';
         ctx.fillRect(0, 0, size, size);
-
         ctx.save();
         ctx.translate(size / 2, size / 2);
         ctx.rotate(angle);
         ctx.drawImage(img, -size / 2, -size / 2, size, size);
         ctx.restore();
-
-        encoder.addFrame(ctx);
+        const buffer = canvas.toBuffer('image/png');
+        writeFileSync(path.join(tempDir, `frame${String(i).padStart(2, '0')}.png`), buffer);
       }
 
-      encoder.finish();
-      const gifBuffer = Buffer.concat(bufferChunks);
+      const outputVideo = `./temp/spin-${Date.now()}.mp4`;
 
-      const attachment = new AttachmentBuilder(gifBuffer, { name: `spin-${name}-${tokenId}.gif` });
+      // Generate MP4 with FFmpeg
+      execSync(`ffmpeg -y -framerate 12 -i ${tempDir}/frame%02d.png -c:v libx264 -pix_fmt yuv420p ${outputVideo}`);
+
+      const attachment = new AttachmentBuilder(outputVideo, { name: `spin-${name}-${tokenId}.mp4` });
 
       await interaction.editReply({
         content: `🌀 Spinning NFT: **${name} #${tokenId}**`,
         files: [attachment]
       });
+
+      rmSync(tempDir, { recursive: true, force: true });
+      unlinkSync(outputVideo);
 
     } catch (err) {
       console.error('❌ Error in /flexspin:', err);
@@ -100,3 +102,4 @@ module.exports = {
     }
   }
 };
+
