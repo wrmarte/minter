@@ -7,7 +7,7 @@ const fetch = require('node-fetch');
 
 const abi = [
   'function totalSupply() view returns (uint256)',
-  'function tokenURI(uint256 tokenId) view returns (string)',
+  'function tokenURI(uint256 tokenId) view returns (string)'
 ];
 
 module.exports = {
@@ -37,6 +37,7 @@ module.exports = {
       let imageUrl = null;
       let tokenId = null;
 
+      // Step 1: Try Reservoir
       try {
         const reservoirUrl = `https://api.reservoir.tools/tokens/v6?collection=${address}&limit=1&sortBy=random&network=${network}`;
         const reservoirRes = await fetch(reservoirUrl, {
@@ -52,6 +53,7 @@ module.exports = {
         console.warn('⚠️ Reservoir fallback triggered:', err.message);
       }
 
+      // Step 2: Try Moralis
       if (!imageUrl) {
         try {
           const rpc = network === 'base' ? 'https://mainnet.base.org' : 'https://rpc.ankr.com/eth';
@@ -74,6 +76,7 @@ module.exports = {
         }
       }
 
+      // Step 3: tokenURI fallback
       if (!imageUrl) {
         try {
           const rpc = network === 'base' ? 'https://mainnet.base.org' : 'https://rpc.ankr.com/eth';
@@ -95,42 +98,49 @@ module.exports = {
       const image = await loadImage(imageUrl);
       const canvas = createCanvas(512, 512);
       const ctx = canvas.getContext('2d');
-      const frameCount = 8;
-      const angleStep = (Math.PI * 2) / frameCount;
-      const filePath = path.join('/tmp', `spin_${Date.now()}.gif`);
 
-      const { createWriteStream } = require('fs');
-      const GIFEncoder = require('gifencoder');
+      // Step 1: Blurred image as intro
+      ctx.clearRect(0, 0, 512, 512);
+      ctx.filter = 'blur(10px)';
+      ctx.drawImage(image, 0, 0, 512, 512);
+      const blurBuffer = canvas.toBuffer('image/png');
+      const blurPath = path.join('/tmp', `spin_blur_${Date.now()}.png`);
+      fs.writeFileSync(blurPath, blurBuffer);
+      const blurAttachment = new AttachmentBuilder(blurPath, { name: 'spin_blur.png' });
 
-      const encoder = new GIFEncoder(512, 512);
-      encoder.createReadStream().pipe(createWriteStream(filePath));
-      encoder.start();
-      encoder.setRepeat(0);
-      encoder.setDelay(100);
-      encoder.setQuality(10);
+      await interaction.editReply({ content: '🎰 **Spinning...** 🌀', files: [blurAttachment] });
 
-      for (let i = 0; i < frameCount; i++) {
-        ctx.clearRect(0, 0, 512, 512);
-        ctx.save();
-        ctx.translate(256, 256);
-        ctx.rotate(i * angleStep);
-        ctx.drawImage(image, -256, -256, 512, 512);
-        ctx.restore();
-        encoder.addFrame(ctx);
-      }
+      // Wait before reveal
+      await new Promise(resolve => setTimeout(resolve, 2000));
 
-      encoder.finish();
+      // Step 2: Final clean image with circular frame
+      ctx.clearRect(0, 0, 512, 512);
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(256, 256, 250, 0, 2 * Math.PI);
+      ctx.clip();
+      ctx.drawImage(image, 0, 0, 512, 512);
+      ctx.restore();
 
-      const attachment = new AttachmentBuilder(filePath, { name: 'spin.gif' });
-      await interaction.editReply({ content: `🎰 **FlexSpin!** Here's your NFT from **${name}** #${tokenId}`, files: [attachment] });
+      const buffer = canvas.toBuffer('image/png');
+      const filePath = path.join('/tmp', `spin_${Date.now()}.png`);
+      fs.writeFileSync(filePath, buffer);
+      const attachment = new AttachmentBuilder(filePath, { name: 'spin.png' });
 
-      setTimeout(() => fs.existsSync(filePath) && fs.unlinkSync(filePath), 60000);
+      await interaction.editReply({ content: `🎉 **FlexSpin Complete!** Here's your spin from **${name}** #${tokenId}`, files: [attachment] });
+
+      setTimeout(() => {
+        fs.existsSync(filePath) && fs.unlinkSync(filePath);
+        fs.existsSync(blurPath) && fs.unlinkSync(blurPath);
+      }, 60000);
+
     } catch (err) {
       console.error('❌ FlexSpin error:', err);
       await interaction.editReply('⚠️ Something went wrong during /flexspin.');
     }
   }
 };
+
 
 
 
