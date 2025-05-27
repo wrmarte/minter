@@ -37,7 +37,6 @@ module.exports = {
       let imageUrl = null;
       let tokenId = null;
 
-      // Step 1: Try Reservoir
       try {
         const reservoirUrl = `https://api.reservoir.tools/tokens/v6?collection=${address}&limit=1&sortBy=random&network=${network}`;
         const reservoirRes = await fetch(reservoirUrl, {
@@ -53,42 +52,32 @@ module.exports = {
         console.warn('⚠️ Reservoir fallback triggered:', err.message);
       }
 
-      // Step 2: Try Moralis
       if (!imageUrl) {
-        try {
-          const rpc = network === 'base' ? 'https://mainnet.base.org' : 'https://rpc.ankr.com/eth';
-          const provider = new JsonRpcProvider(rpc);
-          const contract = new Contract(address, abi, provider);
-          const totalSupply = await contract.totalSupply().then(x => x.toString());
-          tokenId = Math.floor(Math.random() * totalSupply);
+        const rpc = network === 'base' ? 'https://mainnet.base.org' : 'https://rpc.ankr.com/eth';
+        const provider = new JsonRpcProvider(rpc);
+        const contract = new Contract(address, abi, provider);
+        const totalSupply = await contract.totalSupply().then(x => x.toString());
+        tokenId = Math.floor(Math.random() * totalSupply);
 
-          const moralisUrl = `https://deep-index.moralis.io/api/v2.2/nft/${address}/${tokenId}?chain=${network}&format=decimal`;
-          const metadataRes = await fetch(moralisUrl, {
-            headers: { 'X-API-Key': process.env.MORALIS_API_KEY }
-          });
-          const metadata = await metadataRes.json();
-          const rawImage = metadata?.metadata ? JSON.parse(metadata.metadata)?.image : null;
-          if (rawImage) {
-            imageUrl = rawImage.replace('ipfs://', 'https://ipfs.io/ipfs/');
-          }
-        } catch (moralisError) {
-          console.warn('⚠️ Moralis fallback failed:', moralisError.message);
+        const moralisUrl = `https://deep-index.moralis.io/api/v2.2/nft/${address}/${tokenId}?chain=${network}&format=decimal`;
+        const metadataRes = await fetch(moralisUrl, {
+          headers: { 'X-API-Key': process.env.MORALIS_API_KEY }
+        });
+        const metadata = await metadataRes.json();
+        const rawImage = metadata?.metadata ? JSON.parse(metadata.metadata)?.image : null;
+        if (rawImage) {
+          imageUrl = rawImage.replace('ipfs://', 'https://ipfs.io/ipfs/');
         }
       }
 
-      // Step 3: tokenURI fallback
       if (!imageUrl) {
-        try {
-          const rpc = network === 'base' ? 'https://mainnet.base.org' : 'https://rpc.ankr.com/eth';
-          const provider = new JsonRpcProvider(rpc);
-          const contract = new Contract(address, abi, provider);
-          const tokenUri = await contract.tokenURI(tokenId);
-          const fixedUri = tokenUri.replace('ipfs://', 'https://ipfs.io/ipfs/');
-          const fallbackMeta = await fetch(fixedUri).then(res => res.json());
-          imageUrl = fallbackMeta?.image?.replace('ipfs://', 'https://ipfs.io/ipfs/');
-        } catch (err) {
-          console.warn('⚠️ tokenURI fallback failed:', err.message);
-        }
+        const rpc = network === 'base' ? 'https://mainnet.base.org' : 'https://rpc.ankr.com/eth';
+        const provider = new JsonRpcProvider(rpc);
+        const contract = new Contract(address, abi, provider);
+        const tokenUri = await contract.tokenURI(tokenId);
+        const fixedUri = tokenUri.replace('ipfs://', 'https://ipfs.io/ipfs/');
+        const fallbackMeta = await fetch(fixedUri).then(res => res.json());
+        imageUrl = fallbackMeta?.image?.replace('ipfs://', 'https://ipfs.io/ipfs/');
       }
 
       if (!imageUrl) {
@@ -96,43 +85,34 @@ module.exports = {
       }
 
       const image = await loadImage(imageUrl);
-      const canvas = createCanvas(512, 512);
+      const size = 512;
+      const canvas = createCanvas(size, size);
       const ctx = canvas.getContext('2d');
+      const files = [];
 
-      // Step 1: Blurred image as intro
-      ctx.clearRect(0, 0, 512, 512);
-      ctx.filter = 'blur(10px)';
-      ctx.drawImage(image, 0, 0, 512, 512);
-      const blurBuffer = canvas.toBuffer('image/png');
-      const blurPath = path.join('/tmp', `spin_blur_${Date.now()}.png`);
-      fs.writeFileSync(blurPath, blurBuffer);
-      const blurAttachment = new AttachmentBuilder(blurPath, { name: 'spin_blur.png' });
+      const angles = [0, 0.25, 0.5, 0.75, 1].map(n => n * Math.PI);
 
-      await interaction.editReply({ content: '🎰 **Spinning...** 🌀', files: [blurAttachment] });
+      for (let i = 0; i < angles.length; i++) {
+        ctx.clearRect(0, 0, size, size);
+        ctx.save();
+        ctx.translate(size / 2, size / 2);
+        ctx.rotate(angles[i]);
+        ctx.beginPath();
+        ctx.arc(0, 0, size / 2, 0, Math.PI * 2);
+        ctx.clip();
+        ctx.drawImage(image, -size / 2, -size / 2, size, size);
+        ctx.restore();
 
-      // Wait before reveal
-      await new Promise(resolve => setTimeout(resolve, 2000));
+        const filePath = path.join('/tmp', `spin_frame_${i}_${Date.now()}.png`);
+        fs.writeFileSync(filePath, canvas.toBuffer('image/png'));
+        files.push(new AttachmentBuilder(filePath, { name: `spin_frame_${i}.png` }));
+        setTimeout(() => fs.existsSync(filePath) && fs.unlinkSync(filePath), 120000);
+      }
 
-      // Step 2: Final clean image with circular frame
-      ctx.clearRect(0, 0, 512, 512);
-      ctx.save();
-      ctx.beginPath();
-      ctx.arc(256, 256, 250, 0, 2 * Math.PI);
-      ctx.clip();
-      ctx.drawImage(image, 0, 0, 512, 512);
-      ctx.restore();
-
-      const buffer = canvas.toBuffer('image/png');
-      const filePath = path.join('/tmp', `spin_${Date.now()}.png`);
-      fs.writeFileSync(filePath, buffer);
-      const attachment = new AttachmentBuilder(filePath, { name: 'spin.png' });
-
-      await interaction.editReply({ content: `🎉 **FlexSpin Complete!** Here's your spin from **${name}** #${tokenId}`, files: [attachment] });
-
-      setTimeout(() => {
-        fs.existsSync(filePath) && fs.unlinkSync(filePath);
-        fs.existsSync(blurPath) && fs.unlinkSync(blurPath);
-      }, 60000);
+      await interaction.editReply({
+        content: `🎰 **FlexSpin Reveal!** Here's your spin from **${name}** #${tokenId}`,
+        files
+      });
 
     } catch (err) {
       console.error('❌ FlexSpin error:', err);
