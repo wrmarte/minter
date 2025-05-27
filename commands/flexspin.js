@@ -28,14 +28,12 @@ module.exports = {
     await interaction.deferReply();
 
     try {
-      // Fetch project info
       const res = await pg.query(`SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`, [guildId, name]);
       if (!res.rows.length) {
         return interaction.editReply('❌ Project not found. Use `/addflex` first.');
       }
 
       const { address, network } = res.rows[0];
-
       let imageUrl = null;
       let tokenId = null;
 
@@ -61,7 +59,6 @@ module.exports = {
           const rpc = network === 'base' ? 'https://mainnet.base.org' : 'https://rpc.ankr.com/eth';
           const provider = new JsonRpcProvider(rpc);
           const contract = new Contract(address, abi, provider);
-
           const totalSupply = await contract.totalSupply().then(x => x.toString());
           tokenId = Math.floor(Math.random() * totalSupply);
 
@@ -79,13 +76,12 @@ module.exports = {
         }
       }
 
-      // Step 3: Try tokenURI fallback
+      // Step 3: tokenURI fallback
       if (!imageUrl) {
         try {
           const rpc = network === 'base' ? 'https://mainnet.base.org' : 'https://rpc.ankr.com/eth';
           const provider = new JsonRpcProvider(rpc);
           const contract = new Contract(address, abi, provider);
-
           const tokenUri = await contract.tokenURI(tokenId);
           const fixedUri = tokenUri.replace('ipfs://', 'https://ipfs.io/ipfs/');
           const fallbackMeta = await fetch(fixedUri).then(res => res.json());
@@ -99,11 +95,29 @@ module.exports = {
         return interaction.editReply('⚠️ Could not load NFT image from any source.');
       }
 
-      // Load NFT image
       const image = await loadImage(imageUrl);
       const canvas = createCanvas(512, 512);
       const ctx = canvas.getContext('2d');
 
+      // SPIN EFFECT
+      const steps = 8;
+      const radius = 250;
+      const angleStep = (Math.PI * 2) / steps;
+
+      for (let i = 0; i < steps; i++) {
+        ctx.clearRect(0, 0, 512, 512);
+        ctx.save();
+        ctx.translate(256, 256);
+        ctx.rotate(i * angleStep);
+        ctx.beginPath();
+        ctx.arc(0, 0, radius, 0, 2 * Math.PI);
+        ctx.clip();
+        ctx.drawImage(image, -256, -256, 512, 512);
+        ctx.restore();
+      }
+
+      // Final full image
+      ctx.clearRect(0, 0, 512, 512);
       ctx.save();
       ctx.beginPath();
       ctx.arc(256, 256, 250, 0, 2 * Math.PI);
@@ -116,17 +130,16 @@ module.exports = {
       fs.writeFileSync(filePath, buffer);
       const attachment = new AttachmentBuilder(filePath, { name: 'spin.png' });
 
-      const msg = `🎰 **Flex Spin!**\nHere's a spin from **${name}** #${tokenId}`;
-      await interaction.editReply({ content: msg, files: [attachment] });
-
-      setTimeout(() => fs.existsSync(filePath) && fs.unlinkSync(filePath), 60_000); // clean temp
+      await interaction.editReply({ content: `🎰 **FlexSpin Complete!** Here's your spin from **${name}** #${tokenId}`, files: [attachment] });
+      setTimeout(() => fs.existsSync(filePath) && fs.unlinkSync(filePath), 60000);
 
     } catch (err) {
       console.error('❌ FlexSpin error:', err);
-      await interaction.editReply('⚠️ Something went wrong with /flexspin.');
+      await interaction.editReply('⚠️ Something went wrong during /flexspin.');
     }
   }
 };
+
 
 
 
