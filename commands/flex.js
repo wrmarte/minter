@@ -21,7 +21,10 @@ module.exports = {
     .setName('flex')
     .setDescription('Flex a random NFT or specific token ID from a project')
     .addStringOption(opt =>
-      opt.setName('name').setDescription('Project name').setRequired(true)
+      opt.setName('name')
+        .setDescription('Project name')
+        .setRequired(true)
+        .setAutocomplete(true) // ✅ Enable autocomplete
     )
     .addIntegerOption(opt =>
       opt.setName('tokenid').setDescription('Token ID to flex (optional)')
@@ -116,6 +119,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
