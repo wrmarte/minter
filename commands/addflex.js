@@ -24,16 +24,30 @@ module.exports = {
     }
 
     const pg = interaction.client.pg;
-    const name = interaction.options.getString('name').toLowerCase();
-    const address = interaction.options.getString('address');
+    const name = interaction.options.getString('name').toLowerCase().trim();
+    const address = interaction.options.getString('address').toLowerCase().trim();
     const network = interaction.options.getString('network');
+    const guildId = interaction.guild.id;
 
     try {
+      // ✅ Ensure table has guild_id column
       await pg.query(`
-        INSERT INTO flex_projects (name, address, network)
-        VALUES ($1, $2, $3)
-        ON CONFLICT (name) DO UPDATE SET address = $2, network = $3
-      `, [name, address, network]);
+        CREATE TABLE IF NOT EXISTS flex_projects (
+          guild_id TEXT,
+          name TEXT,
+          address TEXT,
+          network TEXT,
+          PRIMARY KEY (guild_id, name)
+        )
+      `);
+
+      await pg.query(`
+        INSERT INTO flex_projects (guild_id, name, address, network)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (guild_id, name) DO UPDATE SET
+          address = EXCLUDED.address,
+          network = EXCLUDED.network
+      `, [guildId, name, address, network]);
 
       return interaction.reply(`✅ Project **${name}** added for flexing on **${network}**.`);
     } catch (err) {
@@ -42,4 +56,5 @@ module.exports = {
     }
   }
 };
+
 
