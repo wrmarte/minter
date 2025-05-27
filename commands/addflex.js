@@ -40,19 +40,28 @@ module.exports = {
         );
       `);
 
-      // ✅ Ensure composite unique constraint exists
+      // ✅ Auto-drop old primary key and replace with composite key if needed
       await pg.query(`
         DO $$
         BEGIN
-          IF NOT EXISTS (
-            SELECT 1
-            FROM pg_indexes
-            WHERE tablename = 'flex_projects'
-              AND indexname = 'flex_projects_guild_name_unique'
+          -- Drop old primary key if it exists
+          IF EXISTS (
+            SELECT 1 FROM information_schema.table_constraints
+            WHERE table_name = 'flex_projects'
+            AND constraint_type = 'PRIMARY KEY'
+            AND constraint_name = 'flex_projects_pkey'
           ) THEN
-            ALTER TABLE flex_projects
-            ADD CONSTRAINT flex_projects_guild_name_unique
-            UNIQUE (guild_id, name);
+            ALTER TABLE flex_projects DROP CONSTRAINT flex_projects_pkey;
+          END IF;
+
+          -- Add new composite primary key if not exists
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.table_constraints
+            WHERE table_name = 'flex_projects'
+            AND constraint_type = 'PRIMARY KEY'
+            AND constraint_name = 'flex_projects_pk'
+          ) THEN
+            ALTER TABLE flex_projects ADD CONSTRAINT flex_projects_pk PRIMARY KEY (guild_id, name);
           END IF;
         END
         $$;
@@ -77,6 +86,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
