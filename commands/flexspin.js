@@ -7,13 +7,13 @@ const fetch = require('node-fetch');
 
 const abi = [
   'function totalSupply() view returns (uint256)',
-  'function tokenURI(uint256 tokenId) view returns (string)'
+  'function tokenURI(uint256 tokenId) view returns (string)',
 ];
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('flexspin')
-    .setDescription('🎰 Spin to flex a dynamic NFT snapshot from a project')
+    .setDescription('🎰 Spin to flex a random NFT from a project')
     .addStringOption(opt =>
       opt.setName('name')
         .setDescription('Project name (from /addflex)')
@@ -93,46 +93,38 @@ module.exports = {
       }
 
       const image = await loadImage(imageUrl);
-      const canvas = createCanvas(1024, 768);
+      const canvas = createCanvas(512, 512);
       const ctx = canvas.getContext('2d');
+      const frameCount = 8;
+      const angleStep = (Math.PI * 2) / frameCount;
+      const filePath = path.join('/tmp', `spin_${Date.now()}.gif`);
 
-      ctx.fillStyle = '#000';
-      ctx.fillRect(0, 0, 1024, 768);
+      const { createWriteStream } = require('fs');
+      const GIFEncoder = require('gifencoder');
 
-      const centerX = [170, 512, 854];
-      const centerY = [180, 580];
-      let i = 0;
+      const encoder = new GIFEncoder(512, 512);
+      encoder.createReadStream().pipe(createWriteStream(filePath));
+      encoder.start();
+      encoder.setRepeat(0);
+      encoder.setDelay(100);
+      encoder.setQuality(10);
 
-      for (let y = 0; y < centerY.length; y++) {
-        for (let x = 0; x < centerX.length; x++) {
-          ctx.save();
-          ctx.translate(centerX[x], centerY[y]);
-          ctx.rotate((Math.PI / 16) * (i - 2));
-          ctx.beginPath();
-          ctx.arc(0, 0, 120, 0, 2 * Math.PI);
-          ctx.clip();
-          ctx.drawImage(image, -120, -120, 240, 240);
-          ctx.restore();
-          i++;
-        }
+      for (let i = 0; i < frameCount; i++) {
+        ctx.clearRect(0, 0, 512, 512);
+        ctx.save();
+        ctx.translate(256, 256);
+        ctx.rotate(i * angleStep);
+        ctx.drawImage(image, -256, -256, 512, 512);
+        ctx.restore();
+        encoder.addFrame(ctx);
       }
 
-      ctx.font = 'bold 36px Sans';
-      ctx.fillStyle = '#fff';
-      ctx.fillText(`FlexSpin Reel: ${name.toUpperCase()} #${tokenId}`, 40, 740);
+      encoder.finish();
 
-      const buffer = canvas.toBuffer('image/png');
-      const filePath = path.join('/tmp', `flexspin_${Date.now()}.png`);
-      fs.writeFileSync(filePath, buffer);
-      const attachment = new AttachmentBuilder(filePath, { name: 'flexspin.png' });
-
-      await interaction.editReply({
-        content: `🎰 **FlexSpin Snapshot!** Here's your spin collage from **${name}** #${tokenId}`,
-        files: [attachment]
-      });
+      const attachment = new AttachmentBuilder(filePath, { name: 'spin.gif' });
+      await interaction.editReply({ content: `🎰 **FlexSpin!** Here's your NFT from **${name}** #${tokenId}`, files: [attachment] });
 
       setTimeout(() => fs.existsSync(filePath) && fs.unlinkSync(filePath), 60000);
-
     } catch (err) {
       console.error('❌ FlexSpin error:', err);
       await interaction.editReply('⚠️ Something went wrong during /flexspin.');
