@@ -16,9 +16,13 @@
     "node-fetch": "^2.6.12",
     "@napi-rs/canvas": "^0.1.43",
     "pg": "^8.11.3",
-    "gifencoder-alt": "^1.0.4"
+    "gifencoder": "2.0.1"
+  },
+  "overrides": {
+    "gifencoder/canvas": false
   }
 }
+
 
 
 
