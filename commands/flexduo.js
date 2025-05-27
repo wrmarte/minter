@@ -37,12 +37,16 @@ module.exports = {
     .setDescription('Display a side-by-side duo of NFTs')
     .addStringOption(opt =>
       opt.setName('name').setDescription('Duo name').setRequired(true)
+    )
+    .addIntegerOption(opt =>
+      opt.setName('tokenid').setDescription('Token ID to flex (optional)')
     ),
 
   async execute(interaction) {
     await interaction.deferReply();
     const pg = interaction.client.pg;
     const name = interaction.options.getString('name').toLowerCase();
+    const tokenIdInput = interaction.options.getInteger('tokenid');
     const guildId = interaction.guild.id;
 
     try {
@@ -59,13 +63,14 @@ module.exports = {
       const nft1 = new Contract(contract1, abi, provider);
       const nft2 = new Contract(contract2, abi, provider);
 
-      const totalSupply = await nft1.totalSupply();
-      const total = typeof totalSupply === 'number' ? totalSupply : Number(totalSupply);
-      if (total === 0) {
-        return interaction.editReply('❌ No tokens minted yet.');
-      }
+      let tokenId = tokenIdInput;
 
-      const tokenId = Math.floor(Math.random() * total);
+      if (tokenId == null) {
+        const totalSupply = await nft1.totalSupply();
+        const total = typeof totalSupply === 'number' ? totalSupply : Number(totalSupply);
+        if (total === 0) return interaction.editReply('❌ No tokens minted yet.');
+        tokenId = Math.floor(Math.random() * total);
+      }
 
       const uri1 = await nft1.tokenURI(tokenId);
       const uri2 = await nft2.tokenURI(tokenId);
@@ -75,36 +80,29 @@ module.exports = {
 
       const image1 = meta1.image?.replace('ipfs://', 'https://ipfs.io/ipfs/');
       const image2 = meta2.image?.replace('ipfs://', 'https://ipfs.io/ipfs/');
-      if (!image1 || !image2) {
-        throw new Error('Missing image URLs in metadata');
-      }
+      if (!image1 || !image2) throw new Error('Missing image URLs in metadata');
 
       const img1 = await loadImage(image1);
       const img2 = await loadImage(image2);
 
       const canvasPadding = 30;
       const labelHeight = 50;
-
       const canvasWidth = img1.width + img2.width + canvasPadding * 3;
       const canvasHeight = Math.max(img1.height, img2.height) + labelHeight;
 
       const canvas = createCanvas(canvasWidth, canvasHeight);
       const ctx = canvas.getContext('2d');
 
-      // Background
       ctx.fillStyle = '#000';
       ctx.fillRect(0, 0, canvasWidth, canvasHeight);
 
-      // Centered positions
       const x1 = canvasPadding;
       const x2 = x1 + img1.width + canvasPadding;
       const y = 10;
 
-      // Draw images
       ctx.drawImage(img1, x1, y);
       ctx.drawImage(img2, x2, y);
 
-      // Labels
       ctx.fillStyle = '#ccc';
       ctx.font = '22px sans-serif';
       ctx.textAlign = 'center';
@@ -116,6 +114,7 @@ module.exports = {
 
       const embed = new EmbedBuilder()
         .setTitle(`🎭 ${name.toUpperCase()} Duo #${tokenId}`)
+        .setDescription(tokenIdInput ? `🎯 Specific token flexed` : `🎲 Randomly flexed`)
         .setImage(`attachment://duo-${tokenId}.png`)
         .setColor(0x0099ff)
         .setFooter({ text: `Powered by PimpsDev • ${getTodayFormatted()}` });
