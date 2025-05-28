@@ -1,4 +1,3 @@
-// interactionCreate.js (patched for full autocomplete)
 module.exports = (client, pg) => {
   client.on('interactionCreate', async interaction => {
     // 🔍 Autocomplete support
@@ -45,7 +44,7 @@ module.exports = (client, pg) => {
           console.log('🎯 Autocomplete /exp returned rows:', rows);
         }
 
-        const choices = rows.map(row => row.name);
+        const choices = rows.map(row => row.name).filter(Boolean);
         const filtered = choices
           .filter(name => name.toLowerCase().includes(focused.value.toLowerCase()))
           .slice(0, 25);
@@ -55,7 +54,11 @@ module.exports = (client, pg) => {
         return await interaction.respond(filtered.map(name => ({ name, value: name })));
       } catch (err) {
         console.error('❌ Autocomplete error:', err);
-        return await interaction.respond([]);
+        try {
+          return await interaction.respond([]);
+        } catch (timeoutErr) {
+          console.warn('⚠️ Autocomplete fallback timeout:', timeoutErr.message);
+        }
       }
     }
 
@@ -92,6 +95,7 @@ module.exports = (client, pg) => {
     }
   });
 };
+
 
 
 
