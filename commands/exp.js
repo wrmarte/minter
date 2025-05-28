@@ -1,4 +1,5 @@
 const { SlashCommandBuilder, AttachmentBuilder } = require('discord.js');
+const fetch = require('node-fetch');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -19,7 +20,7 @@ module.exports = {
     const name = interaction.options.getString('name').toLowerCase();
     const guildId = interaction.guild?.id ?? null;
 
-    // Try to find server-specific first, then global fallback
+    // Query DB: try guild first, then fallback to global
     const res = await pg.query(`
       SELECT * FROM expressions
       WHERE name = $1 AND (guild_id = $2 OR guild_id IS NULL)
@@ -35,21 +36,23 @@ module.exports = {
     const userMention = `<@${interaction.user.id}>`;
     const message = exp.content.includes('{user}')
       ? exp.content.replace('{user}', userMention)
-      : `${userMention} ${exp.content}`;
+      : `${userMention} is feeling **${name}** today!`;
 
-    // 🖼️ If image
     if (exp.type === 'image') {
       try {
+        const imageRes = await fetch(exp.content);
+        if (!imageRes.ok) throw new Error(`Image failed to load: ${imageRes.status}`);
+
         const file = new AttachmentBuilder(exp.content);
         return await interaction.reply({ content: message, files: [file] });
       } catch (err) {
-        console.error('❌ Error loading image:', err);
-        return await interaction.reply({ content: `⚠️ Couldn't load the image.`, flags: 64 });
+        console.error('❌ Image fetch error:', err.message);
+        return await interaction.reply({ content: `⚠️ Image broken, but:\n${message}`, flags: 64 });
       }
     }
 
-    // 📝 If text
     return interaction.reply({ content: message });
   }
 };
+
 
