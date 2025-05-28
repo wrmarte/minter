@@ -1,3 +1,4 @@
+// interactionCreate.js (patched for full autocomplete)
 module.exports = (client, pg) => {
   client.on('interactionCreate', async interaction => {
     // 🔍 Autocomplete support
@@ -35,7 +36,6 @@ module.exports = (client, pg) => {
           rows = res.rows;
         }
 
-        // ✅ NEW: Autocomplete for /exp
         if (commandName === 'exp' && focused.name === 'name') {
           const res = await pg.query(
             `SELECT DISTINCT name FROM expressions WHERE guild_id = $1 OR guild_id IS NULL`,
@@ -70,7 +70,6 @@ module.exports = (client, pg) => {
     }
 
     try {
-      // 🔀 Support both styles: with or without (interaction, { pg })
       const needsPg = command.execute.length > 1;
       if (needsPg) {
         await command.execute(interaction, { pg });
@@ -92,6 +91,7 @@ module.exports = (client, pg) => {
     }
   });
 };
+
 
 
 
