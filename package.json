@@ -4,7 +4,8 @@
   "description": "A Discord bot that tracks CryptoPimps mints.",
   "main": "index.js",
   "scripts": {
-    "start": "node --no-deprecation --max-old-space-size=1024 index.js"
+    "start": "node --no-deprecation --max-old-space-size=1024 index.js",
+    "build": "npm install"
   },
   "engines": {
     "node": ">=18.0.0"
@@ -19,6 +20,7 @@
     "pg": "^8.11.3"
   }
 }
+
 
 
 
