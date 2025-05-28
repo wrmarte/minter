@@ -9,6 +9,7 @@ module.exports = {
       option.setName('name')
         .setDescription('Name of the expression (e.g. "rich")')
         .setRequired(true)
+        .setAutocomplete(true) // ✅ this is critical             
     ),
 
   async execute(interaction, { pg }) {
