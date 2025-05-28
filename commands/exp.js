@@ -37,7 +37,7 @@ module.exports = {
     const userMention = `<@${interaction.user.id}>`;
     const message = exp.content.includes('{user}')
       ? exp.content.replace('{user}', userMention)
-      : `${userMention} is feeling **${name}** today!`;
+      : `💥 ${userMention} is experiencing **"${name}"** energy today!`;
 
     if (exp.type === 'image') {
       try {
@@ -55,5 +55,6 @@ module.exports = {
     return interaction.reply({ content: message });
   }
 };
+
 
 
