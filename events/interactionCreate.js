@@ -49,7 +49,7 @@ module.exports = (client, pg) => {
       }
     }
 
-    // 🧠 Normal slash command handling
+    // 🧠 Slash command handler
     if (!interaction.isChatInputCommand()) return;
 
     console.log(`🎯 Received slash command: /${interaction.commandName}`);
@@ -61,7 +61,13 @@ module.exports = (client, pg) => {
     }
 
     try {
-      await command.execute(interaction, { pg });
+      // 🔀 Support both styles: with or without (interaction, { pg })
+      const needsPg = command.execute.length > 1;
+      if (needsPg) {
+        await command.execute(interaction, { pg });
+      } else {
+        await command.execute(interaction);
+      }
     } catch (error) {
       console.error(`❌ Error executing /${interaction.commandName}:`, error);
 
@@ -77,6 +83,7 @@ module.exports = (client, pg) => {
     }
   });
 };
+
 
 
 
