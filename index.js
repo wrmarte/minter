@@ -6,7 +6,7 @@ const path = require('path');
 
 console.log("👀 Booting from:", __dirname);
 
-// === Discord Client ===
+// === Discord Client ===.
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages]
 });
