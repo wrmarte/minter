@@ -47,13 +47,16 @@ pg.query(`CREATE TABLE IF NOT EXISTS tracked_tokens (
 // 🔧 Patch for older tracked_tokens missing channel_id column
 pg.query(`ALTER TABLE tracked_tokens ADD COLUMN IF NOT EXISTS channel_id TEXT`);
 
-// ✅ NEW: Expressions table for /exp and /addexp
+// ✅ NEW: Expressions table for /exp and /addexp (now with guild_id)
 pg.query(`
   CREATE TABLE IF NOT EXISTS expressions (
-    name TEXT PRIMARY KEY,
+    name TEXT,
     type TEXT NOT NULL,
-    content TEXT NOT NULL
+    content TEXT NOT NULL,
+    guild_id TEXT, -- null = global
+    PRIMARY KEY (name, guild_id)
 )`);
+
 
 // === Command Loader ===
 client.commands = new Map();
