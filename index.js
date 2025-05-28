@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits } = require('discord.js');
+const { Client, GatewayIntentBits, Collection } = require('discord.js');
 const { Client: PgClient } = require('pg');
 const fs = require('fs');
 const path = require('path');
@@ -47,19 +47,22 @@ pg.query(`CREATE TABLE IF NOT EXISTS tracked_tokens (
 // 🔧 Patch for older tracked_tokens missing channel_id column
 pg.query(`ALTER TABLE tracked_tokens ADD COLUMN IF NOT EXISTS channel_id TEXT`);
 
-// ✅ NEW: Expressions table for /exp and /addexp (now with guild_id)
+// ✅ Expressions table for /exp and /addexp (with guild_id support)
 pg.query(`
   CREATE TABLE IF NOT EXISTS expressions (
-    name TEXT,
+    name TEXT NOT NULL,
     type TEXT NOT NULL,
     content TEXT NOT NULL,
-    guild_id TEXT, -- null = global
+    guild_id TEXT,
     PRIMARY KEY (name, guild_id)
 )`);
 
+// 🛠 Patch for legacy expressions table missing guild_id
+pg.query(`ALTER TABLE expressions ADD COLUMN IF NOT EXISTS guild_id TEXT`);
 
 // === Command Loader ===
-client.commands = new Map();
+client.commands = new Collection();
+client.prefixCommands = new Collection();
 
 try {
   const commandFiles = fs.readdirSync(path.join(__dirname, 'commands')).filter(file => file.endsWith('.js'));
@@ -70,8 +73,11 @@ try {
     if (command.data && command.execute) {
       client.commands.set(command.data.name, command);
       console.log(`✅ Loaded command: /${command.data.name}`);
+    } else if (command.name && command.execute) {
+      client.prefixCommands.set(command.name, command);
+      console.log(`✅ Loaded command: !${command.name}`);
     } else {
-      console.warn(`⚠️ Skipped ${file} — missing .data or .execute`);
+      console.warn(`⚠️ Skipped ${file} — missing .data/.name or .execute`);
     }
   }
 } catch (err) {
