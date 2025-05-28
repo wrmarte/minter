@@ -19,7 +19,6 @@ for (const file of commandFiles) {
   }
 }
 
-// Register globally...
 const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_BOT_TOKEN);
 
 (async () => {
@@ -34,5 +33,6 @@ const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_BOT_TOKEN)
     console.error('❌ Error registering slash commands:', error);
   }
 })();
+
 
 
