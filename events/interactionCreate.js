@@ -42,6 +42,7 @@ module.exports = (client, pg) => {
             [guildId]
           );
           rows = res.rows;
+          console.log('🎯 Autocomplete /exp returned rows:', rows);
         }
 
         const choices = rows.map(row => row.name);
@@ -91,6 +92,7 @@ module.exports = (client, pg) => {
     }
   });
 };
+
 
 
 
