@@ -35,6 +35,15 @@ module.exports = (client, pg) => {
           rows = res.rows;
         }
 
+        // ✅ NEW: Autocomplete for /exp
+        if (commandName === 'exp' && focused.name === 'name') {
+          const res = await pg.query(
+            `SELECT DISTINCT name FROM expressions WHERE guild_id = $1 OR guild_id IS NULL`,
+            [guildId]
+          );
+          rows = res.rows;
+        }
+
         const choices = rows.map(row => row.name);
         const filtered = choices
           .filter(name => name.toLowerCase().includes(focused.value.toLowerCase()))
