@@ -95,11 +95,11 @@ module.exports = async function trackTokenSales(client) {
           if (!ROUTERS.includes(fromAddr)) continue;
           if (to.toLowerCase() === '0x0000000000000000000000000000000000000000') continue;
 
-          const tokenAmountRaw = BigInt(amount.toString());
-          const tokenAmountFormatted = new Intl.NumberFormat('en-US', {
+          const tokenAmountRaw = parseFloat(formatUnits(amount, 18));
+          const tokenAmountFormatted = (tokenAmountRaw * 1000).toLocaleString(undefined, {
             minimumFractionDigits: 2,
             maximumFractionDigits: 2
-          }).format(Number(formatUnits(tokenAmountRaw, 18)));
+          });
 
           const tokenPrice = await getTokenPriceUSD(address);
           const marketCap = await getMarketCapUSD(address);
@@ -118,7 +118,7 @@ module.exports = async function trackTokenSales(client) {
             console.warn(`⚠️ TX fetch failed: ${err.message}`);
           }
 
-          const rocketIntensity = Math.min(Math.floor(Number(formatUnits(tokenAmountRaw, 18)) / 100), 10);
+          const rocketIntensity = Math.min(Math.floor(tokenAmountRaw / 100), 10);
           const rocketLine = '🟥🟦🚀'.repeat(Math.max(1, rocketIntensity));
 
           const getColorByUsdSpent = (usd) => {
@@ -179,7 +179,7 @@ module.exports = async function trackTokenSales(client) {
           rotateProvider();
         }
 
-        await new Promise((r) => setTimeout(r, 500));
+        await new Promise((r) => setTimeout(r, 500)); // Cooldown to prevent hammering
       }
     });
   }
@@ -215,6 +215,7 @@ async function getMarketCapUSD(address) {
     return 0;
   }
 }
+
 
 
 
