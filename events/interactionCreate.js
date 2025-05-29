@@ -54,19 +54,23 @@ module.exports = (client, pg) => {
           const res = await pg.query(query, params);
           rows = res.rows;
 
-          const choices = rows
+          const choices = await Promise.all(rows
             .filter(row => !!row.name)
-            .map(row => {
-              const tag = row.guild_id === null
-                ? '🌐 Global'
-                : row.guild_id === guildId
-                ? '🏠 This Server'
-                : '🛡️ Other Server';
+            .map(async row => {
+              let tag;
+              if (row.guild_id === null) {
+                tag = '🌐 Global';
+              } else if (row.guild_id === guildId) {
+                tag = '🏠 This Server';
+              } else {
+                const guild = await client.guilds.fetch(row.guild_id).catch(() => null);
+                tag = guild ? `🛡️ ${guild.name}` : '🛡️ Other Server';
+              }
               return {
                 name: `${row.name} — ${tag}`,
                 value: row.name
               };
-            });
+            }));
 
           const filtered = choices
             .filter(c => c.name.toLowerCase().includes(focused.value.toLowerCase()))
@@ -127,6 +131,7 @@ module.exports = (client, pg) => {
     }
   });
 };
+
 
 
 
