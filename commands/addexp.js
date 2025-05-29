@@ -36,26 +36,22 @@ module.exports = {
     const guildId = interaction.guild?.id ?? null;
 
     try {
-      // 🛠️ Ensure unique constraint exists
-      await pg.query(`
-        CREATE UNIQUE INDEX IF NOT EXISTS expressions_name_guild_id_unique
-        ON expressions(name, guild_id);
-      `);
+      await pg.query(
+        `INSERT INTO expressions (name, type, content, guild_id)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (name, guild_id)
+         DO UPDATE SET type = EXCLUDED.type, content = EXCLUDED.content`,
+        [name, type, content, guildId]
+      );
 
-      await pg.query(`
-        INSERT INTO expressions (name, type, content, guild_id)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (name, guild_id)
-        DO UPDATE SET type = EXCLUDED.type, content = EXCLUDED.content
-      `, [name, type, content, guildId]);
-
-      return interaction.reply(`✅ Expression \`${name}\` saved as \`${type}\`.`);
+      return interaction.reply(`✅ Expression \`${name}\` saved for this server (${guildId ?? 'global'}) as \`${type}\`.`);
     } catch (err) {
       console.error('❌ Failed to insert expression:', err);
       return interaction.reply('⚠️ Error saving the expression.');
     }
   }
 };
+
 
 
 
