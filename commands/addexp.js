@@ -26,29 +26,36 @@ module.exports = {
 
   async execute(interaction, { pg }) {
     const ownerId = process.env.BOT_OWNER_ID;
-    const isOwner = interaction.user.id === ownerId;
+    if (interaction.user.id !== ownerId) {
+      return interaction.reply({ content: '❌ Only the bot owner can use this.', ephemeral: true });
+    }
 
     const name = interaction.options.getString('name').toLowerCase();
     const type = interaction.options.getString('type');
     const content = interaction.options.getString('content');
-    const guildId = isOwner ? null : interaction.guild?.id ?? null;
+    const guildId = interaction.guild?.id ?? null;
 
     try {
-      await pg.query(
-        `INSERT INTO expressions (name, type, content, guild_id)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT (name, guild_id)
-         DO UPDATE SET type = EXCLUDED.type, content = EXCLUDED.content`,
-        [name, type, content, guildId]
-      );
+      // 🛠️ Ensure unique constraint exists
+      await pg.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS expressions_name_guild_id_unique
+        ON expressions(name, guild_id);
+      `);
 
-      const scope = guildId ? 'this server' : 'globally';
-      return interaction.reply(`✅ Expression \`${name}\` saved as \`${type}\` in ${scope}.`);
+      await pg.query(`
+        INSERT INTO expressions (name, type, content, guild_id)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (name, guild_id)
+        DO UPDATE SET type = EXCLUDED.type, content = EXCLUDED.content
+      `, [name, type, content, guildId]);
+
+      return interaction.reply(`✅ Expression \`${name}\` saved as \`${type}\`.`);
     } catch (err) {
       console.error('❌ Failed to insert expression:', err);
       return interaction.reply('⚠️ Error saving the expression.');
     }
   }
 };
+
 
 
