@@ -161,12 +161,25 @@ module.exports = {
     }
 
     return interaction.reply({ content: customMessage });
+  },
+
+  async autocomplete(interaction, { pg }) {
+    const focused = interaction.options.getFocused();
+    const guildId = interaction.guild?.id ?? null;
+
+    const res = await pg.query(
+      `SELECT DISTINCT name FROM expressions WHERE guild_id = $1 OR guild_id IS NULL`,
+      [guildId]
+    );
+
+    const dbOptions = res.rows.map(row => row.name);
+    const flavorOptions = Object.keys(flavorMap);
+
+    const allOptions = [...new Set([...dbOptions, ...flavorOptions])]
+      .filter(name => name.toLowerCase().includes(focused.toLowerCase()))
+      .slice(0, 25)
+      .map(name => ({ name, value: name }));
+
+    await interaction.respond(allOptions);
   }
 };
-
-
-
-
-
-
-
