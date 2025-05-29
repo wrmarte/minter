@@ -134,8 +134,8 @@ module.exports = async function trackTokenSales(client) {
               .setDescription(`${rocketLine}`)
               .setImage('https://iili.io/3tSecKP.gif')
               .addFields(
-                { name: '💸 Spent', value: `$${usdSpent.toFixed(4)} / ${ethSpent.toFixed(4)} ETH`, inline: true },
-                { name: '🎯 Got', value: `${tokenAmount.toLocaleString()} ${name}`, inline: true },
+                { name: '💸 Spent', value: `$${usdSpent.toFixed(2)} / ${ethSpent.toFixed(4)} ETH`, inline: true },
+                { name: '🎯 Got', value: `${tokenAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${name}`, inline: true },
                 { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
                 { name: '📊 MCap', value: marketCap && marketCap > 0 ? `$${marketCap.toLocaleString()}` : 'Fetching...', inline: true }
               )
