@@ -41,27 +41,48 @@ module.exports = (client, pg) => {
           let query;
           let params;
 
-          if (userId === ownerId) {
-            query = `SELECT DISTINCT name FROM expressions`;
+          const isOwner = userId === ownerId;
+
+          if (isOwner) {
+            query = `SELECT DISTINCT name, guild_id FROM expressions`;
             params = [];
           } else {
-            query = `SELECT DISTINCT name FROM expressions WHERE guild_id = $1 OR guild_id IS NULL`;
+            query = `SELECT DISTINCT name, guild_id FROM expressions WHERE guild_id = $1 OR guild_id IS NULL`;
             params = [guildId];
           }
 
           const res = await pg.query(query, params);
           rows = res.rows;
 
-          console.log('🎯 Autocomplete /exp returned rows:', rows);
+          const choices = rows
+            .filter(row => !!row.name)
+            .map(row => {
+              const tag = row.guild_id === null
+                ? '🌐 Global'
+                : row.guild_id === guildId
+                ? '🏠 This Server'
+                : '🛡️ Other Server';
+              return {
+                name: `${row.name} — ${tag}`,
+                value: row.name
+              };
+            });
+
+          const filtered = choices
+            .filter(c => c.name.toLowerCase().includes(focused.value.toLowerCase()))
+            .slice(0, 25);
+
+          console.log(`🔁 Tagged Autocomplete for /exp:`, filtered);
+          return await interaction.respond(filtered);
         }
 
+        // Normal autocomplete fallback
         const choices = rows.map(row => row.name).filter(Boolean);
         const filtered = choices
           .filter(name => name.toLowerCase().includes(focused.value.toLowerCase()))
           .slice(0, 25);
 
         console.log(`🔁 Autocomplete for /${commandName}:`, filtered);
-
         return await interaction.respond(filtered.map(name => ({ name, value: name })));
       } catch (err) {
         console.error('❌ Autocomplete error:', err);
@@ -106,6 +127,7 @@ module.exports = (client, pg) => {
     }
   });
 };
+
 
 
 
