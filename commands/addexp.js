@@ -36,21 +36,23 @@ module.exports = {
     const name = interaction.options.getString('name').toLowerCase();
     const type = interaction.options.getString('type');
     const content = interaction.options.getString('content');
-    const guildId = interaction.guild?.id ?? null;
+    const guildId = interaction.guild?.id ?? 'global';
 
     try {
-      // 🔧 Auto-create table if missing
+      // ✅ Create table if not exists
       await pg.query(`
         CREATE TABLE IF NOT EXISTS expressions (
           name TEXT NOT NULL,
           type TEXT NOT NULL,
           content TEXT NOT NULL,
-          guild_id TEXT,
-          PRIMARY KEY (name, guild_id)
+          guild_id TEXT
         );
       `);
 
-      // 🔧 Ensure correct PK constraint exists
+      // ✅ Ensure all existing NULL guild_id are updated to 'global'
+      await pg.query(`UPDATE expressions SET guild_id = 'global' WHERE guild_id IS NULL;`);
+
+      // ✅ Add primary key safely
       await pg.query(`
         DO $$
         BEGIN
@@ -58,13 +60,13 @@ module.exports = {
             SELECT 1 FROM pg_constraint WHERE conname = 'expressions_name_guild_id_pk'
           ) THEN
             ALTER TABLE expressions
-            DROP CONSTRAINT IF EXISTS expressions_pkey,
-            ADD CONSTRAINT expressions_name_guild_id_pk PRIMARY KEY (name, guild_id);
+              DROP CONSTRAINT IF EXISTS expressions_pkey,
+              ADD CONSTRAINT expressions_name_guild_id_pk PRIMARY KEY (name, guild_id);
           END IF;
         END$$;
       `);
 
-      // ✅ Upsert expression
+      // ✅ Upsert
       await pg.query(`
         INSERT INTO expressions (name, type, content, guild_id)
         VALUES ($1, $2, $3, $4)
@@ -73,18 +75,20 @@ module.exports = {
       `, [name, type, content, guildId]);
 
       return interaction.reply({
-        content: `✅ Expression \`${name}\` saved for this server as \`${type}\`.`,
+        content: `✅ Expression \`${name}\` saved as \`${type}\` for \`${guildId}\`.`,
         flags: 64
       });
+
     } catch (err) {
       console.error('❌ Failed to insert expression:', err);
       return interaction.reply({
-        content: `⚠️ Error saving the expression: \`${err.code}\``,
+        content: `⚠️ Error: \`${err.code}\` while saving expression.`,
         flags: 64
       });
     }
   }
 };
+
 
 
 
