@@ -124,51 +124,46 @@ module.exports = {
 
     const name = interaction.options.getString('name').toLowerCase();
     const guildId = interaction.guild?.id ?? null;
-    const guildName = interaction.guild?.name ?? 'Unknown Server';
     const userMention = `<@${interaction.user.id}>`;
 
-    const res = await pg.query(`
-      SELECT * FROM expressions
-      WHERE name = $1
-      AND ($2 = $3 OR guild_id = $2 OR guild_id IS NULL)
-      ORDER BY RANDOM()
-      LIMIT 1
-    `, [name, isOwner ? 'global' : guildId, guildId]);
+    let res;
+    if (isOwner) {
+      res = await pg.query(
+        `SELECT * FROM expressions WHERE name = $1 ORDER BY RANDOM() LIMIT 1`,
+        [name]
+      );
+    } else {
+      res = await pg.query(
+        `SELECT * FROM expressions WHERE name = $1 AND (guild_id = $2 OR guild_id IS NULL) ORDER BY RANDOM() LIMIT 1`,
+        [name, guildId]
+      );
+    }
 
     if (!res.rows.length && !flavorMap[name]) {
       return interaction.reply({ content: `❌ No expression named \`${name}\` found.`, flags: 64 });
     }
 
     const exp = res.rows[0];
-    let serverTag = '';
-
-    if (isOwner && exp.guild_id && exp.guild_id !== guildId) {
-      serverTag = ` _(from ${guildName})_`;
-    } else if (exp.guild_id === null) {
-      serverTag = ' _(Global)_';
-    }
-
     const customMessage = exp?.content?.includes('{user}')
       ? exp.content.replace('{user}', userMention)
       : getRandomFlavor(name, userMention) || `💥 ${userMention} is experiencing **"${name}"** energy today!`;
-
-    const fullMessage = `${customMessage}${serverTag}`;
 
     if (exp?.type === 'image') {
       try {
         const imageRes = await fetch(exp.content);
         if (!imageRes.ok) throw new Error(`Image failed to load: ${imageRes.status}`);
         const file = new AttachmentBuilder(exp.content);
-        return await interaction.reply({ content: fullMessage, files: [file] });
+        return await interaction.reply({ content: customMessage, files: [file] });
       } catch (err) {
         console.error('❌ Image fetch error:', err.message);
-        return await interaction.reply({ content: `⚠️ Image broken, but:\n${fullMessage}`, flags: 64 });
+        return await interaction.reply({ content: `⚠️ Image broken, but:\n${customMessage}`, flags: 64 });
       }
     }
 
-    return interaction.reply({ content: fullMessage });
+    return interaction.reply({ content: customMessage });
   }
 };
+
 
 
 
