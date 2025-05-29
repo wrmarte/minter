@@ -27,7 +27,10 @@ module.exports = {
   async execute(interaction, { pg }) {
     const ownerId = process.env.BOT_OWNER_ID;
     if (interaction.user.id !== ownerId) {
-      return interaction.reply({ content: '❌ Only the bot owner can use this.', ephemeral: true });
+      return interaction.reply({
+        content: '❌ Only the bot owner can use this.',
+        ephemeral: true
+      });
     }
 
     const name = interaction.options.getString('name').toLowerCase();
@@ -36,7 +39,7 @@ module.exports = {
     const guildId = interaction.guild?.id ?? null;
 
     try {
-      // ✅ Ensure table + constraint exists first (safe to rerun)
+      // 🧱 Create table if missing
       await pg.query(`
         CREATE TABLE IF NOT EXISTS expressions (
           name TEXT NOT NULL,
@@ -47,6 +50,7 @@ module.exports = {
         );
       `);
 
+      // 💾 Insert or update entry
       await pg.query(
         `INSERT INTO expressions (name, type, content, guild_id)
          VALUES ($1, $2, $3, $4)
@@ -55,13 +59,20 @@ module.exports = {
         [name, type, content, guildId]
       );
 
-      return interaction.reply(`✅ Expression \`${name}\` saved for this server (${guildId ?? 'global'}) as \`${type}\`.`);
+      return interaction.reply({
+        content: `✅ Expression \`${name}\` saved as \`${type}\` for ${guildId ? 'this server' : 'global'}.`,
+        ephemeral: true
+      });
     } catch (err) {
       console.error('❌ Failed to insert expression:', err);
-      return interaction.reply('⚠️ Error saving the expression.');
+      return interaction.reply({
+        content: '⚠️ Failed to save the expression.',
+        ephemeral: true
+      });
     }
   }
 };
+
 
 
 
