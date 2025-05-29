@@ -98,10 +98,14 @@ const flavorMap = {
 };
 
 function getRandomFlavor(name, userMention) {
-  const flavors = flavorMap[name] ?? [];
-  if (!flavors.length) return null;
-  const pick = flavors[Math.floor(Math.random() * flavors.length)];
+  const options = flavorMap[name] || [];
+  if (options.length === 0) return null;
+  const pick = options[Math.floor(Math.random() * options.length)];
   return pick.replace('{user}', userMention);
 }
 
-module.exports = { flavorMap, getRandomFlavor };
+module.exports = {
+  flavorMap,
+  getRandomFlavor
+};
+
