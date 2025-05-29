@@ -29,7 +29,7 @@ module.exports = {
     if (interaction.user.id !== ownerId) {
       return interaction.reply({
         content: '❌ Only the bot owner can use this.',
-        ephemeral: true
+        flags: 64
       });
     }
 
@@ -39,7 +39,7 @@ module.exports = {
     const guildId = interaction.guild?.id ?? null;
 
     try {
-      // 🧱 Create table if missing
+      // 🔧 Auto-create table if missing
       await pg.query(`
         CREATE TABLE IF NOT EXISTS expressions (
           name TEXT NOT NULL,
@@ -50,28 +50,42 @@ module.exports = {
         );
       `);
 
-      // 💾 Insert or update entry
-      await pg.query(
-        `INSERT INTO expressions (name, type, content, guild_id)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT (name, guild_id)
-         DO UPDATE SET type = EXCLUDED.type, content = EXCLUDED.content`,
-        [name, type, content, guildId]
-      );
+      // 🔧 Ensure correct PK constraint exists
+      await pg.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'expressions_name_guild_id_pk'
+          ) THEN
+            ALTER TABLE expressions
+            DROP CONSTRAINT IF EXISTS expressions_pkey,
+            ADD CONSTRAINT expressions_name_guild_id_pk PRIMARY KEY (name, guild_id);
+          END IF;
+        END$$;
+      `);
+
+      // ✅ Upsert expression
+      await pg.query(`
+        INSERT INTO expressions (name, type, content, guild_id)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (name, guild_id)
+        DO UPDATE SET type = EXCLUDED.type, content = EXCLUDED.content
+      `, [name, type, content, guildId]);
 
       return interaction.reply({
-        content: `✅ Expression \`${name}\` saved as \`${type}\` for ${guildId ? 'this server' : 'global'}.`,
-        ephemeral: true
+        content: `✅ Expression \`${name}\` saved for this server as \`${type}\`.`,
+        flags: 64
       });
     } catch (err) {
       console.error('❌ Failed to insert expression:', err);
       return interaction.reply({
-        content: '⚠️ Failed to save the expression.',
-        ephemeral: true
+        content: `⚠️ Error saving the expression: \`${err.code}\``,
+        flags: 64
       });
     }
   }
 };
+
 
 
 
