@@ -36,6 +36,17 @@ module.exports = {
     const guildId = interaction.guild?.id ?? null;
 
     try {
+      // ✅ Ensure table + constraint exists first (safe to rerun)
+      await pg.query(`
+        CREATE TABLE IF NOT EXISTS expressions (
+          name TEXT NOT NULL,
+          type TEXT NOT NULL,
+          content TEXT NOT NULL,
+          guild_id TEXT,
+          PRIMARY KEY (name, guild_id)
+        );
+      `);
+
       await pg.query(
         `INSERT INTO expressions (name, type, content, guild_id)
          VALUES ($1, $2, $3, $4)
@@ -51,6 +62,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
