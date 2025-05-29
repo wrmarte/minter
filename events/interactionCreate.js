@@ -5,8 +5,10 @@ module.exports = (client, pg) => {
       const { commandName, options } = interaction;
       const focused = options.getFocused(true);
       const guildId = interaction.guild?.id;
+      const userId = interaction.user.id;
+      const ownerId = process.env.BOT_OWNER_ID;
 
-      if (!guildId) {
+      if (!guildId && commandName !== 'exp') {
         console.warn('⚠️ Autocomplete interaction received without a guild context.');
         return await interaction.respond([]);
       }
@@ -36,11 +38,20 @@ module.exports = (client, pg) => {
         }
 
         if (commandName === 'exp' && focused.name === 'name') {
-          const res = await pg.query(
-            `SELECT DISTINCT name FROM expressions WHERE guild_id = $1 OR guild_id IS NULL`,
-            [guildId]
-          );
+          let query;
+          let params;
+
+          if (userId === ownerId) {
+            query = `SELECT DISTINCT name FROM expressions`;
+            params = [];
+          } else {
+            query = `SELECT DISTINCT name FROM expressions WHERE guild_id = $1 OR guild_id IS NULL`;
+            params = [guildId];
+          }
+
+          const res = await pg.query(query, params);
           rows = res.rows;
+
           console.log('🎯 Autocomplete /exp returned rows:', rows);
         }
 
@@ -95,6 +106,7 @@ module.exports = (client, pg) => {
     }
   });
 };
+
 
 
 
