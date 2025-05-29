@@ -1,4 +1,4 @@
-const { flavorMap } = require('../utils/flavorMap'); // optional if flavorMap moved out
+const { flavorMap } = require('../utils/flavorMap'); // optional if flavorMap moved out.
 
 module.exports = (client, pg) => {
   client.on('interactionCreate', async interaction => {
