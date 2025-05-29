@@ -1,3 +1,5 @@
+const { flavorMap } = require('../utils/flavorMap'); // optional if flavorMap moved out
+
 module.exports = (client, pg) => {
   client.on('interactionCreate', async interaction => {
     // 🔍 Autocomplete support
@@ -38,9 +40,7 @@ module.exports = (client, pg) => {
         }
 
         if (commandName === 'exp' && focused.name === 'name') {
-          let query;
-          let params;
-
+          let query, params;
           const isOwner = userId === ownerId;
 
           if (isOwner) {
@@ -54,7 +54,16 @@ module.exports = (client, pg) => {
           const res = await pg.query(query, params);
           rows = res.rows;
 
-          const choices = await Promise.all(rows
+          // Add flavorMap keys as built-in suggestions
+          const flavorChoices = Object.keys(flavorMap)
+            .filter(key => key.toLowerCase().includes(focused.value.toLowerCase()))
+            .map(key => ({
+              name: `${key} — 🔥 Built-in`,
+              value: key
+            }));
+
+          // Add database entries
+          const dbChoices = await Promise.all(rows
             .filter(row => !!row.name)
             .map(async row => {
               let tag;
@@ -66,21 +75,22 @@ module.exports = (client, pg) => {
                 const guild = await client.guilds.fetch(row.guild_id).catch(() => null);
                 tag = guild ? `🛡️ ${guild.name}` : '🛡️ Other Server';
               }
+
               return {
                 name: `${row.name} — ${tag}`,
                 value: row.name
               };
             }));
 
-          const filtered = choices
+          const filtered = [...flavorChoices, ...dbChoices]
             .filter(c => c.name.toLowerCase().includes(focused.value.toLowerCase()))
             .slice(0, 25);
 
-          console.log(`🔁 Tagged Autocomplete for /exp:`, filtered);
+          console.log(`🔁 Autocomplete for /exp:`, filtered);
           return await interaction.respond(filtered);
         }
 
-        // Normal autocomplete fallback
+        // Default autocomplete fallback
         const choices = rows.map(row => row.name).filter(Boolean);
         const filtered = choices
           .filter(name => name.toLowerCase().includes(focused.value.toLowerCase()))
@@ -131,6 +141,7 @@ module.exports = (client, pg) => {
     }
   });
 };
+
 
 
 
