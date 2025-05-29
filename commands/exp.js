@@ -2,6 +2,7 @@ const { SlashCommandBuilder, AttachmentBuilder } = require('discord.js');
 const fetch = require('node-fetch');
 
 const flavorMap = {
+  // [same flavorMap content as provided]
   rich: [
     '💸 {user} just flexed their bags. Money talks.',
     '🤑 {user} is feeling extra loaded today.',
@@ -120,33 +121,30 @@ module.exports = {
 
   async execute(interaction, { pg }) {
     const ownerId = process.env.BOT_OWNER_ID;
-    if (interaction.user.id !== ownerId) {
-      return interaction.reply({ content: '❌ Only the bot owner can use this command.', flags: 64 });
-    }
+    const isOwner = interaction.user.id === ownerId;
 
     const name = interaction.options.getString('name').toLowerCase();
     const guildId = interaction.guild?.id ?? null;
+    const userMention = `<@${interaction.user.id}>`;
 
     const res = await pg.query(`
       SELECT * FROM expressions
-      WHERE name = $1 AND (guild_id = $2 OR guild_id IS NULL)
-      ORDER BY guild_id DESC
+      WHERE name = $1
+      AND ($2 = $3 OR guild_id = $2 OR guild_id IS NULL)
+      ORDER BY RANDOM()
       LIMIT 1
-    `, [name, guildId]);
+    `, [name, isOwner ? 'global' : guildId, guildId]);
 
-    if (!res.rows.length) {
+    if (!res.rows.length && !flavorMap[name]) {
       return interaction.reply({ content: `❌ No expression named \`${name}\` found.`, flags: 64 });
     }
 
     const exp = res.rows[0];
-    const userMention = `<@${interaction.user.id}>`;
-
-    // 🎲 Randomize message
-    const customMessage = exp.content.includes('{user}')
+    const customMessage = exp?.content?.includes('{user}')
       ? exp.content.replace('{user}', userMention)
       : getRandomFlavor(name, userMention) || `💥 ${userMention} is experiencing **"${name}"** energy today!`;
 
-    if (exp.type === 'image') {
+    if (exp?.type === 'image') {
       try {
         const imageRes = await fetch(exp.content);
         if (!imageRes.ok) throw new Error(`Image failed to load: ${imageRes.status}`);
@@ -161,6 +159,7 @@ module.exports = {
     return interaction.reply({ content: customMessage });
   }
 };
+
 
 
 
