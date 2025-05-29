@@ -33,19 +33,24 @@ module.exports = {
     const name = interaction.options.getString('name').toLowerCase();
     const type = interaction.options.getString('type');
     const content = interaction.options.getString('content');
+    const guildId = interaction.guild?.id ?? null;
 
     try {
+      // Insert or update expression for this guild or globally
       await pg.query(
-        `INSERT INTO expressions (name, type, content)
-         VALUES ($1, $2, $3)
-         ON CONFLICT (name) DO UPDATE SET type = EXCLUDED.type, content = EXCLUDED.content`,
-        [name, type, content]
+        `INSERT INTO expressions (name, type, content, guild_id)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (name, guild_id) DO UPDATE
+         SET type = EXCLUDED.type, content = EXCLUDED.content`,
+        [name, type, content, guildId]
       );
 
-      return interaction.reply(`✅ Expression \`${name}\` saved as \`${type}\`.`);
+      const scopeLabel = guildId ? `for this server` : `globally`;
+      return interaction.reply(`✅ Expression \`${name}\` saved ${scopeLabel} as \`${type}\`.`);
     } catch (err) {
       console.error('❌ Failed to insert expression:', err);
       return interaction.reply('⚠️ Error saving the expression.');
     }
   }
 };
+
