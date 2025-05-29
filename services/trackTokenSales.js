@@ -95,7 +95,12 @@ module.exports = async function trackTokenSales(client) {
           if (!ROUTERS.includes(fromAddr)) continue;
           if (to.toLowerCase() === '0x0000000000000000000000000000000000000000') continue;
 
-          const tokenAmount = parseFloat(formatUnits(amount, 18));
+          const tokenAmountRaw = BigInt(amount.toString());
+          const tokenAmountFormatted = new Intl.NumberFormat('en-US', {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2
+          }).format(Number(formatUnits(tokenAmountRaw, 18)));
+
           const tokenPrice = await getTokenPriceUSD(address);
           const marketCap = await getMarketCapUSD(address);
 
@@ -113,7 +118,7 @@ module.exports = async function trackTokenSales(client) {
             console.warn(`⚠️ TX fetch failed: ${err.message}`);
           }
 
-          const rocketIntensity = Math.min(Math.floor(tokenAmount / 100), 10);
+          const rocketIntensity = Math.min(Math.floor(Number(formatUnits(tokenAmountRaw, 18)) / 100), 10);
           const rocketLine = '🟥🟦🚀'.repeat(Math.max(1, rocketIntensity));
 
           const getColorByUsdSpent = (usd) => {
@@ -134,8 +139,8 @@ module.exports = async function trackTokenSales(client) {
               .setDescription(`${rocketLine}`)
               .setImage('https://iili.io/3tSecKP.gif')
               .addFields(
-                { name: '💸 Spent', value: `$${usdSpent.toFixed(2)} / ${ethSpent.toFixed(4)} ETH`, inline: true },
-                { name: '🎯 Got', value: `${tokenAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${name}`, inline: true },
+                { name: '💸 Spent', value: `$${usdSpent.toFixed(4)} / ${ethSpent.toFixed(4)} ETH`, inline: true },
+                { name: '🎯 Got', value: `${tokenAmountFormatted} ${name}`, inline: true },
                 { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
                 { name: '📊 MCap', value: marketCap && marketCap > 0 ? `$${marketCap.toLocaleString()}` : 'Fetching...', inline: true }
               )
@@ -174,7 +179,7 @@ module.exports = async function trackTokenSales(client) {
           rotateProvider();
         }
 
-        await new Promise((r) => setTimeout(r, 500)); // Cooldown to prevent hammering
+        await new Promise((r) => setTimeout(r, 500));
       }
     });
   }
@@ -210,6 +215,7 @@ async function getMarketCapUSD(address) {
     return 0;
   }
 }
+
 
 
 
