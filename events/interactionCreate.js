@@ -2,6 +2,7 @@ const { flavorMap } = require('../utils/flavorMap');  // ✅ pulling from extern
 
 module.exports = (client, pg) => {
   client.on('interactionCreate', async interaction => {
+
     // 🔍 Autocomplete support
     if (interaction.isAutocomplete()) {
       const { commandName, options } = interaction;
@@ -19,10 +20,7 @@ module.exports = (client, pg) => {
         let rows = [];
 
         if (commandName === 'flexduo' && focused.name === 'name') {
-          const res = await pg.query(
-            `SELECT name FROM flex_duo WHERE guild_id = $1`,
-            [guildId]
-          );
+          const res = await pg.query(`SELECT name FROM flex_duo WHERE guild_id = $1`, [guildId]);
           rows = res.rows;
         }
 
@@ -32,17 +30,14 @@ module.exports = (client, pg) => {
            commandName === 'flexspin') &&
           focused.name === 'name'
         ) {
-          const res = await pg.query(
-            `SELECT name FROM flex_projects WHERE guild_id = $1`,
-            [guildId]
-          );
+          const res = await pg.query(`SELECT name FROM flex_projects WHERE guild_id = $1`, [guildId]);
           rows = res.rows;
         }
 
         if (commandName === 'exp' && focused.name === 'name') {
           // Build native flavorMap options
           const flavorChoices = Object.keys(flavorMap).map(name => ({
-            name: `${name} [🔥 Built-in]`,
+            name: `${name}  (🔥 Built-in)`,
             value: name
           }));
 
@@ -59,14 +54,27 @@ module.exports = (client, pg) => {
 
           const res = await pg.query(query, params);
           const dbChoices = await Promise.all(res.rows.map(async row => {
-            let tag;
-            if (row.guild_id === null) tag = '[🌐 Global]';
-            else if (row.guild_id === guildId) tag = '[🏠 This Server]';
-            else {
+            let tagIcon, tagLabel;
+
+            if (row.guild_id === null) {
+              tagIcon = '🌐'; tagLabel = 'Global';
+            } else if (row.guild_id === guildId) {
+              tagIcon = '🏠'; tagLabel = 'This Server';
+            } else {
               const guild = await client.guilds.fetch(row.guild_id).catch(() => null);
-              tag = guild ? `[🛡️ ${guild.name}]` : '[🛡️ Other Server]';
+              if (guild) {
+                tagIcon = '🛡️';
+                tagLabel = guild.name.length > 20 ? guild.name.slice(0, 20) + '…' : guild.name;
+              } else {
+                tagIcon = '🛡️';
+                tagLabel = 'Other Server';
+              }
             }
-            return { name: `${row.name} ${tag}`, value: row.name };
+
+            return {
+              name: `${row.name}  (${tagIcon} ${tagLabel})`,
+              value: row.name
+            };
           }));
 
           const combined = [...flavorChoices, ...dbChoices];
@@ -117,7 +125,6 @@ module.exports = (client, pg) => {
       }
     } catch (error) {
       console.error(`❌ Error executing /${interaction.commandName}:`, error);
-
       try {
         if (interaction.deferred || interaction.replied) {
           await interaction.editReply({ content: '⚠️ Something went wrong.' });
@@ -130,6 +137,7 @@ module.exports = (client, pg) => {
     }
   });
 };
+
 
 
 
