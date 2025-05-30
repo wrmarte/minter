@@ -96,6 +96,8 @@ for (const file of eventFiles) {
     console.error(`❌ Failed to load event ${file}:`, err);
   }
 }
+const messageCreate = require('./events/messageCreate');
+messageCreate(client, pg);
 
 // === Start the Bot ===
 client.login(process.env.DISCORD_BOT_TOKEN)
