@@ -9,7 +9,7 @@ module.exports = {
     const userMention = `<@${message.author.id}>`;
 
     if (!name) {
-      return message.reply('❌ Please provide an expression name. Example: `!exp rich`');
+      return message.reply({ content: '❌ Please provide an expression name. Example: `!exp rich`' });
     }
 
     // Check DB first
@@ -41,10 +41,11 @@ module.exports = {
     // If not in DB, check built-in flavorMap fallback
     if (flavorMap[name]) {
       const builtMessage = getRandomFlavor(name, userMention);
-      return message.reply(builtMessage);
+      return message.reply({ content: builtMessage });  // ✅ wrap into { content: }
     }
 
-    return message.reply('❌ Unknown expression. Use valid keywords or saved expressions.');
+    return message.reply({ content: '❌ Unknown expression. Use valid keywords or saved expressions.' });
   }
 };
+
 
