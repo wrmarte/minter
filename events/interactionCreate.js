@@ -1,9 +1,7 @@
-const { flavorMap } = require('../utils/flavorMap');  // ✅ pulling from external now
+const { flavorMap } = require('../utils/flavorMap');
 
 module.exports = (client, pg) => {
   client.on('interactionCreate', async interaction => {
-
-    // 🔍 Autocomplete support
     if (interaction.isAutocomplete()) {
       const { commandName, options } = interaction;
       const focused = options.getFocused(true);
@@ -19,30 +17,34 @@ module.exports = (client, pg) => {
       try {
         let rows = [];
 
+        // Flex duo autocomplete
         if (commandName === 'flexduo' && focused.name === 'name') {
           const res = await pg.query(`SELECT name FROM flex_duo WHERE guild_id = $1`, [guildId]);
           rows = res.rows;
         }
 
+        // Flex, flexplus, flexspin autocomplete
         if (
           (commandName === 'flex' ||
-           commandName === 'flexplus' ||
-           commandName === 'flexspin') &&
+            commandName === 'flexplus' ||
+            commandName === 'flexspin') &&
           focused.name === 'name'
         ) {
           const res = await pg.query(`SELECT name FROM flex_projects WHERE guild_id = $1`, [guildId]);
           rows = res.rows;
         }
 
+        // EXP AUTOCOMPLETE 🔥
         if (commandName === 'exp' && focused.name === 'name') {
-          // Build native flavorMap options
-          const flavorChoices = Object.keys(flavorMap).map(name => ({
-            name: `${name}  (🔥 Built-in)`,
+          const isOwner = userId === ownerId;
+
+          // Built-in flavors
+          const builtInChoices = Object.keys(flavorMap).map(name => ({
+            name: `🔥 ${name} (Built-in)`,
             value: name
           }));
 
           let query, params;
-          const isOwner = userId === ownerId;
 
           if (isOwner) {
             query = `SELECT DISTINCT name, guild_id FROM expressions`;
@@ -53,41 +55,43 @@ module.exports = (client, pg) => {
           }
 
           const res = await pg.query(query, params);
-          const dbChoices = await Promise.all(res.rows.map(async row => {
-            let tagIcon, tagLabel;
+
+          // Group results
+          const thisServer = [];
+          const global = [];
+          const otherServers = [];
+
+          for (const row of res.rows) {
+            if (!row.name) continue;
 
             if (row.guild_id === null) {
-              tagIcon = '🌐'; tagLabel = 'Global';
+              global.push({ name: `🌐 ${row.name} (Global)`, value: row.name });
             } else if (row.guild_id === guildId) {
-              tagIcon = '🏠'; tagLabel = 'This Server';
+              thisServer.push({ name: `🏠 ${row.name} (This Server)`, value: row.name });
             } else {
               const guild = await client.guilds.fetch(row.guild_id).catch(() => null);
-              if (guild) {
-                tagIcon = '🛡️';
-                tagLabel = guild.name.length > 20 ? guild.name.slice(0, 20) + '…' : guild.name;
-              } else {
-                tagIcon = '🛡️';
-                tagLabel = 'Other Server';
-              }
+              const guildName = guild ? guild.name : 'Other Server';
+              otherServers.push({ name: `🛡️ ${row.name} (${guildName})`, value: row.name });
             }
+          }
 
-            return {
-              name: `${row.name}  (${tagIcon} ${tagLabel})`,
-              value: row.name
-            };
-          }));
-
-          const combined = [...flavorChoices, ...dbChoices];
+          // Merge all groups with polished ordering
+          const combined = [
+            ...builtInChoices,
+            ...thisServer,
+            ...global,
+            ...otherServers
+          ];
 
           const filtered = combined
             .filter(c => c.name.toLowerCase().includes(focused.value.toLowerCase()))
             .slice(0, 25);
 
-          console.log(`🔁 Professional Autocomplete for /exp:`, filtered);
+          console.log(`🔁 Polished Autocomplete for /exp:`, filtered);
           return await interaction.respond(filtered);
         }
 
-        // Normal autocomplete fallback
+        // Default fallback for flex/flexplus/flexspin etc
         const choices = rows.map(row => row.name).filter(Boolean);
         const filtered = choices
           .filter(name => name.toLowerCase().includes(focused.value.toLowerCase()))
@@ -125,6 +129,7 @@ module.exports = (client, pg) => {
       }
     } catch (error) {
       console.error(`❌ Error executing /${interaction.commandName}:`, error);
+
       try {
         if (interaction.deferred || interaction.replied) {
           await interaction.editReply({ content: '⚠️ Something went wrong.' });
@@ -137,6 +142,7 @@ module.exports = (client, pg) => {
     }
   });
 };
+
 
 
 
