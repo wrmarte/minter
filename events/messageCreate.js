@@ -20,15 +20,15 @@ module.exports = (client, pg) => {
     try {
       let customMessage = null;
 
-      // 1️⃣ First: check flavorMap built-ins
+      // 1️⃣ Built-in first
       if (flavorMap[name]) {
         customMessage = getRandomFlavor(name, userMention);
         return message.reply({ content: customMessage });
       }
 
-      // 2️⃣ Then: check DB saved expressions (global & server)
+      // 2️⃣ Then DB query (patched SQL logic)
       const res = await pg.query(
-        `SELECT * FROM expressions WHERE name = $1 AND (guild_id = $2 OR guild_id IS NULL) ORDER BY RANDOM() LIMIT 1`,
+        `SELECT * FROM expressions WHERE name = $1 AND (guild_id = $2 OR ($2 IS NULL AND guild_id IS NULL)) ORDER BY RANDOM() LIMIT 1`,
         [name, guildId]
       );
 
@@ -46,7 +46,7 @@ module.exports = (client, pg) => {
         return message.reply({ content: customMessage });
       }
 
-      // 3️⃣ Fallback:
+      // 3️⃣ Fallback
       return message.reply({ content: '❌ Unknown expression. Use valid keywords or saved expressions.' });
 
     } catch (err) {
@@ -55,5 +55,6 @@ module.exports = (client, pg) => {
     }
   });
 };
+
 
 
