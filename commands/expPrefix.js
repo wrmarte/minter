@@ -1,39 +1,50 @@
 const { AttachmentBuilder } = require('discord.js');
-
-// Same data
-const expMap = {
-  rich: {
-    url: 'https://your-railway-domain.com/images/exp-rich.png',
-    message: '💸 {user} feeling **rich** today!'
-  },
-  poor: {
-    url: 'https://your-railway-domain.com/images/exp-poor.png',
-    message: '💀 {user} is **down bad** today...'
-  },
-  blessed: {
-    url: 'https://your-railway-domain.com/images/exp-blessed.png',
-    message: '🌈 {user} is feeling **blessed**!'
-  }
-};
+const { flavorMap, getRandomFlavor } = require('../utils/flavorMap');  // ✅ Unified flavorMap
 
 module.exports = {
   name: 'exp',
-  async execute(message, args) {
-    const ownerId = process.env.BOT_OWNER_ID;
-    if (message.author.id !== ownerId) {
-      return message.reply('❌ Only the bot owner can use this command.');
-    }
-
+  async execute(message, args, { pg }) {
     const name = args[0]?.toLowerCase();
-    const exp = expMap[name];
+    const guildId = message.guild?.id ?? null;
+    const userMention = `<@${message.author.id}>`;
 
-    if (!exp) {
-      return message.reply('❌ Unknown experience. Try `!exp rich`, `!exp poor`, or `!exp blessed`.');
+    if (!name) {
+      return message.reply('❌ Please provide an expression name. Example: `!exp rich`');
     }
 
-    const image = new AttachmentBuilder(exp.url);
-    const msg = exp.message.replace('{user}', `<@${message.author.id}>`);
+    // Check DB first
+    let res = await pg.query(
+      `SELECT * FROM expressions WHERE name = $1 AND (guild_id = $2 OR guild_id IS NULL) ORDER BY RANDOM() LIMIT 1`,
+      [name, guildId]
+    );
 
-    await message.reply({ content: msg, files: [image] });
+    let customMessage;
+    if (res.rows.length > 0) {
+      const exp = res.rows[0];
+      customMessage = exp?.content?.includes('{user}')
+        ? exp.content.replace('{user}', userMention)
+        : getRandomFlavor(name, userMention) || `💥 ${userMention} is experiencing **"${name}"** energy today!`;
+
+      if (exp?.type === 'image') {
+        try {
+          const file = new AttachmentBuilder(exp.content);
+          return await message.reply({ content: customMessage, files: [file] });
+        } catch (err) {
+          console.error('❌ Image fetch error:', err.message);
+          return await message.reply({ content: `⚠️ Image broken, but:\n${customMessage}` });
+        }
+      }
+
+      return message.reply({ content: customMessage });
+    }
+
+    // If not in DB, check built-in flavorMap fallback
+    if (flavorMap[name]) {
+      const builtMessage = getRandomFlavor(name, userMention);
+      return message.reply(builtMessage);
+    }
+
+    return message.reply('❌ Unknown expression. Use valid keywords or saved expressions.');
   }
 };
+
