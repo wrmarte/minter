@@ -6,12 +6,14 @@ const path = require('path');
 
 console.log("👀 Booting from:", __dirname);
 
-// === Discord Client ===.
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages]
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent  // ✅ <-- This was missing!
+  ]
 });
 
-// === PostgreSQL Setup ===
 const pg = new PgClient({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
@@ -20,7 +22,6 @@ pg.connect();
 
 client.pg = pg;
 
-// ✅ Create Tables
 pg.query(`CREATE TABLE IF NOT EXISTS contract_watchlist (
   name TEXT PRIMARY KEY,
   address TEXT NOT NULL,
@@ -44,10 +45,8 @@ pg.query(`CREATE TABLE IF NOT EXISTS tracked_tokens (
   PRIMARY KEY (address, guild_id)
 )`);
 
-// 🔧 Patch for older tracked_tokens missing channel_id column
 pg.query(`ALTER TABLE tracked_tokens ADD COLUMN IF NOT EXISTS channel_id TEXT`);
 
-// ✅ Expressions table for /exp and /addexp (with guild_id support)
 pg.query(`
   CREATE TABLE IF NOT EXISTS expressions (
     name TEXT NOT NULL,
@@ -57,10 +56,8 @@ pg.query(`
     PRIMARY KEY (name, guild_id)
 )`);
 
-// 🛠 Patch for legacy expressions table missing guild_id
 pg.query(`ALTER TABLE expressions ADD COLUMN IF NOT EXISTS guild_id TEXT`);
 
-// === Command Loader ===
 client.commands = new Collection();
 client.prefixCommands = new Collection();
 
@@ -84,22 +81,18 @@ try {
   console.error('❌ Error loading commands:', err);
 }
 
-// === Event Loader (now passes pg to each event) ===
 const eventFiles = fs.readdirSync(path.join(__dirname, 'events')).filter(file => file.endsWith('.js'));
 
 for (const file of eventFiles) {
   try {
     const registerEvent = require(`./events/${file}`);
-    registerEvent(client, pg); // ✅ pass pg
+    registerEvent(client, pg);
     console.log(`📡 Event loaded: ${file}`);
   } catch (err) {
     console.error(`❌ Failed to load event ${file}:`, err);
   }
 }
-const messageCreate = require('./events/messageCreate');
-messageCreate(client, pg);
 
-// === Start the Bot ===
 client.login(process.env.DISCORD_BOT_TOKEN)
   .then(() => {
     console.log(`✅ Logged in as ${client.user.tag}`);
@@ -107,6 +100,7 @@ client.login(process.env.DISCORD_BOT_TOKEN)
   .catch(err => {
     console.error('❌ Discord login failed:', err);
   });
+
 
 
 
