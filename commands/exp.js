@@ -2,6 +2,9 @@ const { SlashCommandBuilder, AttachmentBuilder } = require('discord.js');
 const fetch = require('node-fetch');
 const { flavorMap, getRandomFlavor } = require('../utils/flavorMap');
 
+// Simple in-memory cache for guild names
+const guildNameCache = new Map();
+
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('exp')
@@ -96,8 +99,13 @@ module.exports = {
       } else if (row.guild_id === guildId) {
         thisServer.push({ name: `🏠 ${row.name} (This Server)`, value: row.name });
       } else {
-        const guild = await client.guilds.fetch(row.guild_id).catch(() => null);
-        const guildName = guild ? guild.name : 'Other Server';
+        // Lazy cache lookup for guild names
+        let guildName = guildNameCache.get(row.guild_id);
+        if (!guildName) {
+          const guild = await client.guilds.fetch(row.guild_id).catch(() => null);
+          guildName = guild?.name ?? 'Other Server';
+          guildNameCache.set(row.guild_id, guildName);
+        }
         otherServers.push({ name: `🛡️ ${row.name} (${guildName})`, value: row.name });
       }
     }
@@ -113,9 +121,10 @@ module.exports = {
       .filter(c => c.name.toLowerCase().includes(focused.toLowerCase()))
       .slice(0, 25);
 
-    console.log(`🔁 Polished Autocomplete for /exp:`, filtered);
+    console.log(`🔁 Optimized Autocomplete for /exp:`, filtered);
     await interaction.respond(filtered);
   }
 };
+
 
 
