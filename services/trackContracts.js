@@ -1,6 +1,7 @@
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const { JsonRpcProvider, Contract, Interface, id, ZeroAddress, ethers } = require('ethers');
 const fetch = require('node-fetch');
+const fs = require('fs');
 const path = require('path');
 const { getEthPriceFromToken, getRealDexPriceForToken } = require('./price');
 const { shortWalletLink, loadJson, saveJson, seenPath, seenSalesPath } = require('../utils/helpers');
@@ -32,39 +33,13 @@ const TOKEN_NAME_TO_ADDRESS = {
   'ADRIAN': '0x7e99075ce287f1cf8cbcaaa6a1c7894e404fd7ea'
 };
 
-// Dynamically assign WETH per network
-const WETH_BY_NETWORK = {
-  base: '0x4200000000000000000000000000000000000006',
-  eth: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'
-};
-
-// Fetch metadata image (cached in memory to speed up)
-const tokenUriCache = {};
-async function fetchTokenImage(contract, tokenId) {
-  const cacheKey = `${contract.address}-${tokenId}`;
-  if (tokenUriCache[cacheKey]) return tokenUriCache[cacheKey];
-
-  try {
-    let uri = await contract.tokenURI(tokenId);
-    if (uri.startsWith('ipfs://')) uri = uri.replace('ipfs://', 'https://ipfs.io/ipfs/');
-    const meta = await fetch(uri).then(res => res.json());
-    let imageUrl = meta?.image || 'https://via.placeholder.com/400x400.png?text=NFT';
-    if (imageUrl.startsWith('ipfs://')) imageUrl = imageUrl.replace('ipfs://', 'https://ipfs.io/ipfs/');
-    tokenUriCache[cacheKey] = imageUrl;
-    return imageUrl;
-  } catch {
-    return 'https://via.placeholder.com/400x400.png?text=NFT';
-  }
-}
-
-// Send embeds safely across servers
 async function sendToUniqueGuilds(channel_ids, embed, row = null, client) {
   const sentChannels = new Set();
   for (const id of channel_ids) {
     if (sentChannels.has(id)) continue;
     try {
       const ch = await client.channels.fetch(id);
-      if (!ch?.send) continue;
+      if (!ch || !ch.send) continue;
       await ch.send({ embeds: [embed], components: row ? [row] : [] });
       sentChannels.add(id);
     } catch (err) {
@@ -74,9 +49,7 @@ async function sendToUniqueGuilds(channel_ids, embed, row = null, client) {
 }
 
 async function trackAllContracts(client, contractRow) {
-  const { name, address, mint_price, mint_token, mint_token_symbol, channel_ids, network } = contractRow;
-
-  const WETH_ADDRESS = WETH_BY_NETWORK[network];
+  const { name, address, mint_price, mint_token, mint_token_symbol, channel_ids } = contractRow;
 
   const abi = [
     'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
@@ -89,8 +62,13 @@ async function trackAllContracts(client, contractRow) {
   let seenSales = new Set(loadJson(seenSalesPath(name)) || []);
 
   provider.on('block', async (blockNumber) => {
-    const fromBlock = blockNumber - 1;
+    const fromBlock = Math.max(blockNumber - 1, 0);
     const toBlock = blockNumber;
+
+    if (fromBlock >= toBlock) {
+      console.warn(`🛑 Skipping invalid block range: fromBlock=${fromBlock}, toBlock=${toBlock}`);
+      return;
+    }
 
     let logs;
     try {
@@ -102,6 +80,7 @@ async function trackAllContracts(client, contractRow) {
       });
     } catch (err) {
       console.warn(`⚠️ getLogs failed: ${err.message}`);
+      await new Promise(r => setTimeout(r, 500)); // cooldown to avoid RPC spam
       return;
     }
 
@@ -110,7 +89,11 @@ async function trackAllContracts(client, contractRow) {
 
     for (const log of logs) {
       let parsed;
-      try { parsed = iface.parseLog(log); } catch { continue; }
+      try {
+        parsed = iface.parseLog(log);
+      } catch {
+        continue;
+      }
 
       const { from, to, tokenId } = parsed.args;
       const tokenIdStr = tokenId.toString();
@@ -118,7 +101,19 @@ async function trackAllContracts(client, contractRow) {
       if (from === ZeroAddress) {
         if (seenTokenIds.has(tokenIdStr)) continue;
         seenTokenIds.add(tokenIdStr);
-        const imageUrl = await fetchTokenImage(contract, tokenId);
+
+        let imageUrl = 'https://via.placeholder.com/400x400.png?text=NFT';
+        try {
+          let uri = await contract.tokenURI(tokenId);
+          if (uri.startsWith('ipfs://')) uri = uri.replace('ipfs://', 'https://ipfs.io/ipfs/');
+          const meta = await fetch(uri).then(res => res.json());
+          if (meta?.image) {
+            imageUrl = meta.image.startsWith('ipfs://')
+              ? meta.image.replace('ipfs://', 'https://ipfs.io/ipfs/')
+              : meta.image;
+          }
+        } catch {}
+
         newMints.push({ tokenId, imageUrl, to, tokenAmount: mint_price });
       } else {
         if (seenSales.has(tokenIdStr)) continue;
@@ -129,6 +124,7 @@ async function trackAllContracts(client, contractRow) {
 
     if (newMints.length) {
       const total = newMints.reduce((sum, m) => sum + Number(m.tokenAmount), 0);
+
       let tokenAddr = mint_token.toLowerCase();
       if (TOKEN_NAME_TO_ADDRESS[mint_token_symbol.toUpperCase()]) {
         tokenAddr = TOKEN_NAME_TO_ADDRESS[mint_token_symbol.toUpperCase()].toLowerCase();
@@ -151,67 +147,77 @@ async function trackAllContracts(client, contractRow) {
         )
         .setThumbnail(newMints[0].imageUrl)
         .setColor(219139)
-        .setFooter({ text: `Live on ${network.toUpperCase()} • Powered by PimpsDev` })
+        .setFooter({ text: `Live on Base • Powered by PimpsDev` })
         .setTimestamp();
 
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
           .setLabel('🔗 View on OpenSea')
           .setStyle(ButtonStyle.Link)
-          .setURL(`https://opensea.io/assets/${network === 'base' ? 'base' : 'ethereum'}/${address}/${newMints[0].tokenId}`)
+          .setURL(`https://opensea.io/assets/base/${address}/${newMints[0].tokenId}`)
       );
 
       await sendToUniqueGuilds(channel_ids, embed, row, client);
     }
 
     for (const sale of newSales) {
-      const imageUrl = await fetchTokenImage(contract, sale.tokenId);
-      let tokenAmount = null, ethValue = null, methodUsed = null;
-      let receipt, tx;
+      let imageUrl = 'https://via.placeholder.com/400x400.png?text=SOLD';
+      let tokenAmount = null;
+      let ethValue = null;
+      let methodUsed = null;
 
+      try {
+        let uri = await contract.tokenURI(sale.tokenId);
+        if (uri.startsWith('ipfs://')) uri = uri.replace('ipfs://', 'https://ipfs.io/ipfs/');
+        const meta = await fetch(uri).then(res => res.json());
+        if (meta?.image) {
+          imageUrl = meta.image.startsWith('ipfs://')
+            ? meta.image.replace('ipfs://', 'https://ipfs.io/ipfs/')
+            : meta.image;
+        }
+      } catch {}
+
+      let receipt, tx;
       try {
         receipt = await provider.getTransactionReceipt(sale.transactionHash);
         tx = await provider.getTransaction(sale.transactionHash);
         if (!receipt || !tx) continue;
-      } catch { continue; }
+      } catch {
+        continue;
+      }
 
-      // ETH sale detection
       if (tx.value && tx.value > 0n) {
         tokenAmount = parseFloat(ethers.formatEther(tx.value));
         ethValue = tokenAmount;
         methodUsed = '🟦 ETH';
       }
 
-      // Token sale detection
       if (!ethValue) {
-        for (const log of receipt.logs) {
-          if (log.address !== address && log.topics[0] === id('Transfer(address,address,uint256)')) {
-            const seller = ethers.getAddress(sale.from);
-            const to = ethers.getAddress('0x' + log.topics[2].slice(26));
-            if (to.toLowerCase() === seller.toLowerCase()) {
-              const tokenContract = log.address;
-              tokenAmount = parseFloat(ethers.formatUnits(log.data, 18));
-              ethValue = await getRealDexPriceForToken(tokenAmount, tokenContract)
-                || (await getEthPriceFromToken(tokenContract)) * tokenAmount;
-              methodUsed = `🟨 ${mint_token_symbol}`;
-              break;
-            }
-          }
-        }
-      }
+        const transferTopic = id('Transfer(address,address,uint256)');
+        const seller = ethers.getAddress(sale.from);
 
-      // WETH Offer detection (finally fixed!)
-      if (!ethValue) {
         for (const log of receipt.logs) {
-          if (log.address.toLowerCase() === WETH_ADDRESS.toLowerCase() && log.topics[0] === id('Transfer(address,address,uint256)')) {
-            const wethAmount = parseFloat(ethers.formatUnits(log.data, 18));
-            const toAddr = '0x' + log.topics[2].slice(26);
-            if (toAddr.toLowerCase() === sale.from.toLowerCase()) {
-              tokenAmount = wethAmount;
-              ethValue = wethAmount;
-              methodUsed = '🟧 WETH Offer';
-              break;
-            }
+          if (
+            log.topics[0] === transferTopic &&
+            log.topics.length === 3 &&
+            log.address !== address
+          ) {
+            try {
+              const to = ethers.getAddress('0x' + log.topics[2].slice(26));
+              if (to.toLowerCase() === seller.toLowerCase()) {
+                const tokenContract = log.address;
+                tokenAmount = parseFloat(ethers.formatUnits(log.data, 18));
+                ethValue = await getRealDexPriceForToken(tokenAmount, tokenContract);
+
+                if (!ethValue) {
+                  const fallback = await getEthPriceFromToken(tokenContract);
+                  ethValue = fallback ? tokenAmount * fallback : null;
+                }
+
+                methodUsed = `🟨 ${mint_token_symbol}`;
+                break;
+              }
+            } catch {}
           }
         }
       }
@@ -228,10 +234,10 @@ async function trackAllContracts(client, contractRow) {
           { name: `⇄ ETH Value`, value: `${ethValue.toFixed(4)} ETH`, inline: true },
           { name: `💳 Method`, value: methodUsed || 'Unknown', inline: true }
         )
-        .setURL(`https://opensea.io/assets/${network === 'base' ? 'base' : 'ethereum'}/${address}/${sale.tokenId}`)
+        .setURL(`https://opensea.io/assets/base/${address}/${sale.tokenId}`)
         .setThumbnail(imageUrl)
         .setColor(0x66cc66)
-        .setFooter({ text: `Live on ${network.toUpperCase()} • Powered by PimpsDev` })
+        .setFooter({ text: 'Powered by PimpsDev' })
         .setTimestamp();
 
       await sendToUniqueGuilds(channel_ids, embed, null, client);
@@ -244,7 +250,8 @@ async function trackAllContracts(client, contractRow) {
   });
 }
 
-module.exports = { trackAllContracts };
-
+module.exports = {
+  trackAllContracts
+};
 
 
