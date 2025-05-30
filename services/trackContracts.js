@@ -9,29 +9,54 @@ const { shortWalletLink, loadJson, saveJson, seenPath, seenSalesPath } = require
 const rpcUrls = [
   'https://mainnet.base.org',
   'https://developer-access-mainnet.base.org',
-  'https://base.blockpi.network/v1/rpc/public'
+  'https://base.blockpi.network/v1/rpc/public',
+  'https://base.meowrpc.com'
 ];
 
-let provider;
+let currentRpc = 0;
+let provider = new JsonRpcProvider(rpcUrls[currentRpc]);
 
-(async () => {
-  for (const url of rpcUrls) {
-    try {
-      const temp = new JsonRpcProvider(url);
-      await temp.getBlockNumber();
-      provider = temp;
-      console.log(`✅ Connected to RPC: ${url}`);
-      break;
-    } catch {
-      console.warn(`⚠️ Failed RPC: ${url}`);
-    }
+async function rotateProvider() {
+  currentRpc = (currentRpc + 1) % rpcUrls.length;
+  provider = new JsonRpcProvider(rpcUrls[currentRpc]);
+  console.warn(`🔁 Switched RPC: ${rpcUrls[currentRpc]}`);
+}
+
+async function validateProvider() {
+  try {
+    await provider.getBlockNumber();
+    console.log(`✅ Connected to RPC: ${rpcUrls[currentRpc]}`);
+  } catch {
+    console.warn('❌ Provider failed. Rotating...');
+    await rotateProvider();
+    await validateProvider();
   }
-  if (!provider) throw new Error('❌ All RPCs failed');
-})();
+}
+validateProvider();
 
 const TOKEN_NAME_TO_ADDRESS = {
   'ADRIAN': '0x7e99075ce287f1cf8cbcaaa6a1c7894e404fd7ea'
 };
+
+const WETH_ADDRESS = '0x4200000000000000000000000000000000000006';
+const TOKENURI_CACHE = {};
+
+async function fetchTokenImage(contract, tokenId) {
+  const key = `${contract.address}-${tokenId}`;
+  if (TOKENURI_CACHE[key]) return TOKENURI_CACHE[key];
+
+  try {
+    let uri = await contract.tokenURI(tokenId);
+    if (uri.startsWith('ipfs://')) uri = uri.replace('ipfs://', 'https://ipfs.io/ipfs/');
+    const meta = await fetch(uri).then(res => res.json());
+    let imageUrl = meta?.image || 'https://via.placeholder.com/400x400.png?text=NFT';
+    if (imageUrl.startsWith('ipfs://')) imageUrl = imageUrl.replace('ipfs://', 'https://ipfs.io/ipfs/');
+    TOKENURI_CACHE[key] = imageUrl;
+    return imageUrl;
+  } catch {
+    return 'https://via.placeholder.com/400x400.png?text=NFT';
+  }
+}
 
 async function sendToUniqueGuilds(channel_ids, embed, row = null, client) {
   const sentChannels = new Set();
@@ -39,7 +64,7 @@ async function sendToUniqueGuilds(channel_ids, embed, row = null, client) {
     if (sentChannels.has(id)) continue;
     try {
       const ch = await client.channels.fetch(id);
-      if (!ch || !ch.send) continue;
+      if (!ch?.send) continue;
       await ch.send({ embeds: [embed], components: row ? [row] : [] });
       sentChannels.add(id);
     } catch (err) {
@@ -47,7 +72,6 @@ async function sendToUniqueGuilds(channel_ids, embed, row = null, client) {
     }
   }
 }
-
 async function trackAllContracts(client, contractRow) {
   const { name, address, mint_price, mint_token, mint_token_symbol, channel_ids } = contractRow;
 
@@ -62,13 +86,8 @@ async function trackAllContracts(client, contractRow) {
   let seenSales = new Set(loadJson(seenSalesPath(name)) || []);
 
   provider.on('block', async (blockNumber) => {
-    const fromBlock = Math.max(blockNumber - 1, 0);
+    const fromBlock = blockNumber - 1;
     const toBlock = blockNumber;
-
-    if (fromBlock >= toBlock) {
-      console.warn(`🛑 Skipping invalid block range: fromBlock=${fromBlock}, toBlock=${toBlock}`);
-      return;
-    }
 
     let logs;
     try {
@@ -80,7 +99,7 @@ async function trackAllContracts(client, contractRow) {
       });
     } catch (err) {
       console.warn(`⚠️ getLogs failed: ${err.message}`);
-      await new Promise(r => setTimeout(r, 500)); // cooldown to avoid RPC spam
+      await rotateProvider();
       return;
     }
 
@@ -91,9 +110,7 @@ async function trackAllContracts(client, contractRow) {
       let parsed;
       try {
         parsed = iface.parseLog(log);
-      } catch {
-        continue;
-      }
+      } catch { continue; }
 
       const { from, to, tokenId } = parsed.args;
       const tokenIdStr = tokenId.toString();
@@ -101,19 +118,7 @@ async function trackAllContracts(client, contractRow) {
       if (from === ZeroAddress) {
         if (seenTokenIds.has(tokenIdStr)) continue;
         seenTokenIds.add(tokenIdStr);
-
-        let imageUrl = 'https://via.placeholder.com/400x400.png?text=NFT';
-        try {
-          let uri = await contract.tokenURI(tokenId);
-          if (uri.startsWith('ipfs://')) uri = uri.replace('ipfs://', 'https://ipfs.io/ipfs/');
-          const meta = await fetch(uri).then(res => res.json());
-          if (meta?.image) {
-            imageUrl = meta.image.startsWith('ipfs://')
-              ? meta.image.replace('ipfs://', 'https://ipfs.io/ipfs/')
-              : meta.image;
-          }
-        } catch {}
-
+        const imageUrl = await fetchTokenImage(contract, tokenId);
         newMints.push({ tokenId, imageUrl, to, tokenAmount: mint_price });
       } else {
         if (seenSales.has(tokenIdStr)) continue;
@@ -122,9 +127,9 @@ async function trackAllContracts(client, contractRow) {
       }
     }
 
+    // MINT BLOCK
     if (newMints.length) {
       const total = newMints.reduce((sum, m) => sum + Number(m.tokenAmount), 0);
-
       let tokenAddr = mint_token.toLowerCase();
       if (TOKEN_NAME_TO_ADDRESS[mint_token_symbol.toUpperCase()]) {
         tokenAddr = TOKEN_NAME_TO_ADDRESS[mint_token_symbol.toUpperCase()].toLowerCase();
@@ -160,64 +165,54 @@ async function trackAllContracts(client, contractRow) {
       await sendToUniqueGuilds(channel_ids, embed, row, client);
     }
 
+    // SALES BLOCK
     for (const sale of newSales) {
-      let imageUrl = 'https://via.placeholder.com/400x400.png?text=SOLD';
-      let tokenAmount = null;
-      let ethValue = null;
-      let methodUsed = null;
-
-      try {
-        let uri = await contract.tokenURI(sale.tokenId);
-        if (uri.startsWith('ipfs://')) uri = uri.replace('ipfs://', 'https://ipfs.io/ipfs/');
-        const meta = await fetch(uri).then(res => res.json());
-        if (meta?.image) {
-          imageUrl = meta.image.startsWith('ipfs://')
-            ? meta.image.replace('ipfs://', 'https://ipfs.io/ipfs/')
-            : meta.image;
-        }
-      } catch {}
-
+      const imageUrl = await fetchTokenImage(contract, sale.tokenId);
+      let tokenAmount = null, ethValue = null, methodUsed = null;
       let receipt, tx;
+
       try {
         receipt = await provider.getTransactionReceipt(sale.transactionHash);
         tx = await provider.getTransaction(sale.transactionHash);
         if (!receipt || !tx) continue;
-      } catch {
-        continue;
-      }
+      } catch { continue; }
 
+      // ETH sale
       if (tx.value && tx.value > 0n) {
         tokenAmount = parseFloat(ethers.formatEther(tx.value));
         ethValue = tokenAmount;
         methodUsed = '🟦 ETH';
       }
 
+      // TOKEN sale
       if (!ethValue) {
-        const transferTopic = id('Transfer(address,address,uint256)');
-        const seller = ethers.getAddress(sale.from);
-
         for (const log of receipt.logs) {
-          if (
-            log.topics[0] === transferTopic &&
-            log.topics.length === 3 &&
-            log.address !== address
-          ) {
-            try {
-              const to = ethers.getAddress('0x' + log.topics[2].slice(26));
-              if (to.toLowerCase() === seller.toLowerCase()) {
-                const tokenContract = log.address;
-                tokenAmount = parseFloat(ethers.formatUnits(log.data, 18));
-                ethValue = await getRealDexPriceForToken(tokenAmount, tokenContract);
+          if (log.address !== address && log.topics[0] === id('Transfer(address,address,uint256)')) {
+            const seller = ethers.getAddress(sale.from);
+            const to = ethers.getAddress('0x' + log.topics[2].slice(26));
+            if (to.toLowerCase() === seller.toLowerCase()) {
+              const tokenContract = log.address;
+              tokenAmount = parseFloat(ethers.formatUnits(log.data, 18));
+              ethValue = await getRealDexPriceForToken(tokenAmount, tokenContract) || (await getEthPriceFromToken(tokenContract)) * tokenAmount;
+              methodUsed = `🟨 ${mint_token_symbol}`;
+              break;
+            }
+          }
+        }
+      }
 
-                if (!ethValue) {
-                  const fallback = await getEthPriceFromToken(tokenContract);
-                  ethValue = fallback ? tokenAmount * fallback : null;
-                }
-
-                methodUsed = `🟨 ${mint_token_symbol}`;
-                break;
-              }
-            } catch {}
+      // WETH offer
+      if (!ethValue) {
+        for (const log of receipt.logs) {
+          if (log.address.toLowerCase() === WETH_ADDRESS.toLowerCase() && log.topics[0] === id('Transfer(address,address,uint256)')) {
+            const wethAmount = parseFloat(ethers.formatUnits(log.data, 18));
+            const toAddr = '0x' + log.topics[2].slice(26);
+            if (toAddr.toLowerCase() === sale.from.toLowerCase()) {
+              tokenAmount = wethAmount;
+              ethValue = wethAmount;
+              methodUsed = '🟧 WETH Offer';
+              break;
+            }
           }
         }
       }
@@ -243,6 +238,7 @@ async function trackAllContracts(client, contractRow) {
       await sendToUniqueGuilds(channel_ids, embed, null, client);
     }
 
+    // Save state every 10 blocks
     if (blockNumber % 10 === 0) {
       saveJson(seenPath(name), [...seenTokenIds]);
       saveJson(seenSalesPath(name), [...seenSales]);
@@ -250,8 +246,6 @@ async function trackAllContracts(client, contractRow) {
   });
 }
 
-module.exports = {
-  trackAllContracts
-};
+module.exports = { trackAllContracts };
 
 
