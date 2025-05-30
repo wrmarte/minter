@@ -61,21 +61,61 @@ module.exports = {
   async autocomplete(interaction, { pg }) {
     const focused = interaction.options.getFocused();
     const guildId = interaction.guild?.id ?? null;
+    const userId = interaction.user.id;
+    const ownerId = process.env.BOT_OWNER_ID;
+    const isOwner = userId === ownerId;
+    const client = interaction.client;
 
-    const res = await pg.query(
-      `SELECT DISTINCT name FROM expressions WHERE guild_id = $1 OR guild_id IS NULL`,
-      [guildId]
-    );
+    // Built-in flavorMap options
+    const builtInChoices = Object.keys(flavorMap).map(name => ({
+      name: `🔥 ${name} (Built-in)`,
+      value: name
+    }));
 
-    const dbOptions = res.rows.map(row => row.name);
-    const flavorOptions = Object.keys(flavorMap);
+    let query, params;
 
-    const allOptions = [...new Set([...dbOptions, ...flavorOptions])]
-      .filter(name => name.toLowerCase().includes(focused.toLowerCase()))
-      .slice(0, 25)
-      .map(name => ({ name, value: name }));
+    if (isOwner) {
+      query = `SELECT DISTINCT name, guild_id FROM expressions`;
+      params = [];
+    } else {
+      query = `SELECT DISTINCT name, guild_id FROM expressions WHERE guild_id = $1 OR guild_id IS NULL`;
+      params = [guildId];
+    }
 
-    await interaction.respond(allOptions);
+    const res = await pg.query(query, params);
+
+    const thisServer = [];
+    const global = [];
+    const otherServers = [];
+
+    for (const row of res.rows) {
+      if (!row.name) continue;
+
+      if (row.guild_id === null) {
+        global.push({ name: `🌐 ${row.name} (Global)`, value: row.name });
+      } else if (row.guild_id === guildId) {
+        thisServer.push({ name: `🏠 ${row.name} (This Server)`, value: row.name });
+      } else {
+        const guild = await client.guilds.fetch(row.guild_id).catch(() => null);
+        const guildName = guild ? guild.name : 'Other Server';
+        otherServers.push({ name: `🛡️ ${row.name} (${guildName})`, value: row.name });
+      }
+    }
+
+    const combined = [
+      ...builtInChoices,
+      ...thisServer,
+      ...global,
+      ...otherServers
+    ];
+
+    const filtered = combined
+      .filter(c => c.name.toLowerCase().includes(focused.toLowerCase()))
+      .slice(0, 25);
+
+    console.log(`🔁 Polished Autocomplete for /exp:`, filtered);
+    await interaction.respond(filtered);
   }
 };
+
 
