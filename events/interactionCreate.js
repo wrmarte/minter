@@ -1,4 +1,4 @@
-const { flavorMap } = require('../utils/flavorMap'); // optional if flavorMap moved out.
+const { flavorMap } = require('../utils/flavorMap');  // ✅ pulling from external now
 
 module.exports = (client, pg) => {
   client.on('interactionCreate', async interaction => {
@@ -40,6 +40,12 @@ module.exports = (client, pg) => {
         }
 
         if (commandName === 'exp' && focused.name === 'name') {
+          // Build native flavorMap options
+          const flavorChoices = Object.keys(flavorMap).map(name => ({
+            name: `${name} [🔥 Built-in]`,
+            value: name
+          }));
+
           let query, params;
           const isOwner = userId === ownerId;
 
@@ -52,45 +58,28 @@ module.exports = (client, pg) => {
           }
 
           const res = await pg.query(query, params);
-          rows = res.rows;
+          const dbChoices = await Promise.all(res.rows.map(async row => {
+            let tag;
+            if (row.guild_id === null) tag = '[🌐 Global]';
+            else if (row.guild_id === guildId) tag = '[🏠 This Server]';
+            else {
+              const guild = await client.guilds.fetch(row.guild_id).catch(() => null);
+              tag = guild ? `[🛡️ ${guild.name}]` : '[🛡️ Other Server]';
+            }
+            return { name: `${row.name} ${tag}`, value: row.name };
+          }));
 
-          // Add flavorMap keys as built-in suggestions
-          const flavorChoices = Object.keys(flavorMap)
-            .filter(key => key.toLowerCase().includes(focused.value.toLowerCase()))
-            .map(key => ({
-              name: `${key} — 🔥 Built-in`,
-              value: key
-            }));
+          const combined = [...flavorChoices, ...dbChoices];
 
-          // Add database entries
-          const dbChoices = await Promise.all(rows
-            .filter(row => !!row.name)
-            .map(async row => {
-              let tag;
-              if (row.guild_id === null) {
-                tag = '🌐 Global';
-              } else if (row.guild_id === guildId) {
-                tag = '🏠 This Server';
-              } else {
-                const guild = await client.guilds.fetch(row.guild_id).catch(() => null);
-                tag = guild ? `🛡️ ${guild.name}` : '🛡️ Other Server';
-              }
-
-              return {
-                name: `${row.name} — ${tag}`,
-                value: row.name
-              };
-            }));
-
-          const filtered = [...flavorChoices, ...dbChoices]
+          const filtered = combined
             .filter(c => c.name.toLowerCase().includes(focused.value.toLowerCase()))
             .slice(0, 25);
 
-          console.log(`🔁 Autocomplete for /exp:`, filtered);
+          console.log(`🔁 Professional Autocomplete for /exp:`, filtered);
           return await interaction.respond(filtered);
         }
 
-        // Default autocomplete fallback
+        // Normal autocomplete fallback
         const choices = rows.map(row => row.name).filter(Boolean);
         const filtered = choices
           .filter(name => name.toLowerCase().includes(focused.value.toLowerCase()))
@@ -141,6 +130,7 @@ module.exports = (client, pg) => {
     }
   });
 };
+
 
 
 
