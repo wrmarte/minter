@@ -1,6 +1,8 @@
-const { flavorMap } = require('../utils/flavorMap');
+const { flavorMap } = require('../utils/flavorMap');  // ✅ pulling from external now
 
 module.exports = (client, pg) => {
+  const guildNameCache = new Map();
+
   client.on('interactionCreate', async interaction => {
     if (interaction.isAutocomplete()) {
       const { commandName, options } = interaction;
@@ -8,37 +10,28 @@ module.exports = (client, pg) => {
       const guildId = interaction.guild?.id;
       const userId = interaction.user.id;
       const ownerId = process.env.BOT_OWNER_ID;
-
-      if (!guildId && commandName !== 'exp') {
-        console.warn('⚠️ Autocomplete interaction received without a guild context.');
-        return await interaction.respond([]);
-      }
+      const isOwner = userId === ownerId;
 
       try {
         let rows = [];
 
-        // Flex duo autocomplete
+        // --- FLEXDUO ---
         if (commandName === 'flexduo' && focused.name === 'name') {
           const res = await pg.query(`SELECT name FROM flex_duo WHERE guild_id = $1`, [guildId]);
           rows = res.rows;
         }
 
-        // Flex, flexplus, flexspin autocomplete
+        // --- FLEX FAMILY ---
         if (
-          (commandName === 'flex' ||
-            commandName === 'flexplus' ||
-            commandName === 'flexspin') &&
+          ['flex', 'flexplus', 'flexspin'].includes(commandName) &&
           focused.name === 'name'
         ) {
           const res = await pg.query(`SELECT name FROM flex_projects WHERE guild_id = $1`, [guildId]);
           rows = res.rows;
         }
 
-        // EXP AUTOCOMPLETE 🔥
+        // --- EXP AUTOCOMPLETE ---
         if (commandName === 'exp' && focused.name === 'name') {
-          const isOwner = userId === ownerId;
-
-          // Built-in flavors
           const builtInChoices = Object.keys(flavorMap).map(name => ({
             name: `🔥 ${name} (Built-in)`,
             value: name
@@ -56,7 +49,6 @@ module.exports = (client, pg) => {
 
           const res = await pg.query(query, params);
 
-          // Group results
           const thisServer = [];
           const global = [];
           const otherServers = [];
@@ -69,36 +61,35 @@ module.exports = (client, pg) => {
             } else if (row.guild_id === guildId) {
               thisServer.push({ name: `🏠 ${row.name} (This Server)`, value: row.name });
             } else {
-              const guild = await client.guilds.fetch(row.guild_id).catch(() => null);
-              const guildName = guild ? guild.name : 'Other Server';
+              let guildName = guildNameCache.get(row.guild_id);
+              if (!guildName) {
+                const guild = await client.guilds.fetch(row.guild_id).catch(() => null);
+                guildName = guild?.name ?? 'Other Server';
+                guildNameCache.set(row.guild_id, guildName);
+              }
               otherServers.push({ name: `🛡️ ${row.name} (${guildName})`, value: row.name });
             }
           }
 
-          // Merge all groups with polished ordering
-          const combined = [
-            ...builtInChoices,
-            ...thisServer,
-            ...global,
-            ...otherServers
-          ];
+          const combined = [...builtInChoices, ...thisServer, ...global, ...otherServers];
 
           const filtered = combined
             .filter(c => c.name.toLowerCase().includes(focused.value.toLowerCase()))
             .slice(0, 25);
 
-          console.log(`🔁 Polished Autocomplete for /exp:`, filtered);
+          console.log(`🔁 Optimized Autocomplete for /exp:`, filtered);
           return await interaction.respond(filtered);
         }
 
-        // Default fallback for flex/flexplus/flexspin etc
+        // --- DEFAULT AUTOCOMPLETE ---
         const choices = rows.map(row => row.name).filter(Boolean);
         const filtered = choices
           .filter(name => name.toLowerCase().includes(focused.value.toLowerCase()))
           .slice(0, 25);
 
-        console.log(`🔁 Autocomplete for /${commandName}:`, filtered);
+        console.log(`🔁 Default Autocomplete for /${commandName}:`, filtered);
         return await interaction.respond(filtered.map(name => ({ name, value: name })));
+
       } catch (err) {
         console.error('❌ Autocomplete error:', err);
         try {
@@ -109,7 +100,7 @@ module.exports = (client, pg) => {
       }
     }
 
-    // 🧠 Slash command handler
+    // --- Slash Command Execution ---
     if (!interaction.isChatInputCommand()) return;
 
     console.log(`🎯 Received slash command: /${interaction.commandName}`);
@@ -142,6 +133,7 @@ module.exports = (client, pg) => {
     }
   });
 };
+
 
 
 
