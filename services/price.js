@@ -1,6 +1,7 @@
 const fetch = require('node-fetch');
 const { Contract, ethers } = require('ethers');
 
+// Direct contract mappings
 const TOKEN_NAME_TO_ADDRESS = {
   'ADRIAN': '0x7e99075ce287f1cf8cbcaaa6a1c7894e404fd7ea'
 };
@@ -10,19 +11,20 @@ const FALLBACK_PRICES = {
 };
 
 const WETH_ADDRESS = '0x4200000000000000000000000000000000000006';
-const provider = new ethers.JsonRpcProvider('https://mainnet.base.org'); 
 const routerAddress = '0x327Df1E6de05895d2ab08513aaDD9313Fe505d86';
-const abi = ['function getAmountsOut(uint amountIn, address[] path) view returns (uint[] memory)'];
-const router = new Contract(routerAddress, abi, provider);
+const routerAbi = ['function getAmountsOut(uint amountIn, address[] path) view returns (uint[] memory)'];
 
-// Fetch DEX price (tokenAmount is input amount in tokens)
+// ⚠ IMPORTANT: inject provider from global provider.js
+const { getProvider } = require('./provider');
+const router = new Contract(routerAddress, routerAbi, getProvider());
+
+// Fetch DEX price (tokenAmount = input amount of tokens)
 async function getRealDexPriceForToken(tokenAmount, tokenAddress) {
   try {
     if (!tokenAddress) return null;
-
     const tokenAddr = tokenAddress.toLowerCase();
 
-    // WETH special case: 1:1 ETH
+    // WETH shortcut
     if (tokenAddr === WETH_ADDRESS.toLowerCase()) {
       return parseFloat(tokenAmount);
     }
@@ -46,11 +48,7 @@ async function getEthPriceFromToken(tokenInput) {
     addr = TOKEN_NAME_TO_ADDRESS[tokenInput.toUpperCase()].toLowerCase();
   }
   if (!addr || addr === 'eth') return 1;
-
-  // WETH shortcut bypass
-  if (addr === WETH_ADDRESS.toLowerCase()) {
-    return 1;
-  }
+  if (addr === WETH_ADDRESS.toLowerCase()) return 1;
 
   try {
     const res = await fetch(`https://api.coingecko.com/api/v3/simple/token_price/base?contract_addresses=${addr}&vs_currencies=eth`);
@@ -70,8 +68,6 @@ async function getEthPriceFromToken(tokenInput) {
   return FALLBACK_PRICES[addr] || null;
 }
 
-module.exports = {
-  getEthPriceFromToken,
-  getRealDexPriceForToken
-};
+module.exports = { getRealDexPriceForToken, getEthPriceFromToken };
+
 
