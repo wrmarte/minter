@@ -1,33 +1,14 @@
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
-const { JsonRpcProvider, Contract, Interface, id, ZeroAddress, ethers } = require('ethers');
+const { Contract, Interface, id, ZeroAddress, ethers } = require('ethers');
 const fetch = require('node-fetch');
 const fs = require('fs');
 const path = require('path');
 const { getEthPriceFromToken, getRealDexPriceForToken } = require('./price');
 const { shortWalletLink, loadJson, saveJson, seenPath, seenSalesPath } = require('../utils/helpers');
+const { getProvider } = require('./services/provider');
+const { fetchLogs } = require('./services/logScanner');
 
-const rpcUrls = [
-  'https://mainnet.base.org',
-  'https://developer-access-mainnet.base.org',
-  'https://base.blockpi.network/v1/rpc/public'
-];
-
-let provider;
-
-(async () => {
-  for (const url of rpcUrls) {
-    try {
-      const temp = new JsonRpcProvider(url);
-      await temp.getBlockNumber();
-      provider = temp;
-      console.log(`✅ Connected to RPC: ${url}`);
-      break;
-    } catch {
-      console.warn(`⚠️ Failed RPC: ${url}`);
-    }
-  }
-  if (!provider) throw new Error('❌ All RPCs failed');
-})();
+// ✅ Remove the old rpcUrls block entirely, we no longer need it.
 
 const TOKEN_NAME_TO_ADDRESS = {
   'ADRIAN': '0x7e99075ce287f1cf8cbcaaa6a1c7894e404fd7ea'
@@ -56,31 +37,21 @@ async function trackAllContracts(client, contractRow) {
     'function tokenURI(uint256 tokenId) view returns (string)'
   ];
   const iface = new Interface(abi);
-  const contract = new Contract(address, abi, provider);
+  const contract = new Contract(address, abi, getProvider());
 
   let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
   let seenSales = new Set(loadJson(seenSalesPath(name)) || []);
 
-  provider.on('block', async (blockNumber) => {
-    const fromBlock = Math.max(blockNumber - 1, 0);
+  // ⚠ Block listener stays — but use better range
+  getProvider().on('block', async (blockNumber) => {
+    const fromBlock = Math.max(blockNumber - 5, 0);
     const toBlock = blockNumber;
-
-    if (fromBlock >= toBlock) {
-      console.warn(`🛑 Skipping invalid block range: fromBlock=${fromBlock}, toBlock=${toBlock}`);
-      return;
-    }
 
     let logs;
     try {
-      logs = await provider.getLogs({
-        fromBlock,
-        toBlock,
-        address,
-        topics: [id('Transfer(address,address,uint256)')]
-      });
+      logs = await fetchLogs(address, fromBlock, toBlock, id('Transfer(address,address,uint256)'));
     } catch (err) {
-      console.warn(`⚠️ getLogs failed: ${err.message}`);
-      await new Promise(r => setTimeout(r, 500)); // cooldown to avoid RPC spam
+      console.warn(`⚠️ fetchLogs failed: ${err.message}`);
       return;
     }
 
@@ -122,6 +93,7 @@ async function trackAllContracts(client, contractRow) {
       }
     }
 
+    // ✅ Mint Embed logic stays exactly like your original
     if (newMints.length) {
       const total = newMints.reduce((sum, m) => sum + Number(m.tokenAmount), 0);
 
@@ -160,6 +132,7 @@ async function trackAllContracts(client, contractRow) {
       await sendToUniqueGuilds(channel_ids, embed, row, client);
     }
 
+    // ✅ Sales logic untouched, fully compatible
     for (const sale of newSales) {
       let imageUrl = 'https://via.placeholder.com/400x400.png?text=SOLD';
       let tokenAmount = null;
@@ -179,8 +152,8 @@ async function trackAllContracts(client, contractRow) {
 
       let receipt, tx;
       try {
-        receipt = await provider.getTransactionReceipt(sale.transactionHash);
-        tx = await provider.getTransaction(sale.transactionHash);
+        receipt = await getProvider().getTransactionReceipt(sale.transactionHash);
+        tx = await getProvider().getTransaction(sale.transactionHash);
         if (!receipt || !tx) continue;
       } catch {
         continue;
@@ -208,12 +181,10 @@ async function trackAllContracts(client, contractRow) {
                 const tokenContract = log.address;
                 tokenAmount = parseFloat(ethers.formatUnits(log.data, 18));
                 ethValue = await getRealDexPriceForToken(tokenAmount, tokenContract);
-
                 if (!ethValue) {
                   const fallback = await getEthPriceFromToken(tokenContract);
                   ethValue = fallback ? tokenAmount * fallback : null;
                 }
-
                 methodUsed = `🟨 ${mint_token_symbol}`;
                 break;
               }
