@@ -5,8 +5,9 @@ const fs = require('fs');
 const path = require('path');
 const { getEthPriceFromToken, getRealDexPriceForToken } = require('./price');
 const { shortWalletLink, loadJson, saveJson, seenPath, seenSalesPath } = require('../utils/helpers');
-const { getProvider } = require('./services/provider');
-const { fetchLogs } = require('./services/logScanner');
+const { getProvider } = require('./provider');
+const { fetchLogs } = require('./logScanner');
+
 
 // ✅ Remove the old rpcUrls block entirely, we no longer need it.
 
