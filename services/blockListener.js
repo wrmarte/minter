@@ -1,5 +1,5 @@
 const { getProvider } = require('./provider');
-const { processContracts, processTokenBuys } = require('./trackProcessors');
+const processUnifiedBlock = require('./globalBlockProcessor');
 
 module.exports = async function startGlobalBlockListener(client) {
   const provider = getProvider();
@@ -11,10 +11,10 @@ module.exports = async function startGlobalBlockListener(client) {
     const toBlock = blockNumber;
 
     try {
-      await processContracts(client, fromBlock, toBlock);
-      await processTokenBuys(client, fromBlock, toBlock);
+      await processUnifiedBlock(client, fromBlock, toBlock);
     } catch (err) {
-      console.warn(`⚠️ Global Block Processor Error: ${err.message}`);
+      console.warn(`⚠️ Global Processor Error: ${err.message}`);
     }
   });
-}
+};
+
