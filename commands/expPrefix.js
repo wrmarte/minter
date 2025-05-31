@@ -5,27 +5,21 @@ const fetch = require('node-fetch');
 module.exports = {
   name: 'exp',
   async execute(message, args, { pg }) {
-    const ownerId = process.env.BOT_OWNER_ID;
     const guildId = message.guild?.id ?? null;
-
-    if (message.author.id !== ownerId) {
-      return message.reply('❌ Only the bot owner can use this command.');
-    }
+    const userMention = `<@${message.author.id}>`;
 
     const name = args[0]?.toLowerCase();
     if (!name) {
-      return message.reply('❌ Please specify an expression name.');
+      return message.reply('❌ Please provide an expression name. Example: `!exp rich`');
     }
 
-    const userMention = `<@${message.author.id}>`;
-
-    // 1️⃣ Check hardcoded flavorMap first
+    // 1️⃣ Check built-in flavorMap first
     if (flavorMap[name]) {
       const msg = getRandomFlavor(name, userMention);
       return message.reply(msg);
     }
 
-    // 2️⃣ Check PostgreSQL database for custom ones
+    // 2️⃣ Check PostgreSQL database for saved expressions
     const res = await pg.query(`
       SELECT * FROM expressions 
       WHERE name = $1 AND (guild_id = $2 OR guild_id IS NULL) 
@@ -36,7 +30,7 @@ module.exports = {
       const exp = res.rows[0];
       const customMessage = exp?.content?.includes('{user}')
         ? exp.content.replace('{user}', userMention)
-        : `${userMention} is experiencing **"${name}"** energy today!`;
+        : `${userMention} is vibing "${name}" right now!`;
 
       if (exp?.type === 'image') {
         try {
@@ -53,10 +47,10 @@ module.exports = {
       return message.reply(customMessage);
     }
 
-    // 3️⃣ AI fallback if nothing found
+    // 3️⃣ AI fallback if not found anywhere
     try {
       let aiResponse = await getGroqAI(name, userMention);
-      aiResponse = aiResponse.replace(/^"(.+(?="$))"$/, '$1'); // Remove quotes if any
+      aiResponse = cleanQuotes(aiResponse); // Clean up any extra quotes
       return message.reply(aiResponse);
     } catch (err) {
       console.error('❌ AI error:', err);
@@ -65,7 +59,7 @@ module.exports = {
   }
 };
 
-// 🔥 Groq AI function (same as slash)
+// 🔥 Groq AI function (exactly matching your slash /exp)
 async function getGroqAI(keyword, userMention) {
   const url = 'https://api.groq.com/openai/v1/chat/completions';
   const apiKey = process.env.GROQ_API_KEY;
@@ -79,7 +73,7 @@ async function getGroqAI(keyword, userMention) {
       },
       {
         role: 'user',
-        content: `Someone typed "${keyword}". Generate a super short savage one-liner. Include ${userMention} inside. Use Discord/Web3 slang. Max 1 sentence.`
+        content: `Someone typed "${keyword}". Generate a super short savage one-liner. Include ${userMention}. Use Discord/Web3 slang. Max 1 sentence.`
       }
     ],
     max_tokens: 50,
@@ -104,6 +98,12 @@ async function getGroqAI(keyword, userMention) {
   const data = await res.json();
   return data.choices[0].message.content.trim();
 }
+
+// 🧼 Utility to strip any surrounding quotes from AI
+function cleanQuotes(text) {
+  return text.replace(/^"(.*)"$/, '$1').trim();
+}
+
 
 
 
