@@ -1,6 +1,15 @@
-const { AttachmentBuilder } = require('discord.js');
+const { AttachmentBuilder, EmbedBuilder } = require('discord.js');
 const { flavorMap, getRandomFlavor } = require('../utils/flavorMap');
 const fetch = require('node-fetch');
+
+// Random color generator (same as slash)
+function getRandomColor() {
+  const colors = [
+    0xFFD700, 0x66CCFF, 0xFF66CC, 0xFF4500,
+    0x00FF99, 0xFF69B4, 0x00CED1, 0xFFA500, 0x8A2BE2
+  ];
+  return colors[Math.floor(Math.random() * colors.length)];
+}
 
 module.exports = {
   name: 'exp',
@@ -13,13 +22,14 @@ module.exports = {
       return message.reply('❌ Please provide an expression name. Example: `!exp rich`');
     }
 
-    // 1️⃣ Check built-in flavorMap first
+    // ✅ Check built-in flavorMap first
     if (flavorMap[name]) {
       const msg = getRandomFlavor(name, userMention);
-      return message.reply(msg);
+      const embed = new EmbedBuilder().setDescription(msg).setColor(getRandomColor());
+      return message.reply({ embeds: [embed] });
     }
 
-    // 2️⃣ Check PostgreSQL database for saved expressions
+    // ✅ Check PostgreSQL database
     const res = await pg.query(`
       SELECT * FROM expressions 
       WHERE name = $1 AND (guild_id = $2 OR guild_id IS NULL) 
@@ -44,14 +54,16 @@ module.exports = {
         }
       }
 
-      return message.reply(customMessage);
+      const embed = new EmbedBuilder().setDescription(customMessage).setColor(getRandomColor());
+      return message.reply({ embeds: [embed] });
     }
 
-    // 3️⃣ AI fallback if not found anywhere
+    // ✅ AI fallback
     try {
       let aiResponse = await getGroqAI(name, userMention);
-      aiResponse = cleanQuotes(aiResponse); 
-      return message.reply(aiResponse);
+      aiResponse = cleanQuotes(aiResponse);
+      const embed = new EmbedBuilder().setDescription(aiResponse).setColor(getRandomColor());
+      return message.reply({ embeds: [embed] });
     } catch (err) {
       console.error('❌ AI error:', err);
       return message.reply('❌ No expression found & AI failed.');
@@ -59,7 +71,7 @@ module.exports = {
   }
 };
 
-// 🔥 Groq AI function 
+// 🔥 Unified Groq AI function
 async function getGroqAI(keyword, userMention) {
   const url = 'https://api.groq.com/openai/v1/chat/completions';
   const apiKey = process.env.GROQ_API_KEY;
@@ -101,10 +113,11 @@ async function getGroqAI(keyword, userMention) {
   return reply;
 }
 
-// Utility: Clean extra quotes if Groq returns them
+// Clean quotes from AI
 function cleanQuotes(text) {
   return text.replace(/^"(.*)"$/, '$1').trim();
 }
+
 
 
 
