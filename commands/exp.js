@@ -50,7 +50,9 @@ module.exports = {
     if (!res.rows.length && !flavorMap[name]) {
       await interaction.deferReply();
       try {
-        const aiResponse = await getGroqAI(name, userMention);
+        let aiResponse = await getGroqAI(name, userMention);
+        aiResponse = cleanQuotes(aiResponse);
+
         const embed = new EmbedBuilder()
           .setDescription(aiResponse)
           .setColor(getRandomColor());
@@ -190,6 +192,12 @@ async function getGroqAI(keyword, userMention) {
   const data = await res.json();
   return data.choices[0].message.content.trim();
 }
+
+// Clean extra quotes from AI response
+function cleanQuotes(text) {
+  return text.replace(/^"(.*)"$/, '$1').trim();
+}
+
 
 
 
