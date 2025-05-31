@@ -14,6 +14,10 @@ const ROUTERS = [
   '0x95ebfcb1c6b345fda69cf56c51e30421e5a35aec'
 ];
 
+const TOKEN_NAME_TO_ADDRESS = {
+  'ADRIAN': '0x7e99075ce287f1cf8cbcaaa6a1c7894e404fd7ea'
+};
+
 const seenTx = new Set();
 
 module.exports = async function processUnifiedBlock(client, fromBlock, toBlock) {
@@ -54,10 +58,9 @@ module.exports = async function processUnifiedBlock(client, fromBlock, toBlock) 
 }
 
 async function handleContractLog(client, contractRow, log) {
-  const { name, address, channel_ids } = contractRow;
+  const { name, address, mint_price, mint_token, mint_token_symbol, channel_ids } = contractRow;
   const nftTransferTopic = id('Transfer(address,address,uint256)');
 
-  // ✅ Only parse logs that match NFT Transfer signature
   if (log.topics[0] !== nftTransferTopic) return;
 
   const abi = [
@@ -73,13 +76,12 @@ async function handleContractLog(client, contractRow, log) {
   } catch {
     return;
   }
-
-  if (!parsed?.args) return;  // ✅ Fully safe guard
+  if (!parsed?.args) return;
 
   const { from, to, tokenId } = parsed.args;
   const tokenIdStr = tokenId.toString();
-
   let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
+
   if (from === ZeroAddress) {
     if (seenTokenIds.has(tokenIdStr)) return;
     seenTokenIds.add(tokenIdStr);
@@ -94,11 +96,27 @@ async function handleContractLog(client, contractRow, log) {
       }
     } catch {}
 
+    const total = Number(mint_price);
+    let tokenAddr = mint_token.toLowerCase();
+    if (TOKEN_NAME_TO_ADDRESS[mint_token_symbol.toUpperCase()]) {
+      tokenAddr = TOKEN_NAME_TO_ADDRESS[mint_token_symbol.toUpperCase()].toLowerCase();
+    }
+
+    let ethValue = await getRealDexPriceForToken(total, tokenAddr);
+    if (!ethValue) {
+      const fallback = await getEthPriceFromToken(tokenAddr);
+      ethValue = fallback ? total * fallback : null;
+    }
+
     const embed = {
       title: `✨ NEW ${name.toUpperCase()} MINT!`,
       description: `Minted by: ${shortWalletLink(to)}\nToken #${tokenId}`,
-      color: 219139,
+      fields: [
+        { name: `💰 Spent (${mint_token_symbol})`, value: total.toFixed(4), inline: true },
+        { name: `⇄ ETH Value`, value: ethValue ? `${ethValue.toFixed(4)} ETH` : 'N/A', inline: true }
+      ],
       thumbnail: { url: imageUrl },
+      color: 219139,
       footer: { text: 'Powered by PimpsDev' },
       timestamp: new Date().toISOString()
     };
@@ -196,6 +214,7 @@ async function getMarketCapUSD(address) {
     return parseFloat(data?.data?.attributes?.fdv_usd || data?.data?.attributes?.market_cap_usd || '0');
   } catch { return 0; }
 }
+
 
 
 
