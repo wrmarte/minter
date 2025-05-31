@@ -62,6 +62,7 @@ pg.query(`
 
 pg.query(`ALTER TABLE expressions ADD COLUMN IF NOT EXISTS guild_id TEXT`);
 
+
 client.commands = new Collection();
 client.prefixCommands = new Collection();
 
