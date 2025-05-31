@@ -1,24 +1,8 @@
-const { JsonRpcProvider, Interface, formatUnits } = require('ethers');
+const { Interface, formatUnits } = require('ethers');
 const { EmbedBuilder } = require('discord.js');
 const fetch = require('node-fetch');
-
-// --- Multi-RPC setup ---
-const baseRpcs = [
-  'https://mainnet.base.org',
-  'https://base.publicnode.com',
-  'https://1rpc.io/base',
-  'https://base.llamarpc.com',
-  'https://base.meowrpc.com'
-];
-
-let currentRpcIndex = 0;
-let provider = new JsonRpcProvider(baseRpcs[currentRpcIndex]);
-
-function rotateProvider() {
-  currentRpcIndex = (currentRpcIndex + 1) % baseRpcs.length;
-  console.warn(`🔁 Switching to fallback Base RPC: ${baseRpcs[currentRpcIndex]}`);
-  provider = new JsonRpcProvider(baseRpcs[currentRpcIndex]);
-}
+const { getProvider, rotateProvider } = require('./provider');
+const { fetchLogs } = require('./logScanner');
 
 // --- Interfaces and constants ---
 const erc20Iface = new Interface([
@@ -62,124 +46,111 @@ module.exports = async function trackTokenSales(client) {
   }
 
   for (const [address, tokenGroup] of addressMap.entries()) {
-    let lastBlock = await provider.getBlockNumber();
+    const contractAddress = address;
+    const transferTopic = erc20Iface.getEvent('Transfer').topicHash;
 
-    provider.on('block', async (blockNumber) => {
-      if (blockNumber === lastBlock) return;
-      const fromBlock = Math.max(blockNumber - 1, 0);
+    getProvider().on('block', async (blockNumber) => {
+      const fromBlock = Math.max(blockNumber - 5, 0);
       const toBlock = blockNumber;
 
-      if (fromBlock >= toBlock) {
-        console.warn(`🛑 Skipping invalid block range: ${fromBlock} >= ${toBlock}`);
+      let logs = [];
+
+      try {
+        logs = await fetchLogs(contractAddress, fromBlock, toBlock, transferTopic);
+      } catch (err) {
+        console.warn(`⚠️ fetchLogs failed: ${err.message}`);
         return;
       }
 
-      lastBlock = blockNumber;
+      for (const log of logs) {
+        if (seenTx.has(log.transactionHash)) continue;
+        seenTx.add(log.transactionHash);
 
-      try {
-        const logs = await provider.getLogs({
-          address,
-          fromBlock,
-          toBlock,
-          topics: [erc20Iface.getEvent('Transfer').topicHash]
+        let parsed;
+        try {
+          parsed = erc20Iface.parseLog(log);
+        } catch {
+          continue;
+        }
+
+        const { from, to, amount } = parsed.args;
+        const fromAddr = from.toLowerCase();
+        if (!ROUTERS.includes(fromAddr)) continue;
+        if (to.toLowerCase() === '0x0000000000000000000000000000000000000000') continue;
+
+        const tokenAmountRaw = parseFloat(formatUnits(amount, 18));
+        const tokenAmountFormatted = (tokenAmountRaw * 1000).toLocaleString(undefined, {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2
         });
 
-        for (const log of logs) {
-          if (seenTx.has(log.transactionHash)) continue;
-          seenTx.add(log.transactionHash);
+        const tokenPrice = await getTokenPriceUSD(address);
+        const marketCap = await getMarketCapUSD(address);
 
-          const parsed = erc20Iface.parseLog(log);
-          const { from, to, amount } = parsed.args;
+        let usdSpent = 0;
+        let ethSpent = 0;
 
-          const fromAddr = from.toLowerCase();
-          if (!ROUTERS.includes(fromAddr)) continue;
-          if (to.toLowerCase() === '0x0000000000000000000000000000000000000000') continue;
-
-          const tokenAmountRaw = parseFloat(formatUnits(amount, 18));
-          const tokenAmountFormatted = (tokenAmountRaw * 1000).toLocaleString(undefined, {
-            minimumFractionDigits: 2,
-            maximumFractionDigits: 2
-          });
-
-          const tokenPrice = await getTokenPriceUSD(address);
-          const marketCap = await getMarketCapUSD(address);
-
-          let usdSpent = 0;
-          let ethSpent = 0;
-
-          try {
-            const tx = await provider.getTransaction(log.transactionHash);
-            const ethPrice = await getETHPrice();
-            if (tx?.value) {
-              ethSpent = parseFloat(formatUnits(tx.value, 18));
-              usdSpent = ethSpent * ethPrice;
-            }
-          } catch (err) {
-            console.warn(`⚠️ TX fetch failed: ${err.message}`);
+        try {
+          const tx = await getProvider().getTransaction(log.transactionHash);
+          const ethPrice = await getETHPrice();
+          if (tx?.value) {
+            ethSpent = parseFloat(formatUnits(tx.value, 18));
+            usdSpent = ethSpent * ethPrice;
           }
-
-          const rocketIntensity = Math.min(Math.floor(tokenAmountRaw / 100), 10);
-          const rocketLine = '🟥🟦🚀'.repeat(Math.max(1, rocketIntensity));
-
-          const getColorByUsdSpent = (usd) => {
-            if (usd < 10) return 0xff0000;
-            if (usd < 20) return 0x3498db;
-            return 0x00cc66;
-          };
-
-          const embedColor = getColorByUsdSpent(usdSpent);
-
-          for (const token of tokenGroup) {
-            const guildId = token.guild_id;
-            const trackedChannelId = token.channel_id;
-            const name = token.name.toUpperCase();
-
-            const embed = new EmbedBuilder()
-              .setTitle(`${name} Buy!`)
-              .setDescription(`${rocketLine}`)
-              .setImage('https://iili.io/3tSecKP.gif')
-              .addFields(
-                { name: '💸 Spent', value: `$${usdSpent.toFixed(4)} / ${ethSpent.toFixed(4)} ETH`, inline: true },
-                { name: '🎯 Got', value: `${tokenAmountFormatted} ${name}`, inline: true },
-                { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
-                { name: '📊 MCap', value: marketCap && marketCap > 0 ? `$${marketCap.toLocaleString()}` : 'Fetching...', inline: true }
-              )
-              .setURL(`https://www.geckoterminal.com/base/pools/${address}`)
-              .setColor(embedColor)
-              .setFooter({ text: 'Live on Base • Powered by PimpsDev' })
-              .setTimestamp();
-
-            const guild = client.guilds.cache.get(guildId);
-            if (!guild) continue;
-
-            let channel = null;
-
-            if (trackedChannelId) {
-              channel = guild.channels.cache.get(trackedChannelId);
-            }
-
-            if (!channel || !channel.isTextBased() || !channel.permissionsFor(guild.members.me).has('SendMessages')) {
-              channel = guild.channels.cache.find(c =>
-                c.isTextBased() && c.permissionsFor(guild.members.me).has('SendMessages')
-              );
-            }
-
-            if (channel) {
-              await channel.send({ embeds: [embed] });
-            }
-          }
-        }
-      } catch (err) {
-        console.warn(`⚠️ Error checking token group for ${address}: ${err.message}`);
-        if (
-          err.code === 'SERVER_ERROR' ||
-          err.message?.includes('504') ||
-          err.message?.includes('invalid block range')
-        ) {
-          rotateProvider();
+        } catch (err) {
+          console.warn(`⚠️ TX fetch failed: ${err.message}`);
         }
 
-        await new Promise((r) => setTimeout(r, 500)); // Cooldown to prevent hammering
+        const rocketIntensity = Math.min(Math.floor(tokenAmountRaw / 100), 10);
+        const rocketLine = '🟥🟦🚀'.repeat(Math.max(1, rocketIntensity));
+
+        const getColorByUsdSpent = (usd) => {
+          if (usd < 10) return 0xff0000;
+          if (usd < 20) return 0x3498db;
+          return 0x00cc66;
+        };
+
+        const embedColor = getColorByUsdSpent(usdSpent);
+
+        for (const token of tokenGroup) {
+          const guildId = token.guild_id;
+          const trackedChannelId = token.channel_id;
+          const name = token.name.toUpperCase();
+
+          const embed = new EmbedBuilder()
+            .setTitle(`${name} Buy!`)
+            .setDescription(`${rocketLine}`)
+            .setImage('https://iili.io/3tSecKP.gif')
+            .addFields(
+              { name: '💸 Spent', value: `$${usdSpent.toFixed(4)} / ${ethSpent.toFixed(4)} ETH`, inline: true },
+              { name: '🎯 Got', value: `${tokenAmountFormatted} ${name}`, inline: true },
+              { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
+              { name: '📊 MCap', value: marketCap && marketCap > 0 ? `$${marketCap.toLocaleString()}` : 'Fetching...', inline: true }
+            )
+            .setURL(`https://www.geckoterminal.com/base/pools/${address}`)
+            .setColor(embedColor)
+            .setFooter({ text: 'Live on Base • Powered by PimpsDev' })
+            .setTimestamp();
+
+          const guild = client.guilds.cache.get(guildId);
+          if (!guild) continue;
+
+          let channel = null;
+
+          if (trackedChannelId) {
+            channel = guild.channels.cache.get(trackedChannelId);
+          }
+
+          if (!channel || !channel.isTextBased() || !channel.permissionsFor(guild.members.me).has('SendMessages')) {
+            channel = guild.channels.cache.find(c =>
+              c.isTextBased() && c.permissionsFor(guild.members.me).has('SendMessages')
+            );
+          }
+
+          if (channel) {
+            await channel.send({ embeds: [embed] });
+          }
+        }
       }
     });
   }
@@ -215,6 +186,7 @@ async function getMarketCapUSD(address) {
     return 0;
   }
 }
+
 
 
 
