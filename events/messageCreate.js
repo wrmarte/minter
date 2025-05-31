@@ -56,7 +56,7 @@ module.exports = (client, pg) => {
         return message.reply({ embeds: [embed] });
       }
 
-      // 3️⃣ AI Fallback (Groq-powered)
+      // 3️⃣ AI Fallback (Groq-powered with mention patch)
       try {
         let aiResponse = await getGroqAI(name, userMention);
         aiResponse = cleanQuotes(aiResponse);
@@ -74,7 +74,7 @@ module.exports = (client, pg) => {
   });
 };
 
-// 🔥 Groq AI logic injected directly
+// ✅ Groq AI logic fully patched with mention-safe placeholder
 async function getGroqAI(keyword, userMention) {
   const url = 'https://api.groq.com/openai/v1/chat/completions';
   const apiKey = process.env.GROQ_API_KEY; // fully Railway safe
@@ -88,7 +88,7 @@ async function getGroqAI(keyword, userMention) {
       },
       {
         role: 'user',
-        content: `Someone typed "${keyword}". Generate a super short savage one-liner. Include ${userMention}. Use Discord/Web3 slang. Max 1 sentence.`
+        content: `Someone typed "${keyword}". Generate a super short savage one-liner. Insert {user} where you want to mention the user. Use Discord/Web3 slang. Max 1 sentence.`
       }
     ],
     max_tokens: 50,
@@ -111,15 +111,19 @@ async function getGroqAI(keyword, userMention) {
   }
 
   const data = await res.json();
-  const reply = data?.choices?.[0]?.message?.content?.trim();
-  if (!reply) throw new Error('Empty AI response');
-  return reply;
+  const rawReply = data?.choices?.[0]?.message?.content?.trim();
+  if (!rawReply) throw new Error('Empty AI response');
+
+  // Replace {user} placeholder with real Discord mention
+  const replaced = rawReply.replace(/{user}/gi, userMention);
+  return replaced;
 }
 
 // 🧼 Utility to clean quotes
 function cleanQuotes(text) {
   return text.replace(/^"(.*)"$/, '$1').trim();
 }
+
 
 
 
