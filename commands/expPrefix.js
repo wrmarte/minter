@@ -16,7 +16,6 @@ module.exports = {
   async execute(message, args, { pg, groqApiKey }) {
     const guildId = message.guild?.id ?? null;
     const userMention = `<@${message.author.id}>`;
-
     const name = args[0]?.toLowerCase();
     if (!name) {
       return message.reply('❌ Please provide an expression name. Example: `!exp rich`');
@@ -58,7 +57,7 @@ module.exports = {
       return message.reply({ embeds: [embed] });
     }
 
-    // ✅ AI fallback (with groqApiKey properly injected)
+    // ✅ AI fallback (Groq with patched safe mention logic)
     try {
       let aiResponse = await getGroqAI(name, userMention, groqApiKey);
       aiResponse = cleanQuotes(aiResponse);
@@ -71,7 +70,7 @@ module.exports = {
   }
 };
 
-// ✅ Unified Groq AI function
+// ✅ Unified Groq AI function (patched mention-safe)
 async function getGroqAI(keyword, userMention, groqApiKey) {
   const url = 'https://api.groq.com/openai/v1/chat/completions';
 
@@ -84,7 +83,7 @@ async function getGroqAI(keyword, userMention, groqApiKey) {
       },
       {
         role: 'user',
-        content: `Someone typed "${keyword}". Generate a super short savage one-liner. Include ${userMention}. Use Discord/Web3 slang. Max 1 sentence.`
+        content: `Someone typed "${keyword}". Generate a super short savage one-liner. Insert {user} where you want to mention the user. Use Discord/Web3 slang. Max 1 sentence.`
       }
     ],
     max_tokens: 50,
@@ -107,15 +106,18 @@ async function getGroqAI(keyword, userMention, groqApiKey) {
   }
 
   const data = await res.json();
-  const reply = data?.choices?.[0]?.message?.content?.trim();
-  if (!reply) throw new Error('Empty AI response');
-  return reply;
+  const rawReply = data?.choices?.[0]?.message?.content?.trim();
+  if (!rawReply) throw new Error('Empty AI response');
+
+  const replaced = rawReply.replace(/{user}/gi, userMention);
+  return replaced;
 }
 
 // Clean quotes from AI
 function cleanQuotes(text) {
   return text.replace(/^"(.*)"$/, '$1').trim();
 }
+
 
 
 
