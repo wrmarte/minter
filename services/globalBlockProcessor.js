@@ -19,28 +19,18 @@ const seenTx = new Set();
 module.exports = async function processUnifiedBlock(client, fromBlock, toBlock) {
   const pg = client.pg;
 
-  // 1️⃣ Fetch tracked contracts
   const contractRes = await pg.query('SELECT * FROM contract_watchlist');
   const contractRows = contractRes.rows;
 
-  // 2️⃣ Fetch tracked tokens
   const tokenRes = await pg.query('SELECT * FROM tracked_tokens');
   const tokenRows = tokenRes.rows;
 
-  // 3️⃣ Build unified address list
-  const addresses = [
-    ...new Set([
-      ...contractRows.map(row => row.address.toLowerCase()),
-      ...tokenRows.map(row => row.address.toLowerCase())
-    ])
-  ];
-
+  const addresses = [...new Set([...contractRows.map(row => row.address.toLowerCase()), ...tokenRows.map(row => row.address.toLowerCase())])];
   if (addresses.length === 0) {
     console.log('✅ No contracts or tokens to scan.');
     return;
   }
 
-  // 4️⃣ Call unified fetchLogs()
   let logs;
   try {
     logs = await fetchLogs(addresses, fromBlock, toBlock);
@@ -49,16 +39,13 @@ module.exports = async function processUnifiedBlock(client, fromBlock, toBlock) 
     return;
   }
 
-  // 5️⃣ Split logs into contract vs token logs
   for (const log of logs) {
-    // 5a — Handle NFT contracts (mints + sales)
     const contractRow = contractRows.find(row => row.address.toLowerCase() === log.address.toLowerCase());
     if (contractRow) {
       await handleContractLog(client, contractRow, log);
       continue;
     }
 
-    // 5b — Handle Token Buys
     const tokenRowGroup = tokenRows.filter(row => row.address.toLowerCase() === log.address.toLowerCase());
     if (tokenRowGroup.length > 0) {
       await handleTokenLog(client, tokenRowGroup, log);
@@ -66,13 +53,9 @@ module.exports = async function processUnifiedBlock(client, fromBlock, toBlock) 
   }
 }
 
-// --- HANDLE CONTRACT LOGS (MINT / SALE)
 async function handleContractLog(client, contractRow, log) {
   const { name, address, mint_price, mint_token, mint_token_symbol, channel_ids } = contractRow;
-  const abi = [
-    'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
-    'function tokenURI(uint256 tokenId) view returns (string)'
-  ];
+  const abi = ['event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)', 'function tokenURI(uint256 tokenId) view returns (string)'];
   const iface = new Interface(abi);
   const contract = new Contract(address, abi, getProvider());
 
@@ -81,8 +64,6 @@ async function handleContractLog(client, contractRow, log) {
   const tokenIdStr = tokenId.toString();
 
   let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
-  let seenSales = new Set(loadJson(seenSalesPath(name)) || []);
-
   if (from === ZeroAddress) {
     if (seenTokenIds.has(tokenIdStr)) return;
     seenTokenIds.add(tokenIdStr);
@@ -113,11 +94,8 @@ async function handleContractLog(client, contractRow, log) {
 
     saveJson(seenPath(name), [...seenTokenIds]);
   }
-
-  // Sales logic can also be added here if needed
 }
 
-// --- HANDLE TOKEN LOGS (TOKEN BUYS)
 async function handleTokenLog(client, tokenRowGroup, log) {
   const iface = new Interface(['event Transfer(address indexed from, address indexed to, uint amount)']);
   const parsed = iface.parseLog(log);
@@ -126,34 +104,50 @@ async function handleTokenLog(client, tokenRowGroup, log) {
 
   if (!ROUTERS.includes(fromAddr)) return;
   if (to.toLowerCase() === '0x0000000000000000000000000000000000000000') return;
-
   if (seenTx.has(log.transactionHash)) return;
   seenTx.add(log.transactionHash);
 
   const tokenAmountRaw = parseFloat(formatUnits(amount, 18));
+  const tokenAmountFormatted = (tokenAmountRaw * 1000).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+  const tokenAddress = log.address.toLowerCase();
+  const tokenPrice = await getTokenPriceUSD(tokenAddress);
+  const marketCap = await getMarketCapUSD(tokenAddress);
+
+  let usdSpent = 0, ethSpent = 0;
+  try {
+    const tx = await getProvider().getTransaction(log.transactionHash);
+    const ethPrice = await getETHPrice();
+    if (tx?.value) {
+      ethSpent = parseFloat(formatUnits(tx.value, 18));
+      usdSpent = ethSpent * ethPrice;
+    }
+  } catch {}
+
+  const rocketIntensity = Math.min(Math.floor(tokenAmountRaw / 100), 10);
+  const rocketLine = '🟥🟦🚀'.repeat(Math.max(1, rocketIntensity));
+  const getColorByUsdSpent = (usd) => usd < 10 ? 0xff0000 : usd < 20 ? 0x3498db : 0x00cc66;
 
   for (const token of tokenRowGroup) {
     const guild = client.guilds.cache.get(token.guild_id);
     if (!guild) continue;
-
-    let channel = null;
-    if (token.channel_id) {
-      channel = guild.channels.cache.get(token.channel_id);
-    }
+    let channel = token.channel_id ? guild.channels.cache.get(token.channel_id) : null;
     if (!channel || !channel.isTextBased() || !channel.permissionsFor(guild.members.me).has('SendMessages')) {
-      channel = guild.channels.cache.find(c =>
-        c.isTextBased() && c.permissionsFor(guild.members.me).has('SendMessages')
-      );
+      channel = guild.channels.cache.find(c => c.isTextBased() && c.permissionsFor(guild.members.me).has('SendMessages'));
     }
-
     if (channel) {
       const embed = {
         title: `${token.name.toUpperCase()} Buy!`,
+        description: rocketLine,
+        image: { url: 'https://iili.io/3tSecKP.gif' },
         fields: [
-          { name: '🎯 Amount', value: `${tokenAmountRaw.toFixed(2)} ${token.name.toUpperCase()}`, inline: true },
-          { name: 'Tx', value: `[Explorer](https://basescan.org/tx/${log.transactionHash})`, inline: false }
+          { name: '💸 Spent', value: `$${usdSpent.toFixed(4)} / ${ethSpent.toFixed(4)} ETH`, inline: true },
+          { name: '🎯 Got', value: `${tokenAmountFormatted} ${token.name.toUpperCase()}`, inline: true },
+          { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
+          { name: '📊 MCap', value: marketCap ? `$${marketCap.toLocaleString()}` : 'Fetching...', inline: true }
         ],
-        color: 0x00cc66,
+        url: `https://www.geckoterminal.com/base/pools/${tokenAddress}`,
+        color: getColorByUsdSpent(usdSpent),
         footer: { text: 'Live on Base • Powered by PimpsDev' },
         timestamp: new Date().toISOString()
       };
@@ -161,3 +155,29 @@ async function handleTokenLog(client, tokenRowGroup, log) {
     }
   }
 }
+
+async function getETHPrice() {
+  try {
+    const res = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd');
+    const data = await res.json();
+    return parseFloat(data?.ethereum?.usd || '0');
+  } catch { return 0; }
+}
+
+async function getTokenPriceUSD(address) {
+  try {
+    const res = await fetch(`https://api.geckoterminal.com/api/v2/simple/networks/base/token_price/${address}`);
+    const data = await res.json();
+    const prices = data?.data?.attributes?.token_prices || {};
+    return parseFloat(prices[address.toLowerCase()] || '0');
+  } catch { return 0; }
+}
+
+async function getMarketCapUSD(address) {
+  try {
+    const res = await fetch(`https://api.geckoterminal.com/api/v2/networks/base/tokens/${address}`);
+    const data = await res.json();
+    return parseFloat(data?.data?.attributes?.fdv_usd || data?.data?.attributes?.market_cap_usd || '0');
+  } catch { return 0; }
+}
+
