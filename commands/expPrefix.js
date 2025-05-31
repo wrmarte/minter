@@ -50,7 +50,7 @@ module.exports = {
     // 3️⃣ AI fallback if not found anywhere
     try {
       let aiResponse = await getGroqAI(name, userMention);
-      aiResponse = cleanQuotes(aiResponse); // Clean up any extra quotes
+      aiResponse = cleanQuotes(aiResponse); 
       return message.reply(aiResponse);
     } catch (err) {
       console.error('❌ AI error:', err);
@@ -59,7 +59,7 @@ module.exports = {
   }
 };
 
-// 🔥 Groq AI function (exactly matching your slash /exp)
+// 🔥 Groq AI function 
 async function getGroqAI(keyword, userMention) {
   const url = 'https://api.groq.com/openai/v1/chat/completions';
   const apiKey = process.env.GROQ_API_KEY;
@@ -92,17 +92,20 @@ async function getGroqAI(keyword, userMention) {
   if (!res.ok) {
     const errData = await res.json();
     console.error(errData);
-    throw new Error('Groq AI call failed');
+    throw new Error(`Groq AI call failed: ${JSON.stringify(errData)}`);
   }
 
   const data = await res.json();
-  return data.choices[0].message.content.trim();
+  const reply = data?.choices?.[0]?.message?.content?.trim();
+  if (!reply) throw new Error('Empty AI response');
+  return reply;
 }
 
-// 🧼 Utility to strip any surrounding quotes from AI
+// Utility: Clean extra quotes if Groq returns them
 function cleanQuotes(text) {
   return text.replace(/^"(.*)"$/, '$1').trim();
 }
+
 
 
 
