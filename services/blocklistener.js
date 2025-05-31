@@ -18,3 +18,4 @@ module.exports = async function startGlobalBlockListener(client) {
     }
   });
 }
+
