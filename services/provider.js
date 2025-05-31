@@ -1,5 +1,6 @@
 const { JsonRpcProvider } = require('ethers');
 
+// ✅ Multi-RPC rotation for stability
 const baseRpcs = [
   'https://mainnet.base.org',
   'https://base.publicnode.com',
@@ -13,7 +14,6 @@ let provider = new JsonRpcProvider(baseRpcs[currentRpcIndex]);
 
 function rotateProvider() {
   currentRpcIndex = (currentRpcIndex + 1) % baseRpcs.length;
-  console.warn(`🔁 Switching to fallback Base RPC: ${baseRpcs[currentRpcIndex]}`);
   provider = new JsonRpcProvider(baseRpcs[currentRpcIndex]);
 }
 
