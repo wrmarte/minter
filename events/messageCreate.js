@@ -1,5 +1,15 @@
 const { flavorMap, getRandomFlavor } = require('../utils/flavorMap');
-const { AttachmentBuilder } = require('discord.js');
+const { AttachmentBuilder, EmbedBuilder } = require('discord.js');
+const fetch = require('node-fetch');
+
+// Random embed color generator
+function getRandomColor() {
+  const colors = [
+    0xFFD700, 0x66CCFF, 0xFF66CC, 0xFF4500,
+    0x00FF99, 0xFF69B4, 0x00CED1, 0xFFA500, 0x8A2BE2
+  ];
+  return colors[Math.floor(Math.random() * colors.length)];
+}
 
 module.exports = (client, pg) => {
   client.on('messageCreate', async message => {
@@ -18,15 +28,14 @@ module.exports = (client, pg) => {
     }
 
     try {
-      let customMessage = null;
-
-      // 1️⃣ Built-in first
+      // 1️⃣ Built-in FlavorMap check
       if (flavorMap[name]) {
-        customMessage = getRandomFlavor(name, userMention);
-        return message.reply({ content: customMessage });
+        const msg = getRandomFlavor(name, userMention);
+        const embed = new EmbedBuilder().setDescription(msg).setColor(getRandomColor());
+        return message.reply({ embeds: [embed] });
       }
 
-      // 2️⃣ Then DB query (patched SQL logic)
+      // 2️⃣ PostgreSQL check
       const res = await pg.query(
         `SELECT * FROM expressions WHERE name = $1 AND (guild_id = $2 OR ($2 IS NULL AND guild_id IS NULL)) ORDER BY RANDOM() LIMIT 1`,
         [name, guildId]
@@ -34,7 +43,7 @@ module.exports = (client, pg) => {
 
       if (res.rows.length > 0) {
         const exp = res.rows[0];
-        customMessage = exp?.content?.includes('{user}')
+        const customMessage = exp?.content?.includes('{user}')
           ? exp.content.replace('{user}', userMention)
           : `${userMention} is experiencing **"${name}"** energy today!`;
 
@@ -43,11 +52,20 @@ module.exports = (client, pg) => {
           return await message.reply({ content: customMessage, files: [file] });
         }
 
-        return message.reply({ content: customMessage });
+        const embed = new EmbedBuilder().setDescription(customMessage).setColor(getRandomColor());
+        return message.reply({ embeds: [embed] });
       }
 
-      // 3️⃣ Fallback
-      return message.reply({ content: '❌ Unknown expression. Use valid keywords or saved expressions.' });
+      // 3️⃣ AI Fallback (Groq-powered)
+      try {
+        let aiResponse = await getGroqAI(name, userMention);
+        aiResponse = cleanQuotes(aiResponse);
+        const embed = new EmbedBuilder().setDescription(aiResponse).setColor(getRandomColor());
+        return message.reply({ embeds: [embed] });
+      } catch (aiErr) {
+        console.error('❌ AI error:', aiErr);
+        return message.reply({ content: '❌ No expression found & AI failed.' });
+      }
 
     } catch (err) {
       console.error('❌ Error handling !exp:', err);
@@ -55,6 +73,54 @@ module.exports = (client, pg) => {
     }
   });
 };
+
+// 🔥 Groq AI logic injected directly
+async function getGroqAI(keyword, userMention) {
+  const url = 'https://api.groq.com/openai/v1/chat/completions';
+  const apiKey = process.env.GROQ_API_KEY; // fully Railway safe
+
+  const body = {
+    model: 'llama3-70b-8192',
+    messages: [
+      {
+        role: 'system',
+        content: 'You are a savage Discord bot AI expression generator.'
+      },
+      {
+        role: 'user',
+        content: `Someone typed "${keyword}". Generate a super short savage one-liner. Include ${userMention}. Use Discord/Web3 slang. Max 1 sentence.`
+      }
+    ],
+    max_tokens: 50,
+    temperature: 0.9
+  };
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(body)
+  });
+
+  if (!res.ok) {
+    const errData = await res.json();
+    console.error(errData);
+    throw new Error(`Groq AI call failed: ${JSON.stringify(errData)}`);
+  }
+
+  const data = await res.json();
+  const reply = data?.choices?.[0]?.message?.content?.trim();
+  if (!reply) throw new Error('Empty AI response');
+  return reply;
+}
+
+// 🧼 Utility to clean quotes
+function cleanQuotes(text) {
+  return text.replace(/^"(.*)"$/, '$1').trim();
+}
+
 
 
 
