@@ -2,7 +2,7 @@ const { SlashCommandBuilder, AttachmentBuilder, EmbedBuilder } = require('discor
 const fetch = require('node-fetch');
 const { flavorMap, getRandomFlavor } = require('../utils/flavorMap');
 
-// Simple in-memory cache for guild names
+// Guild name cache (for autocomplete)
 const guildNameCache = new Map();
 
 module.exports = {
@@ -26,15 +26,9 @@ module.exports = {
 
     let res;
     if (isOwner) {
-      res = await pg.query(
-        `SELECT * FROM expressions WHERE name = $1 ORDER BY RANDOM() LIMIT 1`,
-        [name]
-      );
+      res = await pg.query(`SELECT * FROM expressions WHERE name = $1 ORDER BY RANDOM() LIMIT 1`, [name]);
     } else {
-      res = await pg.query(
-        `SELECT * FROM expressions WHERE name = $1 AND (guild_id = $2 OR guild_id IS NULL) ORDER BY RANDOM() LIMIT 1`,
-        [name, guildId]
-      );
+      res = await pg.query(`SELECT * FROM expressions WHERE name = $1 AND (guild_id = $2 OR guild_id IS NULL) ORDER BY RANDOM() LIMIT 1`, [name, guildId]);
     }
 
     if (!res.rows.length && !flavorMap[name]) {
@@ -44,8 +38,7 @@ module.exports = {
         const embed = new EmbedBuilder()
           .setTitle('🧠 AI Expression')
           .setDescription(aiResponse)
-          .setColor(0xFFD700)
-          .setFooter({ text: 'Powered by Groq AI Engine' });
+          .setColor(0xFFD700);
         return await interaction.editReply({ embeds: [embed] });
       } catch (err) {
         console.error('❌ AI error:', err);
@@ -125,15 +118,13 @@ module.exports = {
     }
 
     const combined = [...builtInChoices, ...thisServer, ...global, ...otherServers];
-    const filtered = combined
-      .filter(c => c.name.toLowerCase().includes(focused.toLowerCase()))
-      .slice(0, 25);
+    const filtered = combined.filter(c => c.name.toLowerCase().includes(focused.toLowerCase())).slice(0, 25);
 
     await interaction.respond(filtered);
   }
 };
 
-// 🧠 Groq AI call function
+// GROQ AI function (FREE version)
 async function getGroqAI(keyword) {
   const url = 'https://api.groq.com/openai/v1/chat/completions';
   const apiKey = process.env.GROQ_API_KEY;
@@ -147,10 +138,10 @@ async function getGroqAI(keyword) {
       },
       {
         role: 'user',
-        content: `Someone gave you the word "${keyword}". Generate a short funny, witty or savage reaction. Use emojis/slang if helpful. Max 2 lines.`
+        content: `Someone gave you the word "${keyword}". Generate a super short savage one-liner reaction. Max 1 sentence. Avoid chatty answers. Use Web3 or Discord slang if helpful.`
       }
     ],
-    max_tokens: 60,
+    max_tokens: 50,
     temperature: 0.9
   };
 
@@ -172,6 +163,7 @@ async function getGroqAI(keyword) {
   const data = await res.json();
   return data.choices[0].message.content.trim();
 }
+
 
 
 
