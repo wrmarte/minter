@@ -4,13 +4,17 @@ const { Client: PgClient } = require('pg');
 const fs = require('fs');
 const path = require('path');
 
+// ✅ Load new optimization modules
+require('./services/provider');
+require('./services/logScanner');
+
 console.log("👀 Booting from:", __dirname);
 
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent  // ✅ <-- This was missing!
+    GatewayIntentBits.MessageContent 
   ]
 });
 
@@ -19,9 +23,9 @@ const pg = new PgClient({
   ssl: { rejectUnauthorized: false }
 });
 pg.connect();
-
 client.pg = pg;
 
+// ✅ Database initialization
 pg.query(`CREATE TABLE IF NOT EXISTS contract_watchlist (
   name TEXT PRIMARY KEY,
   address TEXT NOT NULL,
@@ -63,10 +67,8 @@ client.prefixCommands = new Collection();
 
 try {
   const commandFiles = fs.readdirSync(path.join(__dirname, 'commands')).filter(file => file.endsWith('.js'));
-
   for (const file of commandFiles) {
     const command = require(`./commands/${file}`);
-
     if (command.data && command.execute) {
       client.commands.set(command.data.name, command);
       console.log(`✅ Loaded command: /${command.data.name}`);
@@ -82,7 +84,6 @@ try {
 }
 
 const eventFiles = fs.readdirSync(path.join(__dirname, 'events')).filter(file => file.endsWith('.js'));
-
 for (const file of eventFiles) {
   try {
     const registerEvent = require(`./events/${file}`);
@@ -100,6 +101,7 @@ client.login(process.env.DISCORD_BOT_TOKEN)
   .catch(err => {
     console.error('❌ Discord login failed:', err);
   });
+
 
 
 
