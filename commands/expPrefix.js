@@ -13,7 +13,7 @@ function getRandomColor() {
 
 module.exports = {
   name: 'exp',
-  async execute(message, args, { pg }) {
+  async execute(message, args, { pg, groqApiKey }) {
     const guildId = message.guild?.id ?? null;
     const userMention = `<@${message.author.id}>`;
 
@@ -58,9 +58,9 @@ module.exports = {
       return message.reply({ embeds: [embed] });
     }
 
-    // ✅ AI fallback
+    // ✅ AI fallback (with groqApiKey properly injected)
     try {
-      let aiResponse = await getGroqAI(name, userMention);
+      let aiResponse = await getGroqAI(name, userMention, groqApiKey);
       aiResponse = cleanQuotes(aiResponse);
       const embed = new EmbedBuilder().setDescription(aiResponse).setColor(getRandomColor());
       return message.reply({ embeds: [embed] });
@@ -71,10 +71,9 @@ module.exports = {
   }
 };
 
-// 🔥 Unified Groq AI function
-async function getGroqAI(keyword, userMention) {
+// ✅ Unified Groq AI function
+async function getGroqAI(keyword, userMention, groqApiKey) {
   const url = 'https://api.groq.com/openai/v1/chat/completions';
-  const apiKey = process.env.GROQ_API_KEY;
 
   const body = {
     model: 'llama3-70b-8192',
@@ -95,7 +94,7 @@ async function getGroqAI(keyword, userMention) {
   const res = await fetch(url, {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${apiKey}`,
+      'Authorization': `Bearer ${groqApiKey}`,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify(body)
@@ -117,6 +116,7 @@ async function getGroqAI(keyword, userMention) {
 function cleanQuotes(text) {
   return text.replace(/^"(.*)"$/, '$1').trim();
 }
+
 
 
 
