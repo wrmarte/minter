@@ -2,7 +2,6 @@ const { SlashCommandBuilder, AttachmentBuilder, EmbedBuilder } = require('discor
 const fetch = require('node-fetch');
 const { flavorMap, getRandomFlavor } = require('../utils/flavorMap');
 
-// Guild name cache (for autocomplete)
 const guildNameCache = new Map();
 
 module.exports = {
@@ -34,9 +33,8 @@ module.exports = {
     if (!res.rows.length && !flavorMap[name]) {
       await interaction.deferReply();
       try {
-        const aiResponse = await getGroqAI(name);
+        const aiResponse = await getGroqAI(name, userMention);
         const embed = new EmbedBuilder()
-          .setTitle('🧠 AI Expression')
           .setDescription(aiResponse)
           .setColor(0xFFD700);
         return await interaction.editReply({ embeds: [embed] });
@@ -124,8 +122,8 @@ module.exports = {
   }
 };
 
-// GROQ AI function (FREE version)
-async function getGroqAI(keyword) {
+// GROQ AI function with executor mention
+async function getGroqAI(keyword, userMention) {
   const url = 'https://api.groq.com/openai/v1/chat/completions';
   const apiKey = process.env.GROQ_API_KEY;
 
@@ -138,7 +136,7 @@ async function getGroqAI(keyword) {
       },
       {
         role: 'user',
-        content: `Someone gave you the word "${keyword}". Generate a super short savage one-liner reaction. Max 1 sentence. Avoid chatty answers. Use Web3 or Discord slang if helpful.`
+        content: `Someone typed "${keyword}". Generate a super short savage one-liner reaction. Include ${userMention} inside the sentence. Avoid chatty answers. Use Discord/Web3 slang if helpful. Max 1 sentence.`
       }
     ],
     max_tokens: 50,
@@ -163,6 +161,7 @@ async function getGroqAI(keyword) {
   const data = await res.json();
   return data.choices[0].message.content.trim();
 }
+
 
 
 
