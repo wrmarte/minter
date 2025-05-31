@@ -2,7 +2,7 @@ const { Interface, Contract, ZeroAddress, id, formatUnits, ethers } = require('e
 const fetch = require('node-fetch');
 const { fetchLogs } = require('./logScanner');
 const { getProvider } = require('./provider');
-const { getEthPriceFromToken, getRealDexPriceForToken } = require('../price');
+const { getRealDexPriceForToken, getEthPriceFromToken } = require('./price');
 const { shortWalletLink, loadJson, saveJson, seenPath, seenSalesPath } = require('../utils/helpers');
 
 // Routers for token buys
