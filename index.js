@@ -18,6 +18,7 @@ const client = new Client({
   ]
 });
 
+
 const pg = new PgClient({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
