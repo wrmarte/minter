@@ -1,5 +1,6 @@
 const { trackAllContracts } = require('../services/trackContracts');
-const trackTokenSales = require('../services/trackTokenSales');
+const trackTokenSales = require('../services/mintProcessor')
+;
 
 module.exports = client => {
   client.once('ready', async () => {
