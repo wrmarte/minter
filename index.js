@@ -4,7 +4,7 @@ const { Client: PgClient } = require('pg');
 const fs = require('fs');
 const path = require('path');
 
-// ✅ Load new optimization modules
+// ✅ Load optimization modules
 require('./services/provider');
 require('./services/logScanner');
 
@@ -17,7 +17,6 @@ const client = new Client({
     GatewayIntentBits.MessageContent 
   ]
 });
-
 
 const pg = new PgClient({
   connectionString: process.env.DATABASE_URL,
@@ -95,6 +94,10 @@ for (const file of eventFiles) {
   }
 }
 
+// ✅ Start Global Block Listener for Minter V4.6 (this is the key injection)
+const startGlobalBlockListener = require('./services/blockListener');
+startGlobalBlockListener(client);
+
 client.login(process.env.DISCORD_BOT_TOKEN)
   .then(() => {
     console.log(`✅ Logged in as ${client.user.tag}`);
@@ -102,6 +105,7 @@ client.login(process.env.DISCORD_BOT_TOKEN)
   .catch(err => {
     console.error('❌ Discord login failed:', err);
   });
+
 
 
 
