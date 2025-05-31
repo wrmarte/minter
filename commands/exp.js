@@ -1,6 +1,12 @@
-const { SlashCommandBuilder, AttachmentBuilder } = require('discord.js');
+const { SlashCommandBuilder, AttachmentBuilder, EmbedBuilder } = require('discord.js');
 const fetch = require('node-fetch');
 const { flavorMap, getRandomFlavor } = require('../utils/flavorMap');
+const { OpenAI } = require('openai');
+
+// Init OpenAI
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY
+});
 
 // Simple in-memory cache for guild names
 const guildNameCache = new Map();
@@ -37,8 +43,41 @@ module.exports = {
       );
     }
 
+    // 🔥 Main logic: database → flavorMap → AI fallback
     if (!res.rows.length && !flavorMap[name]) {
-      return interaction.reply({ content: `❌ No expression named \`${name}\` found.`, flags: 64 });
+      // AI fallback time
+      await interaction.deferReply();
+
+      const prompt = `
+You are a savage, funny, web3-native Discord bot. Someone typed: "${name}". 
+Generate a creative, witty, or savage 1-liner reaction for this vibe. Use emojis/slang if helpful. Do NOT repeat the word directly.
+      `;
+
+      try {
+        const completion = await openai.chat.completions.create({
+          model: 'gpt-4o',
+          messages: [
+            { role: 'system', content: 'You are a savage Discord bot AI expression generator.' },
+            { role: 'user', content: prompt }
+          ],
+          max_tokens: 50,
+          temperature: 0.9
+        });
+
+        const aiResponse = completion.choices[0].message.content.trim();
+
+        const embed = new EmbedBuilder()
+          .setTitle('🧠 AI Expression')
+          .setDescription(aiResponse)
+          .setColor(0xFFD700)
+          .setFooter({ text: 'Powered by PimpsDev AI Engine' });
+
+        return await interaction.editReply({ embeds: [embed] });
+
+      } catch (err) {
+        console.error('❌ AI error:', err);
+        return await interaction.reply({ content: `❌ No expression found & AI failed.`, flags: 64 });
+      }
     }
 
     const exp = res.rows[0];
@@ -69,14 +108,12 @@ module.exports = {
     const isOwner = userId === ownerId;
     const client = interaction.client;
 
-    // Built-in flavorMap options
     const builtInChoices = Object.keys(flavorMap).map(name => ({
       name: `🔥 ${name} (Built-in)`,
       value: name
     }));
 
     let query, params;
-
     if (isOwner) {
       query = `SELECT DISTINCT name, guild_id FROM expressions`;
       params = [];
@@ -99,7 +136,6 @@ module.exports = {
       } else if (row.guild_id === guildId) {
         thisServer.push({ name: `🏠 ${row.name} (This Server)`, value: row.name });
       } else {
-        // Lazy cache lookup for guild names
         let guildName = guildNameCache.get(row.guild_id);
         if (!guildName) {
           const guild = await client.guilds.fetch(row.guild_id).catch(() => null);
@@ -110,13 +146,7 @@ module.exports = {
       }
     }
 
-    const combined = [
-      ...builtInChoices,
-      ...thisServer,
-      ...global,
-      ...otherServers
-    ];
-
+    const combined = [...builtInChoices, ...thisServer, ...global, ...otherServers];
     const filtered = combined
       .filter(c => c.name.toLowerCase().includes(focused.toLowerCase()))
       .slice(0, 25);
@@ -125,6 +155,7 @@ module.exports = {
     await interaction.respond(filtered);
   }
 };
+
 
 
 
