@@ -4,7 +4,6 @@ const { flavorMap, getRandomFlavor } = require('../utils/flavorMap');
 
 const guildNameCache = new Map();
 
-// Random color generator
 function getRandomColor() {
   const colors = [
     0xFFD700, 0x66CCFF, 0xFF66CC, 0xFF4500,
@@ -22,6 +21,11 @@ module.exports = {
         .setDescription('Name of the expression (e.g. rich)')
         .setRequired(true)
         .setAutocomplete(true)
+    )
+    .addUserOption(option =>
+      option.setName('target')
+        .setDescription('Tag another user (optional)')
+        .setRequired(false)
     ),
 
   async execute(interaction, { pg }) {
@@ -29,8 +33,9 @@ module.exports = {
     const isOwner = interaction.user.id === ownerId;
 
     const name = interaction.options.getString('name').toLowerCase();
+    const targetUser = interaction.options.getUser('target') || interaction.user;
+    const userMention = `<@${targetUser.id}>`;
     const guildId = interaction.guild?.id ?? null;
-    const userMention = `<@${interaction.user.id}>`;
 
     let res;
     if (isOwner) {
@@ -128,7 +133,7 @@ module.exports = {
   }
 };
 
-// 🔧 AI fully patched to avoid hallucinated mentions
+// 🔧 Groq AI with mention-safe system
 async function getGroqAI(keyword, userMention) {
   const url = 'https://api.groq.com/openai/v1/chat/completions';
   const apiKey = process.env.GROQ_API_KEY;
@@ -142,7 +147,7 @@ async function getGroqAI(keyword, userMention) {
       },
       {
         role: 'user',
-        content: `Someone typed "${keyword}". Generate a super short savage one-liner. Insert {user} where you want to mention the user. Use Discord/Web3 slang. Max 1 sentence.`
+        content: `Someone typed "${keyword}". Generate a savage one-liner. Insert {user} where you want to mention the user. Use Discord/Web3 slang. Max 1 sentence.`
       }
     ],
     max_tokens: 50,
@@ -166,6 +171,7 @@ async function getGroqAI(keyword, userMention) {
 function cleanQuotes(text) {
   return text.replace(/^"(.*)"$/, '$1').trim();
 }
+
 
 
 
