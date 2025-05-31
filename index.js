@@ -4,7 +4,6 @@ const { Client: PgClient } = require('pg');
 const fs = require('fs');
 const path = require('path');
 
-// ✅ Load optimization modules (keep these for logScanner/provider)
 require('./services/provider');
 require('./services/logScanner');
 
@@ -50,16 +49,13 @@ pg.query(`CREATE TABLE IF NOT EXISTS tracked_tokens (
 )`);
 
 pg.query(`ALTER TABLE tracked_tokens ADD COLUMN IF NOT EXISTS channel_id TEXT`);
-
-pg.query(`
-  CREATE TABLE IF NOT EXISTS expressions (
-    name TEXT NOT NULL,
-    type TEXT NOT NULL,
-    content TEXT NOT NULL,
-    guild_id TEXT,
-    PRIMARY KEY (name, guild_id)
+pg.query(`CREATE TABLE IF NOT EXISTS expressions (
+  name TEXT NOT NULL,
+  type TEXT NOT NULL,
+  content TEXT NOT NULL,
+  guild_id TEXT,
+  PRIMARY KEY (name, guild_id)
 )`);
-
 pg.query(`ALTER TABLE expressions ADD COLUMN IF NOT EXISTS guild_id TEXT`);
 
 client.commands = new Collection();
@@ -97,11 +93,11 @@ for (const file of eventFiles) {
 }
 
 // ✅ Hybrid Global + Live Block Listeners Activated!
-
-// 1️⃣ Start Global Block Scanner (Token Buys & Sales)
 const processUnifiedBlock = require('./services/globalProcessor');
+const { trackAllContracts } = require('./services/mintProcessor');
 const { getProvider } = require('./services/provider');
 
+// Start global block listener (token sales)
 setInterval(async () => {
   try {
     const latestBlock = await getProvider().getBlockNumber();
@@ -109,19 +105,15 @@ setInterval(async () => {
   } catch (err) {
     console.error("Global Scanner Error:", err);
   }
-}, 15000); // Scan every 15 seconds (adjust as needed)
+}, 15000);
 
-// 2️⃣ Start Per-Contract NFT Mint Live Listeners
-const { trackAllContracts } = require('./services/mintProcessor');
+// Start per-contract live mint listener
 trackAllContracts(client);
 
 client.login(process.env.DISCORD_BOT_TOKEN)
-  .then(() => {
-    console.log(`✅ Logged in as ${client.user.tag}`);
-  })
-  .catch(err => {
-    console.error('❌ Discord login failed:', err);
-  });
+  .then(() => console.log(`✅ Logged in as ${client.user.tag}`))
+  .catch(err => console.error('❌ Discord login failed:', err));
+
 
 
 
