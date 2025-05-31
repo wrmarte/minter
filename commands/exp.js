@@ -1,12 +1,6 @@
 const { SlashCommandBuilder, AttachmentBuilder, EmbedBuilder } = require('discord.js');
 const fetch = require('node-fetch');
 const { flavorMap, getRandomFlavor } = require('../utils/flavorMap');
-const { OpenAI } = require('openai');
-
-// Init OpenAI
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
 
 // Simple in-memory cache for guild names
 const guildNameCache = new Map();
@@ -17,7 +11,7 @@ module.exports = {
     .setDescription('Show a visual experience vibe')
     .addStringOption(option =>
       option.setName('name')
-        .setDescription('Name of the expression (e.g. "rich")')
+        .setDescription('Name of the expression (e.g. rich)')
         .setRequired(true)
         .setAutocomplete(true)
     ),
@@ -43,47 +37,31 @@ module.exports = {
       );
     }
 
-    // 🔥 Main logic: database → flavorMap → AI fallback
     if (!res.rows.length && !flavorMap[name]) {
-      // AI fallback time
       await interaction.deferReply();
-
-      const prompt = `
-You are a savage, funny, web3-native Discord bot. Someone typed: "${name}". 
-Generate a creative, witty, or savage 1-liner reaction for this vibe. Use emojis/slang if helpful. Do NOT repeat the word directly.
-      `;
-
       try {
-        const completion = await openai.chat.completions.create({
-          model: 'gpt-4o',
-          messages: [
-            { role: 'system', content: 'You are a savage Discord bot AI expression generator.' },
-            { role: 'user', content: prompt }
-          ],
-          max_tokens: 50,
-          temperature: 0.9
-        });
-
-        const aiResponse = completion.choices[0].message.content.trim();
-
+        const aiResponse = await getGroqAI(name);
         const embed = new EmbedBuilder()
           .setTitle('🧠 AI Expression')
           .setDescription(aiResponse)
           .setColor(0xFFD700)
-          .setFooter({ text: 'Powered by PimpsDev AI Engine' });
-
+          .setFooter({ text: 'Powered by Groq AI Engine' });
         return await interaction.editReply({ embeds: [embed] });
-
       } catch (err) {
         console.error('❌ AI error:', err);
-        return await interaction.reply({ content: `❌ No expression found & AI failed.`, flags: 64 });
+        if (interaction.deferred) {
+          await interaction.editReply('❌ AI failed.');
+        } else {
+          await interaction.reply('❌ AI failed.');
+        }
+        return;
       }
     }
 
     const exp = res.rows[0];
     const customMessage = exp?.content?.includes('{user}')
       ? exp.content.replace('{user}', userMention)
-      : getRandomFlavor(name, userMention) || `💥 ${userMention} is experiencing **"${name}"** energy today!`;
+      : getRandomFlavor(name, userMention) || `💥 ${userMention} is experiencing "${name}" energy today!`;
 
     if (exp?.type === 'image') {
       try {
@@ -93,7 +71,7 @@ Generate a creative, witty, or savage 1-liner reaction for this vibe. Use emojis
         return await interaction.reply({ content: customMessage, files: [file] });
       } catch (err) {
         console.error('❌ Image fetch error:', err.message);
-        return await interaction.reply({ content: `⚠️ Image broken, but:\n${customMessage}`, flags: 64 });
+        return await interaction.reply({ content: `⚠️ Image broken, but:\n${customMessage}` });
       }
     }
 
@@ -151,10 +129,50 @@ Generate a creative, witty, or savage 1-liner reaction for this vibe. Use emojis
       .filter(c => c.name.toLowerCase().includes(focused.toLowerCase()))
       .slice(0, 25);
 
-    console.log(`🔁 Optimized Autocomplete for /exp:`, filtered);
     await interaction.respond(filtered);
   }
 };
+
+// 🧠 Groq AI call function
+async function getGroqAI(keyword) {
+  const url = 'https://api.groq.com/openai/v1/chat/completions';
+  const apiKey = process.env.GROQ_API_KEY;
+
+  const body = {
+    model: 'llama3-70b-8192',
+    messages: [
+      {
+        role: 'system',
+        content: 'You are a savage Discord bot AI expression generator.'
+      },
+      {
+        role: 'user',
+        content: `Someone gave you the word "${keyword}". Generate a short funny, witty or savage reaction. Use emojis/slang if helpful. Max 2 lines.`
+      }
+    ],
+    max_tokens: 60,
+    temperature: 0.9
+  };
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(body)
+  });
+
+  if (!res.ok) {
+    const errData = await res.json();
+    console.error(errData);
+    throw new Error('Groq AI call failed');
+  }
+
+  const data = await res.json();
+  return data.choices[0].message.content.trim();
+}
+
 
 
 
