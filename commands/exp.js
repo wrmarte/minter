@@ -7,15 +7,8 @@ const guildNameCache = new Map();
 // Random color generator
 function getRandomColor() {
   const colors = [
-    0xFFD700, // gold
-    0x66CCFF, // light blue
-    0xFF66CC, // pink
-    0xFF4500, // orange red
-    0x00FF99, // neon green
-    0xFF69B4, // hot pink
-    0x00CED1, // dark turquoise
-    0xFFA500, // orange
-    0x8A2BE2  // blue violet
+    0xFFD700, 0x66CCFF, 0xFF66CC, 0xFF4500,
+    0x00FF99, 0xFF69B4, 0x00CED1, 0xFFA500, 0x8A2BE2
   ];
   return colors[Math.floor(Math.random() * colors.length)];
 }
@@ -46,29 +39,20 @@ module.exports = {
       res = await pg.query(`SELECT * FROM expressions WHERE name = $1 AND (guild_id = $2 OR guild_id IS NULL) ORDER BY RANDOM() LIMIT 1`, [name, guildId]);
     }
 
-    // 🔥 AI fallback if not found anywhere
     if (!res.rows.length && !flavorMap[name]) {
       await interaction.deferReply();
       try {
         let aiResponse = await getGroqAI(name, userMention);
-        aiResponse = cleanQuotes(aiResponse);
-
         const embed = new EmbedBuilder()
           .setDescription(aiResponse)
           .setColor(getRandomColor());
         return await interaction.editReply({ embeds: [embed] });
       } catch (err) {
         console.error('❌ AI error:', err);
-        if (interaction.deferred) {
-          await interaction.editReply('❌ AI failed.');
-        } else {
-          await interaction.reply('❌ AI failed.');
-        }
-        return;
+        return await interaction.editReply('❌ AI failed.');
       }
     }
 
-    // 🔥 Handle DB expression
     if (res.rows.length) {
       const exp = res.rows[0];
       const customMessage = exp?.content?.includes('{user}')
@@ -82,23 +66,19 @@ module.exports = {
           const file = new AttachmentBuilder(exp.content);
           return await interaction.reply({ content: customMessage, files: [file] });
         } catch (err) {
-          console.error('❌ Image fetch error:', err.message);
           return await interaction.reply({ content: `⚠️ Image broken, but:\n${customMessage}` });
         }
       }
 
-      const embed = new EmbedBuilder()
-        .setDescription(customMessage)
-        .setColor(getRandomColor());
-      return await interaction.reply({ embeds: [embed] });
+      const embed = new EmbedBuilder().setDescription(customMessage).setColor(getRandomColor());
+      return interaction.reply({ embeds: [embed] });
     }
 
-    // 🔥 Handle built-in flavorMap
     const builtIn = getRandomFlavor(name, userMention);
     const embed = new EmbedBuilder()
       .setDescription(builtIn || `💥 ${userMention} is experiencing "${name}" energy today!`)
       .setColor(getRandomColor());
-    return await interaction.reply({ embeds: [embed] });
+    return interaction.reply({ embeds: [embed] });
   },
 
   async autocomplete(interaction, { pg }) {
@@ -125,18 +105,13 @@ module.exports = {
 
     const res = await pg.query(query, params);
 
-    const thisServer = [];
-    const global = [];
-    const otherServers = [];
-
+    const thisServer = [], global = [], otherServers = [];
     for (const row of res.rows) {
       if (!row.name) continue;
 
-      if (row.guild_id === null) {
-        global.push({ name: `🌐 ${row.name} (Global)`, value: row.name });
-      } else if (row.guild_id === guildId) {
-        thisServer.push({ name: `🏠 ${row.name} (This Server)`, value: row.name });
-      } else {
+      if (row.guild_id === null) global.push({ name: `🌐 ${row.name} (Global)`, value: row.name });
+      else if (row.guild_id === guildId) thisServer.push({ name: `🏠 ${row.name} (This Server)`, value: row.name });
+      else {
         let guildName = guildNameCache.get(row.guild_id);
         if (!guildName) {
           const guild = await client.guilds.fetch(row.guild_id).catch(() => null);
@@ -153,7 +128,7 @@ module.exports = {
   }
 };
 
-// Groq AI integration
+// 🔧 AI fully patched to avoid hallucinated mentions
 async function getGroqAI(keyword, userMention) {
   const url = 'https://api.groq.com/openai/v1/chat/completions';
   const apiKey = process.env.GROQ_API_KEY;
@@ -167,7 +142,7 @@ async function getGroqAI(keyword, userMention) {
       },
       {
         role: 'user',
-        content: `Someone typed "${keyword}". Generate a super short savage one-liner reaction. Include ${userMention} inside. Use Discord/Web3 slang. Max 1 sentence.`
+        content: `Someone typed "${keyword}". Generate a super short savage one-liner. Insert {user} where you want to mention the user. Use Discord/Web3 slang. Max 1 sentence.`
       }
     ],
     max_tokens: 50,
@@ -176,24 +151,18 @@ async function getGroqAI(keyword, userMention) {
 
   const res = await fetch(url, {
     method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'application/json'
-    },
+    headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
   });
 
-  if (!res.ok) {
-    const errData = await res.json();
-    console.error(errData);
-    throw new Error('Groq AI call failed');
-  }
-
   const data = await res.json();
-  return data.choices[0].message.content.trim();
+  const rawReply = data?.choices?.[0]?.message?.content?.trim();
+  if (!rawReply) throw new Error('Empty AI response');
+
+  const replaced = rawReply.replace(/{user}/gi, userMention);
+  return cleanQuotes(replaced);
 }
 
-// Clean extra quotes from AI response
 function cleanQuotes(text) {
   return text.replace(/^"(.*)"$/, '$1').trim();
 }
