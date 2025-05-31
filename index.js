@@ -4,7 +4,7 @@ const { Client: PgClient } = require('pg');
 const fs = require('fs');
 const path = require('path');
 
-// ✅ Load optimization modules
+// ✅ Load optimization modules (keep these for logScanner/provider)
 require('./services/provider');
 require('./services/logScanner');
 
@@ -62,10 +62,10 @@ pg.query(`
 
 pg.query(`ALTER TABLE expressions ADD COLUMN IF NOT EXISTS guild_id TEXT`);
 
-
 client.commands = new Collection();
 client.prefixCommands = new Collection();
 
+// ✅ Load all slash + prefix commands
 try {
   const commandFiles = fs.readdirSync(path.join(__dirname, 'commands')).filter(file => file.endsWith('.js'));
   for (const file of commandFiles) {
@@ -84,6 +84,7 @@ try {
   console.error('❌ Error loading commands:', err);
 }
 
+// ✅ Load events
 const eventFiles = fs.readdirSync(path.join(__dirname, 'events')).filter(file => file.endsWith('.js'));
 for (const file of eventFiles) {
   try {
@@ -95,9 +96,24 @@ for (const file of eventFiles) {
   }
 }
 
-// ✅ Start Global Block Listener for Minter V4.6 (this is the key injection)
-const startGlobalBlockListener = require('./services/blockListener');
-startGlobalBlockListener(client);
+// ✅ Hybrid Global + Live Block Listeners Activated!
+
+// 1️⃣ Start Global Block Scanner (Token Buys & Sales)
+const processUnifiedBlock = require('./services/globalProcessor');
+const { getProvider } = require('./services/provider');
+
+setInterval(async () => {
+  try {
+    const latestBlock = await getProvider().getBlockNumber();
+    await processUnifiedBlock(client, latestBlock - 5, latestBlock);
+  } catch (err) {
+    console.error("Global Scanner Error:", err);
+  }
+}, 15000); // Scan every 15 seconds (adjust as needed)
+
+// 2️⃣ Start Per-Contract NFT Mint Live Listeners
+const { trackAllContracts } = require('./services/mintProcessor');
+trackAllContracts(client);
 
 client.login(process.env.DISCORD_BOT_TOKEN)
   .then(() => {
@@ -106,6 +122,7 @@ client.login(process.env.DISCORD_BOT_TOKEN)
   .catch(err => {
     console.error('❌ Discord login failed:', err);
   });
+
 
 
 
