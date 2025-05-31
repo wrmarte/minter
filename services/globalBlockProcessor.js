@@ -55,7 +55,15 @@ module.exports = async function processUnifiedBlock(client, fromBlock, toBlock) 
 
 async function handleContractLog(client, contractRow, log) {
   const { name, address, channel_ids } = contractRow;
-  const abi = ['event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)', 'function tokenURI(uint256 tokenId) view returns (string)'];
+  const nftTransferTopic = id('Transfer(address,address,uint256)');
+
+  // ✅ Only parse logs that match NFT Transfer signature
+  if (log.topics[0] !== nftTransferTopic) return;
+
+  const abi = [
+    'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
+    'function tokenURI(uint256 tokenId) view returns (string)'
+  ];
   const iface = new Interface(abi);
   const contract = new Contract(address, abi, getProvider());
 
@@ -63,8 +71,10 @@ async function handleContractLog(client, contractRow, log) {
   try {
     parsed = iface.parseLog(log);
   } catch {
-    return; // skip invalid log safely
+    return;
   }
+
+  if (!parsed?.args) return;  // ✅ Fully safe guard
 
   const { from, to, tokenId } = parsed.args;
   const tokenIdStr = tokenId.toString();
@@ -186,5 +196,6 @@ async function getMarketCapUSD(address) {
     return parseFloat(data?.data?.attributes?.fdv_usd || data?.data?.attributes?.market_cap_usd || '0');
   } catch { return 0; }
 }
+
 
 
