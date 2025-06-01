@@ -1,19 +1,12 @@
-const { trackAllContracts } = require('../services/trackContracts');
-const trackTokenSales = require('../services/mintProcessor')
-;
+const { trackAllContracts } = require('../services/mintProcessor');
 
-module.exports = client => {
-  client.once('ready', async () => {
-    console.log(`✅ Logged in as ${client.user.tag}`);
+module.exports = async (client, pg) => {
+  console.log('✅ Bot is fully ready!');
 
-    const res = await client.pg.query(`SELECT * FROM contract_watchlist`);
-    for (const row of res.rows) {
-      await trackAllContracts(client, row);
-    }
-
-    await trackTokenSales(client); // 👈 added token sale tracking
-  });
+  // Kickstart the live NFT mint/sale tracking when bot is fully ready
+  trackAllContracts(client);
 };
+
 
 
 
