@@ -1,21 +1,29 @@
-const { formatUnits } = require('ethers');
 const fetch = require('node-fetch');
-const { getProvider } = require('./provider');
 
-// ✅ Used everywhere for both mint & sale ETH calculations
 async function getRealDexPriceForToken(amount, tokenAddress) {
   try {
-    const res = await fetch(`https://api.geckoterminal.com/api/v2/simple/networks/base/token_price/${tokenAddress}`);
+    const res = await fetch(`https://api.geckoterminal.com/api/v2/networks/base/tokens/${tokenAddress}`);
     const data = await res.json();
-    const prices = data?.data?.attributes?.token_prices || {};
-    const tokenPrice = parseFloat(prices[tokenAddress.toLowerCase()] || '0');
-    return tokenPrice ? amount * tokenPrice : null;
+    const priceData = data?.data?.attributes;
+
+    // Extract raw USD price per token unit
+    const priceUSD = parseFloat(priceData?.price_usd || '0');
+    const decimals = parseInt(priceData?.decimals || 18);
+    
+    // Adjust for decimals to get true token unit price
+    const adjustedUSD = priceUSD * (10 ** decimals);
+
+    const ethRes = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd');
+    const ethData = await ethRes.json();
+    const ethUSD = parseFloat(ethData?.ethereum?.usd || '0');
+    const priceETH = ethUSD > 0 ? adjustedUSD / ethUSD : null;
+
+    return priceETH ? (amount * priceETH) : null;
   } catch {
     return null;
   }
 }
 
-// ✅ Used only when primary price fails (very rare)
 async function getEthPriceFromToken(tokenAddress) {
   try {
     const res = await fetch(`https://api.geckoterminal.com/api/v2/networks/base/tokens/${tokenAddress}`);
@@ -26,14 +34,15 @@ async function getEthPriceFromToken(tokenAddress) {
 
     const ethRes = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd');
     const ethData = await ethRes.json();
-    const ethUsd = parseFloat(ethData?.ethereum?.usd || '0');
-    return ethUsd > 0 ? price / ethUsd : null;
+    const ethUSD = parseFloat(ethData?.ethereum?.usd || '0');
+    return ethUSD > 0 ? price / ethUSD : null;
   } catch {
     return null;
   }
 }
 
 module.exports = { getRealDexPriceForToken, getEthPriceFromToken };
+
 
 
 
