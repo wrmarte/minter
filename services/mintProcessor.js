@@ -220,8 +220,12 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
 }
 
 module.exports = {
-  trackAllContracts
+  trackAllContracts,
+  contractListeners // <-- EXPORT LISTENERS FOR STATUS MONITOR
 };
+
+
+
 
 
 
