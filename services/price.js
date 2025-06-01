@@ -6,17 +6,14 @@ async function getRealDexPriceForToken(amount, tokenAddress) {
     const data = await res.json();
     const priceData = data?.data?.attributes;
 
-    // Extract raw USD price per token unit
+    // ✅ Use priceUSD directly (it's already per token unit)
     const priceUSD = parseFloat(priceData?.price_usd || '0');
-    const decimals = parseInt(priceData?.decimals || 18);
-    
-    // Adjust for decimals to get true token unit price
-    const adjustedUSD = priceUSD * (10 ** decimals);
 
     const ethRes = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd');
     const ethData = await ethRes.json();
     const ethUSD = parseFloat(ethData?.ethereum?.usd || '0');
-    const priceETH = ethUSD > 0 ? adjustedUSD / ethUSD : null;
+
+    const priceETH = ethUSD > 0 ? priceUSD / ethUSD : null;
 
     return priceETH ? (amount * priceETH) : null;
   } catch {
@@ -42,6 +39,7 @@ async function getEthPriceFromToken(tokenAddress) {
 }
 
 module.exports = { getRealDexPriceForToken, getEthPriceFromToken };
+
 
 
 
