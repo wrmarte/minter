@@ -11,18 +11,9 @@ const TOKEN_NAME_TO_ADDRESS = {
 async function trackAllContracts(client) {
   const pg = client.pg;
 
-  const res = await pg.query(`
-    SELECT 
-      address, name, mint_price, mint_token, mint_token_symbol, 
-      array_agg(channel_ids) AS raw_channel_ids
-    FROM contract_watchlist
-    GROUP BY address, name, mint_price, mint_token, mint_token_symbol
-  `);
-
-  const contracts = res.rows.map(row => ({
-    ...row,
-    channel_ids: [...new Set(row.raw_channel_ids.flat())]  // Flatten & deduplicate channels
-  }));
+  // ✅ Fully back to V4.4 logic: select all rows
+  const res = await pg.query('SELECT * FROM contract_watchlist');
+  const contracts = res.rows;
 
   for (const contractRow of contracts) {
     launchContractListener(client, contractRow);
@@ -42,6 +33,7 @@ function launchContractListener(client, contractRow) {
   let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
   let seenSales = new Set(loadJson(seenSalesPath(name)) || []);
 
+  // ✅ Prevent multiple listeners per address
   const listenerKey = `${address.toLowerCase()}_mint_listener`;
   if (getProvider()[listenerKey]) {
     console.log(`[${name}] Listener already active — skipping duplicate`);
