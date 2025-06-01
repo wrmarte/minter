@@ -5,7 +5,7 @@ const contractListeners = require('../services/mintProcessor').contractListeners
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('status')
-    .setDescription('Show system health and operational status'),
+    .setDescription('📊 Display full system health overview'),
 
   async execute(interaction) {
     const client = interaction.client;
@@ -13,7 +13,7 @@ module.exports = {
 
     await interaction.deferReply();
 
-    // DB Check
+    // Database Check
     let dbStatus = '🔴 Failed';
     try {
       await pg.query('SELECT 1');
@@ -33,30 +33,33 @@ module.exports = {
       rpcStatus = '🔴 Failed';
     }
 
-    // Discord Check
+    // Discord Gateway Check
     let discordStatus = client.ws.status === 0 ? '🟢 Connected' : '🔴 Disconnected';
 
-    // MintProcessor Check (listeners)
-    let mintStatus = '🔴 No listeners';
+    // Mint Processor Check (active listeners)
+    let mintStatus = '🔴 Inactive';
     try {
       const active = Object.keys(contractListeners || {}).length;
-      mintStatus = active > 0 ? `🟢 ${active} listener${active > 1 ? 's' : ''}` : '🟠 No active listeners';
+      mintStatus = active > 0 ? `🟢 ${active} Active` : '🟠 No listeners';
     } catch {
       mintStatus = '🔴 Error';
     }
 
+    // Embed display (clean vertical layout)
     const embed = new EmbedBuilder()
-      .setTitle('📊 System Health Status')
-      .setColor(0x00cc66)
-      .addFields(
-        { name: '🗄️ PostgreSQL', value: dbStatus, inline: true },
-        { name: '📡 RPC Provider', value: `${rpcStatus} ${blockNum}`, inline: true },
-        { name: '🤖 Discord Gateway', value: discordStatus, inline: true },
-        { name: '🧱 Mint Processor', value: mintStatus, inline: true }
-      )
-      .setFooter({ text: 'Powered by PimpsDev — Status V1' })
+      .setTitle('📊 Bot System Status')
+      .setColor(0x3498db)
+      .setDescription([
+        `🗄️ **PostgreSQL:** ${dbStatus}`,
+        `📡 **RPC Provider:** ${rpcStatus} *(Block ${blockNum})*`,
+        `🤖 **Discord Gateway:** ${discordStatus}`,
+        `🧱 **Mint Processor:** ${mintStatus}`,
+        `\u200b` // empty line for spacing
+      ].join('\n'))
+      .setFooter({ text: 'PimpsDev • Status Monitor v1.0' })
       .setTimestamp();
 
     await interaction.editReply({ embeds: [embed] });
   }
 };
+
