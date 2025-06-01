@@ -61,15 +61,9 @@ async function handleTokenLog(client, tokenRows, log) {
   const tokenPrice = await getTokenPriceUSD(tokenAddress);
   const marketCap = await getMarketCapUSD(tokenAddress);
 
-  let usdSpent = 0, ethSpent = 0;
-  try {
-    const tx = await getProvider().getTransaction(log.transactionHash);
-    const ethPrice = await getETHPrice();
-    if (tx?.value) {
-      ethSpent = parseFloat(formatUnits(tx.value, 18));
-      usdSpent = ethSpent * ethPrice;
-    }
-  } catch {}
+  const ethPrice = await getETHPrice();
+  const usdSpent = tokenAmountRaw * tokenPrice;
+  const ethSpent = ethPrice > 0 ? usdSpent / ethPrice : 0;
 
   const rocketIntensity = Math.min(Math.floor(tokenAmountRaw / 100), 10);
   const rocketLine = '🟥🟦🚀'.repeat(Math.max(1, rocketIntensity));
