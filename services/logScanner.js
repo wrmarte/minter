@@ -1,45 +1,26 @@
-const { getProvider, rotateProvider } = require('./provider');
+const { id } = require('ethers');
+const { getProvider } = require('./provider');
 
-async function fetchLogs(contractAddress, fromBlock, toBlock, topic) {
-  const blockBatchSize = 500;
-  let currentBlock = fromBlock;
-  const allLogs = [];
+async function fetchLogs(addresses, fromBlock, toBlock) {
+  const topics = [
+    id('Transfer(address,address,uint256)'),
+    id('Transfer(address,address,uint amount)')
+  ];
 
-  while (currentBlock <= toBlock) {
-    const batchFrom = currentBlock;
-    const batchTo = Math.min(currentBlock + blockBatchSize - 1, toBlock);
+  const logs = [];
 
-    let success = false;
-    let attempts = 0;
-
-    while (!success && attempts < 5) {
+  for (const address of addresses) {
+    for (const topic of topics) {
       try {
-        const provider = getProvider();
-        const logs = await provider.getLogs({
-          address: contractAddress,
-          fromBlock: batchFrom,
-          toBlock: batchTo,
-          topics: [topic]
-        });
-
-        console.log(`✅ Logs: ${logs.length} from ${batchFrom} to ${batchTo}`);
-        allLogs.push(...logs);
-        success = true;
+        const filter = { address, topics: [topic], fromBlock, toBlock };
+        const theseLogs = await getProvider().getLogs(filter);
+        logs.push(...theseLogs);
       } catch (err) {
-        console.warn(`⚠️ Failed log fetch: ${err.message}`);
-        rotateProvider();
+        console.warn(`⚠️ Error fetching logs for ${address}: ${err.message}`);
       }
-      attempts++;
     }
-
-    if (!success) {
-      console.error(`❌ Skipped blocks ${batchFrom}-${batchTo}`);
-    }
-
-    currentBlock = batchTo + 1;
   }
-
-  return allLogs;
+  return logs;
 }
 
 module.exports = { fetchLogs };
