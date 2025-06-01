@@ -13,6 +13,8 @@ const ROUTERS = [
   '0x95ebfcb1c6b345fda69cf56c51e30421e5a35aec'
 ];
 
+const seenTx = new Set();
+
 module.exports = async function processUnifiedBlock(client, fromBlock, toBlock) {
   const pg = client.pg;
   const tokenRes = await pg.query('SELECT * FROM tracked_tokens');
@@ -28,7 +30,7 @@ module.exports = async function processUnifiedBlock(client, fromBlock, toBlock) 
   try {
     logs = await fetchLogs(addresses, fromBlock, toBlock);
   } catch (err) {
-    console.warn(`⚠️ fetchLogs failed: ${err.message}`);
+    console.warn(⚠️ fetchLogs failed: ${err.message});
     return;
   }
 
@@ -49,6 +51,8 @@ async function handleTokenLog(client, tokenRows, log) {
 
   if (!ROUTERS.includes(fromAddr)) return;
   if (to.toLowerCase() === '0x0000000000000000000000000000000000000000') return;
+  if (seenTx.has(log.transactionHash)) return;
+  seenTx.add(log.transactionHash);
 
   const tokenAmountRaw = parseFloat(formatUnits(amount, 18));
   const tokenAmountFormatted = (tokenAmountRaw * 1000).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -80,16 +84,16 @@ async function handleTokenLog(client, tokenRows, log) {
     }
     if (channel) {
       const embed = {
-        title: `${token.name.toUpperCase()} Buy!`,
+        title: ${token.name.toUpperCase()} Buy!,
         description: rocketLine,
         image: { url: 'https://iili.io/3tSecKP.gif' },
         fields: [
-          { name: '💸 Spent', value: `$${usdSpent.toFixed(4)} / ${ethSpent.toFixed(4)} ETH`, inline: true },
-          { name: '🎯 Got', value: `${tokenAmountFormatted} ${token.name.toUpperCase()}`, inline: true },
-          { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
-          { name: '📊 MCap', value: marketCap ? `$${marketCap.toLocaleString()}` : 'Fetching...', inline: true }
+          { name: '💸 Spent', value: $${usdSpent.toFixed(4)} / ${ethSpent.toFixed(4)} ETH, inline: true },
+          { name: '🎯 Got', value: ${tokenAmountFormatted} ${token.name.toUpperCase()}, inline: true },
+          { name: '💵 Price', value: $${tokenPrice.toFixed(8)}, inline: true },
+          { name: '📊 MCap', value: marketCap ? $${marketCap.toLocaleString()} : 'Fetching...', inline: true }
         ],
-        url: `https://www.geckoterminal.com/base/pools/${tokenAddress}`,
+        url: https://www.geckoterminal.com/base/pools/${tokenAddress},
         color: getColorByUsdSpent(usdSpent),
         footer: { text: 'Live on Base • Powered by PimpsDev' },
         timestamp: new Date().toISOString()
@@ -109,7 +113,7 @@ async function getETHPrice() {
 
 async function getTokenPriceUSD(address) {
   try {
-    const res = await fetch(`https://api.geckoterminal.com/api/v2/simple/networks/base/token_price/${address}`);
+    const res = await fetch(https://api.geckoterminal.com/api/v2/simple/networks/base/token_price/${address});
     const data = await res.json();
     const prices = data?.data?.attributes?.token_prices || {};
     return parseFloat(prices[address.toLowerCase()] || '0');
@@ -118,7 +122,7 @@ async function getTokenPriceUSD(address) {
 
 async function getMarketCapUSD(address) {
   try {
-    const res = await fetch(`https://api.geckoterminal.com/api/v2/networks/base/tokens/${address}`);
+    const res = await fetch(https://api.geckoterminal.com/api/v2/networks/base/tokens/${address});
     const data = await res.json();
     return parseFloat(data?.data?.attributes?.fdv_usd || data?.data?.attributes?.market_cap_usd || '0');
   } catch { return 0; }
