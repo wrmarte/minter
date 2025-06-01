@@ -2,6 +2,7 @@ const { formatUnits } = require('ethers');
 const fetch = require('node-fetch');
 const { getProvider } = require('./provider');
 
+// ✅ Used everywhere for both mint & sale ETH calculations
 async function getRealDexPriceForToken(amount, tokenAddress) {
   try {
     const res = await fetch(`https://api.geckoterminal.com/api/v2/simple/networks/base/token_price/${tokenAddress}`);
@@ -14,6 +15,7 @@ async function getRealDexPriceForToken(amount, tokenAddress) {
   }
 }
 
+// ✅ Used only when primary price fails (very rare)
 async function getEthPriceFromToken(tokenAddress) {
   try {
     const res = await fetch(`https://api.geckoterminal.com/api/v2/networks/base/tokens/${tokenAddress}`);
@@ -21,6 +23,7 @@ async function getEthPriceFromToken(tokenAddress) {
     const fdv = parseFloat(data?.data?.attributes?.fdv_usd || '0');
     const supply = parseFloat(data?.data?.attributes?.total_supply || '0');
     const price = fdv && supply ? fdv / supply : 0;
+
     const ethRes = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd');
     const ethData = await ethRes.json();
     const ethUsd = parseFloat(ethData?.ethereum?.usd || '0');
@@ -31,5 +34,7 @@ async function getEthPriceFromToken(tokenAddress) {
 }
 
 module.exports = { getRealDexPriceForToken, getEthPriceFromToken };
+
+
 
 
