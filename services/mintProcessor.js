@@ -31,6 +31,14 @@ function launchContractListener(client, contractRow) {
   let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
   let seenSales = new Set(loadJson(seenSalesPath(name)) || []);
 
+  // ✅ Anti-duplicate listener key
+  const listenerKey = `${address.toLowerCase()}_mint_listener`;
+  if (getProvider()[listenerKey]) {
+    console.log(`[${name}] Listener already active — skipping duplicate`);
+    return;
+  }
+  getProvider()[listenerKey] = true;
+
   getProvider().on('block', async (blockNumber) => {
     try {
       const fromBlock = Math.max(blockNumber - 5, 0);
@@ -47,31 +55,25 @@ function launchContractListener(client, contractRow) {
 
       for (const log of logs) {
         let parsed;
-        try {
-          parsed = iface.parseLog(log);
-        } catch { continue; }
+        try { parsed = iface.parseLog(log); } catch { continue; }
         const { from, to, tokenId } = parsed.args;
         const tokenIdStr = tokenId.toString();
 
         if (from === ZeroAddress) {
-          // Mint Logic
           if (seenTokenIds.has(tokenIdStr)) continue;
           seenTokenIds.add(tokenIdStr);
           await handleMint(client, contractRow, contract, tokenId, to, channel_ids);
         } else {
-          // Sale Logic
           if (seenSales.has(tokenIdStr)) continue;
           seenSales.add(tokenIdStr);
           await handleSale(client, contractRow, contract, tokenId, from, to, log.transactionHash, channel_ids);
         }
       }
 
-      // Save progress periodically
       if (blockNumber % 10 === 0) {
         saveJson(seenPath(name), [...seenTokenIds]);
         saveJson(seenSalesPath(name), [...seenSales]);
       }
-
     } catch (err) {
       console.warn(`[${name}] Block processing error: ${err.message}`);
     }
@@ -201,4 +203,5 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
 module.exports = {
   trackAllContracts
 };
+
 
