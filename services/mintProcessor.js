@@ -8,26 +8,21 @@ const TOKEN_NAME_TO_ADDRESS = {
   'ADRIAN': '0x7e99075ce287f1cf8cbcaaa6a1c7894e404fd7ea'
 };
 
-// ✅ This will store all rows per contract address:
 const contractListeners = {};
 
 async function trackAllContracts(client) {
   const pg = client.pg;
-
   const res = await pg.query('SELECT * FROM contract_watchlist');
   const contracts = res.rows;
 
   for (const contractRow of contracts) {
     const addressKey = contractRow.address.toLowerCase();
-
-    // ✅ Group rows by contract address
     if (!contractListeners[addressKey]) {
       contractListeners[addressKey] = [];
     }
     contractListeners[addressKey].push(contractRow);
   }
 
-  // ✅ Launch one listener per contract address
   for (const addressKey of Object.keys(contractListeners)) {
     launchContractListener(client, addressKey, contractListeners[addressKey]);
   }
@@ -77,15 +72,12 @@ function launchContractListener(client, addressKey, contractRows) {
         if (from === ZeroAddress) {
           if (seenTokenIds.has(tokenIdStr)) continue;
           seenTokenIds.add(tokenIdStr);
-
-          // ✅ Process for every server (contractRow)
           for (const row of contractRows) {
             await handleMint(client, row, contract, tokenId, to, row.channel_ids);
           }
         } else {
           if (seenSales.has(tokenIdStr)) continue;
           seenSales.add(tokenIdStr);
-
           for (const row of contractRows) {
             await handleSale(client, row, contract, tokenId, from, to, log.transactionHash, row.channel_ids);
           }
@@ -140,7 +132,8 @@ async function handleMint(client, contractRow, contract, tokenId, to, channel_id
     timestamp: new Date().toISOString()
   };
 
-  for (const id of [channel_ids].flat()) {
+  const uniqueChannels = [...new Set([channel_ids].flat())];
+  for (const id of uniqueChannels) {
     const ch = await client.channels.fetch(id).catch(() => null);
     if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
   }
@@ -216,7 +209,8 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     timestamp: new Date().toISOString()
   };
 
-  for (const id of [channel_ids].flat()) {
+  const uniqueChannels = [...new Set([channel_ids].flat())];
+  for (const id of uniqueChannels) {
     const ch = await client.channels.fetch(id).catch(() => null);
     if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
   }
@@ -225,6 +219,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
 module.exports = {
   trackAllContracts
 };
+
 
 
 
