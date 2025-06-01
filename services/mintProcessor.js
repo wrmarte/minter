@@ -1,4 +1,4 @@
-const { Interface, Contract, id, ZeroAddress, formatUnits, ethers } = require('ethers');
+const { Interface, Contract, id, ZeroAddress, ethers } = require('ethers');
 const fetch = require('node-fetch');
 const { getRealDexPriceForToken, getEthPriceFromToken } = require('./price');
 const { shortWalletLink, loadJson, saveJson, seenPath, seenSalesPath } = require('../utils/helpers');
@@ -10,7 +10,16 @@ const TOKEN_NAME_TO_ADDRESS = {
 
 async function trackAllContracts(client) {
   const pg = client.pg;
-  const res = await pg.query('SELECT * FROM contract_watchlist');
+
+  // ✅ Aggregate channel_ids across multiple servers for same contract address
+  const res = await pg.query(`
+    SELECT 
+      address, name, mint_price, mint_token, mint_token_symbol, 
+      array_agg(unnest(channel_ids)) AS channel_ids
+    FROM contract_watchlist
+    GROUP BY address, name, mint_price, mint_token, mint_token_symbol
+  `);
+  
   const contracts = res.rows;
 
   for (const contractRow of contracts) {
@@ -19,7 +28,8 @@ async function trackAllContracts(client) {
 }
 
 function launchContractListener(client, contractRow) {
-  const { name, address, mint_price, mint_token, mint_token_symbol, channel_ids } = contractRow;
+  const { name, address, mint_price, mint_token, mint_token_symbol } = contractRow;
+  const channel_ids = [...new Set(contractRow.channel_ids)]; // remove duplicates
 
   const abi = [
     'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
@@ -31,7 +41,7 @@ function launchContractListener(client, contractRow) {
   let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
   let seenSales = new Set(loadJson(seenSalesPath(name)) || []);
 
-  // ✅ Anti-duplicate listener key
+  // ✅ Prevent multiple listeners
   const listenerKey = `${address.toLowerCase()}_mint_listener`;
   if (getProvider()[listenerKey]) {
     console.log(`[${name}] Listener already active — skipping duplicate`);
@@ -203,5 +213,6 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
 module.exports = {
   trackAllContracts
 };
+
 
 
