@@ -1,9 +1,8 @@
-const { Interface, Contract, id, ZeroAddress, formatUnits, ethers } = require('ethers');
+const { Interface, formatUnits } = require('ethers');
 const fetch = require('node-fetch');
 const { fetchLogs } = require('./logScanner');
 const { getProvider } = require('./provider');
-const { getRealDexPriceForToken, getEthPriceFromToken } = require('./price');
-const { shortWalletLink, loadJson, saveJson, seenPath, seenSalesPath } = require('../utils/helpers');
+const { shortWalletLink } = require('../utils/helpers');
 
 const ROUTERS = [
   '0x327Df1E6de05895d2ab08513aaDD9313Fe505d86',
@@ -14,24 +13,16 @@ const ROUTERS = [
   '0x95ebfcb1c6b345fda69cf56c51e30421e5a35aec'
 ];
 
-const TOKEN_NAME_TO_ADDRESS = {
-  'ADRIAN': '0x7e99075ce287f1cf8cbcaaa6a1c7894e404fd7ea'
-};
-
 const seenTx = new Set();
 
 module.exports = async function processUnifiedBlock(client, fromBlock, toBlock) {
   const pg = client.pg;
-
-  const contractRes = await pg.query('SELECT * FROM contract_watchlist');
-  const contractRows = contractRes.rows;
-
   const tokenRes = await pg.query('SELECT * FROM tracked_tokens');
   const tokenRows = tokenRes.rows;
 
-  const addresses = [...new Set([...contractRows.map(row => row.address.toLowerCase()), ...tokenRows.map(row => row.address.toLowerCase())])];
+  const addresses = [...new Set(tokenRows.map(row => row.address.toLowerCase()))];
   if (addresses.length === 0) {
-    console.log('✅ No contracts or tokens to scan.');
+    console.log('✅ No tokens to scan.');
     return;
   }
 
@@ -39,100 +30,22 @@ module.exports = async function processUnifiedBlock(client, fromBlock, toBlock) 
   try {
     logs = await fetchLogs(addresses, fromBlock, toBlock);
   } catch (err) {
-    console.warn(`⚠️ Unified fetchLogs failed: ${err.message}`);
+    console.warn(`⚠️ fetchLogs failed: ${err.message}`);
     return;
   }
 
   for (const log of logs) {
-    const contractRow = contractRows.find(row => row.address.toLowerCase() === log.address.toLowerCase());
-    if (contractRow) {
-      await handleContractLog(client, contractRow, log);
-      continue;
-    }
-
-    const tokenRowGroup = tokenRows.filter(row => row.address.toLowerCase() === log.address.toLowerCase());
-    if (tokenRowGroup.length > 0) {
-      await handleTokenLog(client, tokenRowGroup, log);
-    }
+    await handleTokenLog(client, tokenRows, log);
   }
 }
 
-async function handleContractLog(client, contractRow, log) {
-  const { name, address, mint_price, mint_token, mint_token_symbol, channel_ids } = contractRow;
-  const nftTransferTopic = id('Transfer(address,address,uint256)');
-
-  if (log.topics[0] !== nftTransferTopic) return;
-
-  const abi = [
-    'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
-    'function tokenURI(uint256 tokenId) view returns (string)'
-  ];
-  const iface = new Interface(abi);
-  const contract = new Contract(address, abi, getProvider());
-
+async function handleTokenLog(client, tokenRows, log) {
+  const iface = new Interface(['event Transfer(address indexed from, address indexed to, uint amount)']);
   let parsed;
   try {
     parsed = iface.parseLog(log);
-  } catch {
-    return;
-  }
-  if (!parsed?.args) return;
+  } catch { return; }
 
-  const { from, to, tokenId } = parsed.args;
-  const tokenIdStr = tokenId.toString();
-  let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
-
-  if (from === ZeroAddress) {
-    if (seenTokenIds.has(tokenIdStr)) return;
-    seenTokenIds.add(tokenIdStr);
-
-    let imageUrl = 'https://via.placeholder.com/400x400.png?text=NFT';
-    try {
-      let uri = await contract.tokenURI(tokenId);
-      if (uri.startsWith('ipfs://')) uri = uri.replace('ipfs://', 'https://ipfs.io/ipfs/');
-      const meta = await fetch(uri).then(res => res.json());
-      if (meta?.image) {
-        imageUrl = meta.image.startsWith('ipfs://') ? meta.image.replace('ipfs://', 'https://ipfs.io/ipfs/') : meta.image;
-      }
-    } catch {}
-
-    const total = Number(mint_price);
-    let tokenAddr = mint_token.toLowerCase();
-    if (TOKEN_NAME_TO_ADDRESS[mint_token_symbol.toUpperCase()]) {
-      tokenAddr = TOKEN_NAME_TO_ADDRESS[mint_token_symbol.toUpperCase()].toLowerCase();
-    }
-
-    let ethValue = await getRealDexPriceForToken(total, tokenAddr);
-    if (!ethValue) {
-      const fallback = await getEthPriceFromToken(tokenAddr);
-      ethValue = fallback ? total * fallback : null;
-    }
-
-    const embed = {
-      title: `✨ NEW ${name.toUpperCase()} MINT!`,
-      description: `Minted by: ${shortWalletLink(to)}\nToken #${tokenId}`,
-      fields: [
-        { name: `💰 Spent (${mint_token_symbol})`, value: total.toFixed(4), inline: true },
-        { name: `⇄ ETH Value`, value: ethValue ? `${ethValue.toFixed(4)} ETH` : 'N/A', inline: true }
-      ],
-      thumbnail: { url: imageUrl },
-      color: 219139,
-      footer: { text: 'Powered by PimpsDev' },
-      timestamp: new Date().toISOString()
-    };
-
-    for (const id of channel_ids) {
-      const ch = await client.channels.fetch(id).catch(() => null);
-      if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
-    }
-
-    saveJson(seenPath(name), [...seenTokenIds]);
-  }
-}
-
-async function handleTokenLog(client, tokenRowGroup, log) {
-  const iface = new Interface(['event Transfer(address indexed from, address indexed to, uint amount)']);
-  const parsed = iface.parseLog(log);
   const { from, to, amount } = parsed.args;
   const fromAddr = from.toLowerCase();
 
@@ -162,7 +75,7 @@ async function handleTokenLog(client, tokenRowGroup, log) {
   const rocketLine = '🟥🟦🚀'.repeat(Math.max(1, rocketIntensity));
   const getColorByUsdSpent = (usd) => usd < 10 ? 0xff0000 : usd < 20 ? 0x3498db : 0x00cc66;
 
-  for (const token of tokenRowGroup) {
+  for (const token of tokenRows.filter(row => row.address.toLowerCase() === tokenAddress)) {
     const guild = client.guilds.cache.get(token.guild_id);
     if (!guild) continue;
     let channel = token.channel_id ? guild.channels.cache.get(token.channel_id) : null;
@@ -214,6 +127,7 @@ async function getMarketCapUSD(address) {
     return parseFloat(data?.data?.attributes?.fdv_usd || data?.data?.attributes?.market_cap_usd || '0');
   } catch { return 0; }
 }
+
 
 
 
