@@ -8,20 +8,34 @@ const TOKEN_NAME_TO_ADDRESS = {
   'ADRIAN': '0x7e99075ce287f1cf8cbcaaa6a1c7894e404fd7ea'
 };
 
+// ✅ This will store all rows per contract address:
+const contractListeners = {};
+
 async function trackAllContracts(client) {
   const pg = client.pg;
 
-  // ✅ Fully back to V4.4 logic: select all rows
   const res = await pg.query('SELECT * FROM contract_watchlist');
   const contracts = res.rows;
 
   for (const contractRow of contracts) {
-    launchContractListener(client, contractRow);
+    const addressKey = contractRow.address.toLowerCase();
+
+    // ✅ Group rows by contract address
+    if (!contractListeners[addressKey]) {
+      contractListeners[addressKey] = [];
+    }
+    contractListeners[addressKey].push(contractRow);
+  }
+
+  // ✅ Launch one listener per contract address
+  for (const addressKey of Object.keys(contractListeners)) {
+    launchContractListener(client, addressKey, contractListeners[addressKey]);
   }
 }
 
-function launchContractListener(client, contractRow) {
-  const { name, address, mint_price, mint_token, mint_token_symbol, channel_ids } = contractRow;
+function launchContractListener(client, addressKey, contractRows) {
+  const firstRow = contractRows[0];
+  const { name, address } = firstRow;
 
   const abi = [
     'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
@@ -33,8 +47,7 @@ function launchContractListener(client, contractRow) {
   let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
   let seenSales = new Set(loadJson(seenSalesPath(name)) || []);
 
-  // ✅ Prevent multiple listeners per address
-  const listenerKey = `${address.toLowerCase()}_mint_listener`;
+  const listenerKey = `${addressKey}_mint_listener`;
   if (getProvider()[listenerKey]) {
     console.log(`[${name}] Listener already active — skipping duplicate`);
     return;
@@ -64,11 +77,18 @@ function launchContractListener(client, contractRow) {
         if (from === ZeroAddress) {
           if (seenTokenIds.has(tokenIdStr)) continue;
           seenTokenIds.add(tokenIdStr);
-          await handleMint(client, contractRow, contract, tokenId, to, channel_ids);
+
+          // ✅ Process for every server (contractRow)
+          for (const row of contractRows) {
+            await handleMint(client, row, contract, tokenId, to, row.channel_ids);
+          }
         } else {
           if (seenSales.has(tokenIdStr)) continue;
           seenSales.add(tokenIdStr);
-          await handleSale(client, contractRow, contract, tokenId, from, to, log.transactionHash, channel_ids);
+
+          for (const row of contractRows) {
+            await handleSale(client, row, contract, tokenId, from, to, log.transactionHash, row.channel_ids);
+          }
         }
       }
 
@@ -120,7 +140,7 @@ async function handleMint(client, contractRow, contract, tokenId, to, channel_id
     timestamp: new Date().toISOString()
   };
 
-  for (const id of channel_ids) {
+  for (const id of [channel_ids].flat()) {
     const ch = await client.channels.fetch(id).catch(() => null);
     if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
   }
@@ -196,7 +216,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     timestamp: new Date().toISOString()
   };
 
-  for (const id of channel_ids) {
+  for (const id of [channel_ids].flat()) {
     const ch = await client.channels.fetch(id).catch(() => null);
     if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
   }
@@ -205,6 +225,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
 module.exports = {
   trackAllContracts
 };
+
 
 
 
