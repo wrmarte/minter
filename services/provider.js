@@ -1,6 +1,6 @@
 const { JsonRpcProvider } = require('ethers');
 
-// ✅ Multi-RPC rotation for stability
+// Multi RPC for stability
 const baseRpcs = [
   'https://mainnet.base.org',
   'https://base.publicnode.com',
@@ -22,4 +22,5 @@ function getProvider() {
 }
 
 module.exports = { getProvider, rotateProvider };
+
 
