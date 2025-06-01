@@ -10,7 +10,7 @@ require('./services/logScanner');
 
 console.log("👀 Booting from:", __dirname);
 
-// Create Discord client
+// Create Discord client.
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
