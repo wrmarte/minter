@@ -60,10 +60,11 @@ async function handleTokenLog(client, tokenRows, log) {
   const tokenAddress = log.address.toLowerCase();
   const tokenPrice = await getTokenPriceUSD(tokenAddress);
   const marketCap = await getMarketCapUSD(tokenAddress);
-
   const ethPrice = await getETHPrice();
-  const usdSpent = tokenAmountRaw * tokenPrice;
-  const ethSpent = ethPrice > 0 ? usdSpent / ethPrice : 0;
+
+  const priceValid = tokenPrice > 0;
+  const usdSpent = priceValid ? tokenAmountRaw * tokenPrice : 0;
+  const ethSpent = priceValid && ethPrice > 0 ? usdSpent / ethPrice : 0;
 
   const rocketIntensity = Math.min(Math.floor(tokenAmountRaw / 100), 10);
   const rocketLine = '🟥🟦🚀'.repeat(Math.max(1, rocketIntensity));
@@ -82,9 +83,9 @@ async function handleTokenLog(client, tokenRows, log) {
         description: rocketLine,
         image: { url: 'https://iili.io/3tSecKP.gif' },
         fields: [
-          { name: '💸 Spent', value: `$${usdSpent.toFixed(4)} / ${ethSpent.toFixed(4)} ETH`, inline: true },
+          { name: '💸 Spent', value: priceValid ? `$${usdSpent.toFixed(4)} / ${ethSpent.toFixed(4)} ETH` : 'N/A', inline: true },
           { name: '🎯 Got', value: `${tokenAmountFormatted} ${token.name.toUpperCase()}`, inline: true },
-          { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
+          { name: '💵 Price', value: priceValid ? `$${tokenPrice.toFixed(8)}` : 'N/A', inline: true },
           { name: '📊 MCap', value: marketCap ? `$${marketCap.toLocaleString()}` : 'Fetching...', inline: true }
         ],
         url: `https://www.geckoterminal.com/base/pools/${tokenAddress}`,
@@ -121,6 +122,7 @@ async function getMarketCapUSD(address) {
     return parseFloat(data?.data?.attributes?.fdv_usd || data?.data?.attributes?.market_cap_usd || '0');
   } catch { return 0; }
 }
+
 
 
 
