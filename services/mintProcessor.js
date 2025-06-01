@@ -72,15 +72,20 @@ function launchContractListener(client, addressKey, contractRows) {
         if (from === ZeroAddress) {
           if (seenTokenIds.has(tokenIdStr)) continue;
           seenTokenIds.add(tokenIdStr);
-          for (const row of contractRows) {
-            await handleMint(client, row, contract, tokenId, to, row.channel_ids);
-          }
+
+          // ✅ Deduplicate all channel_ids across all contractRows BEFORE calling handleMint
+          const allChannelIds = [
+            ...new Set(contractRows.flatMap(row => [row.channel_ids].flat()))
+          ];
+          await handleMint(client, firstRow, contract, tokenId, to, allChannelIds);
         } else {
           if (seenSales.has(tokenIdStr)) continue;
           seenSales.add(tokenIdStr);
-          for (const row of contractRows) {
-            await handleSale(client, row, contract, tokenId, from, to, log.transactionHash, row.channel_ids);
-          }
+
+          const allChannelIds = [
+            ...new Set(contractRows.flatMap(row => [row.channel_ids].flat()))
+          ];
+          await handleSale(client, firstRow, contract, tokenId, from, to, log.transactionHash, allChannelIds);
         }
       }
 
@@ -132,8 +137,7 @@ async function handleMint(client, contractRow, contract, tokenId, to, channel_id
     timestamp: new Date().toISOString()
   };
 
-  const uniqueChannels = [...new Set([channel_ids].flat())];
-  for (const id of uniqueChannels) {
+  for (const id of channel_ids) {
     const ch = await client.channels.fetch(id).catch(() => null);
     if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
   }
@@ -209,8 +213,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     timestamp: new Date().toISOString()
   };
 
-  const uniqueChannels = [...new Set([channel_ids].flat())];
-  for (const id of uniqueChannels) {
+  for (const id of channel_ids) {
     const ch = await client.channels.fetch(id).catch(() => null);
     if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
   }
@@ -219,6 +222,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
 module.exports = {
   trackAllContracts
 };
+
 
 
 
