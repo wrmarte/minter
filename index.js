@@ -4,11 +4,13 @@ const { Client: PgClient } = require('pg');
 const fs = require('fs');
 const path = require('path');
 
+// Load helper services
 require('./services/provider');
 require('./services/logScanner');
 
 console.log("👀 Booting from:", __dirname);
 
+// Create Discord client
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -17,6 +19,7 @@ const client = new Client({
   ]
 });
 
+// PostgreSQL connection
 const pg = new PgClient({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
@@ -24,7 +27,7 @@ const pg = new PgClient({
 pg.connect();
 client.pg = pg;
 
-// ✅ Database initialization
+// Initialize database tables if not exists
 pg.query(`CREATE TABLE IF NOT EXISTS contract_watchlist (
   name TEXT PRIMARY KEY,
   address TEXT NOT NULL,
@@ -32,12 +35,6 @@ pg.query(`CREATE TABLE IF NOT EXISTS contract_watchlist (
   mint_token TEXT DEFAULT 'ETH',
   mint_token_symbol TEXT DEFAULT 'ETH',
   channel_ids TEXT[]
-)`);
-
-pg.query(`CREATE TABLE IF NOT EXISTS flex_projects (
-  name TEXT PRIMARY KEY,
-  address TEXT NOT NULL,
-  network TEXT NOT NULL
 )`);
 
 pg.query(`CREATE TABLE IF NOT EXISTS tracked_tokens (
@@ -49,6 +46,13 @@ pg.query(`CREATE TABLE IF NOT EXISTS tracked_tokens (
 )`);
 
 pg.query(`ALTER TABLE tracked_tokens ADD COLUMN IF NOT EXISTS channel_id TEXT`);
+
+pg.query(`CREATE TABLE IF NOT EXISTS flex_projects (
+  name TEXT PRIMARY KEY,
+  address TEXT NOT NULL,
+  network TEXT NOT NULL
+)`);
+
 pg.query(`CREATE TABLE IF NOT EXISTS expressions (
   name TEXT NOT NULL,
   type TEXT NOT NULL,
@@ -56,12 +60,13 @@ pg.query(`CREATE TABLE IF NOT EXISTS expressions (
   guild_id TEXT,
   PRIMARY KEY (name, guild_id)
 )`);
+
 pg.query(`ALTER TABLE expressions ADD COLUMN IF NOT EXISTS guild_id TEXT`);
 
+// Load slash & prefix commands
 client.commands = new Collection();
 client.prefixCommands = new Collection();
 
-// ✅ Load all slash + prefix commands
 try {
   const commandFiles = fs.readdirSync(path.join(__dirname, 'commands')).filter(file => file.endsWith('.js'));
   for (const file of commandFiles) {
@@ -80,7 +85,7 @@ try {
   console.error('❌ Error loading commands:', err);
 }
 
-// ✅ Load events
+// Load events
 const eventFiles = fs.readdirSync(path.join(__dirname, 'events')).filter(file => file.endsWith('.js'));
 for (const file of eventFiles) {
   try {
@@ -92,27 +97,30 @@ for (const file of eventFiles) {
   }
 }
 
-// ✅ Hybrid Global + Live Block Listeners Activated!
+// ✅ Load processors:
+
 const processUnifiedBlock = require('./services/globalProcessor');
 const { trackAllContracts } = require('./services/mintProcessor');
 const { getProvider } = require('./services/provider');
 
-// Start global block listener (token sales)
+// Start token global scanner (token buys/sales)
 setInterval(async () => {
   try {
     const latestBlock = await getProvider().getBlockNumber();
     await processUnifiedBlock(client, latestBlock - 5, latestBlock);
   } catch (err) {
-    console.error("Global Scanner Error:", err);
+    console.error("Global scanner error:", err);
   }
-}, 15000);
+}, 15000);  // scan every 15 sec
 
-// Start per-contract live mint listener
+// Start NFT mint + sale live listeners (per contract)
 trackAllContracts(client);
 
+// Login to Discord
 client.login(process.env.DISCORD_BOT_TOKEN)
   .then(() => console.log(`✅ Logged in as ${client.user.tag}`))
   .catch(err => console.error('❌ Discord login failed:', err));
+
 
 
 
