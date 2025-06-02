@@ -3,7 +3,7 @@ const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('helpmint')
-    .setDescription('Show help menu for minting, sales, flexing, and token tracking'),
+    .setDescription('Show help menu for minting, sales, flexing, token tracking, and AI tools'),
 
   async execute(interaction) {
     const today = new Date().toLocaleDateString('en-US', {
@@ -11,8 +11,8 @@ module.exports = {
     });
 
     const embed = new EmbedBuilder()
-      .setTitle('📖 Mint & Sale Bot Command Guide')
-      .setDescription('Master mint alerts, Flex NFT, track tokens & NFT Sales across the Base/ETH network.')
+      .setTitle('📖 Minter V4.4 Ultimate Command Guide')
+      .setDescription('Master mint alerts, Flex NFTs, track tokens & sales, swap tokens, generate expressions, and use AI-powered features across Base/ETH.')
       .addFields(
         {
           name: '🧱 MINTING COMMANDS',
@@ -39,16 +39,35 @@ module.exports = {
           name: '🖼️ FLEX COMMANDS',
           value:
             '• `/addflex` — Register a flex NFT contract to your server\n' +
-            '• `/flex` — Display a random minted NFT from your tracked flex project\n' +
-            '• `/flexplus` — Show 6 random NFTs from your flex project as a collage\n' +
-            '• `/addflexduo` — Register two paired contracts as a duo\n' +
-            '• `/flexduo` — Display matching NFTs from two paired collections'
+            '• `/flex` — Display a random minted NFT from your flex project\n' +
+            '• `/flexplus` — Show 6 random NFTs as a collage\n' +
+            '• `/addflexduo` — Register two paired contracts as duo\n' +
+            '• `/flexduo` — Display matching NFTs from duo collections\n' +
+            '• `/flexspin` — Spin your NFT with rarity overlay & animation'
+        },
+        {
+          name: '🎭 EXPRESSION COMMANDS',
+          value:
+            '• `/exp` — Generate fun expression / mood\n' +
+            '• `/expadd` — Add your custom expressions'
+        },
+        {
+          name: '🧪 AI / EXPERIMENTAL',
+          value:
+            '• `/analyze` — AI guess traits for unrevealed NFTs\n' +
+            '• `/flexbattle` — Royale rarity battle (WIP/Roadmap)'
+        },
+        {
+          name: '🔄 SWAP TOOL (Owner only)',
+          value:
+            '• `/swap` — Swap tokens via Uniswap on Base'
         },
         {
           name: '🛠️ UTILITIES',
           value:
-            '• `/ping` — Check if the bot is alive\n' +
-            '• `/helpmint` — Show this help menu'
+            '• `/ping` — Check bot status\n' +
+            '• `/status` — View bot system health\n' +
+            '• `/helpmint` — Show this full help menu'
         }
       )
       .setColor(0x00b0f4)
@@ -62,6 +81,7 @@ module.exports = {
     });
   }
 };
+
 
 
 
