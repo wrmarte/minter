@@ -38,28 +38,39 @@ module.exports = {
 
     // Mint Processor Check (active listeners)
     let mintStatus = '🔴 Inactive';
+    let activeListeners = 0;
     try {
-      const active = Object.keys(contractListeners || {}).length;
-      mintStatus = active > 0 ? `🟢 ${active} Active` : '🟠 No listeners';
+      activeListeners = Object.keys(contractListeners || {}).length;
+      mintStatus = activeListeners > 0 ? `🟢 ${activeListeners} Active` : '🟠 No listeners';
     } catch {
       mintStatus = '🔴 Error';
     }
 
-    // Embed display (clean vertical layout)
+    // Uptime
+    const uptimeMs = process.uptime() * 1000;
+    const uptimeHours = Math.floor(uptimeMs / 3600000);
+    const uptimeMinutes = Math.floor((uptimeMs % 3600000) / 60000);
+    const uptime = `${uptimeHours}h ${uptimeMinutes}m`;
+
+    // Active servers
+    const totalGuilds = client.guilds.cache.size;
+
     const embed = new EmbedBuilder()
-      .setTitle('📊 Bot System Status')
-      .setColor(0x3498db)
-      .setDescription([
-        `🗄️ **PostgreSQL:** ${dbStatus}`,
-        `📡 **RPC Provider:** ${rpcStatus} *(Block ${blockNum})*`,
-        `🤖 **Discord Gateway:** ${discordStatus}`,
-        `🧱 **Mint Processor:** ${mintStatus}`,
-        `\u200b` // empty line for spacing
-      ].join('\n'))
-      .setFooter({ text: 'PimpsDev • Status Monitor v1.0' })
+      .setTitle('📊 Minter V4.4 System Status')
+      .setColor(0x2ecc71)
+      .addFields(
+        { name: '🗄️ Database (PostgreSQL)', value: dbStatus, inline: true },
+        { name: '📡 RPC Provider', value: `${rpcStatus} (${blockNum})`, inline: true },
+        { name: '🤖 Discord Gateway', value: discordStatus, inline: true },
+        { name: '🧱 Mint Processor', value: mintStatus, inline: true },
+        { name: '🌐 Active Servers', value: `${totalGuilds} Guilds`, inline: true },
+        { name: '⏱️ Uptime', value: uptime, inline: true },
+      )
+      .setFooter({ text: 'Powered by PimpsDev • Status Monitor V4.4 🚀' })
       .setTimestamp();
 
     await interaction.editReply({ embeds: [embed] });
   }
 };
+
 
