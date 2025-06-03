@@ -36,9 +36,9 @@ module.exports = {
       console.error("Error fetching tokens:", err);
     }
 
-    // Fetch NFTs
+    // Fetch NFTs (updated to flex_projects)
     try {
-      const nftRes = await pg.query('SELECT contract_address FROM contract_watchlist');
+      const nftRes = await pg.query('SELECT name, contract_address FROM flex_projects');
       nfts = nftRes.rows;
     } catch (err) {
       console.error("Error fetching NFTs:", err);
@@ -57,7 +57,7 @@ module.exports = {
         {
           name: '📦 NFTs Tracked',
           value: nfts.length > 0
-            ? nfts.map(n => `• \`${n.contract_address}\``).join('\n')
+            ? nfts.map(n => `• **${n.name}** — \`${n.contract_address}\``).join('\n')
             : 'No NFT contracts tracked.',
         }
       )
@@ -67,4 +67,5 @@ module.exports = {
     await interaction.editReply({ embeds: [embed] });
   }
 };
+
 
