@@ -3,16 +3,15 @@ const { SlashCommandBuilder, EmbedBuilder, PermissionsBitField } = require('disc
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('listracker')
-    .setDescription('🛠️ View tracked NFTs and Tokens across all servers'),
+    .setDescription('🛠️ View tracked NFTs and Tokens (server-scoped, full for owner)'),
 
   async execute(interaction) {
     const pg = interaction.client.pg;
 
-    // Load owner ID from .env
     const ownerId = process.env.BOT_OWNER_ID;
     const isOwner = interaction.user.id === ownerId;
 
-    // Check if user is server admin
+    const guildId = interaction.guild.id;
     const member = await interaction.guild.members.fetch(interaction.user.id);
     const isAdmin = member.permissions.has(PermissionsBitField.Flags.Administrator);
 
@@ -30,17 +29,22 @@ module.exports = {
 
     // Fetch tokens
     try {
-      const tokenRes = await pg.query('SELECT name, address, guild_id FROM tracked_tokens');
-      tokens = tokenRes.rows;
+      if (isOwner) {
+        const tokenRes = await pg.query('SELECT name, address, guild_id FROM tracked_tokens');
+        tokens = tokenRes.rows;
+      } else {
+        const tokenRes = await pg.query('SELECT name, address, guild_id FROM tracked_tokens WHERE guild_id = $1', [guildId]);
+        tokens = tokenRes.rows;
+      }
     } catch (err) {
       console.error("Error fetching tokens:", err);
     }
 
-    // Fetch NFTs (using channel_ids to resolve guilds)
+    // Fetch NFTs (handle channel_ids)
     try {
       const nftRes = await pg.query('SELECT name, address, channel_ids FROM contract_watchlist');
       nfts = nftRes.rows.flatMap(nft => {
-        const channels = nft.channel_ids; 
+        const channels = nft.channel_ids;
         if (!channels || channels.length === 0) return [];
         return channels.map(channelId => ({
           name: nft.name,
@@ -64,23 +68,26 @@ module.exports = {
     // Group NFTs by resolving guild from channel, with deduplication
     for (const nft of nfts) {
       const channel = interaction.client.channels.cache.get(nft.channel_id);
-      const guildId = channel?.guildId || 'unknown';
-      if (!servers[guildId]) servers[guildId] = { tokens: [], nfts: [] };
+      const resolvedGuildId = channel?.guildId || 'unknown';
 
-      // Deduplicate NFTs by contract address per server
-      const alreadyTracked = servers[guildId].nfts.some(existing => existing.address.toLowerCase() === nft.address.toLowerCase());
+      // If not owner, skip NFTs from other servers
+      if (!isOwner && resolvedGuildId !== guildId) continue;
+
+      if (!servers[resolvedGuildId]) servers[resolvedGuildId] = { tokens: [], nfts: [] };
+
+      const alreadyTracked = servers[resolvedGuildId].nfts.some(existing => existing.address.toLowerCase() === nft.address.toLowerCase());
       if (!alreadyTracked) {
-        servers[guildId].nfts.push(nft);
+        servers[resolvedGuildId].nfts.push(nft);
       }
     }
 
     const embed = new EmbedBuilder()
-      .setTitle('🛠️ Full Tracker Overview')
+      .setTitle('🛠️ Tracker Overview')
       .setColor(0x3498db);
 
-    for (const [guildId, data] of Object.entries(servers)) {
-      let serverName = `Unknown Server (${guildId})`;
-      const guild = interaction.client.guilds.cache.get(guildId);
+    for (const [srvId, data] of Object.entries(servers)) {
+      let serverName = `Unknown Server (${srvId})`;
+      const guild = interaction.client.guilds.cache.get(srvId);
       if (guild) serverName = guild.name;
 
       const tokenList = data.tokens.length > 0
@@ -103,6 +110,7 @@ module.exports = {
     await interaction.editReply({ embeds: [embed] });
   }
 };
+
 
 
 
