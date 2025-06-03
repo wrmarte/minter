@@ -36,10 +36,18 @@ module.exports = {
       console.error("Error fetching tokens:", err);
     }
 
-    // Fetch NFTs
+    // Fetch NFTs (using channel_ids to resolve guilds)
     try {
-      const nftRes = await pg.query('SELECT name, address, guild_id FROM contract_watchlist');
-      nfts = nftRes.rows;
+      const nftRes = await pg.query('SELECT name, address, channel_ids FROM contract_watchlist');
+      nfts = nftRes.rows.flatMap(nft => {
+        const channels = nft.channel_ids; // This should be array already
+        if (!channels || channels.length === 0) return [];
+        return channels.map(channelId => ({
+          name: nft.name,
+          address: nft.address,
+          channel_id: channelId
+        }));
+      });
     } catch (err) {
       console.error("Error fetching NFTs:", err);
     }
@@ -47,16 +55,18 @@ module.exports = {
     // Build server map
     const servers = {};
 
-    // Group tokens by server
+    // Group tokens by guild
     for (const token of tokens) {
       if (!servers[token.guild_id]) servers[token.guild_id] = { tokens: [], nfts: [] };
       servers[token.guild_id].tokens.push(token);
     }
 
-    // Group NFTs by server
+    // Group NFTs by resolving guild from channel
     for (const nft of nfts) {
-      if (!servers[nft.guild_id]) servers[nft.guild_id] = { tokens: [], nfts: [] };
-      servers[nft.guild_id].nfts.push(nft);
+      const channel = interaction.client.channels.cache.get(nft.channel_id);
+      const guildId = channel?.guildId || 'unknown';
+      if (!servers[guildId]) servers[guildId] = { tokens: [], nfts: [] };
+      servers[guildId].nfts.push(nft);
     }
 
     const embed = new EmbedBuilder()
@@ -88,6 +98,7 @@ module.exports = {
     await interaction.editReply({ embeds: [embed] });
   }
 };
+
 
 
 
