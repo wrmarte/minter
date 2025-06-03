@@ -3,7 +3,7 @@ const { SlashCommandBuilder, EmbedBuilder, PermissionsBitField } = require('disc
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('listracker')
-    .setDescription('🛠️ View currently tracked NFTs and Tokens (owner & server admins only)'),
+    .setDescription('🛠️ View tracked NFTs and Tokens across all servers'),
 
   async execute(interaction) {
     const pg = interaction.client.pg;
@@ -30,39 +30,60 @@ module.exports = {
 
     // Fetch tokens
     try {
-      const tokenRes = await pg.query('SELECT name, address FROM tracked_tokens');
+      const tokenRes = await pg.query('SELECT name, address, guild_id FROM tracked_tokens');
       tokens = tokenRes.rows;
     } catch (err) {
       console.error("Error fetching tokens:", err);
     }
 
-    // Fetch NFTs (correct table and columns)
+    // Fetch NFTs
     try {
-      const nftRes = await pg.query('SELECT name, address FROM contract_watchlist');
+      const nftRes = await pg.query('SELECT name, address, guild_id FROM contract_watchlist');
       nfts = nftRes.rows;
     } catch (err) {
       console.error("Error fetching NFTs:", err);
     }
 
+    // Build server map
+    const servers = {};
+
+    // Group tokens by server
+    for (const token of tokens) {
+      if (!servers[token.guild_id]) servers[token.guild_id] = { tokens: [], nfts: [] };
+      servers[token.guild_id].tokens.push(token);
+    }
+
+    // Group NFTs by server
+    for (const nft of nfts) {
+      if (!servers[nft.guild_id]) servers[nft.guild_id] = { tokens: [], nfts: [] };
+      servers[nft.guild_id].nfts.push(nft);
+    }
+
     const embed = new EmbedBuilder()
-      .setTitle('🛠️ Current Trackers')
-      .setColor(0x3498db)
-      .addFields(
-        {
-          name: '💰 Tokens Tracked',
-          value: tokens.length > 0 
-            ? tokens.map(t => `• **${t.name}** — \`${t.address}\``).join('\n')
-            : 'No tokens tracked.',
-        },
-        {
-          name: '📦 NFTs Tracked',
-          value: nfts.length > 0
-            ? nfts.map(n => `• **${n.name}** — \`${n.address}\``).join('\n')
-            : 'No NFT contracts tracked.',
-        }
-      )
-      .setFooter({ text: 'Powered by PimpsDev 🧪' })
-      .setTimestamp();
+      .setTitle('🛠️ Full Tracker Overview')
+      .setColor(0x3498db);
+
+    for (const [guildId, data] of Object.entries(servers)) {
+      let serverName = `Unknown Server (${guildId})`;
+      const guild = interaction.client.guilds.cache.get(guildId);
+      if (guild) serverName = guild.name;
+
+      const tokenList = data.tokens.length > 0
+        ? data.tokens.map(t => `• **${t.name}** — \`${t.address}\``).join('\n')
+        : 'No tokens.';
+
+      const nftList = data.nfts.length > 0
+        ? data.nfts.map(n => `• **${n.name}** — \`${n.address}\``).join('\n')
+        : 'No NFTs.';
+
+      embed.addFields(
+        { name: `📍 Server: ${serverName}`, value: '\u200b' },
+        { name: '💰 Tokens', value: tokenList },
+        { name: '📦 NFTs', value: nftList }
+      );
+    }
+
+    embed.setFooter({ text: 'Powered by PimpsDev 🧪' }).setTimestamp();
 
     await interaction.editReply({ embeds: [embed] });
   }
