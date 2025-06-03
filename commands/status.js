@@ -2,6 +2,8 @@ const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 const { getProvider } = require('../services/provider');
 const contractListeners = require('../services/mintProcessor').contractListeners;
 
+let mintProcessorStartTime = Date.now();  // ✅ Capture when bot starts
+
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('status')
@@ -76,20 +78,26 @@ module.exports = {
       nftContracts = 0;
     }
 
-    // Tokens Tracked (fully patched with correct table name!)
+    // Tokens Tracked
     let tokensTracked = 0;
     try {
-      const tokenRes = await pg.query('SELECT COUNT(*) FROM tracked_tokens'); // ✅ <- here is your actual table
+      const tokenRes = await pg.query('SELECT COUNT(*) FROM tracked_tokens');
       tokensTracked = parseInt(tokenRes.rows[0].count);
     } catch {
       tokensTracked = 0;
     }
 
-    // Uptime
+    // Uptime - total bot uptime
     const uptimeMs = process.uptime() * 1000;
     const uptimeHours = Math.floor(uptimeMs / 3600000);
     const uptimeMinutes = Math.floor((uptimeMs % 3600000) / 60000);
     const uptime = `${uptimeHours}h ${uptimeMinutes}m`;
+
+    // Mint Processor Uptime
+    const mintUptimeMs = Date.now() - mintProcessorStartTime;
+    const mintUptimeHours = Math.floor(mintUptimeMs / 3600000);
+    const mintUptimeMinutes = Math.floor((mintUptimeMs % 3600000) / 60000);
+    const mintUptime = `${mintUptimeHours}h ${mintUptimeMinutes}m`;
 
     // Node.js Memory Usage
     const memoryUsage = `${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1)} MB`;
@@ -101,14 +109,14 @@ module.exports = {
         `🗄️ **Database** — ${dbStatus}`,
         `📡 **RPC Provider** — ${rpcStatus} (Block ${blockNum})`,
         `🤖 **Discord Gateway** — ${discordStatus}`,
-        `🧱 **Mint Processor** — ${mintStatus}`,
+        `🧱 **Mint Processor** — ${mintStatus} *(Uptime: ${mintUptime})*`,
         `🌐 **Servers** — ${totalGuilds} Guilds`,
         `🔑 **Slash Commands** — ${commandCount}`,
         `📦 **NFT Contracts Tracked** — ${nftContracts}`,
         `💰 **Tokens Tracked** — ${tokensTracked}`,
         `🎯 **Flex Projects** — ${flexProjects}`,
         `🧮 **Memory Usage** — ${memoryUsage}`,
-        `⏱️ **Uptime** — ${uptime}`
+        `⏱️ **Total Uptime** — ${uptime}`
       ].join('\n'))
       .setFooter({ text: 'Powered by PimpsDev 🧪' })
       .setTimestamp();
@@ -116,6 +124,7 @@ module.exports = {
     await interaction.editReply({ embeds: [embed] });
   }
 };
+
 
 
 
