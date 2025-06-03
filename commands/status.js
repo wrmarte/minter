@@ -76,10 +76,10 @@ module.exports = {
       nftContracts = 0;
     }
 
-    // Tokens Tracked (fully patched here)
+    // Tokens Tracked (fully patched with correct table name!)
     let tokensTracked = 0;
     try {
-      const tokenRes = await pg.query('SELECT COUNT(*) FROM token_watchlist');
+      const tokenRes = await pg.query('SELECT COUNT(*) FROM tracked_tokens'); // ✅ <- here is your actual table
       tokensTracked = parseInt(tokenRes.rows[0].count);
     } catch {
       tokensTracked = 0;
