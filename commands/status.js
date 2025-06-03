@@ -58,14 +58,14 @@ module.exports = {
     const embed = new EmbedBuilder()
       .setTitle('📊 Minter V4.4 System Status')
       .setColor(0x2ecc71)
-      .addFields(
-        { name: '🗄️ Database (PostgreSQL)', value: dbStatus, inline: true },
-        { name: '📡 RPC Provider', value: `${rpcStatus} (${blockNum})`, inline: true },
-        { name: '🤖 Discord Gateway', value: discordStatus, inline: true },
-        { name: '🧱 Mint Processor', value: mintStatus, inline: true },
-        { name: '🌐 Active Servers', value: `${totalGuilds} Guilds`, inline: true },
-        { name: '⏱️ Uptime', value: uptime, inline: true },
-      )
+      .setDescription([
+        `🗄️ **Database** — ${dbStatus}`,
+        `📡 **RPC Provider** — ${rpcStatus} (Block ${blockNum})`,
+        `🤖 **Discord Gateway** — ${discordStatus}`,
+        `🧱 **Mint Processor** — ${mintStatus}`,
+        `🌐 **Active Servers** — ${totalGuilds} Guilds`,
+        `⏱️ **Uptime** — ${uptime}`
+      ].join('\n'))
       .setFooter({ text: 'Powered by PimpsDev • Status Monitor V4.4 🚀' })
       .setTimestamp();
 
