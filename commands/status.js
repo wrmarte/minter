@@ -46,7 +46,7 @@ module.exports = {
       mintStatus = '🔴 Error';
     }
 
-    // Slash Commands Registered (fix)
+    // Slash Commands Registered (live fetch)
     let commandCount = 0;
     try {
       const appCmds = await client.application.commands.fetch();
@@ -62,7 +62,7 @@ module.exports = {
     let flexProjects = 0;
     try {
       const flexRes = await pg.query('SELECT COUNT(*) FROM flex_projects');
-      flexProjects = flexRes.rows[0].count;
+      flexProjects = parseInt(flexRes.rows[0].count);
     } catch {
       flexProjects = 0;
     }
@@ -71,16 +71,16 @@ module.exports = {
     let nftContracts = 0;
     try {
       const nftRes = await pg.query('SELECT COUNT(*) FROM contract_watchlist');
-      nftContracts = nftRes.rows[0].count;
+      nftContracts = parseInt(nftRes.rows[0].count);
     } catch {
       nftContracts = 0;
     }
 
-    // Tokens Tracked (safe fallback if table doesn't exist)
+    // Tokens Tracked (fully patched here)
     let tokensTracked = 0;
     try {
       const tokenRes = await pg.query('SELECT COUNT(*) FROM token_watchlist');
-      tokensTracked = tokenRes.rows[0].count;
+      tokensTracked = parseInt(tokenRes.rows[0].count);
     } catch {
       tokensTracked = 0;
     }
@@ -116,6 +116,7 @@ module.exports = {
     await interaction.editReply({ embeds: [embed] });
   }
 };
+
 
 
 
