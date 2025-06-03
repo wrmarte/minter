@@ -40,7 +40,7 @@ module.exports = {
       console.error("Error fetching tokens:", err);
     }
 
-    // Fetch NFTs (handle channel_ids)
+    // Fetch NFTs
     try {
       const nftRes = await pg.query('SELECT name, address, channel_ids FROM contract_watchlist');
       nfts = nftRes.rows.flatMap(nft => {
@@ -56,23 +56,19 @@ module.exports = {
       console.error("Error fetching NFTs:", err);
     }
 
-    // Build server map
     const servers = {};
 
-    // Group tokens by guild
+    // Group tokens
     for (const token of tokens) {
       if (!servers[token.guild_id]) servers[token.guild_id] = { tokens: [], nfts: [] };
       servers[token.guild_id].tokens.push(token);
     }
 
-    // Group NFTs by resolving guild from channel, with deduplication
+    // Group NFTs with deduplication
     for (const nft of nfts) {
       const channel = interaction.client.channels.cache.get(nft.channel_id);
       const resolvedGuildId = channel?.guildId || 'unknown';
-
-      // If not owner, skip NFTs from other servers
       if (!isOwner && resolvedGuildId !== guildId) continue;
-
       if (!servers[resolvedGuildId]) servers[resolvedGuildId] = { tokens: [], nfts: [] };
 
       const alreadyTracked = servers[resolvedGuildId].nfts.some(existing => existing.address.toLowerCase() === nft.address.toLowerCase());
@@ -91,15 +87,15 @@ module.exports = {
       if (guild) serverName = guild.name;
 
       const tokenList = data.tokens.length > 0
-        ? data.tokens.map(t => `• **${t.name}** — \`${t.address}\``).join('\n')
-        : 'No tokens.';
+        ? data.tokens.map(t => `• **${t.name}**\n\`${t.address}\``).join('\n\n')
+        : '• _No tokens tracked_';
 
       const nftList = data.nfts.length > 0
-        ? data.nfts.map(n => `• **${n.name}** — \`${n.address}\``).join('\n')
-        : 'No NFTs.';
+        ? data.nfts.map(n => `• **${n.name}**\n\`${n.address}\``).join('\n\n')
+        : '• _No NFTs tracked_';
 
       embed.addFields(
-        { name: `📍 Server: ${serverName}`, value: '\u200b' },
+        { name: `📍 **Server: ${serverName}**`, value: '\u200b' },
         { name: '💰 Tokens', value: tokenList },
         { name: '📦 NFTs', value: nftList }
       );
@@ -110,6 +106,7 @@ module.exports = {
     await interaction.editReply({ embeds: [embed] });
   }
 };
+
 
 
 
