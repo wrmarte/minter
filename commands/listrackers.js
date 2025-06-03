@@ -3,18 +3,27 @@ const { SlashCommandBuilder, EmbedBuilder, PermissionsBitField } = require('disc
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('listracker')
-    .setDescription('🛠️ View currently tracked NFTs and Tokens (admin only)'),
+    .setDescription('🛠️ View currently tracked NFTs and Tokens (owner & server admins only)'),
 
   async execute(interaction) {
     const pg = interaction.client.pg;
 
-    // OPTIONAL: Only allow owner (if you want, otherwise comment this out)
-    const ownerId = 'YOUR_DISCORD_USER_ID';
-    if (interaction.user.id !== ownerId) {
-      return interaction.reply({ content: '❌ You are not authorized to use this command.', ephemeral: true });
+    // Load owner ID from .env
+    const ownerId = process.env.BOT_OWNER_ID;
+    const isOwner = interaction.user.id === ownerId;
+
+    // Check if user is server admin
+    const member = await interaction.guild.members.fetch(interaction.user.id);
+    const isAdmin = member.permissions.has(PermissionsBitField.Flags.Administrator);
+
+    if (!isOwner && !isAdmin) {
+      return interaction.reply({
+        content: '❌ You are not authorized to use this command.',
+        flags: 64
+      });
     }
 
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: 64 });
 
     let tokens = [];
     let nfts = [];
@@ -58,3 +67,4 @@ module.exports = {
     await interaction.editReply({ embeds: [embed] });
   }
 };
+
