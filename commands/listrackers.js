@@ -40,7 +40,7 @@ module.exports = {
     try {
       const nftRes = await pg.query('SELECT name, address, channel_ids FROM contract_watchlist');
       nfts = nftRes.rows.flatMap(nft => {
-        const channels = nft.channel_ids; // This should be array already
+        const channels = nft.channel_ids; 
         if (!channels || channels.length === 0) return [];
         return channels.map(channelId => ({
           name: nft.name,
@@ -61,12 +61,17 @@ module.exports = {
       servers[token.guild_id].tokens.push(token);
     }
 
-    // Group NFTs by resolving guild from channel
+    // Group NFTs by resolving guild from channel, with deduplication
     for (const nft of nfts) {
       const channel = interaction.client.channels.cache.get(nft.channel_id);
       const guildId = channel?.guildId || 'unknown';
       if (!servers[guildId]) servers[guildId] = { tokens: [], nfts: [] };
-      servers[guildId].nfts.push(nft);
+
+      // Deduplicate NFTs by contract address per server
+      const alreadyTracked = servers[guildId].nfts.some(existing => existing.address.toLowerCase() === nft.address.toLowerCase());
+      if (!alreadyTracked) {
+        servers[guildId].nfts.push(nft);
+      }
     }
 
     const embed = new EmbedBuilder()
@@ -98,6 +103,7 @@ module.exports = {
     await interaction.editReply({ embeds: [embed] });
   }
 };
+
 
 
 
