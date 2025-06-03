@@ -46,37 +46,43 @@ module.exports = {
       mintStatus = '🔴 Error';
     }
 
-    // Slash Commands Registered
-    const commandCount = client.application.commands.cache.size;
+    // Slash Commands Registered (fix)
+    let commandCount = 0;
+    try {
+      const appCmds = await client.application.commands.fetch();
+      commandCount = appCmds.size;
+    } catch {
+      commandCount = 0;
+    }
 
     // Total servers
     const totalGuilds = client.guilds.cache.size;
 
     // Flex Projects Count
-    let flexProjects = 'N/A';
+    let flexProjects = 0;
     try {
       const flexRes = await pg.query('SELECT COUNT(*) FROM flex_projects');
       flexProjects = flexRes.rows[0].count;
     } catch {
-      flexProjects = 'Error';
+      flexProjects = 0;
     }
 
     // NFT Contracts Tracked (from contract_watchlist)
-    let nftContracts = 'N/A';
+    let nftContracts = 0;
     try {
       const nftRes = await pg.query('SELECT COUNT(*) FROM contract_watchlist');
       nftContracts = nftRes.rows[0].count;
     } catch {
-      nftContracts = 'Error';
+      nftContracts = 0;
     }
 
-    // Tokens Tracked
-    let tokensTracked = 'N/A';
+    // Tokens Tracked (safe fallback if table doesn't exist)
+    let tokensTracked = 0;
     try {
       const tokenRes = await pg.query('SELECT COUNT(*) FROM token_watchlist');
       tokensTracked = tokenRes.rows[0].count;
     } catch {
-      tokensTracked = 'Error';
+      tokensTracked = 0;
     }
 
     // Uptime
@@ -110,6 +116,7 @@ module.exports = {
     await interaction.editReply({ embeds: [embed] });
   }
 };
+
 
 
 
