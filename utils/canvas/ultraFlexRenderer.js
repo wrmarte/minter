@@ -1,6 +1,7 @@
 const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const QRCode = require('qrcode');
 const path = require('path');
+const fs = require('fs/promises');
 const { resolveENS } = require('../../utils/ensResolver');
 const { extractValidAddress, shortenAddress } = require('../../utils/inputCleaner');
 const { cleanNFTData } = require('../../utils/entryCleaner');
@@ -29,7 +30,15 @@ async function generateUltraFlexCard(rawNFTObject) {
   ctx.fillStyle = gradient;
   ctx.fillRect(0, 0, width, height);
 
-  const nftImg = await loadImage(nftImageUrl);
+  // ✅ PATCHED IMAGE LOADING
+  let nftImg;
+  if (nftImageUrl.startsWith('http')) {
+    nftImg = await loadImage(nftImageUrl);
+  } else {
+    const imgBuffer = await fs.readFile(nftImageUrl);
+    nftImg = await loadImage(imgBuffer);
+  }
+
   const imgSize = 1750;
   const imgX = (width - imgSize) / 2;
   const imgY = 120;
@@ -119,4 +128,5 @@ async function generateUltraFlexCard(rawNFTObject) {
 }
 
 module.exports = { generateUltraFlexCard };
+
 
