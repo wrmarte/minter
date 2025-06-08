@@ -8,7 +8,7 @@ const ethRpcs = [
   'https://ethereum.publicnode.com'
 ];
 
-// ENS lookup via RPCs + TheGraph hybrid engine
+// ENS lookup via RPC + The Graph hybrid engine
 async function resolveENS(address) {
   if (!address?.startsWith('0x') || address.length !== 42) return address;
 
@@ -51,5 +51,6 @@ async function forceENSName(wallet) {
 }
 
 module.exports = { resolveENS };
+
 
 
