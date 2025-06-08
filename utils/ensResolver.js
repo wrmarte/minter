@@ -1,7 +1,7 @@
 const { JsonRpcProvider } = require('ethers');
 const { request, gql } = require('graphql-request');
 const { shortenAddress } = require('./inputCleaner');
-const fetch = require('node-fetch');
+const fetch = require('node-fetch');  // make sure you're using node-fetch@2
 
 // 🚀 ENS-compatible public RPCs
 const ethRpcs = [
@@ -33,7 +33,7 @@ async function resolveENS(address) {
   const ensV2 = await queryENSv2(address);
   if (ensV2) return ensV2;
 
-  // 4️⃣ ENS.Vision live API (no keys needed)
+  // 4️⃣ ENS.Vision live API (finally fully functional)
   const visionENS = await queryEnsVision(address);
   if (visionENS) return visionENS;
 
@@ -83,23 +83,29 @@ async function queryENSv2(wallet) {
   }
 }
 
-// 🚀 ENS.Vision live API query
+// 🚀 Fully patched ENS.Vision query (this is your final boss key)
 async function queryEnsVision(wallet) {
   try {
     const url = `https://api.ens.vision/ens/owner/${wallet.toLowerCase()}`;
-    const response = await fetch(url);
-    const json = await response.json();
+    const response = await fetch(url, { timeout: 5000 });
 
+    if (!response.ok) {
+      console.warn(`ENS.Vision HTTP error: ${response.status}`);
+      return null;
+    }
+
+    const json = await response.json();
     if (json?.domains?.length > 0) {
       return json.domains[0].name;
     }
   } catch (err) {
-    console.warn(`ENS.Vision query failed: ${err.message}`);
+    console.warn(`ENS.Vision query failed: ${err}`);
   }
   return null;
 }
 
 module.exports = { resolveENS };
+
 
 
 
