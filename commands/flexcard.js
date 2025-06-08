@@ -1,6 +1,8 @@
 const { SlashCommandBuilder, AttachmentBuilder } = require('discord.js');
 const { buildFlexCard } = require('../services/flexcardService');
 const { buildUltraFlexCard } = require('../services/ultraFlexService');
+const { resolveENS } = require('../utils/resolveENS');  // ✅ PATCHED — import ENS resolver
+const { shortenAddress } = require('../utils/inputCleaner'); // optional fallback safety
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -49,12 +51,32 @@ module.exports = {
         return interaction.editReply('🚫 Only the bot owner can use Ultra mode for now.');
       }
 
-      const imageBuffer = ultraRequested
-        ? await buildUltraFlexCard(contractAddress, tokenId, collectionName)
-        : await buildFlexCard(contractAddress, tokenId, collectionName);
+      // 🔧 PATCHED: Inject ENS resolving when generating Ultra card
+      if (ultraRequested) {
+        // 1️⃣ Build card metadata first
+        const { nftImageUrl, traits, owner, openseaUrl } = await buildUltraFlexCard(contractAddress, tokenId, collectionName);
 
-      const fileName = ultraRequested ? 'ultraflexcard.png' : 'flexcard.png';
-      const attachment = new AttachmentBuilder(imageBuffer, { name: fileName });
+        // 2️⃣ Resolve ENS for owner
+        let ownerDisplay = await resolveENS(owner);
+        if (!ownerDisplay) ownerDisplay = shortenAddress(owner);
+
+        // 3️⃣ Rebuild card image with ENS wired
+        const imageBuffer = await generateUltraFlexCard({
+          nftImageUrl,
+          collectionName,
+          tokenId,
+          traits,
+          owner: ownerDisplay,  // ✅ ENS fully injected
+          openseaUrl
+        });
+
+        const attachment = new AttachmentBuilder(imageBuffer, { name: 'ultraflexcard.png' });
+        return interaction.editReply({ files: [attachment] });
+      }
+
+      // 🟢 If not Ultra mode — run regular Flex
+      const imageBuffer = await buildFlexCard(contractAddress, tokenId, collectionName);
+      const attachment = new AttachmentBuilder(imageBuffer, { name: 'flexcard.png' });
 
       await interaction.editReply({ files: [attachment] });
 
@@ -64,6 +86,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
