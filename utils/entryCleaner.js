@@ -11,9 +11,8 @@ function cleanNFTData(rawNFT) {
     openseaUrl
   } = rawNFT;
 
-  // Correctly resolve local fallback image as file:// URI
   const fallbackImagePath = path.join(__dirname, '../assets/fallback.png');
-  const cleanImage = imageUrl || `file://${fallbackImagePath}`;
+  const cleanImage = imageUrl || fallbackImagePath;
 
   const cleanTraits = Array.isArray(traits)
     ? traits.map(t => t.toString())
@@ -38,6 +37,7 @@ function cleanNFTData(rawNFT) {
 }
 
 module.exports = { cleanNFTData };
+
 
 
 
