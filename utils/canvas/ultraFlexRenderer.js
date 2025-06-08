@@ -4,7 +4,6 @@ const path = require('path');
 const { resolveENS } = require('../../utils/ensResolver');
 const { extractValidAddress, shortenAddress } = require('../../utils/inputCleaner');
 
-// Register font globally
 const fontPath = path.join(__dirname, '../../fonts/Exo2-Bold.ttf');
 GlobalFonts.registerFromPath(fontPath, 'Exo2');
 
@@ -98,12 +97,7 @@ async function generateUltraFlexCard({
 
   const cleanOwner = extractValidAddress(owner);
   if (cleanOwner) {
-    try {
-      ownerDisplay = await resolveENS(cleanOwner);
-    } catch (err) {
-      console.warn(`ENS lookup failed for ${cleanOwner}: ${err}`);
-      ownerDisplay = shortenAddress(cleanOwner);
-    }
+    ownerDisplay = await resolveENS(cleanOwner);
   }
 
   ctx.fillText(`OWNER: ${ownerDisplay}`, 80, 2810 + 40);
@@ -120,6 +114,7 @@ async function generateUltraFlexCard({
 }
 
 module.exports = { generateUltraFlexCard };
+
 
 
 
