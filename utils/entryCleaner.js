@@ -1,4 +1,3 @@
-const path = require('path');
 const { extractValidAddress } = require('./inputCleaner');
 
 function cleanNFTData(rawNFT) {
@@ -11,8 +10,9 @@ function cleanNFTData(rawNFT) {
     openseaUrl
   } = rawNFT;
 
-  const fallbackImagePath = path.join(__dirname, '../assets/fallback.png');
-  const cleanImage = imageUrl || fallbackImagePath;
+  if (!imageUrl) {
+    throw new Error('❌ NFT missing imageUrl');
+  }
 
   const cleanTraits = Array.isArray(traits)
     ? traits.map(t => t.toString())
@@ -27,7 +27,7 @@ function cleanNFTData(rawNFT) {
   const cleanOwner = rawOwner || null;
 
   return {
-    nftImageUrl: cleanImage,
+    nftImageUrl: imageUrl,
     collectionName: collectionName || 'Unknown Collection',
     tokenId: tokenId || '???',
     traits: cleanTraits,
@@ -37,6 +37,7 @@ function cleanNFTData(rawNFT) {
 }
 
 module.exports = { cleanNFTData };
+
 
 
 
