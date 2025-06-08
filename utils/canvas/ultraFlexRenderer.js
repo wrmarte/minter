@@ -2,7 +2,7 @@ const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const QRCode = require('qrcode');
 const path = require('path');
 const { resolveENS } = require('../../utils/ensResolver');
-const { extractValidAddress, shortenAddress } = require('../../utils/inputCleaner');
+const { shortenAddress } = require('../../utils/inputCleaner');
 
 const fontPath = path.join(__dirname, '../../fonts/Exo2-Bold.ttf');
 GlobalFonts.registerFromPath(fontPath, 'Exo2');
@@ -93,11 +93,14 @@ async function generateUltraFlexCard({
   ctx.font = 'bold 60px Exo2';
   ctx.textBaseline = 'middle';
 
-  let ownerDisplay = 'Unknown';
-
-  const cleanOwner = extractValidAddress(owner);
-  if (cleanOwner) {
-    ownerDisplay = await resolveENS(cleanOwner);
+  let ownerDisplay = shortenAddress(owner);
+  if (owner) {
+    try {
+      ownerDisplay = await resolveENS(owner);
+    } catch (err) {
+      console.warn(`ENS lookup failed for ${owner}: ${err}`);
+      ownerDisplay = shortenAddress(owner);
+    }
   }
 
   ctx.fillText(`OWNER: ${ownerDisplay}`, 80, 2810 + 40);
@@ -114,6 +117,7 @@ async function generateUltraFlexCard({
 }
 
 module.exports = { generateUltraFlexCard };
+
 
 
 
