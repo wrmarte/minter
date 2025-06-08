@@ -1,18 +1,18 @@
 const { JsonRpcProvider } = require('ethers');
 const { request, gql } = require('graphql-request');
 
-// Multiple ETH RPCs to rotate
+// ETH RPC rotation (we keep this for reverse if possible)
 const ethRpcs = [
   'https://rpc.ankr.com/eth',
   'https://cloudflare-eth.com',
   'https://ethereum.publicnode.com'
 ];
 
-// ENS lookup via RPC + The Graph hybrid engine
+// Main resolver function
 async function resolveENS(address) {
   if (!address?.startsWith('0x') || address.length !== 42) return address;
 
-  // Step 1: Attempt RPC-based reverse resolution
+  // First attempt: reverse record via RPCs
   for (const url of ethRpcs) {
     try {
       const provider = new JsonRpcProvider(url);
@@ -23,34 +23,34 @@ async function resolveENS(address) {
     }
   }
 
-  // Step 2: Query The Graph for any ENS domain owned
-  const graphName = await forceENSName(address);
+  // Second attempt: full domain ownership via The Graph ENS subgraph
+  const graphName = await queryGraphENS(address);
   if (graphName) return graphName;
 
-  // Step 3: Fallback to raw address
   return address;
 }
 
-// The Graph ENS domain ownership query
-async function forceENSName(wallet) {
+// Advanced The Graph query — use registrant field
+async function queryGraphENS(wallet) {
   const endpoint = 'https://api.thegraph.com/subgraphs/name/ensdomains/ens';
   const query = gql`
-    query($owner: String!) {
-      domains(first: 1, where: { owner: $owner }, orderBy: createdAt, orderDirection: desc) {
+    query($registrant: String!) {
+      domains(first: 1, where: { registrant: $registrant }, orderBy: createdAt, orderDirection: desc) {
         name
       }
     }
   `;
   try {
-    const data = await request(endpoint, query, { owner: wallet.toLowerCase() });
+    const data = await request(endpoint, query, { registrant: wallet.toLowerCase() });
     return data.domains[0]?.name || null;
   } catch (err) {
-    console.warn(`ENS Graph query failed: ${err.message}`);
+    console.warn(`ENS subgraph query failed: ${err.message}`);
     return null;
   }
 }
 
 module.exports = { resolveENS };
+
 
 
 
