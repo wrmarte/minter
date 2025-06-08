@@ -8,10 +8,11 @@ const ethRpcs = [
   'https://ethereum.publicnode.com'
 ];
 
-// ENS lookup with fallback rotation
+// ENS lookup via RPCs + TheGraph hybrid engine
 async function resolveENS(address) {
   if (!address?.startsWith('0x') || address.length !== 42) return address;
 
+  // Step 1: Attempt RPC-based reverse resolution
   for (const url of ethRpcs) {
     try {
       const provider = new JsonRpcProvider(url);
@@ -22,11 +23,15 @@ async function resolveENS(address) {
     }
   }
 
-  // Fallback to The Graph
-  return await forceENSName(address);
+  // Step 2: Query The Graph for any ENS domain owned
+  const graphName = await forceENSName(address);
+  if (graphName) return graphName;
+
+  // Step 3: Fallback to raw address
+  return address;
 }
 
-// ENS backup via The Graph (non-reverse records)
+// The Graph ENS domain ownership query
 async function forceENSName(wallet) {
   const endpoint = 'https://api.thegraph.com/subgraphs/name/ensdomains/ens';
   const query = gql`
@@ -38,12 +43,13 @@ async function forceENSName(wallet) {
   `;
   try {
     const data = await request(endpoint, query, { owner: wallet.toLowerCase() });
-    return data.domains[0]?.name || wallet;
+    return data.domains[0]?.name || null;
   } catch (err) {
-    console.warn(`ENS graph query failed: ${err.message}`);
-    return wallet;
+    console.warn(`ENS Graph query failed: ${err.message}`);
+    return null;
   }
 }
 
 module.exports = { resolveENS };
+
 
