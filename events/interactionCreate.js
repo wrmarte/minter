@@ -23,7 +23,7 @@ module.exports = (client, pg) => {
 
         // --- FLEX FAMILY ---
         if (
-          ['flex', 'flexplus', 'flexspin'].includes(commandName) &&
+          ['flex', 'flexplus', 'flexcard', 'flexspin'].includes(commandName) &&
           focused.name === 'name'
         ) {
           const res = await pg.query(`SELECT name FROM flex_projects WHERE guild_id = $1`, [guildId]);
