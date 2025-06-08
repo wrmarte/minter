@@ -10,7 +10,7 @@ module.exports = {
       opt.setName('name')
         .setDescription('Project name')
         .setRequired(true)
-        .setAutocomplete(true)  // 🔧 AUTOCOMPLETE fully restored ✅
+        .setAutocomplete(true)
     )
     .addIntegerOption(opt =>
       opt.setName('tokenid')
@@ -19,7 +19,7 @@ module.exports = {
     )
     .addBooleanOption(opt =>
       opt.setName('ultra')
-        .setDescription('Use Ultra Flex mode (Admins only)')
+        .setDescription('Use Ultra Flex mode (Bot Owner only)')
         .setRequired(false)
     ),
 
@@ -29,10 +29,8 @@ module.exports = {
     const tokenId = interaction.options.getInteger('tokenid');
     const ultraRequested = interaction.options.getBoolean('ultra') || false;
 
-    const userIsAdmin = (
-      interaction.user.id === process.env.BOT_OWNER_ID ||
-      interaction.member.permissions.has('Administrator')
-    );
+    // 🔐 Only bot owner can access Ultra
+    const userIsOwner = (interaction.user.id === process.env.BOT_OWNER_ID);
 
     await interaction.deferReply();
 
@@ -47,11 +45,10 @@ module.exports = {
       const collectionName = display_name || storedName;
 
       // Permission check for Ultra
-      if (ultraRequested && !userIsAdmin) {
-        return interaction.editReply('🚫 You do not have permission to use Ultra Flex mode.');
+      if (ultraRequested && !userIsOwner) {
+        return interaction.editReply('🚫 Only the bot owner can use Ultra mode for now.');
       }
 
-      // Select rendering engine
       const imageBuffer = ultraRequested
         ? await buildUltraFlexCard(contractAddress, tokenId, collectionName)
         : await buildFlexCard(contractAddress, tokenId, collectionName);
@@ -59,7 +56,6 @@ module.exports = {
       const fileName = ultraRequested ? 'ultraflexcard.png' : 'flexcard.png';
       const attachment = new AttachmentBuilder(imageBuffer, { name: fileName });
 
-      // ✅ CLEAN OUTPUT — image only, no embeds, no clutter ✅
       await interaction.editReply({ files: [attachment] });
 
     } catch (err) {
@@ -68,6 +64,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
