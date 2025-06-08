@@ -1,7 +1,7 @@
 const { JsonRpcProvider } = require('ethers');
 const { request, gql } = require('graphql-request');
 const { shortenAddress } = require('./inputCleaner');
-const fetch = require('node-fetch');  // make sure you're using node-fetch@2
+const fetch = require('node-fetch');  // node-fetch@2
 
 // 🚀 ENS-compatible public RPCs
 const ethRpcs = [
@@ -10,6 +10,9 @@ const ethRpcs = [
   'https://ethereum.publicnode.com',
   'https://rpc.flashbots.net'
 ];
+
+// 🔧 Your deployed Proxy URL:
+const PROXY_URL = 'https://ultraflex-proxy-production.up.railway.app/ens/';
 
 async function resolveENS(address) {
   if (!address?.startsWith('0x') || address.length !== 42) return shortenAddress(address);
@@ -33,15 +36,14 @@ async function resolveENS(address) {
   const ensV2 = await queryENSv2(address);
   if (ensV2) return ensV2;
 
-  // 4️⃣ ENS.Vision live API (finally fully functional)
-  const visionENS = await queryEnsVision(address);
+  // 4️⃣ ENS Proxy (ENS.Vision safely via proxy)
+  const visionENS = await queryEnsProxy(address);
   if (visionENS) return visionENS;
 
   // Final fallback: shorten wallet address
   return shortenAddress(address);
 }
 
-// 🚀 Legacy ENS Subgraph query
 async function queryLegacyENS(wallet) {
   const endpoint = 'https://api.thegraph.com/subgraphs/name/ensdomains/ens';
   const query = gql`
@@ -51,7 +53,6 @@ async function queryLegacyENS(wallet) {
       }
     }
   `;
-
   try {
     const data = await request(endpoint, query, { owner: wallet.toLowerCase() });
     return data?.domains?.[0]?.name || null;
@@ -61,7 +62,6 @@ async function queryLegacyENS(wallet) {
   }
 }
 
-// 🚀 ENSv2 Subgraph query
 async function queryENSv2(wallet) {
   const endpoint = 'https://api.thegraph.com/subgraphs/name/ensdomains/ensv2';
   const query = gql`
@@ -73,7 +73,6 @@ async function queryENSv2(wallet) {
       }
     }
   `;
-
   try {
     const data = await request(endpoint, query, { registrant: wallet.toLowerCase() });
     return data?.registrations?.[0]?.domain?.name || null;
@@ -83,28 +82,26 @@ async function queryENSv2(wallet) {
   }
 }
 
-// 🚀 Fully patched ENS.Vision query (this is your final boss key)
-async function queryEnsVision(wallet) {
+async function queryEnsProxy(wallet) {
   try {
-    const url = `https://api.ens.vision/ens/owner/${wallet.toLowerCase()}`;
+    const url = `${PROXY_URL}${wallet.toLowerCase()}`;
     const response = await fetch(url, { timeout: 5000 });
 
     if (!response.ok) {
-      console.warn(`ENS.Vision HTTP error: ${response.status}`);
+      console.warn(`ENS Proxy HTTP error: ${response.status}`);
       return null;
     }
 
     const json = await response.json();
-    if (json?.domains?.length > 0) {
-      return json.domains[0].name;
-    }
+    return json?.ens || null;
   } catch (err) {
-    console.warn(`ENS.Vision query failed: ${err}`);
+    console.warn(`ENS Proxy query failed: ${err}`);
+    return null;
   }
-  return null;
 }
 
 module.exports = { resolveENS };
+
 
 
 
