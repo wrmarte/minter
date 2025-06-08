@@ -89,12 +89,16 @@ async function generateUltraFlexCard({
   const qrY = traitsBoxTop + ((traitsBoxBottom - traitsBoxTop - qrSize) / 2);
   ctx.drawImage(qrImg, width - 700, qrY, qrSize, qrSize);
 
+  // GOLD Divider before Owner Box
+  ctx.fillStyle = '#FFD700';
+  ctx.fillRect(0, 2800, width, 10);
+
   // Owner Box
   ctx.fillStyle = '#000';
-  ctx.fillRect(0, 2800, width, 80);
+  ctx.fillRect(0, 2810, width, 80);
   ctx.fillStyle = '#fff';
   ctx.font = 'bold 60px Exo2';
-  ctx.fillText(`OWNER: ${owner || 'Unknown'}`, 80, 2860);
+  ctx.fillText(`OWNER: ${owner || 'Unknown'}`, 80, 2810 + 50);
 
   // Footer Branding
   ctx.fillStyle = '#000';
@@ -109,4 +113,5 @@ async function generateUltraFlexCard({
 }
 
 module.exports = { generateUltraFlexCard };
+
 
