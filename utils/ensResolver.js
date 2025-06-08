@@ -2,11 +2,12 @@ const { JsonRpcProvider } = require('ethers');
 const { request, gql } = require('graphql-request');
 const { shortenAddress } = require('./inputCleaner');
 
+// ENS-compatible public RPCs (no keys required)
 const ethRpcs = [
-  'https://rpc.ankr.com/eth',
-  'https://mainnet.infura.io/v3/YOUR_INFURA_KEY',
-  'https://eth-mainnet.g.alchemy.com/v2/YOUR_ALCHEMY_KEY',
-  'https://cloudflare-eth.com'
+  'https://rpc.ankr.com/eth',               // pretty reliable for ENS
+  'https://1rpc.io/eth',                    // 1RPC supports ENS
+  'https://ethereum.publicnode.com',        // public node (better ENS support than Cloudflare)
+  'https://rpc.flashbots.net'               // flashbots relay (supports ENS)
 ];
 
 async function resolveENS(address) {
@@ -49,6 +50,7 @@ async function queryENSv2(wallet) {
 }
 
 module.exports = { resolveENS };
+
 
 
 
