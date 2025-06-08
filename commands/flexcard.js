@@ -1,4 +1,4 @@
-const { SlashCommandBuilder, AttachmentBuilder } = require('discord.js');
+const { SlashCommandBuilder, AttachmentBuilder, EmbedBuilder } = require('discord.js');
 const { buildFlexCard } = require('../services/flexcardService');
 const { buildUltraFlexCard } = require('../services/ultraFlexService');
 
@@ -16,20 +16,23 @@ module.exports = {
       opt.setName('tokenid')
         .setDescription('Token ID')
         .setRequired(true)
+    )
+    .addBooleanOption(opt =>
+      opt.setName('ultra')
+        .setDescription('Use Ultra Flex mode (Admins only)')
+        .setRequired(false)
     ),
 
   async execute(interaction) {
     const pg = interaction.client.pg;
     const name = interaction.options.getString('name').toLowerCase();
     const tokenId = interaction.options.getInteger('tokenid');
+    const ultraRequested = interaction.options.getBoolean('ultra') || false;
 
-    // Admin check
     const userIsAdmin = (
       interaction.user.id === process.env.BOT_OWNER_ID ||
       interaction.member.permissions.has('Administrator')
     );
-
-    const ultraRequested = userIsAdmin;
 
     await interaction.deferReply();
 
@@ -43,13 +46,29 @@ module.exports = {
       const contractAddress = address;
       const collectionName = display_name || storedName;
 
+      // Permission check for Ultra
+      if (ultraRequested && !userIsAdmin) {
+        return interaction.editReply('🚫 You do not have permission to use Ultra Flex mode.');
+      }
+
+      // Select rendering engine
       const imageBuffer = ultraRequested
         ? await buildUltraFlexCard(contractAddress, tokenId, collectionName)
         : await buildFlexCard(contractAddress, tokenId, collectionName);
 
       const fileName = ultraRequested ? 'ultraflexcard.png' : 'flexcard.png';
       const attachment = new AttachmentBuilder(imageBuffer, { name: fileName });
-      await interaction.editReply({ files: [attachment] });
+
+      // Embed WOW effect
+      const embedColor = ultraRequested ? 0xFFD700 : 0x1D9BF0; // Gold for Ultra, Blue for normal
+      const embedTitle = ultraRequested ? '🚀 ULTRA FLEXCARD READY!' : '🎴 FlexCard Ready!';
+
+      const embed = new EmbedBuilder()
+        .setTitle(embedTitle)
+        .setColor(embedColor)
+        .setTimestamp();
+
+      await interaction.editReply({ embeds: [embed], files: [attachment] });
 
     } catch (err) {
       console.error('❌ FlexCard error:', err);
@@ -57,6 +76,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
