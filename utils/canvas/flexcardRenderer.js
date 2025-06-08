@@ -14,7 +14,8 @@ async function generateFlexCard({
   const canvas = createCanvas(width, height);
   const ctx = canvas.getContext('2d');
 
-  ctx.fillStyle = '#7AA547'; // Greenish background
+  // Background color
+  ctx.fillStyle = '#7AA547';
   ctx.fillRect(0, 0, width, height);
 
   // Load NFT image
@@ -26,7 +27,7 @@ async function generateFlexCard({
   ctx.fillRect(0, 1020, width, 80);
 
   ctx.fillStyle = '#FFFFFF';
-  ctx.font = 'bold 40px Arial';
+  ctx.font = 'bold 40px Arial, sans-serif';  // ✅ Font fallback applied
   ctx.fillText(`${(collectionName || "NFT").toUpperCase()} #${tokenId}`, 50, 1075);
 
   // Traits box
@@ -34,10 +35,10 @@ async function generateFlexCard({
   ctx.fillRect(0, 1120, width, 350);
 
   ctx.fillStyle = '#FFFFFF';
-  ctx.font = 'bold 34px Arial';
+  ctx.font = 'bold 34px Arial, sans-serif';
   ctx.fillText('TRAITS', 50, 1160);
 
-  ctx.font = '30px Arial';
+  ctx.font = '30px Arial, sans-serif';
   let traitY = 1200;
   for (const trait of traits) {
     ctx.fillText(`${trait}`, 50, traitY);
@@ -48,7 +49,7 @@ async function generateFlexCard({
   ctx.fillStyle = '#000000';
   ctx.fillRect(0, 1480, width, 60);
   ctx.fillStyle = '#FFFFFF';
-  ctx.font = 'bold 32px Arial';
+  ctx.font = 'bold 32px Arial, sans-serif';
   ctx.fillText(`OWNER: ${owner || 'Unknown'}`, 50, 1520);
 
   // QR Code
@@ -60,4 +61,5 @@ async function generateFlexCard({
 }
 
 module.exports = { generateFlexCard };
+
 
