@@ -1,5 +1,8 @@
-const { createCanvas, loadImage } = require('@napi-rs/canvas');
+const { createCanvas, loadImage, registerFont } = require('@napi-rs/canvas');
 const QRCode = require('qrcode');
+
+// ✅ Register your embedded font from /fonts directory
+registerFont('./fonts/Exo2-Bold.ttf', { family: 'Exo2' });
 
 async function generateFlexCard({
   nftImageUrl,
@@ -27,7 +30,7 @@ async function generateFlexCard({
   ctx.fillRect(0, 1020, width, 80);
 
   ctx.fillStyle = '#FFFFFF';
-  ctx.font = 'bold 40px Arial, sans-serif';  // ✅ Font fallback applied
+  ctx.font = 'bold 40px Exo2';  // 🔥 Using your embedded Exo2 font
   ctx.fillText(`${(collectionName || "NFT").toUpperCase()} #${tokenId}`, 50, 1075);
 
   // Traits box
@@ -35,10 +38,10 @@ async function generateFlexCard({
   ctx.fillRect(0, 1120, width, 350);
 
   ctx.fillStyle = '#FFFFFF';
-  ctx.font = 'bold 34px Arial, sans-serif';
+  ctx.font = 'bold 34px Exo2';
   ctx.fillText('TRAITS', 50, 1160);
 
-  ctx.font = '30px Arial, sans-serif';
+  ctx.font = '30px Exo2';
   let traitY = 1200;
   for (const trait of traits) {
     ctx.fillText(`${trait}`, 50, traitY);
@@ -49,7 +52,7 @@ async function generateFlexCard({
   ctx.fillStyle = '#000000';
   ctx.fillRect(0, 1480, width, 60);
   ctx.fillStyle = '#FFFFFF';
-  ctx.font = 'bold 32px Arial, sans-serif';
+  ctx.font = 'bold 32px Exo2';
   ctx.fillText(`OWNER: ${owner || 'Unknown'}`, 50, 1520);
 
   // QR Code
@@ -61,5 +64,6 @@ async function generateFlexCard({
 }
 
 module.exports = { generateFlexCard };
+
 
 
