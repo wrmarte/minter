@@ -1,6 +1,5 @@
-const { extractValidAddress, shortenAddress } = require('./inputCleaner');
+const { extractValidAddress } = require('./inputCleaner');
 
-// NFT upstream cleaner
 function cleanNFTData(rawNFT) {
   const {
     imageUrl,
@@ -11,31 +10,29 @@ function cleanNFTData(rawNFT) {
     openseaUrl
   } = rawNFT;
 
-  // Sanitize traits (always array of strings)
+  const cleanImage = imageUrl || 'https://via.placeholder.com/1024x1024.png?text=NO+IMAGE';
+
   const cleanTraits = Array.isArray(traits)
     ? traits.map(t => t.toString())
     : [];
 
-  // Extract owner address safely
   let rawOwner = null;
-
   if (typeof owner === 'string') {
     rawOwner = extractValidAddress(owner);
   } else if (typeof owner === 'object' && owner.address) {
     rawOwner = extractValidAddress(owner.address);
   }
-
-  // If not valid address, fallback to null
   const cleanOwner = rawOwner || null;
 
   return {
-    nftImageUrl: imageUrl,
-    collectionName,
-    tokenId,
+    nftImageUrl: cleanImage,
+    collectionName: collectionName || 'Unknown Collection',
+    tokenId: tokenId || '???',
     traits: cleanTraits,
     owner: cleanOwner,
-    openseaUrl
+    openseaUrl: openseaUrl || 'https://opensea.io'
   };
 }
 
 module.exports = { cleanNFTData };
+
