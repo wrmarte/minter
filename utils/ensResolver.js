@@ -1,4 +1,5 @@
 const { JsonRpcProvider } = require('ethers');
+const { request, gql } = require('graphql-request');
 const { shortenAddress } = require('./inputCleaner');
 
 const ethRpcs = [
@@ -21,9 +22,33 @@ async function resolveENS(address) {
     }
   }
 
+  const ensV2 = await queryENSv2(address);
+  if (ensV2) return ensV2;
+
   return shortenAddress(address);
 }
 
+async function queryENSv2(wallet) {
+  const endpoint = 'https://api.thegraph.com/subgraphs/name/ensdomains/ensv2';
+  const query = gql`
+    query($registrant: String!) {
+      registrations(first: 1, where: { registrant: $registrant }) {
+        domain {
+          name
+        }
+      }
+    }
+  `;
+  try {
+    const data = await request(endpoint, query, { registrant: wallet.toLowerCase() });
+    return data?.registrations?.[0]?.domain?.name || null;
+  } catch (err) {
+    console.warn(`ENSv2 query failed: ${err.message}`);
+    return null;
+  }
+}
+
 module.exports = { resolveENS };
+
 
 
