@@ -10,7 +10,7 @@ module.exports = {
       opt.setName('name')
         .setDescription('Project name')
         .setRequired(true)
-        .setAutocomplete(true)
+        .setAutocomplete(true)  // 🔧 AUTOCOMPLETE fully restored ✅
     )
     .addIntegerOption(opt =>
       opt.setName('tokenid')
@@ -59,7 +59,7 @@ module.exports = {
       const fileName = ultraRequested ? 'ultraflexcard.png' : 'flexcard.png';
       const attachment = new AttachmentBuilder(imageBuffer, { name: fileName });
 
-      // ✅ CLEAN: No embed, no timestamp, no clutter — image only
+      // ✅ CLEAN OUTPUT — image only, no embeds, no clutter ✅
       await interaction.editReply({ files: [attachment] });
 
     } catch (err) {
@@ -68,6 +68,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
