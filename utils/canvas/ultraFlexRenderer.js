@@ -50,7 +50,8 @@ async function generateUltraFlexCard({
   ctx.fillRect(0, 2000, width, 100);
   ctx.fillStyle = '#fff';
   ctx.font = 'bold 90px Exo2';
-  ctx.fillText(`${(collectionName || "NFT").toUpperCase()} #${tokenId}`, 80, 2070);
+  ctx.textBaseline = 'middle'; // true vertical center
+  ctx.fillText(`${(collectionName || "NFT").toUpperCase()} #${tokenId}`, 80, 2000 + 50);
 
   // GOLD Divider
   ctx.fillStyle = '#FFD700';
@@ -61,6 +62,7 @@ async function generateUltraFlexCard({
   ctx.fillRect(0, 2110, width, 600);
   ctx.fillStyle = '#fff';
   ctx.font = 'bold 70px Exo2';
+  ctx.textBaseline = 'alphabetic';
   ctx.fillText('TRAITS', 80, 2180);
 
   const maxTraits = 12;
@@ -75,11 +77,11 @@ async function generateUltraFlexCard({
     ctx.fillText(`+ ${traits.length - maxTraits} more...`, 80, traitY);
   }
 
-  // QR Code - full center calculation inside QR zone
+  // QR Code — fully balanced vertically between divider & owner bar
   const qrBuffer = await QRCode.toBuffer(openseaUrl, { width: 600, margin: 1 });
   const qrImg = await loadImage(qrBuffer);
   const qrSize = 500;
-  const qrBoxTop = 2110;
+  const qrBoxTop = 2100;
   const qrBoxBottom = 2800;
   const qrY = qrBoxTop + ((qrBoxBottom - qrBoxTop - qrSize) / 2);
   ctx.drawImage(qrImg, width - 700, qrY, qrSize, qrSize);
@@ -104,9 +106,3 @@ async function generateUltraFlexCard({
 }
 
 module.exports = { generateUltraFlexCard };
-
-
-
-
-
-
