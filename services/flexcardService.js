@@ -11,26 +11,37 @@ const BASE_RPC = 'https://mainnet.base.org';
 const provider = new JsonRpcProvider(BASE_RPC);
 
 async function fetchMetadata(contractAddress, tokenId) {
-  const contract = new Contract(contractAddress, abi, provider);
-  const tokenURI = await contract.tokenURI(tokenId);
-  let metadataUrl = tokenURI;
+  try {
+    const contract = new Contract(contractAddress, abi, provider);
+    const tokenURI = await contract.tokenURI(tokenId);
+    let metadataUrl = tokenURI;
 
-  if (metadataUrl.startsWith('ipfs://')) {
-    metadataUrl = metadataUrl.replace('ipfs://', 'https://ipfs.io/ipfs/');
+    if (metadataUrl.startsWith('ipfs://')) {
+      metadataUrl = metadataUrl.replace('ipfs://', 'https://ipfs.io/ipfs/');
+    }
+
+    const response = await fetch(metadataUrl);
+    const metadata = await response.json();
+    return metadata || {};
+  } catch (err) {
+    console.error('❌ Metadata fetch failed:', err);
+    return {};
   }
-
-  const response = await fetch(metadataUrl);
-  const metadata = await response.json();
-  return metadata;
 }
 
 async function fetchOwner(contractAddress, tokenId) {
-  const contract = new Contract(contractAddress, abi, provider);
-  const owner = await contract.ownerOf(tokenId);
-  return owner;
+  try {
+    const contract = new Contract(contractAddress, abi, provider);
+    const owner = await contract.ownerOf(tokenId);
+    return owner;
+  } catch (err) {
+    console.error('❌ Owner fetch failed:', err);
+    return '0x0000000000000000000000000000000000000000';
+  }
 }
 
 function shortenAddress(address) {
+  if (!address || address.length < 10) return address || 'Unknown';
   return address.substring(0, 6) + '...' + address.substring(address.length - 4);
 }
 
@@ -39,17 +50,32 @@ async function buildFlexCard(contractAddress, tokenId, collectionName) {
   const owner = await fetchOwner(contractAddress, tokenId);
   const ownerDisplay = shortenAddress(owner);
 
-  const nftImageUrl = metadata.image?.startsWith('ipfs://')
-    ? metadata.image.replace('ipfs://', 'https://ipfs.io/ipfs/')
-    : metadata.image;
+  let nftImageUrl = metadata.image || null;
+  if (nftImageUrl?.startsWith('ipfs://')) {
+    nftImageUrl = nftImageUrl.replace('ipfs://', 'https://ipfs.io/ipfs/');
+  }
 
-  const traits = metadata.attributes?.length
+  if (!nftImageUrl) {
+    console.warn('⚠️ No image found, using fallback image.');
+    nftImageUrl = 'https://via.placeholder.com/400x400.png?text=No+Image';
+  }
+
+  const traits = Array.isArray(metadata.attributes) && metadata.attributes.length > 0
     ? metadata.attributes.map(attr => `${attr.trait_type} / ${attr.value}`)
     : ['No traits found'];
 
   const safeCollectionName = collectionName || metadata.name || "NFT";
 
   const openseaUrl = `https://opensea.io/assets/base/${contractAddress}/${tokenId}`;
+
+  // 🔧 DEBUG LOGS FOR YOU
+  console.log("🛠 FlexCard Build:");
+  console.log("Image URL:", nftImageUrl);
+  console.log("Collection Name:", safeCollectionName);
+  console.log("Token ID:", tokenId);
+  console.log("Traits:", traits);
+  console.log("Owner:", ownerDisplay);
+  console.log("OpenSea URL:", openseaUrl);
 
   const imageBuffer = await generateFlexCard({
     nftImageUrl,
