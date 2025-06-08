@@ -3,21 +3,19 @@ const QRCode = require('qrcode');
 const path = require('path');
 const { resolveENS } = require('../../utils/ensResolver');
 const { extractValidAddress, shortenAddress } = require('../../utils/inputCleaner');
-const { cleanNFTData } = require('../../utils/entryCleaner');
 
+// Register font globally
 const fontPath = path.join(__dirname, '../../fonts/Exo2-Bold.ttf');
 GlobalFonts.registerFromPath(fontPath, 'Exo2');
 
-async function generateUltraFlexCard(rawNFTObject) {
-  const {
-    nftImageUrl,
-    collectionName,
-    tokenId,
-    traits,
-    owner,
-    openseaUrl
-  } = cleanNFTData(rawNFTObject);
-
+async function generateUltraFlexCard({
+  nftImageUrl,
+  collectionName,
+  tokenId,
+  traits,
+  owner,
+  openseaUrl
+}) {
   const width = 2048;
   const height = 3072;
   const canvas = createCanvas(width, height);
@@ -97,14 +95,17 @@ async function generateUltraFlexCard(rawNFTObject) {
   ctx.textBaseline = 'middle';
 
   let ownerDisplay = 'Unknown';
-  if (owner) {
+
+  const cleanOwner = extractValidAddress(owner);
+  if (cleanOwner) {
     try {
-      ownerDisplay = await resolveENS(owner);
+      ownerDisplay = await resolveENS(cleanOwner);
     } catch (err) {
-      console.warn(`ENS lookup failed for ${owner}: ${err}`);
-      ownerDisplay = shortenAddress(owner);
+      console.warn(`ENS lookup failed for ${cleanOwner}: ${err}`);
+      ownerDisplay = shortenAddress(cleanOwner);
     }
   }
+
   ctx.fillText(`OWNER: ${ownerDisplay}`, 80, 2810 + 40);
 
   ctx.fillStyle = '#000';
@@ -119,6 +120,7 @@ async function generateUltraFlexCard(rawNFTObject) {
 }
 
 module.exports = { generateUltraFlexCard };
+
 
 
 
