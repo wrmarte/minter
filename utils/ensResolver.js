@@ -49,11 +49,3 @@ async function queryENSv2(wallet) {
 
 module.exports = { resolveENS };
 
-
-
-
-
-
-
-
-
