@@ -119,3 +119,4 @@ async function generateUltraFlexCard(rawNFTObject) {
 }
 
 module.exports = { generateUltraFlexCard };
+
