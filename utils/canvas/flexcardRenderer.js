@@ -1,8 +1,11 @@
-const { createCanvas, loadImage, registerFont } = require('@napi-rs/canvas');
+const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const QRCode = require('qrcode');
+const fs = require('fs');
+const path = require('path');
 
-// ✅ Register your embedded font from /fonts directory
-registerFont('./fonts/Exo2-Bold.ttf', { family: 'Exo2' });
+// ✅ Load font once globally when module is loaded
+const fontPath = path.join(__dirname, '../../fonts/Exo2-Bold.ttf');
+GlobalFonts.registerFromPath(fontPath, 'Exo2');
 
 async function generateFlexCard({
   nftImageUrl,
@@ -30,7 +33,7 @@ async function generateFlexCard({
   ctx.fillRect(0, 1020, width, 80);
 
   ctx.fillStyle = '#FFFFFF';
-  ctx.font = 'bold 40px Exo2';  // 🔥 Using your embedded Exo2 font
+  ctx.font = 'bold 40px Exo2';
   ctx.fillText(`${(collectionName || "NFT").toUpperCase()} #${tokenId}`, 50, 1075);
 
   // Traits box
@@ -64,6 +67,7 @@ async function generateFlexCard({
 }
 
 module.exports = { generateFlexCard };
+
 
 
 
