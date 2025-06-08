@@ -1,8 +1,8 @@
 const { JsonRpcProvider } = require('ethers');
 
-// You can also rotate multiple RPCs here if needed
-const BASE_RPC = 'https://mainnet.base.org';  // you can swap for any working BASE or ETH mainnet RPC
-const provider = new JsonRpcProvider(BASE_RPC);
+// ENS lives on Ethereum mainnet
+const ETHEREUM_MAINNET_RPC = 'https://rpc.ankr.com/eth'; // or Alchemy, Infura, etc.
+const provider = new JsonRpcProvider(ETHEREUM_MAINNET_RPC);
 
 async function resolveENS(address) {
   try {
