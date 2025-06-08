@@ -26,13 +26,13 @@ async function generateUltraFlexCard({
   ctx.fillStyle = gradient;
   ctx.fillRect(0, 0, width, height);
 
-  // Bigger NFT image with thinner border
+  // BIGGER NFT IMAGE - almost full canvas height
   const nftImg = await loadImage(nftImageUrl);
-  const imgX = 175;
-  const imgY = 150;
-  const imgSize = 1700;
+  const imgX = 125;
+  const imgY = 100;
+  const imgSize = 1800;
 
-  // Glow border effect
+  // Glow border effect (thin margin)
   ctx.save();
   ctx.beginPath();
   ctx.roundRect(imgX - 10, imgY - 10, imgSize + 20, imgSize + 20, 50);
@@ -45,24 +45,24 @@ async function generateUltraFlexCard({
 
   ctx.drawImage(nftImg, imgX, imgY, imgSize, imgSize);
 
-  // Title Bar
+  // Title Bar - right below image now
   ctx.fillStyle = '#000';
-  ctx.fillRect(0, 1900, width, 100);
+  ctx.fillRect(0, 2000, width, 100);
   ctx.fillStyle = '#fff';
   ctx.font = 'bold 90px Exo2';
-  ctx.fillText(`${(collectionName || "NFT").toUpperCase()} #${tokenId}`, 80, 1970);
+  ctx.fillText(`${(collectionName || "NFT").toUpperCase()} #${tokenId}`, 80, 2070);
 
   // Traits Box
   ctx.fillStyle = '#000';
-  ctx.fillRect(0, 2000, width, 700);
+  ctx.fillRect(0, 2100, width, 600);
   ctx.fillStyle = '#fff';
   ctx.font = 'bold 70px Exo2';
-  ctx.fillText('TRAITS', 80, 2080);
+  ctx.fillText('TRAITS', 80, 2180);
 
   const maxTraits = 12;
   const displayedTraits = traits.slice(0, maxTraits);
   ctx.font = '60px Exo2';
-  let traitY = 2170;
+  let traitY = 2270;
   for (const trait of displayedTraits) {
     ctx.fillText(`${trait}`, 80, traitY);
     traitY += 70;
@@ -71,10 +71,10 @@ async function generateUltraFlexCard({
     ctx.fillText(`+ ${traits.length - maxTraits} more...`, 80, traitY);
   }
 
-  // QR Code
+  // QR Code (moved down with traits)
   const qrBuffer = await QRCode.toBuffer(openseaUrl, { width: 600, margin: 1 });
   const qrImg = await loadImage(qrBuffer);
-  ctx.drawImage(qrImg, width - 700, 2100, 500, 500);
+  ctx.drawImage(qrImg, width - 700, 2200, 500, 500);
 
   // Owner Box
   ctx.fillStyle = '#000';
@@ -96,5 +96,6 @@ async function generateUltraFlexCard({
 }
 
 module.exports = { generateUltraFlexCard };
+
 
 
