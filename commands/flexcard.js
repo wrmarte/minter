@@ -5,6 +5,11 @@ module.exports = {
   data: new SlashCommandBuilder()
     .setName('flexcard')
     .setDescription('Generate a full NFT card for any token.')
+    .addIntegerOption(opt =>
+      opt.setName('token')
+        .setDescription('Token ID')
+        .setRequired(true)
+    )
     .addStringOption(opt => 
       opt.setName('name')
         .setDescription('Project name (optional, pulls contract from DB)')
@@ -14,11 +19,6 @@ module.exports = {
       opt.setName('contract')
         .setDescription('Contract address (if not using name)')
         .setRequired(false)
-    )
-    .addIntegerOption(opt =>
-      opt.setName('token')
-        .setDescription('Token ID')
-        .setRequired(true)
     ),
 
   async execute(interaction) {
@@ -57,3 +57,4 @@ module.exports = {
     }
   }
 };
+
