@@ -26,13 +26,13 @@ async function generateUltraFlexCard({
   ctx.fillStyle = gradient;
   ctx.fillRect(0, 0, width, height);
 
-  // BIGGER NFT IMAGE - almost full canvas height
+  // BIGGEST NFT IMAGE - almost full canvas height now
   const nftImg = await loadImage(nftImageUrl);
-  const imgX = 125;
-  const imgY = 100;
-  const imgSize = 1800;
+  const imgX = 100;
+  const imgY = 50;
+  const imgSize = 1850;
 
-  // Glow border effect (thin margin)
+  // Glow border effect
   ctx.save();
   ctx.beginPath();
   ctx.roundRect(imgX - 10, imgY - 10, imgSize + 20, imgSize + 20, 50);
@@ -45,16 +45,20 @@ async function generateUltraFlexCard({
 
   ctx.drawImage(nftImg, imgX, imgY, imgSize, imgSize);
 
-  // Title Bar - right below image now
+  // Title Bar
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 2000, width, 100);
   ctx.fillStyle = '#fff';
   ctx.font = 'bold 90px Exo2';
   ctx.fillText(`${(collectionName || "NFT").toUpperCase()} #${tokenId}`, 80, 2070);
 
+  // GOLD Divider
+  ctx.fillStyle = '#FFD700';
+  ctx.fillRect(0, 2100, width, 10);
+
   // Traits Box
   ctx.fillStyle = '#000';
-  ctx.fillRect(0, 2100, width, 600);
+  ctx.fillRect(0, 2110, width, 600);
   ctx.fillStyle = '#fff';
   ctx.font = 'bold 70px Exo2';
   ctx.fillText('TRAITS', 80, 2180);
@@ -71,7 +75,7 @@ async function generateUltraFlexCard({
     ctx.fillText(`+ ${traits.length - maxTraits} more...`, 80, traitY);
   }
 
-  // QR Code (moved down with traits)
+  // QR Code (with breathing space from bottom)
   const qrBuffer = await QRCode.toBuffer(openseaUrl, { width: 600, margin: 1 });
   const qrImg = await loadImage(qrBuffer);
   ctx.drawImage(qrImg, width - 700, 2200, 500, 500);
@@ -96,6 +100,7 @@ async function generateUltraFlexCard({
 }
 
 module.exports = { generateUltraFlexCard };
+
 
 
 
