@@ -1,4 +1,5 @@
 const path = require('path');
+const { extractValidAddress } = require('./inputCleaner');  //<-- THIS IS THE LINE MISSING
 
 function cleanNFTData(rawNFT) {
   const {
@@ -10,9 +11,7 @@ function cleanNFTData(rawNFT) {
     openseaUrl
   } = rawNFT;
 
-  // Use local fallback image path
   const fallbackImagePath = path.join(__dirname, '../assets/fallback.png');
-
   const cleanImage = imageUrl || fallbackImagePath;
 
   const cleanTraits = Array.isArray(traits)
@@ -38,5 +37,6 @@ function cleanNFTData(rawNFT) {
 }
 
 module.exports = { cleanNFTData };
+
 
 
