@@ -50,7 +50,7 @@ async function generateUltraFlexCard({
   ctx.fillRect(0, 2000, width, 100);
   ctx.fillStyle = '#fff';
   ctx.font = 'bold 90px Exo2';
-  ctx.textBaseline = 'middle'; // true vertical center
+  ctx.textBaseline = 'middle';
   ctx.fillText(`${(collectionName || "NFT").toUpperCase()} #${tokenId}`, 80, 2000 + 50);
 
   // GOLD Divider
@@ -81,7 +81,7 @@ async function generateUltraFlexCard({
   const qrBuffer = await QRCode.toBuffer(openseaUrl, { width: 600, margin: 1 });
   const qrImg = await loadImage(qrBuffer);
   const qrSize = 500;
-  const qrBoxTop = 2100;
+  const qrBoxTop = 2110; // match exact traits box
   const qrBoxBottom = 2800;
   const qrY = qrBoxTop + ((qrBoxBottom - qrBoxTop - qrSize) / 2);
   ctx.drawImage(qrImg, width - 700, qrY, qrSize, qrSize);
@@ -93,7 +93,7 @@ async function generateUltraFlexCard({
   ctx.font = 'bold 60px Exo2';
   ctx.fillText(`OWNER: ${owner || 'Unknown'}`, 80, 2860);
 
-  // Footer Branding (Ultra Signature)
+  // Footer Branding
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 2920, width, 60);
   ctx.fillStyle = '#FFD700';
