@@ -16,22 +16,20 @@ module.exports = {
       opt.setName('tokenid')
         .setDescription('Token ID')
         .setRequired(true)
-    )
-    .addBooleanOption(opt =>
-      opt.setName('ultra')
-        .setDescription('Use Ultra Flex mode (Admin only)')
-        .setRequired(false)
     ),
 
   async execute(interaction) {
     const pg = interaction.client.pg;
     const name = interaction.options.getString('name').toLowerCase();
     const tokenId = interaction.options.getInteger('tokenid');
-    const ultraRequested = interaction.options.getBoolean('ultra') || false;
+
+    // Admin check
     const userIsAdmin = (
       interaction.user.id === process.env.BOT_OWNER_ID ||
       interaction.member.permissions.has('Administrator')
     );
+
+    const ultraRequested = userIsAdmin;
 
     await interaction.deferReply();
 
@@ -44,10 +42,6 @@ module.exports = {
       const { address, display_name, name: storedName } = res.rows[0];
       const contractAddress = address;
       const collectionName = display_name || storedName;
-
-      if (ultraRequested && !userIsAdmin) {
-        return interaction.editReply('🚫 You do not have permission to use Ultra Flex mode.');
-      }
 
       const imageBuffer = ultraRequested
         ? await buildUltraFlexCard(contractAddress, tokenId, collectionName)
@@ -63,6 +57,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
