@@ -2,7 +2,6 @@ const { JsonRpcProvider } = require('ethers');
 const { request, gql } = require('graphql-request');
 const { shortenAddress } = require('./inputCleaner');
 
-// ✅ Fully keyless public RPCs
 const ethRpcs = [
   'https://rpc.ankr.com/eth',
   'https://1rpc.io/eth',
@@ -13,7 +12,7 @@ const ethRpcs = [
 async function resolveENS(address) {
   if (!address?.startsWith('0x') || address.length !== 42) return shortenAddress(address);
 
-  // First attempt: Reverse lookup (fast)
+  // First attempt: Reverse lookup
   for (const url of ethRpcs) {
     try {
       const provider = new JsonRpcProvider(url);
@@ -24,36 +23,34 @@ async function resolveENS(address) {
     }
   }
 
-  // Fallback: Forward ownership via ENSv2 subgraph
-  const ensV2 = await queryENSv2(address);
-  if (ensV2) return ensV2;
+  // Fallback: Legacy ENS Subgraph (full forward ownership)
+  const legacyENS = await queryLegacyENS(address);
+  if (legacyENS) return legacyENS;
 
-  // Final fallback: Short address
   return shortenAddress(address);
 }
 
-async function queryENSv2(wallet) {
-  const endpoint = 'https://api.thegraph.com/subgraphs/name/ensdomains/ensv2';
+async function queryLegacyENS(wallet) {
+  const endpoint = 'https://api.thegraph.com/subgraphs/name/ensdomains/ens';
   const query = gql`
-    query($registrant: String!) {
-      registrations(first: 1, where: { registrant: $registrant }, orderBy: registrationDate, orderDirection: desc) {
-        domain {
-          name
-        }
+    query($owner: String!) {
+      domains(first: 1, where: { owner: $owner }, orderBy: createdAt, orderDirection: desc) {
+        name
       }
     }
   `;
 
   try {
-    const data = await request(endpoint, query, { registrant: wallet.toLowerCase() });
-    return data?.registrations?.[0]?.domain?.name || null;
+    const data = await request(endpoint, query, { owner: wallet.toLowerCase() });
+    return data?.domains?.[0]?.name || null;
   } catch (err) {
-    console.warn(`ENSv2 query failed: ${err.message}`);
+    console.warn(`ENS legacy query failed: ${err.message}`);
     return null;
   }
 }
 
 module.exports = { resolveENS };
+
 
 
 
