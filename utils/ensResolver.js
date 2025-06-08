@@ -12,7 +12,7 @@ const ethRpcs = [
 async function resolveENS(address) {
   if (!address?.startsWith('0x') || address.length !== 42) return shortenAddress(address);
 
-  // First attempt: Reverse lookup
+  // ✅ 1️⃣ Reverse lookup
   for (const url of ethRpcs) {
     try {
       const provider = new JsonRpcProvider(url);
@@ -23,13 +23,19 @@ async function resolveENS(address) {
     }
   }
 
-  // Fallback: Legacy ENS Subgraph (full forward ownership)
+  // ✅ 2️⃣ Legacy ENS Subgraph
   const legacyENS = await queryLegacyENS(address);
   if (legacyENS) return legacyENS;
 
+  // ✅ 3️⃣ ENSv2 Subgraph
+  const ensV2 = await queryENSv2(address);
+  if (ensV2) return ensV2;
+
+  // ✅ 4️⃣ Final fallback
   return shortenAddress(address);
 }
 
+// 🔧 Legacy ENS Subgraph query (classic ownership)
 async function queryLegacyENS(wallet) {
   const endpoint = 'https://api.thegraph.com/subgraphs/name/ensdomains/ens';
   const query = gql`
@@ -49,7 +55,30 @@ async function queryLegacyENS(wallet) {
   }
 }
 
+// 🔧 ENSv2 Subgraph query (namewrapper & registrar v2)
+async function queryENSv2(wallet) {
+  const endpoint = 'https://api.thegraph.com/subgraphs/name/ensdomains/ensv2';
+  const query = gql`
+    query($registrant: String!) {
+      registrations(first: 1, where: { registrant: $registrant }, orderBy: registrationDate, orderDirection: desc) {
+        domain {
+          name
+        }
+      }
+    }
+  `;
+
+  try {
+    const data = await request(endpoint, query, { registrant: wallet.toLowerCase() });
+    return data?.registrations?.[0]?.domain?.name || null;
+  } catch (err) {
+    console.warn(`ENSv2 query failed: ${err.message}`);
+    return null;
+  }
+}
+
 module.exports = { resolveENS };
+
 
 
 
