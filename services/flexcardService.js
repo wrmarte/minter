@@ -7,17 +7,14 @@ const abi = [
   'function ownerOf(uint256 tokenId) view returns (address)'
 ];
 
-// You can later enhance to rotate RPCs (your usual system)
 const BASE_RPC = 'https://mainnet.base.org';
 const provider = new JsonRpcProvider(BASE_RPC);
 
 async function fetchMetadata(contractAddress, tokenId) {
   const contract = new Contract(contractAddress, abi, provider);
-
   const tokenURI = await contract.tokenURI(tokenId);
   let metadataUrl = tokenURI;
 
-  // Handle if URI is IPFS
   if (metadataUrl.startsWith('ipfs://')) {
     metadataUrl = metadataUrl.replace('ipfs://', 'https://ipfs.io/ipfs/');
   }
@@ -42,17 +39,21 @@ async function buildFlexCard(contractAddress, tokenId, collectionName) {
   const owner = await fetchOwner(contractAddress, tokenId);
   const ownerDisplay = shortenAddress(owner);
 
-  const nftImageUrl = metadata.image.startsWith('ipfs://')
+  const nftImageUrl = metadata.image?.startsWith('ipfs://')
     ? metadata.image.replace('ipfs://', 'https://ipfs.io/ipfs/')
     : metadata.image;
 
-  const traits = metadata.attributes.map(attr => `${attr.trait_type} / ${attr.value}`);
+  const traits = metadata.attributes?.length
+    ? metadata.attributes.map(attr => `${attr.trait_type} / ${attr.value}`)
+    : ['No traits found'];
+
+  const safeCollectionName = collectionName || metadata.name || "NFT";
 
   const openseaUrl = `https://opensea.io/assets/base/${contractAddress}/${tokenId}`;
 
   const imageBuffer = await generateFlexCard({
     nftImageUrl,
-    collectionName,
+    collectionName: safeCollectionName,
     tokenId,
     traits,
     owner: ownerDisplay,
@@ -63,3 +64,4 @@ async function buildFlexCard(contractAddress, tokenId, collectionName) {
 }
 
 module.exports = { buildFlexCard };
+
