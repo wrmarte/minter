@@ -1,6 +1,7 @@
 const { JsonRpcProvider, Contract } = require('ethers');
 const fetch = require('node-fetch');
 const { generateUltraFlexCard } = require('../utils/canvas/ultraFlexRenderer');
+const { resolveENS } = require('../utils/resolveENS');  // ✅ ENS resolver properly imported
 
 const abi = [
   'function tokenURI(uint256 tokenId) view returns (string)',
@@ -46,7 +47,10 @@ function shortenAddress(address) {
 async function buildUltraFlexCard(contractAddress, tokenId, collectionName) {
   const metadata = await fetchMetadata(contractAddress, tokenId);
   const owner = await fetchOwner(contractAddress, tokenId);
-  const ownerDisplay = shortenAddress(owner);
+
+  // 🔧 ENS resolving patch here
+  let ownerDisplay = await resolveENS(owner);
+  if (!ownerDisplay) ownerDisplay = shortenAddress(owner);
 
   let nftImageUrl = metadata.image || null;
   if (nftImageUrl?.startsWith('ipfs://')) {
@@ -68,7 +72,7 @@ async function buildUltraFlexCard(contractAddress, tokenId, collectionName) {
     collectionName: safeCollectionName,
     tokenId,
     traits,
-    owner: ownerDisplay,
+    owner: ownerDisplay,  // ✅ ENS-injected owner name
     openseaUrl
   });
 
@@ -76,3 +80,4 @@ async function buildUltraFlexCard(contractAddress, tokenId, collectionName) {
 }
 
 module.exports = { buildUltraFlexCard };
+
