@@ -26,43 +26,43 @@ async function generateUltraFlexCard({
   ctx.fillStyle = gradient;
   ctx.fillRect(0, 0, width, height);
 
-  // Draw NFT Image with subtle glow-style border
+  // Bigger NFT image with thinner border
   const nftImg = await loadImage(nftImageUrl);
-  const imgX = 275;
-  const imgY = 250;
-  const imgSize = 1500;
+  const imgX = 175;
+  const imgY = 150;
+  const imgSize = 1700;
 
   // Glow border effect
   ctx.save();
   ctx.beginPath();
-  ctx.roundRect(imgX - 15, imgY - 15, imgSize + 30, imgSize + 30, 50);
+  ctx.roundRect(imgX - 10, imgY - 10, imgSize + 20, imgSize + 20, 50);
   ctx.clip();
   ctx.fillStyle = '#fff';
   ctx.shadowColor = '#FFD700';
-  ctx.shadowBlur = 60;
-  ctx.fillRect(imgX - 15, imgY - 15, imgSize + 30, imgSize + 30);
+  ctx.shadowBlur = 50;
+  ctx.fillRect(imgX - 10, imgY - 10, imgSize + 20, imgSize + 20);
   ctx.restore();
 
   ctx.drawImage(nftImg, imgX, imgY, imgSize, imgSize);
 
   // Title Bar
   ctx.fillStyle = '#000';
-  ctx.fillRect(0, 1800, width, 100);
+  ctx.fillRect(0, 1900, width, 100);
   ctx.fillStyle = '#fff';
   ctx.font = 'bold 90px Exo2';
-  ctx.fillText(`${(collectionName || "NFT").toUpperCase()} #${tokenId}`, 80, 1870);
+  ctx.fillText(`${(collectionName || "NFT").toUpperCase()} #${tokenId}`, 80, 1970);
 
   // Traits Box
   ctx.fillStyle = '#000';
-  ctx.fillRect(0, 1950, width, 700);
+  ctx.fillRect(0, 2000, width, 700);
   ctx.fillStyle = '#fff';
   ctx.font = 'bold 70px Exo2';
-  ctx.fillText('TRAITS', 80, 2030);
+  ctx.fillText('TRAITS', 80, 2080);
 
   const maxTraits = 12;
   const displayedTraits = traits.slice(0, maxTraits);
   ctx.font = '60px Exo2';
-  let traitY = 2120;
+  let traitY = 2170;
   for (const trait of displayedTraits) {
     ctx.fillText(`${trait}`, 80, traitY);
     traitY += 70;
@@ -74,26 +74,27 @@ async function generateUltraFlexCard({
   // QR Code
   const qrBuffer = await QRCode.toBuffer(openseaUrl, { width: 600, margin: 1 });
   const qrImg = await loadImage(qrBuffer);
-  ctx.drawImage(qrImg, width - 700, 2050, 500, 500);
+  ctx.drawImage(qrImg, width - 700, 2100, 500, 500);
 
   // Owner Box
   ctx.fillStyle = '#000';
-  ctx.fillRect(0, 2700, width, 80);
+  ctx.fillRect(0, 2800, width, 80);
   ctx.fillStyle = '#fff';
   ctx.font = 'bold 60px Exo2';
-  ctx.fillText(`OWNER: ${owner || 'Unknown'}`, 80, 2760);
+  ctx.fillText(`OWNER: ${owner || 'Unknown'}`, 80, 2860);
 
   // Footer Branding (Ultra Signature)
   ctx.fillStyle = '#000';
-  ctx.fillRect(0, 2800, width, 60);
+  ctx.fillRect(0, 2920, width, 60);
   ctx.fillStyle = '#FFD700';
   ctx.font = 'bold 50px Exo2';
   const footerText = 'ULTRA FLEXCARD ✨ Powered by PimpsDev';
   const textWidth = ctx.measureText(footerText).width;
-  ctx.fillText(footerText, (width - textWidth) / 2, 2850);
+  ctx.fillText(footerText, (width - textWidth) / 2, 2970);
 
   return canvas.toBuffer('image/png');
 }
 
 module.exports = { generateUltraFlexCard };
+
 
