@@ -14,11 +14,9 @@ async function fetchMetadata(contractAddress, tokenId) {
   try {
     const contract = new Contract(contractAddress, abi, provider);
     const tokenURI = await contract.tokenURI(tokenId);
-    let metadataUrl = tokenURI;
-
-    if (metadataUrl.startsWith('ipfs://')) {
-      metadataUrl = metadataUrl.replace('ipfs://', 'https://ipfs.io/ipfs/');
-    }
+    let metadataUrl = tokenURI.startsWith('ipfs://')
+      ? tokenURI.replace('ipfs://', 'https://ipfs.io/ipfs/')
+      : tokenURI;
 
     const response = await fetch(metadataUrl);
     const metadata = await response.json();
@@ -54,9 +52,7 @@ async function buildFlexCard(contractAddress, tokenId, collectionName) {
   if (nftImageUrl?.startsWith('ipfs://')) {
     nftImageUrl = nftImageUrl.replace('ipfs://', 'https://ipfs.io/ipfs/');
   }
-
   if (!nftImageUrl) {
-    console.warn('⚠️ No image found, using fallback image.');
     nftImageUrl = 'https://via.placeholder.com/400x400.png?text=No+Image';
   }
 
@@ -65,17 +61,7 @@ async function buildFlexCard(contractAddress, tokenId, collectionName) {
     : ['No traits found'];
 
   const safeCollectionName = collectionName || metadata.name || "NFT";
-
   const openseaUrl = `https://opensea.io/assets/base/${contractAddress}/${tokenId}`;
-
-  // 🔧 DEBUG LOGS FOR YOU
-  console.log("🛠 FlexCard Build:");
-  console.log("Image URL:", nftImageUrl);
-  console.log("Collection Name:", safeCollectionName);
-  console.log("Token ID:", tokenId);
-  console.log("Traits:", traits);
-  console.log("Owner:", ownerDisplay);
-  console.log("OpenSea URL:", openseaUrl);
 
   const imageBuffer = await generateFlexCard({
     nftImageUrl,
@@ -90,4 +76,5 @@ async function buildFlexCard(contractAddress, tokenId, collectionName) {
 }
 
 module.exports = { buildFlexCard };
+
 
