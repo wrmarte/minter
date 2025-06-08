@@ -6,7 +6,7 @@ function extractValidAddress(input) {
     return input.toLowerCase();
   }
 
-  // Case 2: Nested object with address field (from API objects)
+  // Case 2: Nested object with address field (from APIs)
   if (typeof input === 'object' && input.address) {
     return extractValidAddress(input.address);
   }
@@ -15,5 +15,11 @@ function extractValidAddress(input) {
   return null;
 }
 
-module.exports = { extractValidAddress };
+function shortenAddress(address) {
+  if (typeof address !== 'string' || address.length !== 42) return address;
+  return `${address.slice(0, 6)}...${address.slice(-4)}`;
+}
+
+module.exports = { extractValidAddress, shortenAddress };
+
 
