@@ -1,7 +1,7 @@
-const { resolveENS } = require('../../utils/ensResolver');
 const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const QRCode = require('qrcode');
 const path = require('path');
+const { resolveENS } = require('../../utils/ensResolver');  // full ENS module
 
 // Register font globally
 const fontPath = path.join(__dirname, '../../fonts/Exo2-Bold.ttf');
@@ -20,20 +20,20 @@ async function generateUltraFlexCard({
   const canvas = createCanvas(width, height);
   const ctx = canvas.getContext('2d');
 
-  // GOLDEN GRADIENT BACKGROUND
+  // Golden gradient background
   const gradient = ctx.createLinearGradient(0, 0, 0, height);
   gradient.addColorStop(0, '#FFD700');
   gradient.addColorStop(1, '#FFA500');
   ctx.fillStyle = gradient;
   ctx.fillRect(0, 0, width, height);
 
-  // TRUE CENTERED NFT IMAGE
+  // NFT image
   const nftImg = await loadImage(nftImageUrl);
   const imgSize = 1750;
   const imgX = (width - imgSize) / 2;
   const imgY = 120;
 
-  // Glow border effect
+  // Glow border
   ctx.save();
   ctx.beginPath();
   ctx.roundRect(imgX - 10, imgY - 10, imgSize + 20, imgSize + 20, 50);
@@ -54,23 +54,22 @@ async function generateUltraFlexCard({
   ctx.textBaseline = 'middle';
   ctx.fillText(`${(collectionName || "NFT").toUpperCase()} #${tokenId}`, 80, 2000 + 50);
 
-  // GOLD Divider
+  // Divider
   ctx.fillStyle = '#FFD700';
   ctx.fillRect(0, 2100, width, 10);
 
-  // Unified Traits & QR Zone
+  // Traits + QR zone
   const traitsBoxTop = 2110;
   const traitsBoxBottom = 2800;
   ctx.fillStyle = '#000';
   ctx.fillRect(0, traitsBoxTop, width, traitsBoxBottom - traitsBoxTop);
 
-  // TRAITS Title as first row
+  // Traits header
   ctx.fillStyle = '#fff';
   ctx.font = 'bold 70px Exo2';
   ctx.textBaseline = 'alphabetic';
   ctx.fillText('TRAITS', 80, traitsBoxTop + 70);
 
-  // Traits List (max 7)
   const maxTraits = 7;
   const displayedTraits = traits.slice(0, maxTraits);
   ctx.font = '60px Exo2';
@@ -83,39 +82,55 @@ async function generateUltraFlexCard({
     ctx.fillText(`+ ${traits.length - maxTraits} more...`, 80, traitY);
   }
 
-  // QR Code — perfectly centered within traits zone
+  // QR code generation
   const qrBuffer = await QRCode.toBuffer(openseaUrl, { width: 600, margin: 1 });
   const qrImg = await loadImage(qrBuffer);
   const qrSize = 500;
   const qrY = traitsBoxTop + ((traitsBoxBottom - traitsBoxTop - qrSize) / 2);
+
+  // QR gold border
+  ctx.save();
+  ctx.beginPath();
+  ctx.roundRect(width - 700 - 10, qrY - 10, qrSize + 20, qrSize + 20, 20);
+  ctx.fillStyle = '#FFD700';
+  ctx.fill();
+  ctx.restore();
+
   ctx.drawImage(qrImg, width - 700, qrY, qrSize, qrSize);
 
-  // GOLD Divider before Owner Box
+  // Divider before Owner box
   ctx.fillStyle = '#FFD700';
   ctx.fillRect(0, 2800, width, 10);
 
-  // Owner Box (fully centered text)
+  // Owner box
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 2810, width, 80);
   ctx.fillStyle = '#fff';
   ctx.font = 'bold 60px Exo2';
   ctx.textBaseline = 'middle';
-  const ownerDisplay = await resolveENS(owner);
-  ctx.fillText(`OWNER: ${ownerDisplay}`, 80, 2810 + 40);
 
+  // ENS resolution (clean address safety check)
+  let ownerDisplay = owner;
+  if (owner?.startsWith('0x') && owner.length === 42) {
+    ownerDisplay = await resolveENS(owner);
+  }
+  ctx.fillText(`OWNER: ${ownerDisplay || 'Unknown'}`, 80, 2810 + 40);
 
-  // Footer Branding (perfect vertical center)
+  // Footer branding
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 2920, width, 60);
   ctx.fillStyle = '#FFD700';
   ctx.font = 'bold 50px Exo2';
   ctx.textBaseline = 'middle';
-  ctx.fillText('ULTRA FLEXCARD ✨ Powered by PimpsDev', width / 2 - ctx.measureText('ULTRA FLEXCARD ✨ Powered by PimpsDev').width / 2, 2920 + 30);
+  const footerText = 'ULTRA FLEXCARD ✨ Powered by PimpsDev';
+  const textWidth = ctx.measureText(footerText).width;
+  ctx.fillText(footerText, (width - textWidth) / 2, 2920 + 30);
 
   return canvas.toBuffer('image/png');
 }
 
 module.exports = { generateUltraFlexCard };
+
 
 
 
