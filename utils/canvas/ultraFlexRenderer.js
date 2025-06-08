@@ -4,18 +4,24 @@ const path = require('path');
 const { resolveENS } = require('../../utils/ensResolver');
 const { extractValidAddress, shortenAddress } = require('../../utils/inputCleaner');
 
+// ENTRY GATEWAY IMPORT
+const { cleanNFTData } = require('../../utils/entryCleaner');
+
 // Register font globally
 const fontPath = path.join(__dirname, '../../fonts/Exo2-Bold.ttf');
 GlobalFonts.registerFromPath(fontPath, 'Exo2');
 
-async function generateUltraFlexCard({
-  nftImageUrl,
-  collectionName,
-  tokenId,
-  traits,
-  owner,
-  openseaUrl
-}) {
+// Use this function to always clean upstream before calling renderer
+async function generateUltraFlexCard(rawNFTObject) {
+  const {
+    nftImageUrl,
+    collectionName,
+    tokenId,
+    traits,
+    owner,
+    openseaUrl
+  } = cleanNFTData(rawNFTObject);
+
   const width = 2048;
   const height = 3072;
   const canvas = createCanvas(width, height);
@@ -101,15 +107,14 @@ async function generateUltraFlexCard({
   ctx.font = 'bold 60px Exo2';
   ctx.textBaseline = 'middle';
 
-  const cleanOwner = extractValidAddress(owner);
   let ownerDisplay = 'Unknown';
 
-  if (cleanOwner) {
+  if (owner) {
     try {
-      ownerDisplay = await resolveENS(cleanOwner);
+      ownerDisplay = await resolveENS(owner);
     } catch (err) {
-      console.warn(`ENS lookup failed for ${cleanOwner}: ${err}`);
-      ownerDisplay = shortenAddress(cleanOwner);
+      console.warn(`ENS lookup failed for ${owner}: ${err}`);
+      ownerDisplay = shortenAddress(owner);
     }
   }
 
@@ -128,5 +133,6 @@ async function generateUltraFlexCard({
 }
 
 module.exports = { generateUltraFlexCard };
+
 
 
