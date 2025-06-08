@@ -1,7 +1,7 @@
 const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const QRCode = require('qrcode');
 const path = require('path');
-const { resolveENS } = require('../../utils/ensResolver');  // full ENS module
+const { resolveENS } = require('../../utils/ensResolver');  // fully hybrid resolver
 
 // Register font globally
 const fontPath = path.join(__dirname, '../../fonts/Exo2-Bold.ttf');
@@ -109,7 +109,6 @@ async function generateUltraFlexCard({
   ctx.font = 'bold 60px Exo2';
   ctx.textBaseline = 'middle';
 
-  // ENS resolution (clean address safety check)
   let ownerDisplay = owner;
   if (owner?.startsWith('0x') && owner.length === 42) {
     ownerDisplay = await resolveENS(owner);
@@ -130,8 +129,3 @@ async function generateUltraFlexCard({
 }
 
 module.exports = { generateUltraFlexCard };
-
-
-
-
-
