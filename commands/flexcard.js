@@ -1,6 +1,7 @@
 const { SlashCommandBuilder, AttachmentBuilder } = require('discord.js');
 const { buildFlexCard } = require('../services/flexcardService');
-const { buildUltraFlexCard, generateUltraFlexCard } = require('../services/ultraFlexService');
+const { buildUltraFlexCard } = require('../services/ultraFlexService');
+const { generateUltraFlexCard } = require('../utils/canvas/ultraFlexRenderer');
 const { resolveENS } = require('../utils/ensResolver');  // ✅ PATCHED — import ENS resolver
 const { shortenAddress } = require('../utils/inputCleaner'); // optional fallback safety
 
