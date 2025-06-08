@@ -57,18 +57,23 @@ async function generateUltraFlexCard({
   ctx.fillStyle = '#FFD700';
   ctx.fillRect(0, 2100, width, 10);
 
-  // Traits Box
+  // Unified Traits & QR Zone
+  const traitsBoxTop = 2110;
+  const traitsBoxBottom = 2800;
   ctx.fillStyle = '#000';
-  ctx.fillRect(0, 2110, width, 600);
+  ctx.fillRect(0, traitsBoxTop, width, traitsBoxBottom - traitsBoxTop);
+
+  // TRAITS Title as first row
   ctx.fillStyle = '#fff';
   ctx.font = 'bold 70px Exo2';
   ctx.textBaseline = 'alphabetic';
-  ctx.fillText('TRAITS', 80, 2180);
+  ctx.fillText('TRAITS', 80, traitsBoxTop + 70);
 
+  // Traits List
   const maxTraits = 12;
   const displayedTraits = traits.slice(0, maxTraits);
   ctx.font = '60px Exo2';
-  let traitY = 2270;
+  let traitY = traitsBoxTop + 150;
   for (const trait of displayedTraits) {
     ctx.fillText(`${trait}`, 80, traitY);
     traitY += 70;
@@ -77,13 +82,11 @@ async function generateUltraFlexCard({
     ctx.fillText(`+ ${traits.length - maxTraits} more...`, 80, traitY);
   }
 
-  // QR Code — fully balanced vertically between divider & owner bar
+  // QR Code — now perfectly centered within traits zone
   const qrBuffer = await QRCode.toBuffer(openseaUrl, { width: 600, margin: 1 });
   const qrImg = await loadImage(qrBuffer);
   const qrSize = 500;
-  const qrBoxTop = 2110; // match exact traits box
-  const qrBoxBottom = 2800;
-  const qrY = qrBoxTop + ((qrBoxBottom - qrBoxTop - qrSize) / 2);
+  const qrY = traitsBoxTop + ((traitsBoxBottom - traitsBoxTop - qrSize) / 2);
   ctx.drawImage(qrImg, width - 700, qrY, qrSize, qrSize);
 
   // Owner Box
@@ -106,3 +109,4 @@ async function generateUltraFlexCard({
 }
 
 module.exports = { generateUltraFlexCard };
+
