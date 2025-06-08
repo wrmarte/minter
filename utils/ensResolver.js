@@ -21,9 +21,9 @@ async function resolveENS(address) {
     }
   }
 
-  // Fallback to short address if ENS not found
   return shortenAddress(address);
 }
 
 module.exports = { resolveENS };
+
 
