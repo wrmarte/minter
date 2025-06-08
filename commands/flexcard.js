@@ -1,4 +1,4 @@
-const { SlashCommandBuilder, AttachmentBuilder, EmbedBuilder } = require('discord.js');
+const { SlashCommandBuilder, AttachmentBuilder } = require('discord.js');
 const { buildFlexCard } = require('../services/flexcardService');
 const { buildUltraFlexCard } = require('../services/ultraFlexService');
 
@@ -59,16 +59,8 @@ module.exports = {
       const fileName = ultraRequested ? 'ultraflexcard.png' : 'flexcard.png';
       const attachment = new AttachmentBuilder(imageBuffer, { name: fileName });
 
-      // Embed WOW effect
-      const embedColor = ultraRequested ? 0xFFD700 : 0x1D9BF0; // Gold for Ultra, Blue for normal
-      const embedTitle = ultraRequested ? '🚀 ULTRA FLEXCARD READY!' : '🎴 FlexCard Ready!';
-
-      const embed = new EmbedBuilder()
-        .setTitle(embedTitle)
-        .setColor(embedColor)
-        .setTimestamp();
-
-      await interaction.editReply({ embeds: [embed], files: [attachment] });
+      // ✅ CLEAN: No embed, no timestamp, no clutter — image only
+      await interaction.editReply({ files: [attachment] });
 
     } catch (err) {
       console.error('❌ FlexCard error:', err);
@@ -76,6 +68,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
