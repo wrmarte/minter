@@ -2,7 +2,7 @@ const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const QRCode = require('qrcode');
 const path = require('path');
 
-// Register font once globally (exact same font you already have uploaded to /fonts)
+// Register font globally
 const fontPath = path.join(__dirname, '../../fonts/Exo2-Bold.ttf');
 GlobalFonts.registerFromPath(fontPath, 'Exo2');
 
@@ -19,19 +19,37 @@ async function generateUltraFlexCard({
   const canvas = createCanvas(width, height);
   const ctx = canvas.getContext('2d');
 
-  // Background
-  ctx.fillStyle = '#7AA547';
+  // GOLDEN GRADIENT BACKGROUND
+  const gradient = ctx.createLinearGradient(0, 0, 0, height);
+  gradient.addColorStop(0, '#FFD700');
+  gradient.addColorStop(1, '#FFA500');
+  ctx.fillStyle = gradient;
   ctx.fillRect(0, 0, width, height);
 
-  // NFT Image (scaled properly inside high-res canvas)
+  // Draw NFT Image with subtle glow-style border
   const nftImg = await loadImage(nftImageUrl);
-  ctx.drawImage(nftImg, 275, 250, 1500, 1500);
+  const imgX = 275;
+  const imgY = 250;
+  const imgSize = 1500;
+
+  // Glow border effect
+  ctx.save();
+  ctx.beginPath();
+  ctx.roundRect(imgX - 15, imgY - 15, imgSize + 30, imgSize + 30, 50);
+  ctx.clip();
+  ctx.fillStyle = '#fff';
+  ctx.shadowColor = '#FFD700';
+  ctx.shadowBlur = 60;
+  ctx.fillRect(imgX - 15, imgY - 15, imgSize + 30, imgSize + 30);
+  ctx.restore();
+
+  ctx.drawImage(nftImg, imgX, imgY, imgSize, imgSize);
 
   // Title Bar
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 1800, width, 100);
   ctx.fillStyle = '#fff';
-  ctx.font = 'bold 80px Exo2';
+  ctx.font = 'bold 90px Exo2';
   ctx.fillText(`${(collectionName || "NFT").toUpperCase()} #${tokenId}`, 80, 1870);
 
   // Traits Box
@@ -53,7 +71,7 @@ async function generateUltraFlexCard({
     ctx.fillText(`+ ${traits.length - maxTraits} more...`, 80, traitY);
   }
 
-  // QR Code (scaled for 2K)
+  // QR Code
   const qrBuffer = await QRCode.toBuffer(openseaUrl, { width: 600, margin: 1 });
   const qrImg = await loadImage(qrBuffer);
   ctx.drawImage(qrImg, width - 700, 2050, 500, 500);
@@ -65,12 +83,12 @@ async function generateUltraFlexCard({
   ctx.font = 'bold 60px Exo2';
   ctx.fillText(`OWNER: ${owner || 'Unknown'}`, 80, 2760);
 
-  // Footer Branding
+  // Footer Branding (Ultra Signature)
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 2800, width, 60);
-  ctx.fillStyle = '#FFFFFF';
+  ctx.fillStyle = '#FFD700';
   ctx.font = 'bold 50px Exo2';
-  const footerText = 'Powered by PimpsDev 🚀';
+  const footerText = 'ULTRA FLEXCARD ✨ Powered by PimpsDev';
   const textWidth = ctx.measureText(footerText).width;
   ctx.fillText(footerText, (width - textWidth) / 2, 2850);
 
@@ -78,3 +96,4 @@ async function generateUltraFlexCard({
 }
 
 module.exports = { generateUltraFlexCard };
+
