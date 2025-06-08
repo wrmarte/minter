@@ -2,7 +2,7 @@ const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const QRCode = require('qrcode');
 const path = require('path');
 const { resolveENS } = require('../../utils/ensResolver');
-const { extractValidAddress } = require('../../utils/inputCleaner');
+const { extractValidAddress, shortenAddress } = require('../../utils/inputCleaner');
 
 // Register font globally
 const fontPath = path.join(__dirname, '../../fonts/Exo2-Bold.ttf');
@@ -28,7 +28,7 @@ async function generateUltraFlexCard({
   ctx.fillStyle = gradient;
   ctx.fillRect(0, 0, width, height);
 
-  // NFT image
+  // NFT Image
   const nftImg = await loadImage(nftImageUrl);
   const imgSize = 1750;
   const imgX = (width - imgSize) / 2;
@@ -78,7 +78,7 @@ async function generateUltraFlexCard({
     ctx.fillText(`+ ${traits.length - maxTraits} more...`, 80, traitY);
   }
 
-  // QR Code w/ gold frame
+  // QR Code with gold border
   const qrBuffer = await QRCode.toBuffer(openseaUrl, { width: 600, margin: 1 });
   const qrImg = await loadImage(qrBuffer);
   const qrSize = 500;
@@ -90,7 +90,6 @@ async function generateUltraFlexCard({
   ctx.fillStyle = '#FFD700';
   ctx.fill();
   ctx.restore();
-
   ctx.drawImage(qrImg, width - 700, qrY, qrSize, qrSize);
 
   // Owner Box
@@ -102,15 +101,15 @@ async function generateUltraFlexCard({
   ctx.font = 'bold 60px Exo2';
   ctx.textBaseline = 'middle';
 
-  // FINAL: Clean owner input and resolve ENS
   const cleanOwner = extractValidAddress(owner);
   let ownerDisplay = 'Unknown';
+
   if (cleanOwner) {
     try {
       ownerDisplay = await resolveENS(cleanOwner);
     } catch (err) {
       console.warn(`ENS lookup failed for ${cleanOwner}: ${err}`);
-      ownerDisplay = cleanOwner;
+      ownerDisplay = shortenAddress(cleanOwner);
     }
   }
 
@@ -129,4 +128,5 @@ async function generateUltraFlexCard({
 }
 
 module.exports = { generateUltraFlexCard };
+
 
