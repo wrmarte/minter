@@ -1,7 +1,8 @@
 const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const QRCode = require('qrcode');
 const path = require('path');
-const { resolveENS } = require('../../utils/ensResolver');  // Muscle-grade ENS resolver
+const { extractValidAddress } = require('../../utils/inputCleaner');
+const { resolveENS } = require('../../utils/ensResolver');
 
 // Register font globally
 const fontPath = path.join(__dirname, '../../fonts/Exo2-Bold.ttf');
@@ -110,21 +111,10 @@ async function generateUltraFlexCard({
   ctx.textBaseline = 'middle';
 
   // 🔧 Sanitize & resolve ENS
-  let cleanOwner = (typeof owner === 'string' && owner.startsWith('0x') && owner.length === 42)
-    ? owner.toLowerCase()
-    : null;
+let cleanOwner = extractValidAddress(owner);
+let ownerDisplay = cleanOwner ? await resolveENS(cleanOwner) : (owner || 'Unknown');
 
-  let ownerDisplay = owner;
-  if (cleanOwner) {
-    try {
-      const ensResolved = await resolveENS(cleanOwner);
-      ownerDisplay = ensResolved || owner;
-    } catch (err) {
-      console.warn(`ENS Resolution failed for ${owner}:`, err);
-    }
-  }
-
-  ctx.fillText(`OWNER: ${ownerDisplay || 'Unknown'}`, 80, 2810 + 40);
+ctx.fillText(`OWNER: ${ownerDisplay}`, 80, 2810 + 40)
 
   // Footer branding
   ctx.fillStyle = '#000';
