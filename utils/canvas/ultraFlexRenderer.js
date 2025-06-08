@@ -1,8 +1,8 @@
 const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const QRCode = require('qrcode');
 const path = require('path');
-const { extractValidAddress } = require('../../utils/inputCleaner');
 const { resolveENS } = require('../../utils/ensResolver');
+const { extractValidAddress } = require('../../utils/inputCleaner');
 
 // Register font globally
 const fontPath = path.join(__dirname, '../../fonts/Exo2-Bold.ttf');
@@ -21,7 +21,7 @@ async function generateUltraFlexCard({
   const canvas = createCanvas(width, height);
   const ctx = canvas.getContext('2d');
 
-  // Golden gradient background
+  // Background
   const gradient = ctx.createLinearGradient(0, 0, 0, height);
   gradient.addColorStop(0, '#FFD700');
   gradient.addColorStop(1, '#FFA500');
@@ -34,7 +34,6 @@ async function generateUltraFlexCard({
   const imgX = (width - imgSize) / 2;
   const imgY = 120;
 
-  // Glow border
   ctx.save();
   ctx.beginPath();
   ctx.roundRect(imgX - 10, imgY - 10, imgSize + 20, imgSize + 20, 50);
@@ -44,7 +43,6 @@ async function generateUltraFlexCard({
   ctx.shadowBlur = 50;
   ctx.fillRect(imgX - 10, imgY - 10, imgSize + 20, imgSize + 20);
   ctx.restore();
-
   ctx.drawImage(nftImg, imgX, imgY, imgSize, imgSize);
 
   // Title Bar
@@ -59,16 +57,13 @@ async function generateUltraFlexCard({
   ctx.fillStyle = '#FFD700';
   ctx.fillRect(0, 2100, width, 10);
 
-  // Traits + QR zone
+  // Traits Box
   const traitsBoxTop = 2110;
   const traitsBoxBottom = 2800;
   ctx.fillStyle = '#000';
   ctx.fillRect(0, traitsBoxTop, width, traitsBoxBottom - traitsBoxTop);
-
-  // Traits header
   ctx.fillStyle = '#fff';
   ctx.font = 'bold 70px Exo2';
-  ctx.textBaseline = 'alphabetic';
   ctx.fillText('TRAITS', 80, traitsBoxTop + 70);
 
   const maxTraits = 7;
@@ -83,13 +78,12 @@ async function generateUltraFlexCard({
     ctx.fillText(`+ ${traits.length - maxTraits} more...`, 80, traitY);
   }
 
-  // QR code generation
+  // QR Code w/ gold frame
   const qrBuffer = await QRCode.toBuffer(openseaUrl, { width: 600, margin: 1 });
   const qrImg = await loadImage(qrBuffer);
   const qrSize = 500;
   const qrY = traitsBoxTop + ((traitsBoxBottom - traitsBoxTop - qrSize) / 2);
 
-  // QR gold border
   ctx.save();
   ctx.beginPath();
   ctx.roundRect(width - 700 - 10, qrY - 10, qrSize + 20, qrSize + 20, 20);
@@ -99,29 +93,34 @@ async function generateUltraFlexCard({
 
   ctx.drawImage(qrImg, width - 700, qrY, qrSize, qrSize);
 
-  // Divider before Owner box
+  // Owner Box
   ctx.fillStyle = '#FFD700';
   ctx.fillRect(0, 2800, width, 10);
-
-  // Owner box
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 2810, width, 80);
   ctx.fillStyle = '#fff';
   ctx.font = 'bold 60px Exo2';
   ctx.textBaseline = 'middle';
 
-  // 🔧 Sanitize & resolve ENS
-let cleanOwner = extractValidAddress(owner);
-let ownerDisplay = cleanOwner ? await resolveENS(cleanOwner) : (owner || 'Unknown');
+  // FINAL: Clean owner input and resolve ENS
+  const cleanOwner = extractValidAddress(owner);
+  let ownerDisplay = 'Unknown';
+  if (cleanOwner) {
+    try {
+      ownerDisplay = await resolveENS(cleanOwner);
+    } catch (err) {
+      console.warn(`ENS lookup failed for ${cleanOwner}: ${err}`);
+      ownerDisplay = cleanOwner;
+    }
+  }
 
-ctx.fillText(`OWNER: ${ownerDisplay}`, 80, 2810 + 40)
+  ctx.fillText(`OWNER: ${ownerDisplay}`, 80, 2810 + 40);
 
-  // Footer branding
+  // Footer
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 2920, width, 60);
   ctx.fillStyle = '#FFD700';
   ctx.font = 'bold 50px Exo2';
-  ctx.textBaseline = 'middle';
   const footerText = 'ULTRA FLEXCARD ✨ Powered by PimpsDev';
   const textWidth = ctx.measureText(footerText).width;
   ctx.fillText(footerText, (width - textWidth) / 2, 2920 + 30);
@@ -130,3 +129,4 @@ ctx.fillText(`OWNER: ${ownerDisplay}`, 80, 2810 + 40)
 }
 
 module.exports = { generateUltraFlexCard };
+
