@@ -1,3 +1,4 @@
+const { resolveENS } = require('../../utils/ensResolver');
 const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const QRCode = require('qrcode');
 const path = require('path');
@@ -99,7 +100,9 @@ async function generateUltraFlexCard({
   ctx.fillStyle = '#fff';
   ctx.font = 'bold 60px Exo2';
   ctx.textBaseline = 'middle';
-  ctx.fillText(`OWNER: ${owner || 'Unknown'}`, 80, 2810 + 40);
+  const ownerDisplay = await resolveENS(owner);
+  ctx.fillText(`OWNER: ${ownerDisplay}`, 80, 2810 + 40);
+
 
   // Footer Branding (perfect vertical center)
   ctx.fillStyle = '#000';
