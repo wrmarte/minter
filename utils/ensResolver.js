@@ -11,8 +11,8 @@ const ethRpcs = [
   'https://rpc.flashbots.net'
 ];
 
-// 🔧 Your deployed Proxy URL:
-const PROXY_URL = 'https://ultraflex-proxy-production.up.railway.app/ens/';
+// 🔧 Your Vercel Proxy URL
+const PROXY_URL = 'https://ultraflex-proxy.vercel.app/ens/';
 
 async function resolveENS(address) {
   if (!address?.startsWith('0x') || address.length !== 42) return shortenAddress(address);
@@ -36,7 +36,7 @@ async function resolveENS(address) {
   const ensV2 = await queryENSv2(address);
   if (ensV2) return ensV2;
 
-  // 4️⃣ ENS Proxy (ENS.Vision safely via proxy)
+  // 4️⃣ ENS Proxy via Vercel
   const visionENS = await queryEnsProxy(address);
   if (visionENS) return visionENS;
 
@@ -101,6 +101,7 @@ async function queryEnsProxy(wallet) {
 }
 
 module.exports = { resolveENS };
+
 
 
 
