@@ -2,18 +2,15 @@ const { JsonRpcProvider } = require('ethers');
 const { request, gql } = require('graphql-request');
 const { shortenAddress } = require('./inputCleaner');
 
-// ETH RPCs for reverse record
 const ethRpcs = [
   'https://rpc.ankr.com/eth',
   'https://cloudflare-eth.com',
   'https://ethereum.publicnode.com'
 ];
 
-// Ultra ENS Resolver
 async function resolveENS(address) {
   if (!address?.startsWith('0x') || address.length !== 42) return shortenAddress(address);
 
-  // Step 1 — reverse record via RPC
   for (const url of ethRpcs) {
     try {
       const provider = new JsonRpcProvider(url);
@@ -24,15 +21,12 @@ async function resolveENS(address) {
     }
   }
 
-  // Step 2 — ENSv2 query via TheGraph
   const ensV2 = await queryENSv2(address);
   if (ensV2) return ensV2;
 
-  // Step 3 — fallback to short wallet
   return shortenAddress(address);
 }
 
-// ENSv2 wrapped domains query
 async function queryENSv2(wallet) {
   const endpoint = 'https://api.thegraph.com/subgraphs/name/ensdomains/ensv2';
   const query = gql`
@@ -54,6 +48,7 @@ async function queryENSv2(wallet) {
 }
 
 module.exports = { resolveENS };
+
 
 
 
