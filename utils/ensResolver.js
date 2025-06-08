@@ -1,18 +1,45 @@
 const { JsonRpcProvider } = require('ethers');
+const { request, gql } = require('graphql-request');
 
-// 100% Free ENS resolution working endpoint:
-const provider = new JsonRpcProvider('https://cloudflare-eth.com');
+// ETH RPC rotation
+const ethRpcs = [
+  'https://rpc.ankr.com/eth',
+  'https://cloudflare-eth.com',
+  'https://ethereum.publicnode.com',
+  // Add more if you want for better redundancy
+];
 
+// ENS lookup via RPCs
 async function resolveENS(address) {
+  for (const url of ethRpcs) {
+    try {
+      const provider = new JsonRpcProvider(url);
+      const name = await provider.lookupAddress(address);
+      if (name) return name;
+    } catch (err) {
+      console.warn(`RPC failed (${url}): ${err.message}`);
+    }
+  }
+  return await forceENSName(address);
+}
+
+// ENS backup via The Graph
+async function forceENSName(wallet) {
+  const endpoint = 'https://api.thegraph.com/subgraphs/name/ensdomains/ens';
+  const query = gql`
+    query($owner: String!) {
+      domains(first: 1, where: { owner: $owner }, orderBy: createdAt, orderDirection: desc) {
+        name
+      }
+    }
+  `;
   try {
-    const ensName = await provider.lookupAddress(address);
-    return ensName || address;
+    const data = await request(endpoint, query, { owner: wallet.toLowerCase() });
+    return data.domains[0]?.name || wallet;
   } catch (err) {
-    console.error('ENS Lookup failed:', err);
-    return address;
+    console.warn(`ENS graph query failed: ${err.message}`);
+    return wallet;
   }
 }
 
 module.exports = { resolveENS };
-
-
