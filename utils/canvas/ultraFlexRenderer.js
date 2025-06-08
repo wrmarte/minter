@@ -69,8 +69,8 @@ async function generateUltraFlexCard({
   ctx.textBaseline = 'alphabetic';
   ctx.fillText('TRAITS', 80, traitsBoxTop + 70);
 
-  // Traits List
-  const maxTraits = 12;
+  // Traits List (max 8)
+  const maxTraits = 8;
   const displayedTraits = traits.slice(0, maxTraits);
   ctx.font = '60px Exo2';
   let traitY = traitsBoxTop + 150;
@@ -82,7 +82,7 @@ async function generateUltraFlexCard({
     ctx.fillText(`+ ${traits.length - maxTraits} more...`, 80, traitY);
   }
 
-  // QR Code — now perfectly centered within traits zone
+  // QR Code — perfectly centered within traits zone
   const qrBuffer = await QRCode.toBuffer(openseaUrl, { width: 600, margin: 1 });
   const qrImg = await loadImage(qrBuffer);
   const qrSize = 500;
@@ -93,12 +93,13 @@ async function generateUltraFlexCard({
   ctx.fillStyle = '#FFD700';
   ctx.fillRect(0, 2800, width, 10);
 
-  // Owner Box
+  // Owner Box (fully centered text)
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 2810, width, 80);
   ctx.fillStyle = '#fff';
   ctx.font = 'bold 60px Exo2';
-  ctx.fillText(`OWNER: ${owner || 'Unknown'}`, 80, 2810 + 50);
+  ctx.textBaseline = 'middle';
+  ctx.fillText(`OWNER: ${owner || 'Unknown'}`, 80, 2810 + 40);
 
   // Footer Branding
   ctx.fillStyle = '#000';
@@ -113,5 +114,6 @@ async function generateUltraFlexCard({
 }
 
 module.exports = { generateUltraFlexCard };
+
 
 
