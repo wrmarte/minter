@@ -1,7 +1,7 @@
 const { JsonRpcProvider, Contract } = require('ethers');
 const fetch = require('node-fetch');
 const { generateUltraFlexCard } = require('../utils/canvas/ultraFlexRenderer');
-const { resolveENS } = require('../utils/resolveENS');  // ✅ ENS resolver properly imported
+const { resolveENS } = require('../utils/ensResolver');  // ✅ ENS resolver properly imported
 
 const abi = [
   'function tokenURI(uint256 tokenId) view returns (string)',
