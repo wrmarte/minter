@@ -1,13 +1,14 @@
 const { JsonRpcProvider } = require('ethers');
 const { request, gql } = require('graphql-request');
 
+// Multiple ETH RPCs to rotate
 const ethRpcs = [
   'https://rpc.ankr.com/eth',
   'https://cloudflare-eth.com',
   'https://ethereum.publicnode.com'
 ];
 
-// ENS lookup via RPCs
+// ENS lookup with fallback rotation
 async function resolveENS(address) {
   if (!address?.startsWith('0x') || address.length !== 42) return address;
 
@@ -21,11 +22,11 @@ async function resolveENS(address) {
     }
   }
 
-  // Fallback to TheGraph:
+  // Fallback to The Graph
   return await forceENSName(address);
 }
 
-// ENS backup via The Graph
+// ENS backup via The Graph (non-reverse records)
 async function forceENSName(wallet) {
   const endpoint = 'https://api.thegraph.com/subgraphs/name/ensdomains/ens';
   const query = gql`
@@ -45,3 +46,4 @@ async function forceENSName(wallet) {
 }
 
 module.exports = { resolveENS };
+
