@@ -3,15 +3,11 @@ const QRCode = require('qrcode');
 const path = require('path');
 const { resolveENS } = require('../../utils/ensResolver');
 const { extractValidAddress, shortenAddress } = require('../../utils/inputCleaner');
-
-// ENTRY GATEWAY IMPORT
 const { cleanNFTData } = require('../../utils/entryCleaner');
 
-// Register font globally
 const fontPath = path.join(__dirname, '../../fonts/Exo2-Bold.ttf');
 GlobalFonts.registerFromPath(fontPath, 'Exo2');
 
-// Use this function to always clean upstream before calling renderer
 async function generateUltraFlexCard(rawNFTObject) {
   const {
     nftImageUrl,
@@ -27,14 +23,12 @@ async function generateUltraFlexCard(rawNFTObject) {
   const canvas = createCanvas(width, height);
   const ctx = canvas.getContext('2d');
 
-  // Background
   const gradient = ctx.createLinearGradient(0, 0, 0, height);
   gradient.addColorStop(0, '#FFD700');
   gradient.addColorStop(1, '#FFA500');
   ctx.fillStyle = gradient;
   ctx.fillRect(0, 0, width, height);
 
-  // NFT Image
   const nftImg = await loadImage(nftImageUrl);
   const imgSize = 1750;
   const imgX = (width - imgSize) / 2;
@@ -51,7 +45,6 @@ async function generateUltraFlexCard(rawNFTObject) {
   ctx.restore();
   ctx.drawImage(nftImg, imgX, imgY, imgSize, imgSize);
 
-  // Title Bar
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 2000, width, 100);
   ctx.fillStyle = '#fff';
@@ -59,11 +52,9 @@ async function generateUltraFlexCard(rawNFTObject) {
   ctx.textBaseline = 'middle';
   ctx.fillText(`${(collectionName || "NFT").toUpperCase()} #${tokenId}`, 80, 2000 + 50);
 
-  // Divider
   ctx.fillStyle = '#FFD700';
   ctx.fillRect(0, 2100, width, 10);
 
-  // Traits Box
   const traitsBoxTop = 2110;
   const traitsBoxBottom = 2800;
   ctx.fillStyle = '#000';
@@ -84,7 +75,6 @@ async function generateUltraFlexCard(rawNFTObject) {
     ctx.fillText(`+ ${traits.length - maxTraits} more...`, 80, traitY);
   }
 
-  // QR Code with gold border
   const qrBuffer = await QRCode.toBuffer(openseaUrl, { width: 600, margin: 1 });
   const qrImg = await loadImage(qrBuffer);
   const qrSize = 500;
@@ -98,7 +88,6 @@ async function generateUltraFlexCard(rawNFTObject) {
   ctx.restore();
   ctx.drawImage(qrImg, width - 700, qrY, qrSize, qrSize);
 
-  // Owner Box
   ctx.fillStyle = '#FFD700';
   ctx.fillRect(0, 2800, width, 10);
   ctx.fillStyle = '#000';
@@ -108,7 +97,6 @@ async function generateUltraFlexCard(rawNFTObject) {
   ctx.textBaseline = 'middle';
 
   let ownerDisplay = 'Unknown';
-
   if (owner) {
     try {
       ownerDisplay = await resolveENS(owner);
@@ -117,10 +105,8 @@ async function generateUltraFlexCard(rawNFTObject) {
       ownerDisplay = shortenAddress(owner);
     }
   }
-
   ctx.fillText(`OWNER: ${ownerDisplay}`, 80, 2810 + 40);
 
-  // Footer
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 2920, width, 60);
   ctx.fillStyle = '#FFD700';
@@ -133,6 +119,3 @@ async function generateUltraFlexCard(rawNFTObject) {
 }
 
 module.exports = { generateUltraFlexCard };
-
-
-
