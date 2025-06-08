@@ -29,8 +29,8 @@ async function generateUltraFlexCard({
   // TRUE CENTERED NFT IMAGE
   const nftImg = await loadImage(nftImageUrl);
   const imgSize = 1750;
-  const imgX = (width - imgSize) / 2; // fully centered horizontally
-  const imgY = 120;                   // slightly adjusted vertically
+  const imgX = (width - imgSize) / 2;
+  const imgY = 120;
 
   // Glow border effect
   ctx.save();
@@ -75,10 +75,14 @@ async function generateUltraFlexCard({
     ctx.fillText(`+ ${traits.length - maxTraits} more...`, 80, traitY);
   }
 
-  // QR Code with perfect bottom spacing
+  // QR Code - full center calculation inside QR zone
   const qrBuffer = await QRCode.toBuffer(openseaUrl, { width: 600, margin: 1 });
   const qrImg = await loadImage(qrBuffer);
-  ctx.drawImage(qrImg, width - 700, 2250, 500, 500);
+  const qrSize = 500;
+  const qrBoxTop = 2110;
+  const qrBoxBottom = 2800;
+  const qrY = qrBoxTop + ((qrBoxBottom - qrBoxTop - qrSize) / 2);
+  ctx.drawImage(qrImg, width - 700, qrY, qrSize, qrSize);
 
   // Owner Box
   ctx.fillStyle = '#000';
@@ -100,6 +104,7 @@ async function generateUltraFlexCard({
 }
 
 module.exports = { generateUltraFlexCard };
+
 
 
 
