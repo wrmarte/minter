@@ -1,16 +1,16 @@
 const { JsonRpcProvider } = require('ethers');
 const { request, gql } = require('graphql-request');
 
-// ETH RPC rotation
 const ethRpcs = [
   'https://rpc.ankr.com/eth',
   'https://cloudflare-eth.com',
-  'https://ethereum.publicnode.com',
-  // Add more if you want for better redundancy
+  'https://ethereum.publicnode.com'
 ];
 
 // ENS lookup via RPCs
 async function resolveENS(address) {
+  if (!address?.startsWith('0x') || address.length !== 42) return address;
+
   for (const url of ethRpcs) {
     try {
       const provider = new JsonRpcProvider(url);
@@ -20,6 +20,8 @@ async function resolveENS(address) {
       console.warn(`RPC failed (${url}): ${err.message}`);
     }
   }
+
+  // Fallback to TheGraph:
   return await forceENSName(address);
 }
 
