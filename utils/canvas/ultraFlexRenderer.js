@@ -69,8 +69,8 @@ async function generateUltraFlexCard({
   ctx.textBaseline = 'alphabetic';
   ctx.fillText('TRAITS', 80, traitsBoxTop + 70);
 
-  // Traits List (max 8)
-  const maxTraits = 8;
+  // Traits List (max 7)
+  const maxTraits = 7;
   const displayedTraits = traits.slice(0, maxTraits);
   ctx.font = '60px Exo2';
   let traitY = traitsBoxTop + 150;
@@ -101,19 +101,19 @@ async function generateUltraFlexCard({
   ctx.textBaseline = 'middle';
   ctx.fillText(`OWNER: ${owner || 'Unknown'}`, 80, 2810 + 40);
 
-  // Footer Branding
+  // Footer Branding (perfect vertical center)
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 2920, width, 60);
   ctx.fillStyle = '#FFD700';
   ctx.font = 'bold 50px Exo2';
-  const footerText = 'ULTRA FLEXCARD ✨ Powered by PimpsDev';
-  const textWidth = ctx.measureText(footerText).width;
-  ctx.fillText(footerText, (width - textWidth) / 2, 2970);
+  ctx.textBaseline = 'middle';
+  ctx.fillText('ULTRA FLEXCARD ✨ Powered by PimpsDev', width / 2 - ctx.measureText('ULTRA FLEXCARD ✨ Powered by PimpsDev').width / 2, 2920 + 30);
 
   return canvas.toBuffer('image/png');
 }
 
 module.exports = { generateUltraFlexCard };
+
 
 
 
