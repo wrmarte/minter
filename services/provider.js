@@ -1,4 +1,4 @@
-const { JsonRpcProvider, getNetwork } = require('ethers');
+const { JsonRpcProvider, Network } = require('ethers');
 
 const RPCS = {
   eth: [
@@ -22,7 +22,7 @@ const RPCS = {
 const CHAIN_IDS = {
   eth: 1,
   base: 8453,
-  ape: 6969 // You can update this if ApeChain changes it
+  ape: 6969
 };
 
 const rpcIndex = {
@@ -43,13 +43,14 @@ function getProvider(chain = 'base') {
   const idx = rpcIndex[chain];
   const url = urls[idx];
 
-  // Rotate index
   rpcIndex[chain] = (idx + 1) % urls.length;
 
-  return new JsonRpcProvider(url, CHAIN_IDS[chain]);
+  const network = new Network(chain, CHAIN_IDS[chain]);
+  return new JsonRpcProvider(url, network, { staticNetwork: true });
 }
 
 module.exports = { getProvider };
+
 
 
 
