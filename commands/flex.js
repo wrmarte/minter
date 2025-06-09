@@ -15,6 +15,7 @@ function roundRect(ctx, x, y, width, height, radius = 20) {
   ctx.moveTo(x + radius, y);
   ctx.arcTo(x + width, y, x + width, y + height, radius);
   ctx.arcTo(x + width, y + height, x, y + height, radius);
+  ctx.arcTo(x, y + height, x, y, radius);
   ctx.arcTo(x, y, x + width, y, radius);
   ctx.closePath();
   ctx.clip();
@@ -56,7 +57,7 @@ module.exports = {
       const contract = new Contract(address, abi, provider);
       let tokenId = tokenIdOption;
 
-      // 🔧 Dynamic random token logic:
+      // 🔧 Dynamic tokenId selection
       if (!tokenId) {
         if (chain === 'eth') {
           try {
@@ -93,13 +94,23 @@ module.exports = {
         `• **${attr.trait_type}**: ${attr.value}`
       ).join('\n') || 'None found';
 
+      // 🔧 Full aspect-ratio safe rendering:
       const image = await loadImage(imageUrl);
-      const canvas = createCanvas(480, 480);
+      const canvasSize = 480;
+      const canvas = createCanvas(canvasSize, canvasSize);
       const ctx = canvas.getContext('2d');
       ctx.fillStyle = '#0d1117';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      roundRect(ctx, 0, 0, 480, 480, 30);
-      ctx.drawImage(image, 0, 0, 480, 480);
+      ctx.fillRect(0, 0, canvasSize, canvasSize);
+
+      const { width, height } = image;
+      const scale = Math.min(canvasSize / width, canvasSize / height);
+      const scaledWidth = width * scale;
+      const scaledHeight = height * scale;
+      const offsetX = (canvasSize - scaledWidth) / 2;
+      const offsetY = (canvasSize - scaledHeight) / 2;
+
+      roundRect(ctx, 0, 0, canvasSize, canvasSize, 30);
+      ctx.drawImage(image, offsetX, offsetY, scaledWidth, scaledHeight);
       const buffer = canvas.toBuffer('image/png');
       const attachment = new AttachmentBuilder(buffer, { name: 'flex.png' });
 
