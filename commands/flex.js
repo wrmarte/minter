@@ -40,11 +40,11 @@ module.exports = {
       opt.setName('name')
         .setDescription('Project name')
         .setRequired(true)
-        .setAutocomplete(true)   // ✅ autocomplete preserved!
+        .setAutocomplete(true)
     )
     .addIntegerOption(opt =>
       opt.setName('tokenid')
-        .setDescription('Token ID to flex')
+        .setDescription('Token ID to flex (optional)')
     ),
 
   async execute(interaction) {
@@ -54,10 +54,10 @@ module.exports = {
     await interaction.deferReply();
 
     try {
-      const res = await pg.query(`SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`, [
-        interaction.guild.id,
-        name
-      ]);
+      const res = await pg.query(
+        `SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`,
+        [interaction.guild.id, name]
+      );
 
       if (!res.rows.length) {
         return interaction.editReply('❌ Project not found. Use `/addflex` first.');
@@ -77,7 +77,6 @@ module.exports = {
             const resvRes = await fetch(reservoirUrl, { headers });
             const resvData = await resvRes.json();
             const tokens = resvData?.tokens?.map(t => t?.token?.tokenId).filter(Boolean) || [];
-
             tokenId = tokens.length > 0 ? tokens[Math.floor(Math.random() * tokens.length)] : Math.floor(Math.random() * 10000).toString();
           } catch {
             tokenId = Math.floor(Math.random() * 10000).toString();
@@ -148,4 +147,5 @@ module.exports = {
     }
   }
 };
+
 
