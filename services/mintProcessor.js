@@ -71,16 +71,15 @@ function launchContractListener(client, addressKey, contractRows) {
 
       let logs = [];
       try {
-        logs = await provider.getLogs(filter);
+        logs = await provider.send('eth_getLogs', [filter]);
       } catch (err) {
-        if (err.message.includes('invalid block range') || err.message.includes('coalesce')) {
+        const msg = err?.error?.message || err?.message || '';
+        const isRangeError = msg.includes('block range') || msg.includes('invalid block range');
+
+        if (isRangeError) {
           console.warn(`[${name}] Block range too large — fallback to single-block mode`);
           try {
-            logs = await provider.getLogs({
-              ...filter,
-              fromBlock: blockNumber,
-              toBlock: blockNumber
-            });
+            logs = await provider.send('eth_getLogs', [{ ...filter, fromBlock: blockNumber, toBlock: blockNumber }]);
           } catch (err2) {
             console.warn(`[${name}] Failed even on single-block fallback: ${err2.message}`);
             return; // gracefully skip block
