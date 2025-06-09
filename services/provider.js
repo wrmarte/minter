@@ -14,9 +14,11 @@ const RPCS = {
     'https://1rpc.io/base',
     'https://base.llamarpc.com'
   ],
-  ape: [
-    'https://rpc.apexchain.io'
-  ]
+ape: [
+  'https://rpc.apexchain.io',
+  'https://apex-mainnet.rpc.thirdweb.com' // if available
+]
+
 };
 
 // Rotation index tracker per chain
