@@ -1,6 +1,9 @@
 const { SlashCommandBuilder, AttachmentBuilder } = require('discord.js');
 const { buildFlexCard } = require('../services/flexcardService');
 const { buildUltraFlexCard } = require('../services/ultraFlexService');
+const { generateUltraFlexCard } = require('../utils/canvas/ultraFlexRenderer');
+const { resolveENS } = require('../utils/ensResolver');  // ✅ PATCHED — import ENS resolver
+const { shortenAddress } = require('../utils/inputCleaner'); // optional fallback safety
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -28,29 +31,51 @@ module.exports = {
     const name = interaction.options.getString('name').toLowerCase();
     const tokenId = interaction.options.getInteger('tokenid');
     const ultraRequested = interaction.options.getBoolean('ultra') || false;
+
+    // 🔐 Only bot owner can access Ultra
     const userIsOwner = (interaction.user.id === process.env.BOT_OWNER_ID);
+
     await interaction.deferReply();
 
     try {
-      const res = await pg.query(`SELECT * FROM flex_projects WHERE name = $1`, [name]);
+      const res = await pg.query(SELECT * FROM flex_projects WHERE name = $1, [name]);
       if (!res.rows.length) {
-        return interaction.editReply('❌ Project not found. Use `/addflex` first.');
+        return interaction.editReply('❌ Project not found. Use /addflex first.');
       }
 
       const { address, display_name, name: storedName } = res.rows[0];
       const contractAddress = address;
       const collectionName = display_name || storedName;
 
+      // Permission check for Ultra
       if (ultraRequested && !userIsOwner) {
         return interaction.editReply('🚫 Only the bot owner can use Ultra mode for now.');
       }
 
+      // 🔧 PATCHED: Inject ENS resolving when generating Ultra card
       if (ultraRequested) {
-        const imageBuffer = await buildUltraFlexCard(contractAddress, tokenId, collectionName);
+        // 1️⃣ Build card metadata first
+        const { nftImageUrl, traits, owner, openseaUrl } = await buildUltraFlexCard(contractAddress, tokenId, collectionName);
+
+        // 2️⃣ Resolve ENS for owner
+        let ownerDisplay = await resolveENS(owner);
+        if (!ownerDisplay) ownerDisplay = shortenAddress(owner);
+
+        // 3️⃣ Rebuild card image with ENS wired
+        const imageBuffer = await generateUltraFlexCard({
+          nftImageUrl,
+          collectionName,
+          tokenId,
+          traits,
+          owner: ownerDisplay,  // ✅ ENS fully injected
+          openseaUrl
+        });
+
         const attachment = new AttachmentBuilder(imageBuffer, { name: 'ultraflexcard.png' });
         return interaction.editReply({ files: [attachment] });
       }
 
+      // 🟢 If not Ultra mode — run regular Flex
       const imageBuffer = await buildFlexCard(contractAddress, tokenId, collectionName);
       const attachment = new AttachmentBuilder(imageBuffer, { name: 'flexcard.png' });
 
