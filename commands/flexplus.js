@@ -1,6 +1,7 @@
 const { SlashCommandBuilder, EmbedBuilder, AttachmentBuilder } = require('discord.js');
 const fetch = require('node-fetch');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
+const { fetchMetadata } = require('../utils/fetchMetadata');
 
 function roundRect(ctx, x, y, width, height, radius = 20) {
   ctx.save();
@@ -22,7 +23,7 @@ module.exports = {
       opt.setName('name')
         .setDescription('Project name')
         .setRequired(true)
-        .setAutocomplete(true) // ✅ Enable dynamic suggestions
+        .setAutocomplete(true)
     ),
 
   async execute(interaction) {
@@ -31,22 +32,31 @@ module.exports = {
     await interaction.deferReply();
 
     try {
-      const res = await pg.query(`SELECT * FROM flex_projects WHERE name = $1`, [name]);
+      const res = await pg.query(`SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`, [
+        interaction.guild.id,
+        name
+      ]);
+
       if (!res.rows.length) {
         return interaction.editReply('❌ Project not found. Use `/addflex` first.');
       }
 
       const { address, network } = res.rows[0];
-      const chain = network === 'base' ? 'base' : 'eth';
+      const chain = network; // eth, base, ape
 
-      const url = `https://deep-index.moralis.io/api/v2.2/nft/${address}?chain=${chain}&format=decimal&limit=50`;
-      const headers = {
-        accept: 'application/json',
-        'X-API-Key': process.env.MORALIS_API_KEY
-      };
+      let nfts = [];
 
-      const moralisData = await fetch(url, { headers }).then(res => res.json());
-      const nfts = moralisData?.result || [];
+      // Use Moralis only for eth and base
+      if (chain === 'eth' || chain === 'base') {
+        const url = `https://deep-index.moralis.io/api/v2.2/nft/${address}?chain=${chain}&format=decimal&limit=50`;
+        const headers = {
+          accept: 'application/json',
+          'X-API-Key': process.env.MORALIS_API_KEY
+        };
+
+        const moralisData = await fetch(url, { headers }).then(res => res.json());
+        nfts = moralisData?.result || [];
+      }
 
       if (!nfts.length) {
         return interaction.editReply('⚠️ No NFTs found via Moralis.');
@@ -54,13 +64,12 @@ module.exports = {
 
       const selected = nfts.sort(() => 0.5 - Math.random()).slice(0, 6);
 
-      // 💎 Canvas layout
+      // Canvas layout
       const columns = 3;
       const rows = 2;
       const imgSize = 280;
       const spacing = 20;
       const padding = 40;
-
       const gridWidth = columns * imgSize + (columns - 1) * spacing;
       const gridHeight = rows * imgSize + (rows - 1) * spacing;
       const canvasWidth = gridWidth + padding * 2;
@@ -87,22 +96,22 @@ module.exports = {
           }
         } catch {}
 
-        let img = null;
-        if (meta.image) {
-          img = meta.image.startsWith('ipfs://')
+        let imgUrl = null;
+        if (meta?.image) {
+          imgUrl = meta.image.startsWith('ipfs://')
             ? meta.image.replace('ipfs://', 'https://ipfs.io/ipfs/')
             : meta.image;
-        } else if (meta.image_url) {
-          img = meta.image_url.startsWith('ipfs://')
+        } else if (meta?.image_url) {
+          imgUrl = meta.image_url.startsWith('ipfs://')
             ? meta.image_url.replace('ipfs://', 'https://ipfs.io/ipfs/')
             : meta.image_url;
         }
 
-        if (!img) continue;
+        if (!imgUrl) continue;
 
         let nftImage;
         try {
-          nftImage = await loadImage(img);
+          nftImage = await loadImage(imgUrl);
         } catch {
           continue;
         }
@@ -123,7 +132,7 @@ module.exports = {
         .setTitle(`🖼️ Flex Collage: ${name}`)
         .setDescription(`Here's a random collage from ${name}`)
         .setImage('attachment://flexplus.png')
-        .setColor(network === 'base' ? 0x1d9bf0 : 0xf5851f)
+        .setColor(chain === 'base' ? 0x1d9bf0 : chain === 'eth' ? 0xf5851f : 0xff6600)
         .setFooter({ text: '🔧 Powered by PimpsDev' })
         .setTimestamp();
 
@@ -134,6 +143,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
