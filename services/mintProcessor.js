@@ -31,7 +31,7 @@ async function trackAllContracts(client) {
 function launchContractListener(client, addressKey, contractRows) {
   const firstRow = contractRows[0];
   const { name, address, network } = firstRow;
-  const chain = network || 'base';
+  const chain = (network || 'base').toLowerCase();
 
   const abi = [
     'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
@@ -41,7 +41,11 @@ function launchContractListener(client, addressKey, contractRows) {
   const contract = new Contract(address, abi, getProvider(chain));
 
   if (chain === 'eth') {
-    console.log(`[${name}] ETH tracking fully hybridized — no RPC listener attached.`);
+    console.log(`[${name}] ETH tracking hybridized — skipping block listener (safe).`);
+    return;
+  }
+  if (chain === 'ape') {
+    console.log(`[${name}] ApeChain not yet supported, will skip listener.`);
     return;
   }
 
@@ -222,3 +226,4 @@ module.exports = {
   trackAllContracts,
   contractListeners
 };
+
