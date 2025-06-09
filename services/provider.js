@@ -1,4 +1,4 @@
-const { JsonRpcProvider } = require('ethers');
+const { JsonRpcProvider, Network } = require('ethers');
 
 const RPCS = {
   eth: [
@@ -25,6 +25,14 @@ const rpcIndex = {
   ape: 0
 };
 
+// Optional: Custom chain IDs
+const CUSTOM_NETWORKS = {
+  ape: {
+    name: 'apechain',
+    chainId: 6969  // or the correct chain ID for ApeChain mainnet
+  }
+};
+
 function getProvider(chain = 'base') {
   chain = chain.toLowerCase();
 
@@ -34,21 +42,17 @@ function getProvider(chain = 'base') {
   }
 
   const urls = RPCS[chain];
-  const url = urls[rpcIndex[chain]];
+  const currentUrl = urls[rpcIndex[chain]];
   rpcIndex[chain] = (rpcIndex[chain] + 1) % urls.length;
 
-  // 🔥 Use correct chain ID for ApeChain to prevent network mismatch
-  if (chain === 'ape') {
-    return new JsonRpcProvider(url, {
-      name: 'apechain',
-      chainId: 33139
-    });
-  }
-
-  return new JsonRpcProvider(url); // default for eth/base
+  const customNetwork = CUSTOM_NETWORKS[chain];
+  return customNetwork
+    ? new JsonRpcProvider(currentUrl, customNetwork)
+    : new JsonRpcProvider(currentUrl); // auto-detect for eth/base
 }
 
 module.exports = { getProvider };
+
 
 
 
