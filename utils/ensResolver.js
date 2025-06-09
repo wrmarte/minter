@@ -5,7 +5,6 @@ const fetch = require('node-fetch');  // node-fetch@2
 
 // 🚀 ENS-compatible public RPCs
 const ethRpcs = [
-  'https://rpc.ankr.com/eth',
   'https://1rpc.io/eth',
   'https://ethereum.publicnode.com',
   'https://rpc.flashbots.net'
