@@ -1,13 +1,13 @@
 const { SlashCommandBuilder, EmbedBuilder, AttachmentBuilder } = require('discord.js');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
 const { Contract } = require('ethers');
-const { getProvider } = require('../utils/provider');
+const { getProvider } = require('../services/provider');
 const { fetchMetadata } = require('../utils/fetchMetadata');
 const fetch = require('node-fetch');
 const NodeCache = require("node-cache");
 
 // ✅ Metadata & image cache
-const metadataCache = new NodeCache({ stdTTL: 900 }); // 15 mins
+const metadataCache = new NodeCache({ stdTTL: 900 }); 
 const imageCache = new Map();
 
 const abi = [
@@ -64,7 +64,7 @@ module.exports = {
       }
 
       const { address, network } = res.rows[0];
-      const chain = network || 'base';
+      const chain = (network || 'base').toLowerCase();
       const provider = getProvider(chain);
       const contract = new Contract(address, abi, provider);
       let tokenId = tokenIdOption;
@@ -110,7 +110,6 @@ module.exports = {
         `• **${attr.trait_type}**: ${attr.value}`
       ).join('\n') || 'None found';
 
-      // ✅ Load image from cache if exists
       const image = await loadCachedImage(imageUrl);
       const canvasSize = 480;
       const canvas = createCanvas(canvasSize, canvasSize);
