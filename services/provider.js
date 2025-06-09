@@ -14,8 +14,7 @@ const RPCS = {
   ],
   ape: [
     'https://apechain.drpc.org',
-    'https://rpc.apechain.com',
-    'https://node.histori.xyz/apechain-mainnet/8ry9f6t9dct1se2hlagxnd9n2a'
+    'https://rpc.apechain.com'
   ]
 };
 
