@@ -40,12 +40,9 @@ function launchContractListener(client, addressKey, contractRows) {
   const iface = new Interface(abi);
   const contract = new Contract(address, abi, getProvider(chain));
 
+  // Fully hybrid safe: ETH is skipped
   if (chain === 'eth') {
-    console.log(`[${name}] ETH tracking hybridized — skipping block listener (safe).`);
-    return;
-  }
-  if (chain === 'ape') {
-    console.log(`[${name}] ApeChain not yet supported, will skip listener.`);
+    console.log(`[${name}] ETH tracking hybridized — skipping block listener.`);
     return;
   }
 
@@ -226,4 +223,5 @@ module.exports = {
   trackAllContracts,
   contractListeners
 };
+
 
