@@ -1,41 +1,49 @@
 const { JsonRpcProvider } = require('ethers');
 const { request, gql } = require('graphql-request');
 const { shortenAddress } = require('./inputCleaner');
-const fetch = require('node-fetch');  // node-fetch@2
+const fetch = require('node-fetch'); // node-fetch@2
 
-// 🚀 ENS-compatible public RPCs
+// ENS-compatible public RPCs
 const ethRpcs = [
   'https://1rpc.io/eth',
   'https://ethereum.publicnode.com',
   'https://rpc.flashbots.net'
 ];
 
-// 🔧 Your Vercel Proxy URL
+// Vercel Proxy URL
 const PROXY_URL = 'https://ultraflex-proxy.vercel.app/ens/';
+
+// Global timeout helper
+async function withTimeout(promise, ms = 5000) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), ms))
+  ]);
+}
 
 async function resolveENS(address) {
   if (!address?.startsWith('0x') || address.length !== 42) return shortenAddress(address);
 
-  // 1️⃣ Reverse Lookup via multiple RPCs
+  // 1️⃣ Reverse Lookup via multiple RPCs (with timeout)
   for (const url of ethRpcs) {
     try {
       const provider = new JsonRpcProvider(url);
-      const name = await provider.lookupAddress(address);
+      const name = await withTimeout(provider.lookupAddress(address), 5000);
       if (name) return name;
     } catch (err) {
       console.warn(`RPC failed (${url}): ${err.message}`);
     }
   }
 
-  // 2️⃣ Legacy ENS Subgraph
+  // 2️⃣ Legacy ENS Subgraph (timeout protected)
   const legacyENS = await queryLegacyENS(address);
   if (legacyENS) return legacyENS;
 
-  // 3️⃣ ENSv2 Subgraph
+  // 3️⃣ ENSv2 Subgraph (timeout protected)
   const ensV2 = await queryENSv2(address);
   if (ensV2) return ensV2;
 
-  // 4️⃣ ENS Proxy via Vercel
+  // 4️⃣ ENS Proxy via Vercel (timeout protected)
   const visionENS = await queryEnsProxy(address);
   if (visionENS) return visionENS;
 
@@ -53,7 +61,10 @@ async function queryLegacyENS(wallet) {
     }
   `;
   try {
-    const data = await request(endpoint, query, { owner: wallet.toLowerCase() });
+    const data = await withTimeout(
+      request(endpoint, query, { owner: wallet.toLowerCase() }),
+      5000
+    );
     return data?.domains?.[0]?.name || null;
   } catch (err) {
     console.warn(`ENS legacy query failed: ${err.message}`);
@@ -73,7 +84,10 @@ async function queryENSv2(wallet) {
     }
   `;
   try {
-    const data = await request(endpoint, query, { registrant: wallet.toLowerCase() });
+    const data = await withTimeout(
+      request(endpoint, query, { registrant: wallet.toLowerCase() }),
+      5000
+    );
     return data?.registrations?.[0]?.domain?.name || null;
   } catch (err) {
     console.warn(`ENSv2 query failed: ${err.message}`);
@@ -84,7 +98,11 @@ async function queryENSv2(wallet) {
 async function queryEnsProxy(wallet) {
   try {
     const url = `${PROXY_URL}${wallet.toLowerCase()}`;
-    const response = await fetch(url, { timeout: 5000 });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+
+    const response = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeout);
 
     if (!response.ok) {
       console.warn(`ENS Proxy HTTP error: ${response.status}`);
@@ -100,6 +118,7 @@ async function queryEnsProxy(wallet) {
 }
 
 module.exports = { resolveENS };
+
 
 
 
