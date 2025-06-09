@@ -6,7 +6,7 @@ const { fetchMetadata } = require('../utils/fetchMetadata');
 const fetch = require('node-fetch');
 const NodeCache = require("node-cache");
 
-// ✅ Caching as before
+// ✅ Metadata & image cache
 const metadataCache = new NodeCache({ stdTTL: 900 });
 const imageCache = new Map();
 
@@ -51,13 +51,15 @@ module.exports = {
     const pg = interaction.client.pg;
     const name = interaction.options.getString('name').toLowerCase();
     const tokenIdOption = interaction.options.getInteger('tokenid');
-    await interaction.deferReply();
+
+    // ✅ Always respond immediately to avoid Discord timeout
+    await interaction.reply({ content: '⏳ Flexing your NFT, hold tight...', ephemeral: true });
 
     try {
-      const res = await pg.query(
-        `SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`,
-        [interaction.guild.id, name]
-      );
+      const res = await pg.query(`SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`, [
+        interaction.guild.id,
+        name
+      ]);
 
       if (!res.rows.length) {
         return interaction.editReply('❌ Project not found. Use `/addflex` first.');
@@ -69,7 +71,6 @@ module.exports = {
       const contract = new Contract(address, abi, provider);
       let tokenId = tokenIdOption;
 
-      // ✅ Hybrid token selection logic
       if (!tokenId) {
         if (chain === 'eth') {
           try {
@@ -82,16 +83,13 @@ module.exports = {
             if (tokens.length > 0) {
               tokenId = tokens[Math.floor(Math.random() * tokens.length)];
             } else {
-              throw new Error('No tokens returned from Reservoir');
+              tokenId = Math.floor(Math.random() * 10000).toString();
             }
           } catch {
-            return interaction.editReply('⚠️ Could not fetch any minted tokens from Reservoir for this ETH project.');
+            tokenId = Math.floor(Math.random() * 10000).toString();
           }
         } else {
           const totalSupply = await contract.totalSupply();
-          if (parseInt(totalSupply) === 0) {
-            return interaction.editReply('⚠️ No NFTs minted yet.');
-          }
           tokenId = Math.floor(Math.random() * parseInt(totalSupply)).toString();
         }
       }
@@ -148,7 +146,7 @@ module.exports = {
         .setFooter({ text: `🔧 Powered by PimpsDev • ${chainDisplay}` })
         .setTimestamp();
 
-      await interaction.editReply({ embeds: [embed], files: [attachment] });
+      await interaction.editReply({ content: null, embeds: [embed], files: [attachment] });
 
     } catch (err) {
       console.error('❌ Error in /flex:', err);
@@ -156,6 +154,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
