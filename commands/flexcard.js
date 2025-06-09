@@ -1,9 +1,6 @@
 const { SlashCommandBuilder, AttachmentBuilder } = require('discord.js');
 const { buildFlexCard } = require('../services/flexcardService');
 const { buildUltraFlexCard } = require('../services/ultraFlexService');
-const { generateUltraFlexCard } = require('../utils/canvas/ultraFlexRenderer');
-const { resolveENS } = require('../utils/ensResolver');  
-const { shortenAddress } = require('../utils/inputCleaner'); 
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -36,9 +33,7 @@ module.exports = {
     await interaction.deferReply();
 
     try {
-      // 🔧 FIXED SQL query with correct backticks
       const res = await pg.query(`SELECT * FROM flex_projects WHERE name = $1`, [name]);
-
       if (!res.rows.length) {
         return interaction.editReply('❌ Project not found. Use `/addflex` first.');
       }
@@ -51,27 +46,12 @@ module.exports = {
         return interaction.editReply('🚫 Only the bot owner can use Ultra mode for now.');
       }
 
-      // 🔧 Ultra Mode Logic (your functional version preserved)
       if (ultraRequested) {
-        const { nftImageUrl, traits, owner, openseaUrl } = await buildUltraFlexCard(contractAddress, tokenId, collectionName);
-
-        let ownerDisplay = await resolveENS(owner);
-        if (!ownerDisplay) ownerDisplay = shortenAddress(owner);
-
-        const imageBuffer = await generateUltraFlexCard({
-          nftImageUrl,
-          collectionName,
-          tokenId,
-          traits,
-          owner: ownerDisplay,
-          openseaUrl
-        });
-
+        const imageBuffer = await buildUltraFlexCard(contractAddress, tokenId, collectionName);
         const attachment = new AttachmentBuilder(imageBuffer, { name: 'ultraflexcard.png' });
         return interaction.editReply({ files: [attachment] });
       }
 
-      // ✅ Regular Flex
       const imageBuffer = await buildFlexCard(contractAddress, tokenId, collectionName);
       const attachment = new AttachmentBuilder(imageBuffer, { name: 'flexcard.png' });
 
@@ -83,6 +63,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
