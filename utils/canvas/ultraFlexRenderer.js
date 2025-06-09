@@ -2,7 +2,6 @@ const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const QRCode = require('qrcode');
 const path = require('path');
 
-// ✅ Embedded fallback image (tiny transparent PNG, always valid)
 const PLACEHOLDER_BASE64 = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAZAAAAGQCAIAAAD1n6fyAAAAA3NCSVQICAjb4U/gAAAAFElEQVR42u3BAQEAAACCIP+vbkhAAQAAAAAAAAAA4EcPfQAAAD7Zuq8AAAAASUVORK5CYII=";
 
 const fontPath = path.join(__dirname, '../../fonts/Exo2-Bold.ttf');
@@ -27,7 +26,6 @@ async function generateUltraFlexCard({
   ctx.fillStyle = gradient;
   ctx.fillRect(0, 0, width, height);
 
-  // ✅ Final bulletproof image logic
   let safeImageUrl = nftImageUrl;
   if (
     !safeImageUrl ||
@@ -121,6 +119,7 @@ async function generateUltraFlexCard({
 }
 
 module.exports = { generateUltraFlexCard };
+
 
 
 
