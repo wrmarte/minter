@@ -80,12 +80,12 @@ function launchContractListener(client, addressKey, contractRows) {
           if (seenTokenIds.has(tokenIdStr)) continue;
           seenTokenIds.add(tokenIdStr);
           const allChannelIds = [...new Set(contractRows.flatMap(row => [row.channel_ids].flat()))];
-          await handleMint(client, firstRow, contract, tokenId, to, allChannelIds);
+          await handleMint(client, firstRow, contract, tokenId, to, allChannelIds, chain);
         } else {
           if (seenSales.has(tokenIdStr)) continue;
           seenSales.add(tokenIdStr);
           const allChannelIds = [...new Set(contractRows.flatMap(row => [row.channel_ids].flat()))];
-          await handleSale(client, firstRow, contract, tokenId, from, to, log.transactionHash, allChannelIds);
+          await handleSale(client, firstRow, contract, tokenId, from, to, log.transactionHash, allChannelIds, chain);
         }
       }
 
@@ -99,7 +99,7 @@ function launchContractListener(client, addressKey, contractRows) {
   });
 }
 
-async function handleMint(client, contractRow, contract, tokenId, to, channel_ids) {
+async function handleMint(client, contractRow, contract, tokenId, to, channel_ids, chain) {
   const { name, mint_price, mint_token, mint_token_symbol } = contractRow;
 
   let imageUrl = 'https://via.placeholder.com/400x400.png?text=NFT';
@@ -133,7 +133,7 @@ async function handleMint(client, contractRow, contract, tokenId, to, channel_id
     ],
     thumbnail: { url: imageUrl },
     color: 219139,
-    footer: { text: 'Live on Base • Powered by PimpsDev' },
+    footer: { text: `Live on ${chain.toUpperCase()} • Powered by PimpsDev` },
     timestamp: new Date().toISOString()
   };
 
@@ -143,8 +143,9 @@ async function handleMint(client, contractRow, contract, tokenId, to, channel_id
   }
 }
 
-async function handleSale(client, contractRow, contract, tokenId, from, to, txHash, channel_ids) {
+async function handleSale(client, contractRow, contract, tokenId, from, to, txHash, channel_ids, chain) {
   const { name, mint_token, mint_token_symbol } = contractRow;
+  const provider = getProvider(chain);
 
   let imageUrl = 'https://via.placeholder.com/400x400.png?text=SOLD';
   try {
@@ -158,8 +159,8 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
 
   let receipt, tx;
   try {
-    receipt = await contract.provider.getTransactionReceipt(txHash);
-    tx = await contract.provider.getTransaction(txHash);
+    receipt = await provider.getTransactionReceipt(txHash);
+    tx = await provider.getTransaction(txHash);
     if (!receipt || !tx) return;
   } catch { return; }
 
@@ -209,7 +210,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     ],
     thumbnail: { url: imageUrl },
     color: 0x66cc66,
-    footer: { text: 'Powered by PimpsDev' },
+    footer: { text: `Powered by PimpsDev` },
     timestamp: new Date().toISOString()
   };
 
@@ -223,5 +224,6 @@ module.exports = {
   trackAllContracts,
   contractListeners
 };
+
 
 
