@@ -10,8 +10,12 @@ module.exports = {
       opt.setName('address').setDescription('Contract address').setRequired(true))
     .addStringOption(opt =>
       opt.setName('network')
-        .setDescription('Network: eth or base')
-        .addChoices({ name: 'Base', value: 'base' }, { name: 'Ethereum', value: 'eth' })
+        .setDescription('Network: Base, Ethereum or ApeChain')
+        .addChoices(
+          { name: 'Base', value: 'base' },
+          { name: 'Ethereum', value: 'eth' },
+          { name: 'ApeChain', value: 'ape' }
+        )
         .setRequired(true)
     ),
 
@@ -40,11 +44,10 @@ module.exports = {
         );
       `);
 
-      // ✅ Auto-drop old primary key and replace with composite key if needed
+      // ✅ Ensure correct primary key (guild_id + name)
       await pg.query(`
         DO $$
         BEGIN
-          -- Drop old primary key if it exists
           IF EXISTS (
             SELECT 1 FROM information_schema.table_constraints
             WHERE table_name = 'flex_projects'
@@ -54,7 +57,6 @@ module.exports = {
             ALTER TABLE flex_projects DROP CONSTRAINT flex_projects_pkey;
           END IF;
 
-          -- Add new composite primary key if not exists
           IF NOT EXISTS (
             SELECT 1 FROM information_schema.table_constraints
             WHERE table_name = 'flex_projects'
@@ -76,7 +78,7 @@ module.exports = {
           network = EXCLUDED.network
       `, [guildId, name, address, network]);
 
-      return interaction.reply(`✅ Project **${name}** added for flexing on **${network}**.`);
+      return interaction.reply(`✅ Project **${name}** added for flexing on **${network.toUpperCase()}**.`);
     } catch (err) {
       console.error('❌ Error in /addflex:', err);
       return interaction.reply({
