@@ -62,11 +62,14 @@ function launchContractListener(client, addressKey, contractRows) {
       const fromBlock = Math.max(blockNumber - defaultWindow, 0);
       const toBlock = blockNumber;
 
+      const hexFrom = `0x${fromBlock.toString(16)}`;
+      const hexTo = `0x${toBlock.toString(16)}`;
+
       const filter = {
         address,
         topics: [id('Transfer(address,address,uint256)')],
-        fromBlock,
-        toBlock
+        fromBlock: hexFrom,
+        toBlock: hexTo
       };
 
       let logs = [];
@@ -74,18 +77,23 @@ function launchContractListener(client, addressKey, contractRows) {
         logs = await provider.send('eth_getLogs', [filter]);
       } catch (err) {
         const msg = err?.error?.message || err?.message || '';
-        const isRangeError = msg.includes('block range') || msg.includes('invalid block range');
+        const isRangeError = msg.includes('range') || msg.includes('block') || msg.includes('coalesce') || msg.includes('invalid argument');
 
         if (isRangeError) {
-          console.warn(`[${name}] Block range too large — fallback to single-block mode`);
+          console.warn(`[${name}] Block range too large or invalid — fallback to single-block mode`);
           try {
-            logs = await provider.send('eth_getLogs', [{ ...filter, fromBlock: blockNumber, toBlock: blockNumber }]);
+            const singleBlockHex = `0x${blockNumber.toString(16)}`;
+            logs = await provider.send('eth_getLogs', [{
+              ...filter,
+              fromBlock: singleBlockHex,
+              toBlock: singleBlockHex
+            }]);
           } catch (err2) {
-            console.warn(`[${name}] Failed even on single-block fallback: ${err2.message}`);
-            return; // gracefully skip block
+            console.warn(`[${name}] Failed even in single-block mode: ${err2.message}`);
+            return;
           }
         } else {
-          console.warn(`[${name}] Unexpected error: ${err.message}`);
+          console.warn(`[${name}] Unexpected error: ${msg}`);
           return;
         }
       }
