@@ -1,8 +1,6 @@
 const { JsonRpcProvider, Contract } = require('ethers');
 const fetch = require('node-fetch');
 const { generateUltraFlexCard } = require('../utils/canvas/ultraFlexRenderer');
-const { resolveENS } = require('../utils/ensResolver');
-const { AbortController } = require('abort-controller');
 
 const abi = [
   'function tokenURI(uint256 tokenId) view returns (string)',
@@ -12,30 +10,6 @@ const abi = [
 const BASE_RPC = 'https://mainnet.base.org';
 const provider = new JsonRpcProvider(BASE_RPC);
 
-// Timeout wrapper for fetch calls
-async function fetchWithTimeout(url, ms = 8000) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), ms);
-  try {
-    const res = await fetch(url, { signal: controller.signal });
-    clearTimeout(timeout);
-    return res;
-  } catch (err) {
-    clearTimeout(timeout);
-    throw err;
-  }
-}
-
-// Validate if remote image url is accessible
-async function isImageValid(url, ms = 5000) {
-  try {
-    const res = await fetchWithTimeout(url, ms);
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
-
 async function fetchMetadata(contractAddress, tokenId) {
   try {
     const contract = new Contract(contractAddress, abi, provider);
@@ -44,7 +18,7 @@ async function fetchMetadata(contractAddress, tokenId) {
       ? tokenURI.replace('ipfs://', 'https://ipfs.io/ipfs/')
       : tokenURI;
 
-    const response = await fetchWithTimeout(metadataUrl);
+    const response = await fetch(metadataUrl);
     const metadata = await response.json();
     return metadata || {};
   } catch (err) {
@@ -72,18 +46,14 @@ function shortenAddress(address) {
 async function buildUltraFlexCard(contractAddress, tokenId, collectionName) {
   const metadata = await fetchMetadata(contractAddress, tokenId);
   const owner = await fetchOwner(contractAddress, tokenId);
-
-  let ownerDisplay = await resolveENS(owner);
-  if (!ownerDisplay) ownerDisplay = shortenAddress(owner);
+  const ownerDisplay = shortenAddress(owner);
 
   let nftImageUrl = metadata.image || metadata.image_url || null;
   if (nftImageUrl?.startsWith('ipfs://')) {
     nftImageUrl = nftImageUrl.replace('ipfs://', 'https://ipfs.io/ipfs/');
   }
-
-  const valid = nftImageUrl && /^https?:\/\//i.test(nftImageUrl) && await isImageValid(nftImageUrl);
-  if (!valid) {
-    nftImageUrl = null; // Let renderer fallback handle this
+  if (!nftImageUrl) {
+    nftImageUrl = null;
   }
 
   const traits = Array.isArray(metadata.attributes) && metadata.attributes.length > 0
@@ -106,6 +76,7 @@ async function buildUltraFlexCard(contractAddress, tokenId, collectionName) {
 }
 
 module.exports = { buildUltraFlexCard };
+
 
 
 
