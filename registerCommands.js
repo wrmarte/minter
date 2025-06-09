@@ -12,11 +12,21 @@ for (const file of commandFiles) {
   const filePath = path.join(commandsPath, file);
   const command = require(filePath);
   if ('data' in command && 'execute' in command) {
-    commands.push(command.data.toJSON());
-    console.log(`✅ Prepared /${command.data.name}`);
+    try {
+      // Defensive check: make sure toJSON works
+      commands.push(command.data.toJSON());
+      console.log(`✅ Prepared /${command.data.name}`);
+    } catch (err) {
+      console.warn(`⚠️ Skipped ${file}: invalid command structure`, err);
+    }
   } else {
     console.warn(`⚠️ Skipped ${file}: missing "data" or "execute"`);
   }
+}
+
+if (commands.length === 0) {
+  console.warn('⚠️ No valid commands found to register.');
+  process.exit(1);
 }
 
 const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_BOT_TOKEN);
@@ -30,7 +40,7 @@ const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_BOT_TOKEN)
     );
     console.log('✅ Slash commands registered successfully!');
   } catch (error) {
-    console.error('❌ Error registering slash commands:', error);
+    console.error('❌ Error registering slash commands:', error?.rawError || error);
   }
 })();
 
