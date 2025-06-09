@@ -58,19 +58,37 @@ function launchContractListener(client, addressKey, contractRows) {
 
   provider.on('block', async (blockNumber) => {
     try {
-      // 🧠 Bulletproof dynamic range:
-      const blockWindow = chain === 'eth' ? 100 : 20;
-      const fromBlock = Math.max(blockNumber - blockWindow, 0);
-      const toBlock = blockNumber;
+      const blockWindow = 20;
+      const safeFrom = Math.max(blockNumber - blockWindow, 0);
+      const safeTo = blockNumber;
 
       const filter = {
         address,
         topics: [id('Transfer(address,address,uint256)')],
-        fromBlock,
-        toBlock
+        fromBlock: safeFrom,
+        toBlock: safeTo
       };
 
-      const logs = await provider.getLogs(filter);
+      let logs = [];
+
+      try {
+        logs = await provider.getLogs(filter);
+      } catch (err) {
+        if (err?.code === -32000 || err?.message.includes("invalid block range params")) {
+          console.warn(`[${name}] Block range too large — fallback to single-block mode`);
+          // Fallback: query one block at a time
+          for (let blk = safeFrom; blk <= safeTo; blk++) {
+            try {
+              const singleLogs = await provider.getLogs({ ...filter, fromBlock: blk, toBlock: blk });
+              logs.push(...singleLogs);
+            } catch (singleErr) {
+              console.warn(`[${name}] Single block log error: ${singleErr.message}`);
+            }
+          }
+        } else {
+          throw err;
+        }
+      }
 
       for (const log of logs) {
         let parsed;
@@ -78,15 +96,15 @@ function launchContractListener(client, addressKey, contractRows) {
         const { from, to, tokenId } = parsed.args;
         const tokenIdStr = tokenId.toString();
 
+        const allChannelIds = [...new Set(contractRows.flatMap(row => [row.channel_ids].flat()))];
+
         if (from === ZeroAddress) {
           if (seenTokenIds.has(tokenIdStr)) continue;
           seenTokenIds.add(tokenIdStr);
-          const allChannelIds = [...new Set(contractRows.flatMap(row => [row.channel_ids].flat()))];
           await handleMint(client, firstRow, contract, tokenId, to, allChannelIds);
         } else {
           if (seenSales.has(tokenIdStr)) continue;
           seenSales.add(tokenIdStr);
-          const allChannelIds = [...new Set(contractRows.flatMap(row => [row.channel_ids].flat()))];
           await handleSale(client, firstRow, contract, tokenId, from, to, log.transactionHash, allChannelIds);
         }
       }
