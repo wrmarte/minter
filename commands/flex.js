@@ -3,6 +3,7 @@ const { createCanvas, loadImage } = require('@napi-rs/canvas');
 const { Contract } = require('ethers');
 const { getProvider } = require('../utils/provider');
 const { fetchMetadata } = require('../utils/fetchMetadata');
+const fetch = require('node-fetch');
 
 const abi = [
   'function totalSupply() view returns (uint256)',
@@ -14,7 +15,6 @@ function roundRect(ctx, x, y, width, height, radius = 20) {
   ctx.moveTo(x + radius, y);
   ctx.arcTo(x + width, y, x + width, y + height, radius);
   ctx.arcTo(x + width, y + height, x, y + height, radius);
-  ctx.arcTo(x, y + height, x, y, radius);
   ctx.arcTo(x, y, x + width, y, radius);
   ctx.closePath();
   ctx.clip();
@@ -51,17 +51,29 @@ module.exports = {
       }
 
       const { address, network } = res.rows[0];
-      const chain = network || 'base'; // safe fallback
-
+      const chain = network || 'base';
       const provider = getProvider(chain);
       const contract = new Contract(address, abi, provider);
-
       let tokenId = tokenIdOption;
 
+      // 🔧 Dynamic random token logic:
       if (!tokenId) {
         if (chain === 'eth') {
-          // ✅ ETH bypass for totalSupply
-          tokenId = Math.floor(Math.random() * 10000).toString();
+          try {
+            const reservoirUrl = `https://api.reservoir.tools/tokens/v6?collection=${address}&limit=50&sortBy=floorAskPrice`;
+            const headers = { 'x-api-key': process.env.RESERVOIR_API_KEY };
+            const resvRes = await fetch(reservoirUrl, { headers });
+            const resvData = await resvRes.json();
+            const tokens = resvData?.tokens?.map(t => t?.token?.tokenId).filter(Boolean) || [];
+
+            if (tokens.length > 0) {
+              tokenId = tokens[Math.floor(Math.random() * tokens.length)];
+            } else {
+              tokenId = Math.floor(Math.random() * 10000).toString();
+            }
+          } catch {
+            tokenId = Math.floor(Math.random() * 10000).toString();
+          }
         } else {
           const totalSupply = await contract.totalSupply();
           tokenId = Math.floor(Math.random() * parseInt(totalSupply)).toString();
@@ -114,6 +126,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
