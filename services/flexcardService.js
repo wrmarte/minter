@@ -1,5 +1,6 @@
-const { JsonRpcProvider, Contract } = require('ethers');
-const fetch = require('node-fetch');
+const { Contract } = require('ethers');
+const { getProvider } = require('../utils/provider');
+const { fetchMetadata } = require('../utils/fetchMetadata');
 const { generateFlexCard } = require('../utils/canvas/flexcardRenderer');
 
 const abi = [
@@ -7,28 +8,9 @@ const abi = [
   'function ownerOf(uint256 tokenId) view returns (address)'
 ];
 
-const BASE_RPC = 'https://mainnet.base.org';
-const provider = new JsonRpcProvider(BASE_RPC);
-
-async function fetchMetadata(contractAddress, tokenId) {
+async function fetchOwner(contractAddress, tokenId, chain) {
   try {
-    const contract = new Contract(contractAddress, abi, provider);
-    const tokenURI = await contract.tokenURI(tokenId);
-    let metadataUrl = tokenURI.startsWith('ipfs://')
-      ? tokenURI.replace('ipfs://', 'https://ipfs.io/ipfs/')
-      : tokenURI;
-
-    const response = await fetch(metadataUrl);
-    const metadata = await response.json();
-    return metadata || {};
-  } catch (err) {
-    console.error('❌ Metadata fetch failed:', err);
-    return {};
-  }
-}
-
-async function fetchOwner(contractAddress, tokenId) {
-  try {
+    const provider = getProvider(chain);
     const contract = new Contract(contractAddress, abi, provider);
     const owner = await contract.ownerOf(tokenId);
     return owner;
@@ -43,9 +25,9 @@ function shortenAddress(address) {
   return address.substring(0, 6) + '...' + address.substring(address.length - 4);
 }
 
-async function buildFlexCard(contractAddress, tokenId, collectionName) {
-  const metadata = await fetchMetadata(contractAddress, tokenId);
-  const owner = await fetchOwner(contractAddress, tokenId);
+async function buildFlexCard(contractAddress, tokenId, collectionName, chain) {
+  const metadata = await fetchMetadata(contractAddress, tokenId, chain);
+  const owner = await fetchOwner(contractAddress, tokenId, chain);
   const ownerDisplay = shortenAddress(owner);
 
   let nftImageUrl = metadata.image || null;
@@ -61,7 +43,9 @@ async function buildFlexCard(contractAddress, tokenId, collectionName) {
     : ['No traits found'];
 
   const safeCollectionName = collectionName || metadata.name || "NFT";
-  const openseaUrl = `https://opensea.io/assets/base/${contractAddress}/${tokenId}`;
+  const openseaUrl = chain === 'eth'
+    ? `https://opensea.io/assets/ethereum/${contractAddress}/${tokenId}`
+    : `https://opensea.io/assets/${chain}/${contractAddress}/${tokenId}`;
 
   const imageBuffer = await generateFlexCard({
     nftImageUrl,
@@ -76,5 +60,6 @@ async function buildFlexCard(contractAddress, tokenId, collectionName) {
 }
 
 module.exports = { buildFlexCard };
+
 
 
