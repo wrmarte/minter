@@ -33,14 +33,14 @@ function launchContractListener(client, addressKey, contractRows) {
   const { name, address, network } = firstRow;
   const chain = (network || 'base').toLowerCase();
 
+  const provider = getProvider(chain);
   const abi = [
     'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
     'function tokenURI(uint256 tokenId) view returns (string)'
   ];
   const iface = new Interface(abi);
-  const contract = new Contract(address, abi, getProvider(chain));
+  const contract = new Contract(address, abi, provider);
 
-  // Fully hybrid safe: ETH is skipped
   if (chain === 'eth') {
     console.log(`[${name}] ETH tracking hybridized — skipping block listener.`);
     return;
@@ -50,13 +50,13 @@ function launchContractListener(client, addressKey, contractRows) {
   let seenSales = new Set(loadJson(seenSalesPath(name)) || []);
 
   const listenerKey = `${addressKey}_mint_listener`;
-  if (getProvider(chain)[listenerKey]) {
+  if (provider[listenerKey]) {
     console.log(`[${name}] Listener already active — skipping duplicate`);
     return;
   }
-  getProvider(chain)[listenerKey] = true;
+  provider[listenerKey] = true;
 
-  getProvider(chain).on('block', async (blockNumber) => {
+  provider.on('block', async (blockNumber) => {
     try {
       const fromBlock = Math.max(blockNumber - 5, 0);
       const toBlock = blockNumber;
@@ -68,7 +68,7 @@ function launchContractListener(client, addressKey, contractRows) {
         toBlock
       };
 
-      const logs = await getProvider(chain).getLogs(filter);
+      const logs = await provider.getLogs(filter);
 
       for (const log of logs) {
         let parsed;
@@ -158,8 +158,8 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
 
   let receipt, tx;
   try {
-    receipt = await getProvider().getTransactionReceipt(txHash);
-    tx = await getProvider().getTransaction(txHash);
+    receipt = await contract.provider.getTransactionReceipt(txHash);
+    tx = await contract.provider.getTransaction(txHash);
     if (!receipt || !tx) return;
   } catch { return; }
 
