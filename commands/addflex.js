@@ -1,152 +1,99 @@
-const { SlashCommandBuilder, EmbedBuilder, AttachmentBuilder } = require('discord.js');
-const { createCanvas, loadImage } = require('@napi-rs/canvas');
-const { Contract } = require('ethers');
-const { getProvider } = require('../services/provider');
-const { fetchMetadata } = require('../utils/fetchMetadata');
-const fetch = require('node-fetch');
-const NodeCache = require("node-cache");
-
-const metadataCache = new NodeCache({ stdTTL: 900 }); 
-const imageCache = new Map();
-
-const abi = [
-  'function totalSupply() view returns (uint256)',
-  'function tokenURI(uint256 tokenId) view returns (string)'
-];
-
-function roundRect(ctx, x, y, width, height, radius = 20) {
-  ctx.beginPath();
-  ctx.moveTo(x + radius, y);
-  ctx.arcTo(x + width, y, x + width, y + height, radius);
-  ctx.arcTo(x + width, y + height, x, y + height, radius);
-  ctx.arcTo(x, y + height, x, y, radius);
-  ctx.arcTo(x, y, x + width, y, radius);
-  ctx.closePath();
-  ctx.clip();
-}
-
-async function loadCachedImage(imageUrl) {
-  if (imageCache.has(imageUrl)) return imageCache.get(imageUrl);
-  const image = await loadImage(imageUrl);
-  imageCache.set(imageUrl, image);
-  return image;
-}
+const { SlashCommandBuilder, PermissionsBitField } = require('discord.js');
 
 module.exports = {
   data: new SlashCommandBuilder()
-    .setName('flex')
-    .setDescription('Flex a random NFT or specific token ID from a project')
+    .setName('addflex')
+    .setDescription('Register a new NFT project to flex from')
     .addStringOption(opt =>
-      opt.setName('name')
-        .setDescription('Project name')
+      opt.setName('name').setDescription('Project name').setRequired(true))
+    .addStringOption(opt =>
+      opt.setName('address').setDescription('Contract address').setRequired(true))
+    .addStringOption(opt =>
+      opt.setName('network')
+        .setDescription('Network: Base, Ethereum or ApeChain')
+        .addChoices(
+          { name: 'Base', value: 'base' },
+          { name: 'Ethereum', value: 'eth' },
+          { name: 'ApeChain', value: 'ape' }
+        )
         .setRequired(true)
-        .setAutocomplete(true)
-    )
-    .addIntegerOption(opt =>
-      opt.setName('tokenid').setDescription('Token ID to flex (optional)')
     ),
 
   async execute(interaction) {
-    const pg = interaction.client.pg;
-    const name = interaction.options.getString('name').toLowerCase();
-    const tokenIdOption = interaction.options.getInteger('tokenid');
+    const isAdmin = interaction.member.permissions.has(PermissionsBitField.Flags.Administrator);
+    const isOwner = interaction.user.id === process.env.BOT_OWNER_ID;
 
-    // ✅ PUBLIC REPLY
-    await interaction.deferReply();  // <-- no ephemeral anymore
+    if (!isAdmin && !isOwner) {
+      return interaction.reply({ content: '🚫 Admins only. (Bot owner bypass not detected)', ephemeral: true });
+    }
+
+    const pg = interaction.client.pg;
+    const name = interaction.options.getString('name').toLowerCase().trim();
+    const address = interaction.options.getString('address').toLowerCase().trim();
+    const network = interaction.options.getString('network');
+    const guildId = interaction.guild.id;
 
     try {
-      const res = await pg.query(`SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`, [
-        interaction.guild.id, name
-      ]);
+      // ✅ Ensure table exists
+      await pg.query(`
+        CREATE TABLE IF NOT EXISTS flex_projects (
+          guild_id TEXT,
+          name TEXT,
+          address TEXT,
+          network TEXT
+        );
+      `);
 
-      if (!res.rows.length) {
-        return interaction.editReply('❌ Project not found. Use `/addflex` first.');
-      }
+      // ✅ Ensure correct primary key (guild_id + name)
+      await pg.query(`
+        DO $$
+        BEGIN
+          IF EXISTS (
+            SELECT 1 FROM information_schema.table_constraints
+            WHERE table_name = 'flex_projects'
+            AND constraint_type = 'PRIMARY KEY'
+            AND constraint_name = 'flex_projects_pkey'
+          ) THEN
+            ALTER TABLE flex_projects DROP CONSTRAINT flex_projects_pkey;
+          END IF;
 
-      const { address, network } = res.rows[0];
-      const chain = (network || 'base').toLowerCase();
-      const provider = getProvider(chain);
-      const contract = new Contract(address, abi, provider);
-      let tokenId = tokenIdOption;
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.table_constraints
+            WHERE table_name = 'flex_projects'
+            AND constraint_type = 'PRIMARY KEY'
+            AND constraint_name = 'flex_projects_pk'
+          ) THEN
+            ALTER TABLE flex_projects ADD CONSTRAINT flex_projects_pk PRIMARY KEY (guild_id, name);
+          END IF;
+        END
+        $$;
+      `);
 
-      if (!tokenId) {
-        if (chain === 'eth') {
-          try {
-            const reservoirUrl = `https://api.reservoir.tools/tokens/v6?collection=${address}&limit=50&sortBy=floorAskPrice`;
-            const headers = { 'x-api-key': process.env.RESERVOIR_API_KEY };
-            const resvRes = await fetch(reservoirUrl, { headers });
-            const resvData = await resvRes.json();
-            const tokens = resvData?.tokens?.map(t => t?.token?.tokenId).filter(Boolean) || [];
-            tokenId = tokens.length > 0 ? tokens[Math.floor(Math.random() * tokens.length)] : Math.floor(Math.random() * 10000).toString();
-          } catch {
-            tokenId = Math.floor(Math.random() * 10000).toString();
-          }
-        } else {
-          const totalSupply = await contract.totalSupply();
-          tokenId = Math.floor(Math.random() * parseInt(totalSupply)).toString();
-        }
-      }
+      // ✅ Insert or update
+      await pg.query(`
+        INSERT INTO flex_projects (guild_id, name, address, network)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (guild_id, name) DO UPDATE SET
+          address = EXCLUDED.address,
+          network = EXCLUDED.network
+      `, [guildId, name, address, network]);
 
-      const cacheKey = `${address}:${tokenId}:${chain}`;
-      let metadata = metadataCache.get(cacheKey);
-      if (!metadata) {
-        metadata = await fetchMetadata(address, tokenId, chain);
-        if (!metadata || !metadata.image) {
-          return interaction.editReply('⚠️ Metadata not found for this token.');
-        }
-        metadataCache.set(cacheKey, metadata);
-      }
-
-      const imageUrl = metadata.image.startsWith('ipfs://')
-        ? metadata.image.replace('ipfs://', 'https://ipfs.io/ipfs/')
-        : metadata.image;
-
-      const traits = (metadata?.attributes || []).map(attr =>
-        `• **${attr.trait_type}**: ${attr.value}`
-      ).join('\n') || 'None found';
-
-      const image = await loadCachedImage(imageUrl);
-      const canvasSize = 480;
-      const canvas = createCanvas(canvasSize, canvasSize);
-      const ctx = canvas.getContext('2d');
-      ctx.fillStyle = '#0d1117';
-      ctx.fillRect(0, 0, canvasSize, canvasSize);
-
-      const { width, height } = image;
-      const scale = Math.min(canvasSize / width, canvasSize / height);
-      const scaledWidth = width * scale;
-      const scaledHeight = height * scale;
-      const offsetX = (canvasSize - scaledWidth) / 2;
-      const offsetY = (canvasSize - scaledHeight) / 2;
-
-      roundRect(ctx, 0, 0, canvasSize, canvasSize, 30);
-      ctx.drawImage(image, offsetX, offsetY, scaledWidth, scaledHeight);
-      const buffer = canvas.toBuffer('image/png');
-      const attachment = new AttachmentBuilder(buffer, { name: 'flex.png' });
-
-      const chainDisplay = chain === 'base' ? 'Base' : chain === 'eth' ? 'Ethereum' : 'ApeChain';
-      const openseaUrl = chain === 'eth'
-        ? `https://opensea.io/assets/ethereum/${address}/${tokenId}`
-        : `https://opensea.io/assets/${chain}/${address}/${tokenId}`;
-
-      const embed = new EmbedBuilder()
-        .setTitle(`🖼️ Flexing: ${name} #${tokenId}`)
-        .setDescription(tokenIdOption ? `🎯 Specific token flexed` : `🎲 Random token flexed`)
-        .setImage('attachment://flex.png')
-        .setURL(openseaUrl)
-        .setColor(chain === 'base' ? 0x1d9bf0 : chain === 'ape' ? 0xff6600 : 0xf5851f)
-        .addFields({ name: '🧬 Traits', value: traits, inline: false })
-        .setFooter({ text: `🔧 Powered by PimpsDev • ${chainDisplay}` })
-        .setTimestamp();
-
-      await interaction.editReply({ embeds: [embed], files: [attachment] });
-
+      return interaction.reply(`✅ Project **${name}** added for flexing on **${network.toUpperCase()}**.`);
     } catch (err) {
-      console.error('❌ Error in /flex:', err);
-      await interaction.editReply('⚠️ Something went wrong while flexing.');
+      console.error('❌ Error in /addflex:', err);
+      return interaction.reply({
+        content: `❌ Error while saving project:\n\`\`\`${err.message || err.toString()}\`\`\``,
+        ephemeral: true
+      });
     }
   }
 };
+
+
+
+
+
+
 
 
 
