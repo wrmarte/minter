@@ -1,7 +1,7 @@
 const { JsonRpcProvider, Contract } = require('ethers');
 const fetch = require('node-fetch');
 const { generateUltraFlexCard } = require('../utils/canvas/ultraFlexRenderer');
-const { resolveENS } = require('../utils/ensResolver');  // ✅ Correct resolver path
+const { resolveENS } = require('../utils/ensResolver');
 
 const abi = [
   'function tokenURI(uint256 tokenId) view returns (string)',
@@ -48,18 +48,15 @@ async function buildUltraFlexCard(contractAddress, tokenId, collectionName) {
   const metadata = await fetchMetadata(contractAddress, tokenId);
   const owner = await fetchOwner(contractAddress, tokenId);
 
-  // ✅ ENS resolving with fallback
   let ownerDisplay = await resolveENS(owner);
   if (!ownerDisplay) ownerDisplay = shortenAddress(owner);
 
-  // 🔧 Image processing with ultra-bulletproof validation
   let nftImageUrl = metadata.image || metadata.image_url || null;
-
   if (nftImageUrl?.startsWith('ipfs://')) {
     nftImageUrl = nftImageUrl.replace('ipfs://', 'https://ipfs.io/ipfs/');
   }
 
-  // 🚀 ULTRA FINAL BULLETPROOF PATCH:
+  // FINAL BULLETPROOF IMAGE CHECK
   if (
     !nftImageUrl ||
     typeof nftImageUrl !== 'string' ||
@@ -83,7 +80,7 @@ async function buildUltraFlexCard(contractAddress, tokenId, collectionName) {
     collectionName: safeCollectionName,
     tokenId,
     traits,
-    owner: ownerDisplay,  // ✅ ENS-injected owner name
+    owner: ownerDisplay,  // ENS-resolved owner injected here
     openseaUrl
   });
 
@@ -91,6 +88,7 @@ async function buildUltraFlexCard(contractAddress, tokenId, collectionName) {
 }
 
 module.exports = { buildUltraFlexCard };
+
 
 
 
