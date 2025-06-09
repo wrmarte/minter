@@ -4,9 +4,9 @@ const MORALIS_API_KEY = process.env.MORALIS_API_KEY;
 
 const RPCS = {
   eth: [
-    `https://eth.llamarpc.com`,
-    `https://1rpc.io/eth`,
-    `https://rpc.ankr.com/eth`
+    'https://eth.llamarpc.com',
+    'https://1rpc.io/eth',
+    'https://rpc.ankr.com/eth'
   ],
   base: [
     'https://mainnet.base.org',
@@ -19,16 +19,24 @@ const RPCS = {
   ]
 };
 
-// Initialize rotation index
-const rpcIndex = { eth: 0, base: 0, ape: 0 };
+// Rotation index tracker per chain
+const rpcIndex = {
+  eth: 0,
+  base: 0,
+  ape: 0
+};
 
-function getProvider(chain) {
-  // ✅ HARDEN: if undefined, fallback to 'base' by default
-  chain = (chain || 'base').toLowerCase();
+function getProvider(chain = 'base') {
+  chain = chain.toLowerCase();
+
+  if (!RPCS.hasOwnProperty(chain)) {
+    console.warn(`⚠️ Unknown chain requested: ${chain} — defaulting to 'base'`);
+    chain = 'base';
+  }
 
   const urls = RPCS[chain];
   if (!urls || urls.length === 0) {
-    throw new Error(`Unsupported chain: ${chain}`);
+    throw new Error(`🚫 No RPC URLs defined for chain: ${chain}`);
   }
 
   const url = urls[rpcIndex[chain]];
@@ -38,6 +46,7 @@ function getProvider(chain) {
 }
 
 module.exports = { getProvider };
+
 
 
 
