@@ -40,6 +40,11 @@ function launchContractListener(client, addressKey, contractRows) {
   const iface = new Interface(abi);
   const contract = new Contract(address, abi, getProvider(chain));
 
+  if (chain === 'eth') {
+    console.log(`[${name}] ETH tracking fully hybridized — no RPC listener attached.`);
+    return;
+  }
+
   let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
   let seenSales = new Set(loadJson(seenSalesPath(name)) || []);
 
@@ -52,11 +57,6 @@ function launchContractListener(client, addressKey, contractRows) {
 
   getProvider(chain).on('block', async (blockNumber) => {
     try {
-      if (chain === 'eth') {
-        console.log(`[${name}] ETH safely bypassed RPC logs — (hybrid protected)`);
-        return; // ETH now fully handled elsewhere
-      }
-
       const fromBlock = Math.max(blockNumber - 5, 0);
       const toBlock = blockNumber;
 
