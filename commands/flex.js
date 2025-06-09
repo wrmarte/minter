@@ -6,9 +6,7 @@ const { fetchMetadata } = require('../utils/fetchMetadata');
 const fetch = require('node-fetch');
 const NodeCache = require("node-cache");
 
-// ✅ Metadata & image cache
 const metadataCache = new NodeCache({ stdTTL: 900 });
-const imageCache = new Map();
 
 const abi = [
   'function totalSupply() view returns (uint256)',
@@ -24,13 +22,6 @@ function roundRect(ctx, x, y, width, height, radius = 20) {
   ctx.arcTo(x, y, x + width, y, radius);
   ctx.closePath();
   ctx.clip();
-}
-
-async function loadCachedImage(imageUrl) {
-  if (imageCache.has(imageUrl)) return imageCache.get(imageUrl);
-  const image = await loadImage(imageUrl);
-  imageCache.set(imageUrl, image);
-  return image;
 }
 
 module.exports = {
@@ -52,9 +43,7 @@ module.exports = {
     const name = interaction.options.getString('name').toLowerCase();
     const tokenIdOption = interaction.options.getInteger('tokenid');
 
-    // ✅ Always respond immediately to avoid Discord timeout
-    await interaction.reply({ content: '⏳ Flexing your NFT, hold tight...' });
-
+    await interaction.deferReply();
 
     try {
       const res = await pg.query(`SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`, [
@@ -80,12 +69,7 @@ module.exports = {
             const resvRes = await fetch(reservoirUrl, { headers });
             const resvData = await resvRes.json();
             const tokens = resvData?.tokens?.map(t => t?.token?.tokenId).filter(Boolean) || [];
-
-            if (tokens.length > 0) {
-              tokenId = tokens[Math.floor(Math.random() * tokens.length)];
-            } else {
-              tokenId = Math.floor(Math.random() * 10000).toString();
-            }
+            tokenId = tokens.length > 0 ? tokens[Math.floor(Math.random() * tokens.length)] : Math.floor(Math.random() * 10000).toString();
           } catch {
             tokenId = Math.floor(Math.random() * 10000).toString();
           }
@@ -109,11 +93,21 @@ module.exports = {
         ? metadata.image.replace('ipfs://', 'https://ipfs.io/ipfs/')
         : metadata.image;
 
+      let image;
+      try {
+        const response = await fetch(imageUrl, { redirect: 'follow' });
+        if (!response.ok) throw new Error(`Fetch failed: ${response.status}`);
+        const arrayBuffer = await response.arrayBuffer();
+        image = await loadImage(Buffer.from(arrayBuffer));
+      } catch (err) {
+        console.error(`❌ Failed to load image: ${imageUrl}`, err);
+        return interaction.editReply('⚠️ Could not load the NFT image.');
+      }
+
       const traits = (metadata?.attributes || []).map(attr =>
         `• **${attr.trait_type}**: ${attr.value}`
       ).join('\n') || 'None found';
 
-      const image = await loadCachedImage(imageUrl);
       const canvasSize = 480;
       const canvas = createCanvas(canvasSize, canvasSize);
       const ctx = canvas.getContext('2d');
@@ -155,6 +149,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
