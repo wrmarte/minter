@@ -58,35 +58,36 @@ function launchContractListener(client, addressKey, contractRows) {
 
   provider.on('block', async (blockNumber) => {
     try {
-      const blockWindow = 20;
-      const safeFrom = Math.max(blockNumber - blockWindow, 0);
-      const safeTo = blockNumber;
+      const defaultWindow = chain === 'eth' ? 100 : 20;
+      const fromBlock = Math.max(blockNumber - defaultWindow, 0);
+      const toBlock = blockNumber;
 
       const filter = {
         address,
         topics: [id('Transfer(address,address,uint256)')],
-        fromBlock: safeFrom,
-        toBlock: safeTo
+        fromBlock,
+        toBlock
       };
 
       let logs = [];
-
       try {
         logs = await provider.getLogs(filter);
       } catch (err) {
-        if (err?.code === -32000 || err?.message.includes("invalid block range params")) {
+        if (err.message.includes('invalid block range') || err.message.includes('coalesce')) {
           console.warn(`[${name}] Block range too large — fallback to single-block mode`);
-          // Fallback: query one block at a time
-          for (let blk = safeFrom; blk <= safeTo; blk++) {
-            try {
-              const singleLogs = await provider.getLogs({ ...filter, fromBlock: blk, toBlock: blk });
-              logs.push(...singleLogs);
-            } catch (singleErr) {
-              console.warn(`[${name}] Single block log error: ${singleErr.message}`);
-            }
+          try {
+            logs = await provider.getLogs({
+              ...filter,
+              fromBlock: blockNumber,
+              toBlock: blockNumber
+            });
+          } catch (err2) {
+            console.warn(`[${name}] Failed even on single-block fallback: ${err2.message}`);
+            return; // gracefully skip block
           }
         } else {
-          throw err;
+          console.warn(`[${name}] Unexpected error: ${err.message}`);
+          return;
         }
       }
 
@@ -243,6 +244,7 @@ module.exports = {
   trackAllContracts,
   contractListeners
 };
+
 
 
 
