@@ -2,8 +2,13 @@ const { SlashCommandBuilder, EmbedBuilder, AttachmentBuilder } = require('discor
 const fetch = require('node-fetch');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
 const { fetchMetadata } = require('../utils/fetchMetadata');
-const { getProvider } = require('../services/provider');
-const { Contract } = require('ethers');
+
+function fixIpfs(url) {
+  if (!url) return null;
+  return url.startsWith('ipfs://')
+    ? url.replace('ipfs://', 'https://cloudflare-ipfs.com/ipfs/')
+    : url;
+}
 
 function roundRect(ctx, x, y, width, height, radius = 20) {
   ctx.save();
@@ -45,9 +50,9 @@ module.exports = {
 
       const { address, network } = res.rows[0];
       const chain = network; // eth, base, ape
+
       let nfts = [];
 
-      // Moralis for eth and base
       if (chain === 'eth' || chain === 'base') {
         const url = `https://deep-index.moralis.io/api/v2.2/nft/${address}?chain=${chain}&format=decimal&limit=50`;
         const headers = {
@@ -59,34 +64,45 @@ module.exports = {
         nfts = moralisData?.result || [];
       }
 
-      // ApeChain fallback using direct contract call
-      if (chain === 'ape') {
-        const provider = getProvider('ape');
-        const contract = new Contract(address, [
-          'function totalSupply() view returns (uint256)',
-          'function tokenURI(uint256 tokenId) view returns (string)'
-        ], provider);
-
-        const totalSupply = await contract.totalSupply();
-        const supply = parseInt(totalSupply.toString());
-
-        for (let i = 0; i < 20; i++) {
-          const randomId = Math.floor(Math.random() * supply);
-          const metadata = await fetchMetadata(address, randomId.toString(), 'ape');
-          if (metadata?.image) {
-            nfts.push({
-              token_id: randomId,
-              metadata: JSON.stringify(metadata)
-            });
-          }
-        }
-      }
-
       if (!nfts.length) {
-        return interaction.editReply('⚠️ No NFTs found for this project.');
+        return interaction.editReply('⚠️ No NFTs found via Moralis.');
       }
 
       const selected = nfts.sort(() => 0.5 - Math.random()).slice(0, 6);
+
+      const imagePromises = selected.map(async (nft, i) => {
+        let meta = {};
+        try {
+          if (nft.metadata) meta = JSON.parse(nft.metadata);
+          else if (nft.token_uri) {
+            const uri = fixIpfs(nft.token_uri);
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 3500);
+            try {
+              const response = await fetch(uri, { signal: controller.signal });
+              meta = await response.json();
+              clearTimeout(timeout);
+            } catch {
+              clearTimeout(timeout);
+            }
+          }
+        } catch {}
+
+        let imgUrl = meta?.image?.startsWith('ipfs://')
+          ? fixIpfs(meta.image)
+          : meta?.image || meta?.image_url;
+
+        if (!imgUrl) return null;
+
+        try {
+          const img = await loadImage(imgUrl);
+          return { img, index: i };
+        } catch {
+          return null;
+        }
+      });
+
+      const loadedImages = (await Promise.all(imagePromises)).filter(Boolean);
 
       // Canvas layout
       const columns = 3;
@@ -105,45 +121,14 @@ module.exports = {
       ctx.fillStyle = '#0d1117';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      for (let i = 0; i < selected.length; i++) {
-        const nft = selected[i];
-        let meta = {};
-
-        try {
-          meta = JSON.parse(nft.metadata || '{}');
-
-          if ((!meta || !meta.image) && nft.token_uri) {
-            const uri = nft.token_uri.replace('ipfs://', 'https://ipfs.io/ipfs/');
-            meta = await fetch(uri).then(res => res.json());
-          }
-        } catch {}
-
-        let imgUrl = null;
-        if (meta?.image) {
-          imgUrl = meta.image.startsWith('ipfs://')
-            ? meta.image.replace('ipfs://', 'https://ipfs.io/ipfs/')
-            : meta.image;
-        } else if (meta?.image_url) {
-          imgUrl = meta.image_url.startsWith('ipfs://')
-            ? meta.image_url.replace('ipfs://', 'https://ipfs.io/ipfs/')
-            : meta.image_url;
-        }
-
-        if (!imgUrl) continue;
-
-        let nftImage;
-        try {
-          nftImage = await loadImage(imgUrl);
-        } catch {
-          continue;
-        }
-
-        const x = padding + (i % columns) * (imgSize + spacing);
-        const y = padding + Math.floor(i / columns) * (imgSize + spacing);
+      for (let i = 0; i < loadedImages.length; i++) {
+        const { img, index } = loadedImages[i];
+        const x = padding + (index % columns) * (imgSize + spacing);
+        const y = padding + Math.floor(index / columns) * (imgSize + spacing);
 
         ctx.save();
         roundRect(ctx, x, y, imgSize, imgSize);
-        ctx.drawImage(nftImage, x, y, imgSize, imgSize);
+        ctx.drawImage(img, x, y, imgSize, imgSize);
         ctx.restore();
       }
 
@@ -165,6 +150,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
