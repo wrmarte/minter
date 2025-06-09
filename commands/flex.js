@@ -4,6 +4,11 @@ const { Contract } = require('ethers');
 const { getProvider } = require('../utils/provider');
 const { fetchMetadata } = require('../utils/fetchMetadata');
 const fetch = require('node-fetch');
+const NodeCache = require("node-cache");
+
+// ✅ Metadata & image cache
+const metadataCache = new NodeCache({ stdTTL: 900 }); // 15 mins
+const imageCache = new Map();
 
 const abi = [
   'function totalSupply() view returns (uint256)',
@@ -19,6 +24,13 @@ function roundRect(ctx, x, y, width, height, radius = 20) {
   ctx.arcTo(x, y, x + width, y, radius);
   ctx.closePath();
   ctx.clip();
+}
+
+async function loadCachedImage(imageUrl) {
+  if (imageCache.has(imageUrl)) return imageCache.get(imageUrl);
+  const image = await loadImage(imageUrl);
+  imageCache.set(imageUrl, image);
+  return image;
 }
 
 module.exports = {
@@ -57,7 +69,6 @@ module.exports = {
       const contract = new Contract(address, abi, provider);
       let tokenId = tokenIdOption;
 
-      // 🔧 Dynamic tokenId selection
       if (!tokenId) {
         if (chain === 'eth') {
           try {
@@ -81,9 +92,14 @@ module.exports = {
         }
       }
 
-      const metadata = await fetchMetadata(address, tokenId, chain);
-      if (!metadata || !metadata.image) {
-        return interaction.editReply('⚠️ Metadata not found for this token.');
+      const cacheKey = `${address}:${tokenId}:${chain}`;
+      let metadata = metadataCache.get(cacheKey);
+      if (!metadata) {
+        metadata = await fetchMetadata(address, tokenId, chain);
+        if (!metadata || !metadata.image) {
+          return interaction.editReply('⚠️ Metadata not found for this token.');
+        }
+        metadataCache.set(cacheKey, metadata);
       }
 
       const imageUrl = metadata.image.startsWith('ipfs://')
@@ -94,8 +110,8 @@ module.exports = {
         `• **${attr.trait_type}**: ${attr.value}`
       ).join('\n') || 'None found';
 
-      // 🔧 Full aspect-ratio safe rendering:
-      const image = await loadImage(imageUrl);
+      // ✅ Load image from cache if exists
+      const image = await loadCachedImage(imageUrl);
       const canvasSize = 480;
       const canvas = createCanvas(canvasSize, canvasSize);
       const ctx = canvas.getContext('2d');
@@ -137,6 +153,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
