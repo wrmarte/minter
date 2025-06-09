@@ -1,7 +1,7 @@
 const { JsonRpcProvider, Contract } = require('ethers');
 const fetch = require('node-fetch');
 const { generateUltraFlexCard } = require('../utils/canvas/ultraFlexRenderer');
-const { resolveENS } = require('../utils/ensResolver');  // ✅ ENS resolver properly imported
+const { resolveENS } = require('../utils/ensResolver');  // ✅ Correct import
 
 const abi = [
   'function tokenURI(uint256 tokenId) view returns (string)',
@@ -48,7 +48,7 @@ async function buildUltraFlexCard(contractAddress, tokenId, collectionName) {
   const metadata = await fetchMetadata(contractAddress, tokenId);
   const owner = await fetchOwner(contractAddress, tokenId);
 
-  // 🔧 ENS resolving patch here
+  // ✅ ENS resolution with fallback
   let ownerDisplay = await resolveENS(owner);
   if (!ownerDisplay) ownerDisplay = shortenAddress(owner);
 
@@ -56,7 +56,9 @@ async function buildUltraFlexCard(contractAddress, tokenId, collectionName) {
   if (nftImageUrl?.startsWith('ipfs://')) {
     nftImageUrl = nftImageUrl.replace('ipfs://', 'https://ipfs.io/ipfs/');
   }
-  if (!nftImageUrl) {
+
+  // ✅ SAFETY PATCH: If image invalid or missing, use placeholder
+  if (!nftImageUrl || !nftImageUrl.startsWith('http')) {
     nftImageUrl = 'https://via.placeholder.com/400x400.png?text=No+Image';
   }
 
@@ -80,4 +82,5 @@ async function buildUltraFlexCard(contractAddress, tokenId, collectionName) {
 }
 
 module.exports = { buildUltraFlexCard };
+
 
