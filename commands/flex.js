@@ -51,9 +51,7 @@ module.exports = {
       }
 
       const { address, network } = res.rows[0];
-      
-      // ✅ Safe fallback if network missing (old DB rows)
-      const chain = network || 'base'; 
+      const chain = network || 'base'; // safe fallback
 
       const provider = getProvider(chain);
       const contract = new Contract(address, abi, provider);
@@ -61,8 +59,13 @@ module.exports = {
       let tokenId = tokenIdOption;
 
       if (!tokenId) {
-        const totalSupply = await contract.totalSupply();
-        tokenId = Math.floor(Math.random() * parseInt(totalSupply)).toString();
+        if (chain === 'eth') {
+          // ✅ ETH bypass for totalSupply
+          tokenId = Math.floor(Math.random() * 10000).toString();
+        } else {
+          const totalSupply = await contract.totalSupply();
+          tokenId = Math.floor(Math.random() * parseInt(totalSupply)).toString();
+        }
       }
 
       const metadata = await fetchMetadata(address, tokenId, chain);
@@ -111,6 +114,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
