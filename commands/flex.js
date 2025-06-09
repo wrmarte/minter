@@ -53,7 +53,8 @@ module.exports = {
     const tokenIdOption = interaction.options.getInteger('tokenid');
 
     // ✅ Always respond immediately to avoid Discord timeout
-    await interaction.reply({ content: '⏳ Flexing your NFT, hold tight...', ephemeral: true });
+    await interaction.reply({ content: '⏳ Flexing your NFT, hold tight...' });
+
 
     try {
       const res = await pg.query(`SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`, [
