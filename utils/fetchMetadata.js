@@ -1,6 +1,6 @@
 const { Contract } = require('ethers');
 const fetch = require('node-fetch');
-const { getProvider } = require('./provider');
+const { getProvider } = require('../services/provider');  // ✅ make sure it's correct path for your structure
 
 const abi = [
   'function tokenURI(uint256 tokenId) view returns (string)'
@@ -14,7 +14,10 @@ function fixIpfs(url) {
     : url;
 }
 
-async function fetchMetadata(contractAddress, tokenId, chain) {
+async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
+  // ✅ Always sanitize chain lowercase
+  chain = chain.toLowerCase();
+
   try {
     const provider = getProvider(chain);
     const contract = new Contract(contractAddress, abi, provider);
@@ -27,11 +30,12 @@ async function fetchMetadata(contractAddress, tokenId, chain) {
     const metadata = await response.json();
     if (metadata) return metadata;
   } catch (err) {
-    console.warn(`⚠️ tokenURI fetch failed: ${err.message}`);
+    console.warn(`⚠️ tokenURI fetch failed on ${chain}: ${err.message}`);
   }
 
-  // ✅ ETH special fallback via Reservoir
+  // ✅ ETH-specific fallbacks (Reservoir -> Moralis)
   if (chain === 'eth') {
+    // ✅ First: Reservoir fallback
     try {
       const reservoirUrl = `https://api.reservoir.tools/tokens/v6?tokens=${contractAddress}:${tokenId}`;
       const headers = { 'x-api-key': process.env.RESERVOIR_API_KEY };
@@ -50,10 +54,11 @@ async function fetchMetadata(contractAddress, tokenId, chain) {
       console.warn(`⚠️ Reservoir fallback failed: ${err.message}`);
     }
 
-    // ✅ Moralis fallback for ETH (final layer)
+    // ✅ Second: Moralis fallback
     try {
       const moralisUrl = `https://deep-index.moralis.io/api/v2.2/nft/${contractAddress}/${tokenId}?chain=eth&format=decimal`;
       const headers = { 'X-API-Key': process.env.MORALIS_API_KEY };
+
       const moralisRes = await fetch(moralisUrl, { headers });
       const moralisData = await moralisRes.json();
 
