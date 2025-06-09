@@ -42,7 +42,7 @@ function launchContractListener(client, addressKey, contractRows) {
   const contract = new Contract(address, abi, provider);
 
   if (chain === 'eth') {
-    console.log(`[${name}] ETH hybrid tracking active — skipping block listener`);
+    console.log(`[${name}] ETH tracking hybridized — skipping block listener.`);
     return;
   }
 
@@ -58,8 +58,9 @@ function launchContractListener(client, addressKey, contractRows) {
 
   provider.on('block', async (blockNumber) => {
     try {
-      const windowSize = (chain === 'eth') ? 50 : 5;
-      const fromBlock = Math.max(blockNumber - windowSize, 0);
+      // 🧠 Bulletproof dynamic range:
+      const blockWindow = chain === 'eth' ? 100 : 20;
+      const fromBlock = Math.max(blockNumber - blockWindow, 0);
       const toBlock = blockNumber;
 
       const filter = {
