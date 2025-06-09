@@ -42,7 +42,7 @@ function launchContractListener(client, addressKey, contractRows) {
   const contract = new Contract(address, abi, provider);
 
   if (chain === 'eth') {
-    console.log(`[${name}] ETH tracking hybridized — skipping block listener.`);
+    console.log(`[${name}] ETH hybrid tracking active — skipping block listener`);
     return;
   }
 
@@ -58,7 +58,8 @@ function launchContractListener(client, addressKey, contractRows) {
 
   provider.on('block', async (blockNumber) => {
     try {
-      const fromBlock = Math.max(blockNumber - 5, 0);
+      const windowSize = (chain === 'eth') ? 50 : 5;
+      const fromBlock = Math.max(blockNumber - windowSize, 0);
       const toBlock = blockNumber;
 
       const filter = {
@@ -80,12 +81,12 @@ function launchContractListener(client, addressKey, contractRows) {
           if (seenTokenIds.has(tokenIdStr)) continue;
           seenTokenIds.add(tokenIdStr);
           const allChannelIds = [...new Set(contractRows.flatMap(row => [row.channel_ids].flat()))];
-          await handleMint(client, firstRow, contract, tokenId, to, allChannelIds, chain);
+          await handleMint(client, firstRow, contract, tokenId, to, allChannelIds);
         } else {
           if (seenSales.has(tokenIdStr)) continue;
           seenSales.add(tokenIdStr);
           const allChannelIds = [...new Set(contractRows.flatMap(row => [row.channel_ids].flat()))];
-          await handleSale(client, firstRow, contract, tokenId, from, to, log.transactionHash, allChannelIds, chain);
+          await handleSale(client, firstRow, contract, tokenId, from, to, log.transactionHash, allChannelIds);
         }
       }
 
@@ -99,7 +100,7 @@ function launchContractListener(client, addressKey, contractRows) {
   });
 }
 
-async function handleMint(client, contractRow, contract, tokenId, to, channel_ids, chain) {
+async function handleMint(client, contractRow, contract, tokenId, to, channel_ids) {
   const { name, mint_price, mint_token, mint_token_symbol } = contractRow;
 
   let imageUrl = 'https://via.placeholder.com/400x400.png?text=NFT';
@@ -133,7 +134,7 @@ async function handleMint(client, contractRow, contract, tokenId, to, channel_id
     ],
     thumbnail: { url: imageUrl },
     color: 219139,
-    footer: { text: `Live on ${chain.toUpperCase()} • Powered by PimpsDev` },
+    footer: { text: 'Live on Base • Powered by PimpsDev' },
     timestamp: new Date().toISOString()
   };
 
@@ -143,9 +144,8 @@ async function handleMint(client, contractRow, contract, tokenId, to, channel_id
   }
 }
 
-async function handleSale(client, contractRow, contract, tokenId, from, to, txHash, channel_ids, chain) {
+async function handleSale(client, contractRow, contract, tokenId, from, to, txHash, channel_ids) {
   const { name, mint_token, mint_token_symbol } = contractRow;
-  const provider = getProvider(chain);
 
   let imageUrl = 'https://via.placeholder.com/400x400.png?text=SOLD';
   try {
@@ -159,8 +159,8 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
 
   let receipt, tx;
   try {
-    receipt = await provider.getTransactionReceipt(txHash);
-    tx = await provider.getTransaction(txHash);
+    receipt = await contract.provider.getTransactionReceipt(txHash);
+    tx = await contract.provider.getTransaction(txHash);
     if (!receipt || !tx) return;
   } catch { return; }
 
@@ -210,7 +210,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     ],
     thumbnail: { url: imageUrl },
     color: 0x66cc66,
-    footer: { text: `Powered by PimpsDev` },
+    footer: { text: 'Powered by PimpsDev' },
     timestamp: new Date().toISOString()
   };
 
@@ -224,6 +224,7 @@ module.exports = {
   trackAllContracts,
   contractListeners
 };
+
 
 
 
