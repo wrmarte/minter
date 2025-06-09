@@ -12,8 +12,7 @@ async function generateUltraFlexCard({
   collectionName,
   tokenId,
   traits,
-  owner,           // 🔧 Pass full address here
-  ownerDisplay,    // 🔧 Pass shortened owner here (already computed in service)
+  owner,      // 🔥 Only using full address now
   openseaUrl
 }) {
   const width = 2048;
@@ -99,31 +98,33 @@ async function generateUltraFlexCard({
   ctx.restore();
   ctx.drawImage(qrImg, width - 700, qrY, qrSize, qrSize);
 
-  // 🔧 OWNER SECTION (with full address below)
+  // 🔧 OWNER SECTION (only full address now)
   ctx.fillStyle = '#FFD700';
   ctx.fillRect(0, 2800, width, 10);
   ctx.fillStyle = '#000';
-  ctx.fillRect(0, 2810, width, 120);
+  ctx.fillRect(0, 2810, width, 80);
   ctx.fillStyle = '#fff';
-  ctx.font = 'bold 60px Exo2';
+  ctx.font = 'bold 50px Exo2';
   ctx.textBaseline = 'middle';
-  ctx.fillText(`OWNER: ${ownerDisplay}`, 80, 2830);
+  ctx.fillText(`OWNER: ${owner}`, 80, 2810 + 40);
 
-  ctx.font = 'bold 40px Exo2';
-  ctx.fillText(`${owner}`, 80, 2880);
+  // 🔧 New separator bar before footer
+  ctx.fillStyle = '#FFD700';
+  ctx.fillRect(0, 2900, width, 10);
 
   ctx.fillStyle = '#000';
-  ctx.fillRect(0, 2920, width, 60);
+  ctx.fillRect(0, 2910, width, 60);
   ctx.fillStyle = '#FFD700';
   ctx.font = 'bold 50px Exo2';
   const footerText = 'ULTRA FLEXCARD ✨ Powered by PimpsDev';
   const textWidth = ctx.measureText(footerText).width;
-  ctx.fillText(footerText, (width - textWidth) / 2, 2920 + 30);
+  ctx.fillText(footerText, (width - textWidth) / 2, 2910 + 30);
 
   return canvas.toBuffer('image/png');
 }
 
 module.exports = { generateUltraFlexCard };
+
 
 
 
