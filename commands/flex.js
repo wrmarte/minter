@@ -1,9 +1,8 @@
 const { SlashCommandBuilder, EmbedBuilder, AttachmentBuilder } = require('discord.js');
-const fetch = require('node-fetch');
-const { JsonRpcProvider, Contract } = require('ethers');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
-
-const abi = ['function tokenURI(uint256 tokenId) view returns (string)'];
+const fetch = require('node-fetch');
+const { fetchMetadata } = require('../utils/fetchMetadata'); // hybrid fetcher
+const { getProvider } = require('../utils/provider'); // hybrid provider
 
 function roundRect(ctx, x, y, width, height, radius = 20) {
   ctx.beginPath();
@@ -16,6 +15,8 @@ function roundRect(ctx, x, y, width, height, radius = 20) {
   ctx.clip();
 }
 
+const abi = ['function totalSupply() view returns (uint256)'];
+
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('flex')
@@ -24,7 +25,7 @@ module.exports = {
       opt.setName('name')
         .setDescription('Project name')
         .setRequired(true)
-        .setAutocomplete(true) // ✅ Enable autocomplete
+        .setAutocomplete(true)
     )
     .addIntegerOption(opt =>
       opt.setName('tokenid').setDescription('Token ID to flex (optional)')
@@ -37,88 +38,67 @@ module.exports = {
     await interaction.deferReply();
 
     try {
-      const res = await pg.query(`SELECT * FROM flex_projects WHERE name = $1`, [name]);
+      const res = await pg.query(`SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`, [
+        interaction.guild.id,
+        name,
+      ]);
+
       if (!res.rows.length) {
         return interaction.editReply('❌ Project not found. Use `/addflex` first.');
       }
 
       const { address, network } = res.rows[0];
-      const chain = network === 'base' ? 'base' : 'ethereum';
-      const provider = new JsonRpcProvider(
-        chain === 'base'
-          ? 'https://mainnet.base.org'
-          : 'https://eth.llamarpc.com'
-      );
+      const chain = network; // network already is 'eth', 'base', or 'ape'
+      const provider = getProvider(chain);
+      const contract = new (require('ethers').Contract)(address, abi, provider);
 
-      const tokenId = tokenIdOption?.toString();
+      let tokenId = tokenIdOption;
 
-      let imageUrl, traits, tokenIdUsed;
-
-      // Use Reservoir API only if no specific token ID provided
       if (!tokenId) {
-        const apiUrl = `https://api.reservoir.tools/tokens/v6?chain=${chain}&contract=${address}&limit=50&sortBy=floorAskPrice&includeTopBid=true&includeAttributes=true`;
-        const headers = { 'x-api-key': process.env.RESERVOIR_API_KEY };
-        const data = await fetch(apiUrl, { headers }).then(res => res.json());
-        const tokens = data?.tokens?.filter(t => t.token?.tokenId) || [];
-
-        if (tokens.length) {
-          const token = tokens[Math.floor(Math.random() * tokens.length)].token;
-          tokenIdUsed = token.tokenId;
-          imageUrl = token.image || 'https://via.placeholder.com/400x400.png?text=NFT';
-          const attributes = token.attributes || [];
-          traits = attributes.length
-            ? attributes.map(attr => `• **${attr.key}**: ${attr.value}`).join('\n')
-            : 'None found';
-        }
+        const totalSupply = await contract.totalSupply();
+        tokenId = Math.floor(Math.random() * parseInt(totalSupply)).toString();
       }
 
-      // If tokenId is provided or fallback needed
-      if (tokenId || !imageUrl) {
-        const contract = new Contract(address, abi, provider);
-        const targetTokenId = tokenId || Array.from({ length: 20 }, (_, i) => i).sort(() => 0.5 - Math.random())[0].toString();
-        try {
-          const uriRaw = await contract.tokenURI(targetTokenId);
-          const uri = uriRaw.replace('ipfs://', 'https://ipfs.io/ipfs/');
-          const meta = await fetch(uri).then(res => res.json());
-          imageUrl = meta?.image?.replace('ipfs://', 'https://ipfs.io/ipfs/') || null;
-          traits = (meta?.attributes || []).map(attr => `• **${attr.trait_type}**: ${attr.value}`).join('\n') || 'None found';
-          tokenIdUsed = targetTokenId;
-        } catch {
-          return interaction.editReply('⚠️ Could not fetch metadata or image for that token ID.');
-        }
+      const metadata = await fetchMetadata(address, tokenId, chain);
+      if (!metadata || !metadata.image) {
+        return interaction.editReply('⚠️ Metadata not found for this token.');
       }
 
-      if (imageUrl && tokenIdUsed != null) {
-        const image = await loadImage(imageUrl);
-        const canvas = createCanvas(480, 480);
-        const ctx = canvas.getContext('2d');
-        ctx.fillStyle = '#0d1117';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        roundRect(ctx, 0, 0, 480, 480, 30);
-        ctx.drawImage(image, 0, 0, 480, 480);
-        const buffer = canvas.toBuffer('image/png');
-        const attachment = new AttachmentBuilder(buffer, { name: 'flex.png' });
+      const imageUrl = metadata.image.startsWith('ipfs://')
+        ? metadata.image.replace('ipfs://', 'https://ipfs.io/ipfs/')
+        : metadata.image;
 
-        const embed = new EmbedBuilder()
-          .setTitle(`🖼️ Flexing: ${name} #${tokenIdUsed}`)
-          .setDescription(tokenIdOption ? `🎯 Specific token flexed` : `🎲 Randomly flexed from ${name}`)
-          .setImage('attachment://flex.png')
-          .setURL(`https://opensea.io/assets/${chain}/${address}/${tokenIdUsed}`)
-          .setColor(network === 'base' ? 0x1d9bf0 : 0xf5851f)
-          .addFields({ name: '🧬 Traits', value: traits, inline: false })
-          .setFooter({ text: '🔧 Powered by PimpsDev' })
-          .setTimestamp();
+      const traits = (metadata?.attributes || []).map(attr =>
+        `• **${attr.trait_type}**: ${attr.value}`
+      ).join('\n') || 'None found';
 
-        return await interaction.editReply({ embeds: [embed], files: [attachment] });
-      }
+      const image = await loadImage(imageUrl);
+      const canvas = createCanvas(480, 480);
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#0d1117';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      roundRect(ctx, 0, 0, 480, 480, 30);
+      ctx.drawImage(image, 0, 0, 480, 480);
+      const buffer = canvas.toBuffer('image/png');
+      const attachment = new AttachmentBuilder(buffer, { name: 'flex.png' });
 
-      return interaction.editReply('⚠️ No NFTs could be flexed. Nothing minted or accessible yet.');
-    } catch (err) {
-      console.error('❌ Error in /flex:', err);
-      await interaction.editReply('⚠️ Something went wrong while flexing.');
-    }
-  }
-};
+      const chainDisplay = chain === 'base' ? 'Base' : chain === 'eth' ? 'Ethereum' : 'ApeChain';
+      const openseaUrl = chain === 'eth'
+        ? `https://opensea.io/assets/ethereum/${address}/${tokenId}`
+        : `https://opensea.io/assets/${chain}/${address}/${tokenId}`;
+
+      const embed = new EmbedBuilder()
+        .setTitle(`🖼️ Flexing: ${name} #${tokenId}`)
+        .setDescription(tokenIdOption ? `🎯 Specific token flexed` : `🎲 Random token flexed`)
+        .setImage('attachment://flex.png')
+        .setURL(openseaUrl)
+        .setColor(network === 'base' ? 0x1d9bf0 : network === 'ape' ? 0xff6600 : 0xf5851f)
+        .addFields({ name: '🧬 Traits', value: traits, inline: false })
+        .setFooter({ text: `🔧 Powered by PimpsDev • ${chainDisplay}` })
+        .setTimestamp();
+
+      await interaction.editReply({ embeds: [embe]()
+
 
 
 
