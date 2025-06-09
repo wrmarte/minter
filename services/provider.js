@@ -1,7 +1,5 @@
 const { JsonRpcProvider } = require('ethers');
 
-const MORALIS_API_KEY = process.env.MORALIS_API_KEY;
-
 const RPCS = {
   eth: [
     'https://eth.llamarpc.com',
@@ -21,7 +19,6 @@ const RPCS = {
   ]
 };
 
-// Rotation index tracker per chain
 const rpcIndex = {
   eth: 0,
   base: 0,
@@ -37,25 +34,22 @@ function getProvider(chain = 'base') {
   }
 
   const urls = RPCS[chain];
-  if (!urls || urls.length === 0) {
-    throw new Error(`🚫 No RPC URLs defined for chain: ${chain}`);
-  }
-
   const url = urls[rpcIndex[chain]];
   rpcIndex[chain] = (rpcIndex[chain] + 1) % urls.length;
 
-  // 🧠 ApeChain: manually define the network to prevent infinite retries
+  // 🔥 Use correct chain ID for ApeChain to prevent network mismatch
   if (chain === 'ape') {
     return new JsonRpcProvider(url, {
       name: 'apechain',
-      chainId: 6969 // 📝 Replace with real chainId if known
+      chainId: 33139
     });
   }
 
-  return new JsonRpcProvider(url);
+  return new JsonRpcProvider(url); // default for eth/base
 }
 
 module.exports = { getProvider };
+
 
 
 
