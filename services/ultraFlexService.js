@@ -1,7 +1,7 @@
 const { JsonRpcProvider, Contract } = require('ethers');
 const fetch = require('node-fetch');
 const { generateUltraFlexCard } = require('../utils/canvas/ultraFlexRenderer');
-const { resolveENS } = require('../utils/ensResolver');  // ✅ Correct resolver
+const { resolveENS } = require('../utils/ensResolver');  // ✅ Correct resolver path
 
 const abi = [
   'function tokenURI(uint256 tokenId) view returns (string)',
@@ -52,15 +52,22 @@ async function buildUltraFlexCard(contractAddress, tokenId, collectionName) {
   let ownerDisplay = await resolveENS(owner);
   if (!ownerDisplay) ownerDisplay = shortenAddress(owner);
 
-  // 🔧 SAFEST image fetch handling
+  // 🔧 Image processing with ultra-bulletproof validation
   let nftImageUrl = metadata.image || metadata.image_url || null;
 
   if (nftImageUrl?.startsWith('ipfs://')) {
     nftImageUrl = nftImageUrl.replace('ipfs://', 'https://ipfs.io/ipfs/');
   }
 
-  // ✅ ULTRA BULLETPROOF IMAGE VALIDATION
-  if (!nftImageUrl || !/^https?:\/\//i.test(nftImageUrl)) {
+  // 🚀 ULTRA FINAL BULLETPROOF PATCH:
+  if (
+    !nftImageUrl ||
+    typeof nftImageUrl !== 'string' ||
+    nftImageUrl.trim() === '' ||
+    nftImageUrl === 'null' ||
+    nftImageUrl === 'undefined' ||
+    !/^https?:\/\//i.test(nftImageUrl)
+  ) {
     nftImageUrl = 'https://via.placeholder.com/400x400.png?text=No+Image';
   }
 
@@ -76,7 +83,7 @@ async function buildUltraFlexCard(contractAddress, tokenId, collectionName) {
     collectionName: safeCollectionName,
     tokenId,
     traits,
-    owner: ownerDisplay,  // ✅ ENS name fully injected here
+    owner: ownerDisplay,  // ✅ ENS-injected owner name
     openseaUrl
   });
 
@@ -84,6 +91,7 @@ async function buildUltraFlexCard(contractAddress, tokenId, collectionName) {
 }
 
 module.exports = { buildUltraFlexCard };
+
 
 
 
