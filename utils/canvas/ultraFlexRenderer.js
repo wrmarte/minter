@@ -109,16 +109,18 @@ async function generateUltraFlexCard({
   ctx.fillText(`OWNER: ${owner}`, 80, 2810 + 40);
 
   // 🔧 New separator bar before footer
-  ctx.fillStyle = '#FFD700';
-  ctx.fillRect(0, 2900, width, 10);
+// 🔧 New thicker separator bar before footer
+ctx.fillStyle = '#FFD700';
+ctx.fillRect(0, 2900, width, 20);
 
-  ctx.fillStyle = '#000';
-  ctx.fillRect(0, 2910, width, 60);
-  ctx.fillStyle = '#FFD700';
-  ctx.font = 'bold 50px Exo2';
-  const footerText = 'ULTRA FLEXCARD ✨ Powered by PimpsDev';
-  const textWidth = ctx.measureText(footerText).width;
-  ctx.fillText(footerText, (width - textWidth) / 2, 2910 + 30);
+ctx.fillStyle = '#000';
+ctx.fillRect(0, 2920, width, 60);
+ctx.fillStyle = '#FFD700';
+ctx.font = 'bold 50px Exo2';
+const footerText = 'ULTRA FLEXCARD ✨ Powered by PimpsDev';
+const textWidth = ctx.measureText(footerText).width;
+ctx.fillText(footerText, (width - textWidth) / 2, 2920 + 30);
+
 
   return canvas.toBuffer('image/png');
 }
