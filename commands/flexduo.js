@@ -1,29 +1,13 @@
 const { SlashCommandBuilder, AttachmentBuilder, EmbedBuilder } = require('discord.js');
-const { JsonRpcProvider, Contract } = require('ethers');
-const fetch = require('node-fetch');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
+const { Contract } = require('ethers');
+const { getProvider } = require('../utils/provider');
+const { fetchMetadata } = require('../utils/fetchMetadata');
 
 const abi = [
   'function tokenURI(uint256 tokenId) view returns (string)',
   'function totalSupply() view returns (uint256)'
 ];
-
-const baseRpcs = [
-  'https://mainnet.base.org',
-  'https://base.publicnode.com',
-  'https://1rpc.io/base',
-  'https://base.llamarpc.com',
-  'https://base.meowrpc.com'
-];
-
-let rpcIndex = 0;
-let provider = new JsonRpcProvider(baseRpcs[rpcIndex]);
-
-function rotateProvider() {
-  rpcIndex = (rpcIndex + 1) % baseRpcs.length;
-  provider = new JsonRpcProvider(baseRpcs[rpcIndex]);
-  console.warn(`🔁 RPC switched to: ${baseRpcs[rpcIndex]}`);
-}
 
 function getTodayFormatted() {
   return new Date().toLocaleDateString('en-US', {
@@ -53,6 +37,7 @@ module.exports = {
     const guildId = interaction.guild.id;
 
     try {
+      // ✅ Load duo config
       const result = await pg.query(
         'SELECT * FROM flex_duo WHERE guild_id = $1 AND name = $2',
         [guildId, name]
@@ -62,9 +47,13 @@ module.exports = {
         return interaction.editReply('❌ Duo not found. Use `/addflexduo` first.');
       }
 
-      const { contract1, contract2 } = result.rows[0];
-      const nft1 = new Contract(contract1, abi, provider);
-      const nft2 = new Contract(contract2, abi, provider);
+      const { contract1, network1, contract2, network2 } = result.rows[0];
+
+      const provider1 = getProvider(network1);
+      const provider2 = getProvider(network2);
+
+      const nft1 = new Contract(contract1, abi, provider1);
+      const nft2 = new Contract(contract2, abi, provider2);
 
       let tokenId = tokenIdInput;
 
@@ -75,20 +64,17 @@ module.exports = {
         tokenId = Math.floor(Math.random() * total);
       }
 
-      const uri1 = await nft1.tokenURI(tokenId);
-      const uri2 = await nft2.tokenURI(tokenId);
+      // ✅ Use hybridized fetchMetadata for both
+      const meta1 = await fetchMetadata(contract1, tokenId, network1);
+      const meta2 = await fetchMetadata(contract2, tokenId, network2);
 
-      const meta1 = await fetch(uri1.replace('ipfs://', 'https://ipfs.io/ipfs/')).then(res => res.json());
-      const meta2 = await fetch(uri2.replace('ipfs://', 'https://ipfs.io/ipfs/')).then(res => res.json());
-
-      const image1 = meta1.image?.replace('ipfs://', 'https://ipfs.io/ipfs/');
-      const image2 = meta2.image?.replace('ipfs://', 'https://ipfs.io/ipfs/');
+      const image1 = meta1?.image?.replace('ipfs://', 'https://ipfs.io/ipfs/');
+      const image2 = meta2?.image?.replace('ipfs://', 'https://ipfs.io/ipfs/');
       if (!image1 || !image2) throw new Error('Missing image URLs in metadata');
 
       const img1 = await loadImage(image1);
       const img2 = await loadImage(image2);
 
-      // ✅ Fixed dimensions
       const targetWidth = 400;
       const targetHeight = 400;
       const canvasPadding = 30;
@@ -100,7 +86,6 @@ module.exports = {
       const canvas = createCanvas(canvasWidth, canvasHeight);
       const ctx = canvas.getContext('2d');
 
-      // 🎨 Background
       ctx.fillStyle = '#000';
       ctx.fillRect(0, 0, canvasWidth, canvasHeight);
 
@@ -111,12 +96,11 @@ module.exports = {
       ctx.drawImage(img1, x1, y, targetWidth, targetHeight);
       ctx.drawImage(img2, x2, y, targetWidth, targetHeight);
 
-      // 🏷️ Labels
       ctx.fillStyle = '#ccc';
       ctx.font = '22px sans-serif';
       ctx.textAlign = 'center';
-      ctx.fillText(meta1.name || `#${tokenId}`, x1 + targetWidth / 2, y + targetHeight + 35);
-      ctx.fillText(meta2.name || `#${tokenId}`, x2 + targetWidth / 2, y + targetHeight + 35);
+      ctx.fillText(meta1?.name || `#${tokenId}`, x1 + targetWidth / 2, y + targetHeight + 35);
+      ctx.fillText(meta2?.name || `#${tokenId}`, x2 + targetWidth / 2, y + targetHeight + 35);
 
       const buffer = canvas.toBuffer('image/png');
       const attachment = new AttachmentBuilder(buffer, { name: `duo-${tokenId}.png` });
@@ -131,12 +115,12 @@ module.exports = {
       await interaction.editReply({ embeds: [embed], files: [attachment] });
 
     } catch (err) {
-      rotateProvider();
       console.error('❌ FlexDuo error:', err);
       return interaction.editReply('❌ Something went wrong flexing that duo.\nCheck bot logs for more.');
     }
   }
 };
+
 
 
 
