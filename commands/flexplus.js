@@ -1,8 +1,17 @@
 const { SlashCommandBuilder, EmbedBuilder, AttachmentBuilder } = require('discord.js');
 const fetch = require('node-fetch');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
-const { Contract } = require('ethers');
-const { getProvider } = require('../services/provider');
+const { fetchMetadata } = require('../utils/fetchMetadata');
+
+// Helper to sanitize IPFS URLs
+function fixIpfs(url) {
+  if (!url) return null;
+
+  return url
+    .replace('ipfs://', 'https://ipfs.io/ipfs/')
+    .replace('https://cloudflare-ipfs.com/ipfs/', 'https://ipfs.io/ipfs/')
+    .replace('https://gateway.pinata.cloud/ipfs/', 'https://ipfs.io/ipfs/');
+}
 
 function roundRect(ctx, x, y, width, height, radius = 20) {
   ctx.save();
@@ -43,11 +52,10 @@ module.exports = {
       }
 
       const { address, network } = res.rows[0];
-      const chain = network.toLowerCase();
-      const provider = getProvider(chain);
+      const chain = network; // eth, base, ape
+
       let nfts = [];
 
-      // Moralis for ETH + BASE
       if (chain === 'eth' || chain === 'base') {
         const url = `https://deep-index.moralis.io/api/v2.2/nft/${address}?chain=${chain}&format=decimal&limit=50`;
         const headers = {
@@ -57,26 +65,18 @@ module.exports = {
 
         const moralisData = await fetch(url, { headers }).then(res => res.json());
         nfts = moralisData?.result || [];
-      }
-
-      // Fallback for APECHAIN (tokenURI loop)
-      if (chain === 'ape') {
-        const contract = new Contract(
-          address,
-          ['function totalSupply() view returns (uint256)'],
-          provider
-        );
-
-        try {
-          const total = await contract.totalSupply();
-          const totalSupply = parseInt(total.toString());
-          const max = Math.min(totalSupply, 50);
-
-          for (let i = 0; i < max; i++) {
-            nfts.push({ token_id: i.toString() });
+      } else {
+        // Chain like Apechain, fallback to tokenURI fetch
+        const tokenIds = Array.from({ length: 50 }, (_, i) => i); // 0–49
+        for (let tokenId of tokenIds) {
+          const meta = await fetchMetadata(address, tokenId, chain);
+          if (meta?.image) {
+            nfts.push({
+              token_id: tokenId,
+              metadata: JSON.stringify(meta),
+              token_uri: `ipfs://${tokenId}.json` // dummy, not used after fetch
+            });
           }
-        } catch (err) {
-          console.warn(`⚠️ Apechain totalSupply() failed: ${err.message}`);
         }
       }
 
@@ -94,51 +94,44 @@ module.exports = {
       const padding = 40;
       const gridWidth = columns * imgSize + (columns - 1) * spacing;
       const gridHeight = rows * imgSize + (rows - 1) * spacing;
-      const canvas = createCanvas(gridWidth + padding * 2, gridHeight + padding * 2);
+      const canvasWidth = gridWidth + padding * 2;
+      const canvasHeight = gridHeight + padding * 2;
+
+      const canvas = createCanvas(canvasWidth, canvasHeight);
       const ctx = canvas.getContext('2d');
+
       ctx.fillStyle = '#0d1117';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
       for (let i = 0; i < selected.length; i++) {
         const nft = selected[i];
         let meta = {};
-        let imgUrl = null;
 
         try {
           if (nft.metadata) {
             meta = JSON.parse(nft.metadata || '{}');
-          } else if (nft.token_uri) {
-            const uri = nft.token_uri.replace('ipfs://', 'https://cloudflare-ipfs.com/ipfs/');
-            meta = await fetch(uri).then(res => res.json());
-          } else if (chain === 'ape') {
-            const tokenId = nft.token_id;
-            const contract = new Contract(address, ['function tokenURI(uint256) view returns (string)'], provider);
-            const uri = await contract.tokenURI(tokenId);
-            const fixed = uri.replace('ipfs://', 'https://cloudflare-ipfs.com/ipfs/');
-            meta = await fetch(fixed).then(res => res.json());
           }
 
-          if (meta?.image) {
-            imgUrl = meta.image.startsWith('ipfs://')
-              ? meta.image.replace('ipfs://', 'https://cloudflare-ipfs.com/ipfs/')
-              : meta.image;
+          if ((!meta || !meta.image) && nft.token_uri) {
+            const uri = fixIpfs(nft.token_uri);
+            meta = await fetch(uri).then(res => res.json());
           }
         } catch (err) {
           console.warn(`❌ Meta fetch failed for ${nft.token_id}: ${err.message}`);
           continue;
         }
 
+        let imgUrl = meta?.image || meta?.image_url;
         if (!imgUrl) continue;
+        imgUrl = fixIpfs(imgUrl);
 
         try {
           const nftImage = await loadImage(imgUrl);
           const x = padding + (i % columns) * (imgSize + spacing);
           const y = padding + Math.floor(i / columns) * (imgSize + spacing);
 
-          ctx.save();
           roundRect(ctx, x, y, imgSize, imgSize);
           ctx.drawImage(nftImage, x, y, imgSize, imgSize);
-          ctx.restore();
         } catch {
           continue;
         }
@@ -162,6 +155,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
