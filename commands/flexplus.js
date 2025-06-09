@@ -2,6 +2,8 @@ const { SlashCommandBuilder, EmbedBuilder, AttachmentBuilder } = require('discor
 const fetch = require('node-fetch');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
 const { fetchMetadata } = require('../utils/fetchMetadata');
+const { getProvider } = require('../services/provider');
+const { Contract } = require('ethers');
 
 function roundRect(ctx, x, y, width, height, radius = 20) {
   ctx.save();
@@ -43,10 +45,9 @@ module.exports = {
 
       const { address, network } = res.rows[0];
       const chain = network; // eth, base, ape
-
       let nfts = [];
 
-      // Use Moralis only for eth and base
+      // Moralis for eth and base
       if (chain === 'eth' || chain === 'base') {
         const url = `https://deep-index.moralis.io/api/v2.2/nft/${address}?chain=${chain}&format=decimal&limit=50`;
         const headers = {
@@ -58,8 +59,31 @@ module.exports = {
         nfts = moralisData?.result || [];
       }
 
+      // ApeChain fallback using direct contract call
+      if (chain === 'ape') {
+        const provider = getProvider('ape');
+        const contract = new Contract(address, [
+          'function totalSupply() view returns (uint256)',
+          'function tokenURI(uint256 tokenId) view returns (string)'
+        ], provider);
+
+        const totalSupply = await contract.totalSupply();
+        const supply = parseInt(totalSupply.toString());
+
+        for (let i = 0; i < 20; i++) {
+          const randomId = Math.floor(Math.random() * supply);
+          const metadata = await fetchMetadata(address, randomId.toString(), 'ape');
+          if (metadata?.image) {
+            nfts.push({
+              token_id: randomId,
+              metadata: JSON.stringify(metadata)
+            });
+          }
+        }
+      }
+
       if (!nfts.length) {
-        return interaction.editReply('⚠️ No NFTs found via Moralis.');
+        return interaction.editReply('⚠️ No NFTs found for this project.');
       }
 
       const selected = nfts.sort(() => 0.5 - Math.random()).slice(0, 6);
@@ -86,9 +110,7 @@ module.exports = {
         let meta = {};
 
         try {
-          if (nft.metadata) {
-            meta = JSON.parse(nft.metadata || '{}');
-          }
+          meta = JSON.parse(nft.metadata || '{}');
 
           if ((!meta || !meta.image) && nft.token_uri) {
             const uri = nft.token_uri.replace('ipfs://', 'https://ipfs.io/ipfs/');
@@ -143,6 +165,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
