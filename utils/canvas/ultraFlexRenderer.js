@@ -12,7 +12,8 @@ async function generateUltraFlexCard({
   collectionName,
   tokenId,
   traits,
-  owner,
+  owner,           // 🔧 Pass full address here
+  ownerDisplay,    // 🔧 Pass shortened owner here (already computed in service)
   openseaUrl
 }) {
   const width = 2048;
@@ -98,14 +99,18 @@ async function generateUltraFlexCard({
   ctx.restore();
   ctx.drawImage(qrImg, width - 700, qrY, qrSize, qrSize);
 
+  // 🔧 OWNER SECTION (with full address below)
   ctx.fillStyle = '#FFD700';
   ctx.fillRect(0, 2800, width, 10);
   ctx.fillStyle = '#000';
-  ctx.fillRect(0, 2810, width, 80);
+  ctx.fillRect(0, 2810, width, 120);
   ctx.fillStyle = '#fff';
   ctx.font = 'bold 60px Exo2';
   ctx.textBaseline = 'middle';
-  ctx.fillText(`OWNER: ${owner}`, 80, 2810 + 40);
+  ctx.fillText(`OWNER: ${ownerDisplay}`, 80, 2830);
+
+  ctx.font = 'bold 40px Exo2';
+  ctx.fillText(`${owner}`, 80, 2880);
 
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 2920, width, 60);
@@ -119,6 +124,7 @@ async function generateUltraFlexCard({
 }
 
 module.exports = { generateUltraFlexCard };
+
 
 
 
