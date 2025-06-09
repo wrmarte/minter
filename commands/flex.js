@@ -6,6 +6,7 @@ const { fetchMetadata } = require('../utils/fetchMetadata');
 const fetch = require('node-fetch');
 const NodeCache = require("node-cache");
 
+// ✅ Caching as before
 const metadataCache = new NodeCache({ stdTTL: 900 });
 const imageCache = new Map();
 
@@ -43,8 +44,7 @@ module.exports = {
         .setAutocomplete(true)
     )
     .addIntegerOption(opt =>
-      opt.setName('tokenid')
-        .setDescription('Token ID to flex (optional)')
+      opt.setName('tokenid').setDescription('Token ID to flex (optional)')
     ),
 
   async execute(interaction) {
@@ -69,6 +69,7 @@ module.exports = {
       const contract = new Contract(address, abi, provider);
       let tokenId = tokenIdOption;
 
+      // ✅ Hybrid token selection logic
       if (!tokenId) {
         if (chain === 'eth') {
           try {
@@ -77,12 +78,20 @@ module.exports = {
             const resvRes = await fetch(reservoirUrl, { headers });
             const resvData = await resvRes.json();
             const tokens = resvData?.tokens?.map(t => t?.token?.tokenId).filter(Boolean) || [];
-            tokenId = tokens.length > 0 ? tokens[Math.floor(Math.random() * tokens.length)] : Math.floor(Math.random() * 10000).toString();
+
+            if (tokens.length > 0) {
+              tokenId = tokens[Math.floor(Math.random() * tokens.length)];
+            } else {
+              throw new Error('No tokens returned from Reservoir');
+            }
           } catch {
-            tokenId = Math.floor(Math.random() * 10000).toString();
+            return interaction.editReply('⚠️ Could not fetch any minted tokens from Reservoir for this ETH project.');
           }
         } else {
           const totalSupply = await contract.totalSupply();
+          if (parseInt(totalSupply) === 0) {
+            return interaction.editReply('⚠️ No NFTs minted yet.');
+          }
           tokenId = Math.floor(Math.random() * parseInt(totalSupply)).toString();
         }
       }
@@ -147,5 +156,6 @@ module.exports = {
     }
   }
 };
+
 
 
