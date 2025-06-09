@@ -1,8 +1,13 @@
 const { SlashCommandBuilder, EmbedBuilder, AttachmentBuilder } = require('discord.js');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
-const fetch = require('node-fetch');
-const { fetchMetadata } = require('../utils/fetchMetadata'); // hybrid fetcher
-const { getProvider } = require('../utils/provider'); // hybrid provider
+const { Contract } = require('ethers');
+const { getProvider } = require('../utils/provider');
+const { fetchMetadata } = require('../utils/fetchMetadata');
+
+const abi = [
+  'function totalSupply() view returns (uint256)',
+  'function tokenURI(uint256 tokenId) view returns (string)'
+];
 
 function roundRect(ctx, x, y, width, height, radius = 20) {
   ctx.beginPath();
@@ -14,8 +19,6 @@ function roundRect(ctx, x, y, width, height, radius = 20) {
   ctx.closePath();
   ctx.clip();
 }
-
-const abi = ['function totalSupply() view returns (uint256)'];
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -40,7 +43,7 @@ module.exports = {
     try {
       const res = await pg.query(`SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`, [
         interaction.guild.id,
-        name,
+        name
       ]);
 
       if (!res.rows.length) {
@@ -48,9 +51,9 @@ module.exports = {
       }
 
       const { address, network } = res.rows[0];
-      const chain = network; // network already is 'eth', 'base', or 'ape'
+      const chain = network;
       const provider = getProvider(chain);
-      const contract = new (require('ethers').Contract)(address, abi, provider);
+      const contract = new Contract(address, abi, provider);
 
       let tokenId = tokenIdOption;
 
@@ -97,7 +100,15 @@ module.exports = {
         .setFooter({ text: `🔧 Powered by PimpsDev • ${chainDisplay}` })
         .setTimestamp();
 
-      await interaction.editReply({ embeds: [embe]()
+      await interaction.editReply({ embeds: [embed], files: [attachment] });
+
+    } catch (err) {
+      console.error('❌ Error in /flex:', err);
+      await interaction.editReply('⚠️ Something went wrong while flexing.');
+    }
+  }
+};
+
 
 
 
