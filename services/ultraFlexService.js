@@ -46,7 +46,7 @@ function shortenAddress(address) {
 async function buildUltraFlexCard(contractAddress, tokenId, collectionName) {
   const metadata = await fetchMetadata(contractAddress, tokenId);
   const owner = await fetchOwner(contractAddress, tokenId);
-  const ownerDisplay = shortenAddress(owner);
+  const ownerDisplay = shortenAddress(owner); // short version
 
   let nftImageUrl = metadata.image || metadata.image_url || null;
   if (nftImageUrl?.startsWith('ipfs://')) {
@@ -68,7 +68,8 @@ async function buildUltraFlexCard(contractAddress, tokenId, collectionName) {
     collectionName: safeCollectionName,
     tokenId,
     traits,
-    owner: ownerDisplay,
+    ownerDisplay,   // 🔥 short version passed
+    owner,          // 🔥 full version passed
     openseaUrl
   });
 
@@ -76,6 +77,7 @@ async function buildUltraFlexCard(contractAddress, tokenId, collectionName) {
 }
 
 module.exports = { buildUltraFlexCard };
+
 
 
 
