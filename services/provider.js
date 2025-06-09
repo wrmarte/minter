@@ -44,10 +44,19 @@ function getProvider(chain = 'base') {
   const url = urls[rpcIndex[chain]];
   rpcIndex[chain] = (rpcIndex[chain] + 1) % urls.length;
 
+  // 🧠 ApeChain: manually define the network to prevent infinite retries
+  if (chain === 'ape') {
+    return new JsonRpcProvider(url, {
+      name: 'apechain',
+      chainId: 6969 // 📝 Replace with real chainId if known
+    });
+  }
+
   return new JsonRpcProvider(url);
 }
 
 module.exports = { getProvider };
+
 
 
 
