@@ -3,16 +3,6 @@ const fetch = require('node-fetch');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
 const { fetchMetadata } = require('../utils/fetchMetadata');
 
-// Helper to sanitize IPFS URLs
-function fixIpfs(url) {
-  if (!url) return null;
-
-  return url
-    .replace('ipfs://', 'https://ipfs.io/ipfs/')
-    .replace('https://cloudflare-ipfs.com/ipfs/', 'https://ipfs.io/ipfs/')
-    .replace('https://gateway.pinata.cloud/ipfs/', 'https://ipfs.io/ipfs/');
-}
-
 function roundRect(ctx, x, y, width, height, radius = 20) {
   ctx.save();
   ctx.beginPath();
@@ -42,10 +32,10 @@ module.exports = {
     await interaction.deferReply();
 
     try {
-      const res = await pg.query(
-        `SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`,
-        [interaction.guild.id, name]
-      );
+      const res = await pg.query(`SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`, [
+        interaction.guild.id,
+        name
+      ]);
 
       if (!res.rows.length) {
         return interaction.editReply('❌ Project not found. Use `/addflex` first.');
@@ -56,6 +46,7 @@ module.exports = {
 
       let nfts = [];
 
+      // Use Moralis only for eth and base
       if (chain === 'eth' || chain === 'base') {
         const url = `https://deep-index.moralis.io/api/v2.2/nft/${address}?chain=${chain}&format=decimal&limit=50`;
         const headers = {
@@ -65,23 +56,10 @@ module.exports = {
 
         const moralisData = await fetch(url, { headers }).then(res => res.json());
         nfts = moralisData?.result || [];
-      } else {
-        // Chain like Apechain, fallback to tokenURI fetch
-        const tokenIds = Array.from({ length: 50 }, (_, i) => i); // 0–49
-        for (let tokenId of tokenIds) {
-          const meta = await fetchMetadata(address, tokenId, chain);
-          if (meta?.image) {
-            nfts.push({
-              token_id: tokenId,
-              metadata: JSON.stringify(meta),
-              token_uri: `ipfs://${tokenId}.json` // dummy, not used after fetch
-            });
-          }
-        }
       }
 
       if (!nfts.length) {
-        return interaction.editReply('⚠️ No NFTs found.');
+        return interaction.editReply('⚠️ No NFTs found via Moralis.');
       }
 
       const selected = nfts.sort(() => 0.5 - Math.random()).slice(0, 6);
@@ -113,28 +91,38 @@ module.exports = {
           }
 
           if ((!meta || !meta.image) && nft.token_uri) {
-            const uri = fixIpfs(nft.token_uri);
+            const uri = nft.token_uri.replace('ipfs://', 'https://ipfs.io/ipfs/');
             meta = await fetch(uri).then(res => res.json());
           }
-        } catch (err) {
-          console.warn(`❌ Meta fetch failed for ${nft.token_id}: ${err.message}`);
-          continue;
+        } catch {}
+
+        let imgUrl = null;
+        if (meta?.image) {
+          imgUrl = meta.image.startsWith('ipfs://')
+            ? meta.image.replace('ipfs://', 'https://ipfs.io/ipfs/')
+            : meta.image;
+        } else if (meta?.image_url) {
+          imgUrl = meta.image_url.startsWith('ipfs://')
+            ? meta.image_url.replace('ipfs://', 'https://ipfs.io/ipfs/')
+            : meta.image_url;
         }
 
-        let imgUrl = meta?.image || meta?.image_url;
         if (!imgUrl) continue;
-        imgUrl = fixIpfs(imgUrl);
 
+        let nftImage;
         try {
-          const nftImage = await loadImage(imgUrl);
-          const x = padding + (i % columns) * (imgSize + spacing);
-          const y = padding + Math.floor(i / columns) * (imgSize + spacing);
-
-          roundRect(ctx, x, y, imgSize, imgSize);
-          ctx.drawImage(nftImage, x, y, imgSize, imgSize);
+          nftImage = await loadImage(imgUrl);
         } catch {
           continue;
         }
+
+        const x = padding + (i % columns) * (imgSize + spacing);
+        const y = padding + Math.floor(i / columns) * (imgSize + spacing);
+
+        ctx.save();
+        roundRect(ctx, x, y, imgSize, imgSize);
+        ctx.drawImage(nftImage, x, y, imgSize, imgSize);
+        ctx.restore();
       }
 
       const buffer = canvas.toBuffer('image/png');
