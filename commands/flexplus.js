@@ -1,14 +1,8 @@
 const { SlashCommandBuilder, EmbedBuilder, AttachmentBuilder } = require('discord.js');
 const fetch = require('node-fetch');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
-const { fetchMetadata } = require('../utils/fetchMetadata');
-
-function fixIpfs(url) {
-  if (!url) return null;
-  return url.startsWith('ipfs://')
-    ? url.replace('ipfs://', 'https://cloudflare-ipfs.com/ipfs/')
-    : url;
-}
+const { Contract } = require('ethers');
+const { getProvider } = require('../services/provider');
 
 function roundRect(ctx, x, y, width, height, radius = 20) {
   ctx.save();
@@ -39,20 +33,21 @@ module.exports = {
     await interaction.deferReply();
 
     try {
-      const res = await pg.query(`SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`, [
-        interaction.guild.id,
-        name
-      ]);
+      const res = await pg.query(
+        `SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`,
+        [interaction.guild.id, name]
+      );
 
       if (!res.rows.length) {
         return interaction.editReply('❌ Project not found. Use `/addflex` first.');
       }
 
       const { address, network } = res.rows[0];
-      const chain = network; // eth, base, ape
-
+      const chain = network.toLowerCase();
+      const provider = getProvider(chain);
       let nfts = [];
 
+      // Moralis for ETH + BASE
       if (chain === 'eth' || chain === 'base') {
         const url = `https://deep-index.moralis.io/api/v2.2/nft/${address}?chain=${chain}&format=decimal&limit=50`;
         const headers = {
@@ -64,45 +59,32 @@ module.exports = {
         nfts = moralisData?.result || [];
       }
 
+      // Fallback for APECHAIN (tokenURI loop)
+      if (chain === 'ape') {
+        const contract = new Contract(
+          address,
+          ['function totalSupply() view returns (uint256)'],
+          provider
+        );
+
+        try {
+          const total = await contract.totalSupply();
+          const totalSupply = parseInt(total.toString());
+          const max = Math.min(totalSupply, 50);
+
+          for (let i = 0; i < max; i++) {
+            nfts.push({ token_id: i.toString() });
+          }
+        } catch (err) {
+          console.warn(`⚠️ Apechain totalSupply() failed: ${err.message}`);
+        }
+      }
+
       if (!nfts.length) {
-        return interaction.editReply('⚠️ No NFTs found via Moralis.');
+        return interaction.editReply('⚠️ No NFTs found.');
       }
 
       const selected = nfts.sort(() => 0.5 - Math.random()).slice(0, 6);
-
-      const imagePromises = selected.map(async (nft, i) => {
-        let meta = {};
-        try {
-          if (nft.metadata) meta = JSON.parse(nft.metadata);
-          else if (nft.token_uri) {
-            const uri = fixIpfs(nft.token_uri);
-            const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), 3500);
-            try {
-              const response = await fetch(uri, { signal: controller.signal });
-              meta = await response.json();
-              clearTimeout(timeout);
-            } catch {
-              clearTimeout(timeout);
-            }
-          }
-        } catch {}
-
-        let imgUrl = meta?.image?.startsWith('ipfs://')
-          ? fixIpfs(meta.image)
-          : meta?.image || meta?.image_url;
-
-        if (!imgUrl) return null;
-
-        try {
-          const img = await loadImage(imgUrl);
-          return { img, index: i };
-        } catch {
-          return null;
-        }
-      });
-
-      const loadedImages = (await Promise.all(imagePromises)).filter(Boolean);
 
       // Canvas layout
       const columns = 3;
@@ -112,24 +94,54 @@ module.exports = {
       const padding = 40;
       const gridWidth = columns * imgSize + (columns - 1) * spacing;
       const gridHeight = rows * imgSize + (rows - 1) * spacing;
-      const canvasWidth = gridWidth + padding * 2;
-      const canvasHeight = gridHeight + padding * 2;
-
-      const canvas = createCanvas(canvasWidth, canvasHeight);
+      const canvas = createCanvas(gridWidth + padding * 2, gridHeight + padding * 2);
       const ctx = canvas.getContext('2d');
-
       ctx.fillStyle = '#0d1117';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      for (let i = 0; i < loadedImages.length; i++) {
-        const { img, index } = loadedImages[i];
-        const x = padding + (index % columns) * (imgSize + spacing);
-        const y = padding + Math.floor(index / columns) * (imgSize + spacing);
+      for (let i = 0; i < selected.length; i++) {
+        const nft = selected[i];
+        let meta = {};
+        let imgUrl = null;
 
-        ctx.save();
-        roundRect(ctx, x, y, imgSize, imgSize);
-        ctx.drawImage(img, x, y, imgSize, imgSize);
-        ctx.restore();
+        try {
+          if (nft.metadata) {
+            meta = JSON.parse(nft.metadata || '{}');
+          } else if (nft.token_uri) {
+            const uri = nft.token_uri.replace('ipfs://', 'https://cloudflare-ipfs.com/ipfs/');
+            meta = await fetch(uri).then(res => res.json());
+          } else if (chain === 'ape') {
+            const tokenId = nft.token_id;
+            const contract = new Contract(address, ['function tokenURI(uint256) view returns (string)'], provider);
+            const uri = await contract.tokenURI(tokenId);
+            const fixed = uri.replace('ipfs://', 'https://cloudflare-ipfs.com/ipfs/');
+            meta = await fetch(fixed).then(res => res.json());
+          }
+
+          if (meta?.image) {
+            imgUrl = meta.image.startsWith('ipfs://')
+              ? meta.image.replace('ipfs://', 'https://cloudflare-ipfs.com/ipfs/')
+              : meta.image;
+          }
+        } catch (err) {
+          console.warn(`❌ Meta fetch failed for ${nft.token_id}: ${err.message}`);
+          continue;
+        }
+
+        if (!imgUrl) continue;
+
+        try {
+          const nftImage = await loadImage(imgUrl);
+          const x = padding + (i % columns) * (imgSize + spacing);
+          const y = padding + Math.floor(i / columns) * (imgSize + spacing);
+
+          ctx.save();
+          roundRect(ctx, x, y, imgSize, imgSize);
+          ctx.drawImage(nftImage, x, y, imgSize, imgSize);
+          ctx.restore();
+        } catch {
+          continue;
+        }
       }
 
       const buffer = canvas.toBuffer('image/png');
@@ -150,6 +162,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
