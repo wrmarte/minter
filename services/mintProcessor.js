@@ -30,27 +30,33 @@ async function trackAllContracts(client) {
 
 function launchContractListener(client, addressKey, contractRows) {
   const firstRow = contractRows[0];
-  const { name, address } = firstRow;
+  const { name, address, network } = firstRow;
+  const chain = network || 'base';
 
   const abi = [
     'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
     'function tokenURI(uint256 tokenId) view returns (string)'
   ];
   const iface = new Interface(abi);
-  const contract = new Contract(address, abi, getProvider());
+  const contract = new Contract(address, abi, getProvider(chain));
 
   let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
   let seenSales = new Set(loadJson(seenSalesPath(name)) || []);
 
   const listenerKey = `${addressKey}_mint_listener`;
-  if (getProvider()[listenerKey]) {
+  if (getProvider(chain)[listenerKey]) {
     console.log(`[${name}] Listener already active — skipping duplicate`);
     return;
   }
-  getProvider()[listenerKey] = true;
+  getProvider(chain)[listenerKey] = true;
 
-  getProvider().on('block', async (blockNumber) => {
+  getProvider(chain).on('block', async (blockNumber) => {
     try {
+      if (chain === 'eth') {
+        console.log(`[${name}] ETH safely bypassed RPC logs — (hybrid protected)`);
+        return; // ETH now fully handled elsewhere
+      }
+
       const fromBlock = Math.max(blockNumber - 5, 0);
       const toBlock = blockNumber;
 
@@ -61,7 +67,7 @@ function launchContractListener(client, addressKey, contractRows) {
         toBlock
       };
 
-      const logs = await getProvider().getLogs(filter);
+      const logs = await getProvider(chain).getLogs(filter);
 
       for (const log of logs) {
         let parsed;
@@ -72,19 +78,12 @@ function launchContractListener(client, addressKey, contractRows) {
         if (from === ZeroAddress) {
           if (seenTokenIds.has(tokenIdStr)) continue;
           seenTokenIds.add(tokenIdStr);
-
-          // ✅ Deduplicate all channel_ids across all contractRows BEFORE calling handleMint
-          const allChannelIds = [
-            ...new Set(contractRows.flatMap(row => [row.channel_ids].flat()))
-          ];
+          const allChannelIds = [...new Set(contractRows.flatMap(row => [row.channel_ids].flat()))];
           await handleMint(client, firstRow, contract, tokenId, to, allChannelIds);
         } else {
           if (seenSales.has(tokenIdStr)) continue;
           seenSales.add(tokenIdStr);
-
-          const allChannelIds = [
-            ...new Set(contractRows.flatMap(row => [row.channel_ids].flat()))
-          ];
+          const allChannelIds = [...new Set(contractRows.flatMap(row => [row.channel_ids].flat()))];
           await handleSale(client, firstRow, contract, tokenId, from, to, log.transactionHash, allChannelIds);
         }
       }
@@ -221,14 +220,5 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
 
 module.exports = {
   trackAllContracts,
-  contractListeners // <-- EXPORT LISTENERS FOR STATUS MONITOR
+  contractListeners
 };
-
-
-
-
-
-
-
-
-
