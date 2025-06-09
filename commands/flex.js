@@ -6,8 +6,7 @@ const { fetchMetadata } = require('../utils/fetchMetadata');
 const fetch = require('node-fetch');
 const NodeCache = require("node-cache");
 
-// ✅ Metadata & image cache
-const metadataCache = new NodeCache({ stdTTL: 900 }); 
+const metadataCache = new NodeCache({ stdTTL: 900 });
 const imageCache = new Map();
 
 const abi = [
@@ -44,7 +43,9 @@ module.exports = {
         .setAutocomplete(true)
     )
     .addIntegerOption(opt =>
-      opt.setName('tokenid').setDescription('Token ID to flex (optional)')
+      opt.setName('tokenid')
+        .setDescription('Token ID to flex')
+        .setRequired(false)
     ),
 
   async execute(interaction) {
@@ -78,11 +79,7 @@ module.exports = {
             const resvData = await resvRes.json();
             const tokens = resvData?.tokens?.map(t => t?.token?.tokenId).filter(Boolean) || [];
 
-            if (tokens.length > 0) {
-              tokenId = tokens[Math.floor(Math.random() * tokens.length)];
-            } else {
-              tokenId = Math.floor(Math.random() * 10000).toString();
-            }
+            tokenId = tokens.length > 0 ? tokens[Math.floor(Math.random() * tokens.length)] : Math.floor(Math.random() * 10000).toString();
           } catch {
             tokenId = Math.floor(Math.random() * 10000).toString();
           }
@@ -152,15 +149,3 @@ module.exports = {
     }
   }
 };
-
-
-
-
-
-
-
-
-
-
-
-
