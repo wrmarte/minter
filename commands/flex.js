@@ -6,7 +6,8 @@ const { fetchMetadata } = require('../utils/fetchMetadata');
 const fetch = require('node-fetch');
 const NodeCache = require("node-cache");
 
-const metadataCache = new NodeCache({ stdTTL: 900 });
+// ✅ Metadata & image cache
+const metadataCache = new NodeCache({ stdTTL: 900 }); 
 const imageCache = new Map();
 
 const abi = [
@@ -43,9 +44,7 @@ module.exports = {
         .setAutocomplete(true)
     )
     .addIntegerOption(opt =>
-      opt.setName('tokenid')
-        .setDescription('Token ID to flex')
-        .setRequired(false)
+      opt.setName('tokenid').setDescription('Token ID to flex (optional)')
     ),
 
   async execute(interaction) {
@@ -55,13 +54,13 @@ module.exports = {
     await interaction.deferReply();
 
     try {
-      const res = await pg.query(`SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`, [
+      const res = await pg.query(SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2, [
         interaction.guild.id,
         name
       ]);
 
       if (!res.rows.length) {
-        return interaction.editReply('❌ Project not found. Use `/addflex` first.');
+        return interaction.editReply('❌ Project not found. Use /addflex first.');
       }
 
       const { address, network } = res.rows[0];
@@ -73,13 +72,17 @@ module.exports = {
       if (!tokenId) {
         if (chain === 'eth') {
           try {
-            const reservoirUrl = `https://api.reservoir.tools/tokens/v6?collection=${address}&limit=50&sortBy=floorAskPrice`;
+            const reservoirUrl = https://api.reservoir.tools/tokens/v6?collection=${address}&limit=50&sortBy=floorAskPrice;
             const headers = { 'x-api-key': process.env.RESERVOIR_API_KEY };
             const resvRes = await fetch(reservoirUrl, { headers });
             const resvData = await resvRes.json();
             const tokens = resvData?.tokens?.map(t => t?.token?.tokenId).filter(Boolean) || [];
 
-            tokenId = tokens.length > 0 ? tokens[Math.floor(Math.random() * tokens.length)] : Math.floor(Math.random() * 10000).toString();
+            if (tokens.length > 0) {
+              tokenId = tokens[Math.floor(Math.random() * tokens.length)];
+            } else {
+              tokenId = Math.floor(Math.random() * 10000).toString();
+            }
           } catch {
             tokenId = Math.floor(Math.random() * 10000).toString();
           }
@@ -89,7 +92,7 @@ module.exports = {
         }
       }
 
-      const cacheKey = `${address}:${tokenId}:${chain}`;
+      const cacheKey = ${address}:${tokenId}:${chain};
       let metadata = metadataCache.get(cacheKey);
       if (!metadata) {
         metadata = await fetchMetadata(address, tokenId, chain);
@@ -104,7 +107,7 @@ module.exports = {
         : metadata.image;
 
       const traits = (metadata?.attributes || []).map(attr =>
-        `• **${attr.trait_type}**: ${attr.value}`
+        • **${attr.trait_type}**: ${attr.value}
       ).join('\n') || 'None found';
 
       const image = await loadCachedImage(imageUrl);
@@ -128,17 +131,17 @@ module.exports = {
 
       const chainDisplay = chain === 'base' ? 'Base' : chain === 'eth' ? 'Ethereum' : 'ApeChain';
       const openseaUrl = chain === 'eth'
-        ? `https://opensea.io/assets/ethereum/${address}/${tokenId}`
-        : `https://opensea.io/assets/${chain}/${address}/${tokenId}`;
+        ? https://opensea.io/assets/ethereum/${address}/${tokenId}
+        : https://opensea.io/assets/${chain}/${address}/${tokenId};
 
       const embed = new EmbedBuilder()
-        .setTitle(`🖼️ Flexing: ${name} #${tokenId}`)
-        .setDescription(tokenIdOption ? `🎯 Specific token flexed` : `🎲 Random token flexed`)
+        .setTitle(🖼️ Flexing: ${name} #${tokenId})
+        .setDescription(tokenIdOption ? 🎯 Specific token flexed : 🎲 Random token flexed)
         .setImage('attachment://flex.png')
         .setURL(openseaUrl)
         .setColor(chain === 'base' ? 0x1d9bf0 : chain === 'ape' ? 0xff6600 : 0xf5851f)
         .addFields({ name: '🧬 Traits', value: traits, inline: false })
-        .setFooter({ text: `🔧 Powered by PimpsDev • ${chainDisplay}` })
+        .setFooter({ text: 🔧 Powered by PimpsDev • ${chainDisplay} })
         .setTimestamp();
 
       await interaction.editReply({ embeds: [embed], files: [attachment] });
