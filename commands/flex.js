@@ -51,7 +51,10 @@ module.exports = {
       }
 
       const { address, network } = res.rows[0];
-      const chain = network;
+      
+      // ✅ Safe fallback if network missing (old DB rows)
+      const chain = network || 'base'; 
+
       const provider = getProvider(chain);
       const contract = new Contract(address, abi, provider);
 
@@ -95,7 +98,7 @@ module.exports = {
         .setDescription(tokenIdOption ? `🎯 Specific token flexed` : `🎲 Random token flexed`)
         .setImage('attachment://flex.png')
         .setURL(openseaUrl)
-        .setColor(network === 'base' ? 0x1d9bf0 : network === 'ape' ? 0xff6600 : 0xf5851f)
+        .setColor(chain === 'base' ? 0x1d9bf0 : chain === 'ape' ? 0xff6600 : 0xf5851f)
         .addFields({ name: '🧬 Traits', value: traits, inline: false })
         .setFooter({ text: `🔧 Powered by PimpsDev • ${chainDisplay}` })
         .setTimestamp();
@@ -108,6 +111,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
