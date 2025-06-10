@@ -12,9 +12,11 @@ const abi = [
 async function fetchOwner(contractAddress, tokenId, chain) {
   try {
     const provider = getProvider(chain);
-    const contract = new Contract(contractAddress, abi, provider);
-    
-    const owner = await contract.ownerOf.staticCall(tokenId); // <-- 🔥 THIS is v6-compatible
+    const contract = new Contract(contractAddress, [
+      'function ownerOf(uint256 tokenId) view returns (address)'
+    ]).connect(provider); // ⬅️ Connect here!
+
+    const owner = await contract.ownerOf.staticCall(tokenId);
     return owner;
   } catch (err) {
     console.error('❌ Owner fetch failed:', err.message);
