@@ -12,11 +12,10 @@ async function fetchOwner(contractAddress, tokenId, chain) {
   try {
     const provider = getProvider(chain);
 
-    // 🔍 Optional: validate the provider is working and matches the correct chain
-    const network = await provider.getNetwork();
-    console.log(`🔍 Provider for ${chain.toUpperCase()}: ${provider.connection.url} | Chain ID: ${network.chainId}`);
+    // 🔍 Optional validation (use internal _network for chain ID)
+    console.log(`🔍 Provider for ${chain.toUpperCase()}: ${provider.connection.url} | Chain ID: ${provider._network.chainId}`);
 
-    // ✅ Use .connectRunner to attach a call-capable runner
+    // ✅ Required in Ethers v6 to allow read-only contract methods
     const contract = new Contract(contractAddress, abi).connectRunner(provider);
 
     const owner = await contract.ownerOf(tokenId);
@@ -26,6 +25,7 @@ async function fetchOwner(contractAddress, tokenId, chain) {
     return '0x0000000000000000000000000000000000000000';
   }
 }
+
 
 
 
