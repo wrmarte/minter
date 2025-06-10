@@ -11,8 +11,11 @@ const abi = [
 async function fetchOwner(contractAddress, tokenId, chain) {
   try {
     const provider = getProvider(chain);
+
+    // ✅ Connect contract with provider that supports .call()
     const contract = new Contract(contractAddress, abi, provider);
     const owner = await contract.ownerOf(tokenId);
+
     return owner;
   } catch (err) {
     console.error('❌ Owner fetch failed:', err);
@@ -43,6 +46,7 @@ async function buildFlexCard(contractAddress, tokenId, collectionName, chain) {
     : ['No traits found'];
 
   const safeCollectionName = collectionName || metadata.name || "NFT";
+
   const openseaUrl = chain === 'eth'
     ? `https://opensea.io/assets/ethereum/${contractAddress}/${tokenId}`
     : `https://opensea.io/assets/${chain}/${contractAddress}/${tokenId}`;
