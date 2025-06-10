@@ -1,6 +1,6 @@
-const { JsonRpcApiProvider } = require('ethers');
+const { JsonRpcProvider } = require('ethers');
 
-// 🔗 Valid RPC endpoints
+// RPC endpoints per chain
 const RPCS = {
   eth: [
     'https://eth.llamarpc.com',
@@ -18,7 +18,7 @@ const RPCS = {
   ]
 };
 
-// 🆔 Valid chain IDs
+// Chain IDs per network
 const CHAIN_IDS = {
   eth: 1,
   base: 8453,
@@ -31,27 +31,29 @@ const rpcIndex = {
   ape: 0
 };
 
-// ✅ Correct v6 provider creation
+// ✅ Ethers v6 compatible provider
 function getProvider(chain = 'base') {
   chain = chain.toLowerCase();
 
   if (!RPCS[chain]) {
-    console.warn(`⚠️ Unknown chain requested: ${chain}, defaulting to base`);
+    console.warn(`⚠️ Unknown chain: ${chain}, defaulting to base`);
     chain = 'base';
   }
 
   const urls = RPCS[chain];
   const idx = rpcIndex[chain];
   const url = urls[idx];
-
   rpcIndex[chain] = (idx + 1) % urls.length;
 
-  const provider = new JsonRpcApiProvider(url, CHAIN_IDS[chain]);
+  const chainId = CHAIN_IDS[chain];
   console.log(`🔌 Using provider for ${chain.toUpperCase()}: ${url}`);
-  return provider;
+
+  // 🛠️ Only URL and chainId passed here — no 'Network' object, no third arg
+  return new JsonRpcProvider(url, chainId);
 }
 
 module.exports = { getProvider };
+
 
 
 
