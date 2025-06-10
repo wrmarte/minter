@@ -9,19 +9,26 @@ const abi = [
 ];
 
 // ✅ Smart validation to ensure provider supports calls
+const { Contract, Interface } = require('ethers');
+
 async function fetchOwner(contractAddress, tokenId, chain) {
   try {
     const provider = getProvider(chain);
 
-    // ⚠️ Some providers don't support .call() unless manually done in Ethers v6
-    const contract = new Contract(contractAddress, [
-      'function ownerOf(uint256 tokenId) view returns (address)'
-    ], provider);
+    // Create interface manually
+    const iface = new Interface(['function ownerOf(uint256 tokenId) view returns (address)']);
+    const data = iface.encodeFunctionData('ownerOf', [tokenId]);
 
-    const callData = contract.interface.encodeFunctionData('ownerOf', [tokenId]);
-    const result = await provider.call({ to: contractAddress, data: callData });
-    const [owner] = contract.interface.decodeFunctionResult('ownerOf', result);
+    // Manual raw call
+    const result = await provider.send('eth_call', [
+      {
+        to: contractAddress,
+        data: data
+      },
+      'latest'
+    ]);
 
+    const [owner] = iface.decodeFunctionResult('ownerOf', result);
     return owner;
   } catch (err) {
     console.error('❌ Owner fetch failed:', err.message);
