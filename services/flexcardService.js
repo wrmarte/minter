@@ -12,12 +12,9 @@ const abi = [
 async function fetchOwner(contractAddress, tokenId, chain) {
   try {
     const provider = getProvider(chain);
-
-    // 🧪 Try basic eth_call to validate support
-    const testBlock = await provider.getBlockNumber();
-    if (!testBlock) throw new Error('❌ Provider is not responsive');
-
-    const contract = new Contract(contractAddress, abi, provider);
+    const contract = new Contract(contractAddress, [
+      'function ownerOf(uint256 tokenId) view returns (address)'
+    ], provider);
 
     const owner = await contract.ownerOf(tokenId);
     return owner;
@@ -26,6 +23,7 @@ async function fetchOwner(contractAddress, tokenId, chain) {
     return '0x0000000000000000000000000000000000000000';
   }
 }
+
 
 function shortenAddress(address) {
   if (!address || address.length < 10) return address || 'Unknown';
