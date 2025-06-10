@@ -27,7 +27,6 @@ async function trackAllContracts(client) {
     launchContractListener(client, addressKey, contractListeners[addressKey]);
   }
 }
-
 function launchContractListener(client, addressKey, contractRows) {
   const firstRow = contractRows[0];
   const { name, address, network } = firstRow;
@@ -58,8 +57,7 @@ function launchContractListener(client, addressKey, contractRows) {
 
   provider.on('block', async (blockNumber) => {
     try {
-      const defaultWindow = chain === 'eth' ? 100 : 20;
-      const fromBlock = Math.max(blockNumber - defaultWindow, 0);
+      const fromBlock = Math.max(blockNumber - 20, 0);
       const toBlock = blockNumber;
 
       const hexFrom = `0x${fromBlock.toString(16)}`;
@@ -77,7 +75,7 @@ function launchContractListener(client, addressKey, contractRows) {
         logs = await provider.send('eth_getLogs', [filter]);
       } catch (err) {
         const msg = err?.error?.message || err?.message || '';
-        const isRangeError = msg.includes('range') || msg.includes('block') || msg.includes('coalesce') || msg.includes('invalid argument');
+        const isRangeError = msg.includes('range') || msg.includes('block') || msg.includes('coalesce') || msg.includes('invalid');
 
         if (isRangeError) {
           console.warn(`[${name}] Block range too large or invalid — fallback to single-block mode`);
@@ -103,7 +101,6 @@ function launchContractListener(client, addressKey, contractRows) {
         try { parsed = iface.parseLog(log); } catch { continue; }
         const { from, to, tokenId } = parsed.args;
         const tokenIdStr = tokenId.toString();
-
         const allChannelIds = [...new Set(contractRows.flatMap(row => [row.channel_ids].flat()))];
 
         if (from === ZeroAddress) {
@@ -126,7 +123,6 @@ function launchContractListener(client, addressKey, contractRows) {
     }
   });
 }
-
 async function handleMint(client, contractRow, contract, tokenId, to, channel_ids) {
   const { name, mint_price, mint_token, mint_token_symbol } = contractRow;
 
@@ -251,6 +247,7 @@ module.exports = {
   trackAllContracts,
   contractListeners
 };
+
 
 
 
