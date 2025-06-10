@@ -8,16 +8,9 @@ const abi = [
   'function ownerOf(uint256 tokenId) view returns (address)'
 ];
 
-// ✅ Robust owner fetch with provider validation
 async function fetchOwner(contractAddress, tokenId, chain) {
   try {
     const provider = getProvider(chain);
-
-    // Validate basic call capability
-    if (typeof provider.call !== 'function' && typeof provider.send !== 'function') {
-      throw new Error('❌ Provider does not support contract calls');
-    }
-
     const contract = new Contract(contractAddress, abi, provider);
     const owner = await contract.ownerOf(tokenId);
     return owner;
@@ -67,6 +60,7 @@ async function buildFlexCard(contractAddress, tokenId, collectionName, chain) {
 }
 
 module.exports = { buildFlexCard };
+
 
 
 
