@@ -12,18 +12,22 @@ const abi = [
 async function fetchOwner(contractAddress, tokenId, chain) {
   try {
     const provider = getProvider(chain);
+
+    // ⚠️ Some providers don't support .call() unless manually done in Ethers v6
     const contract = new Contract(contractAddress, [
       'function ownerOf(uint256 tokenId) view returns (address)'
     ], provider);
 
-    const owner = await contract.ownerOf(tokenId);
+    const callData = contract.interface.encodeFunctionData('ownerOf', [tokenId]);
+    const result = await provider.call({ to: contractAddress, data: callData });
+    const [owner] = contract.interface.decodeFunctionResult('ownerOf', result);
+
     return owner;
   } catch (err) {
     console.error('❌ Owner fetch failed:', err.message);
     return '0x0000000000000000000000000000000000000000';
   }
 }
-
 
 function shortenAddress(address) {
   if (!address || address.length < 10) return address || 'Unknown';
@@ -65,6 +69,7 @@ async function buildFlexCard(contractAddress, tokenId, collectionName, chain) {
 }
 
 module.exports = { buildFlexCard };
+
 
 
 
