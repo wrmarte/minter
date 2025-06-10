@@ -1,4 +1,4 @@
-const { Contract } = require('ethers');
+const { Contract } = require('ethers'); // this is okay
 const { getProvider } = require('../utils/provider');
 const { fetchMetadata } = require('../utils/fetchMetadata');
 const { generateFlexCard } = require('../utils/canvas/flexcardRenderer');
@@ -8,19 +8,21 @@ const abi = [
   'function ownerOf(uint256 tokenId) view returns (address)'
 ];
 
-// ✅ Proper Ethers v6 pattern using provider as runner
 async function fetchOwner(contractAddress, tokenId, chain) {
   try {
     const provider = getProvider(chain);
 
-    const contract = new Contract(contractAddress, abi, provider); // provider is runner
-    const owner = await contract.ownerOf(tokenId);
-    return owner;
+    // 🧠 REAL FIX: explicitly set provider as runner
+    const contract = new Contract(contractAddress, abi);
+    const result = await contract.connect(provider).ownerOf(tokenId); // ✅ runner set here
+
+    return result;
   } catch (err) {
     console.error('❌ Owner fetch failed:', err.message);
     return '0x0000000000000000000000000000000000000000';
   }
 }
+
 
 function shortenAddress(address) {
   if (!address || address.length < 10) return address || 'Unknown';
