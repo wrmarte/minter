@@ -8,12 +8,11 @@ const abi = [
   'function ownerOf(uint256 tokenId) view returns (address)'
 ];
 
-async function fetchOwner(contractAddress, tokenId) {
+async function fetchOwner(contractAddress, tokenId, chain = 'base') {
   try {
-    const provider = getProvider(); // only BASE supported for now
-    const contract = new Contract(contractAddress, abi, provider); // ✅ pass provider as 3rd arg
-
-    const owner = await contract.ownerOf(tokenId); // will only work if runner is present
+    const provider = getProvider(chain);
+    const contract = new Contract(contractAddress, abi, provider); // ✅ pass provider as runner
+    const owner = await contract.ownerOf(tokenId); // ✅ supported
     return owner;
   } catch (err) {
     console.error('❌ Owner fetch failed:', err.message);
@@ -28,7 +27,7 @@ function shortenAddress(address) {
 
 async function buildFlexCard(contractAddress, tokenId, collectionName, chain = 'base') {
   const metadata = await fetchMetadata(contractAddress, tokenId, chain);
-  const owner = await fetchOwner(contractAddress, tokenId);
+  const owner = await fetchOwner(contractAddress, tokenId, chain);
   const ownerDisplay = shortenAddress(owner);
 
   let nftImageUrl = metadata?.image || null;
@@ -60,13 +59,6 @@ async function buildFlexCard(contractAddress, tokenId, collectionName, chain = '
 }
 
 module.exports = { buildFlexCard };
-
-
-
-
-
-
-
 
 
 
