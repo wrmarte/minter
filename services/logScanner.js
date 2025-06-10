@@ -3,56 +3,53 @@ const { getProvider } = require('./provider');
 
 const MAX_BLOCK_SPAN = 1000;
 
-function toHex(num) {
-  return '0x' + num.toString(16);
+function toHex(n) {
+  return '0x' + n.toString(16);
 }
 
-async function safeFetchLogs(provider, { address, topic, fromBlock, toBlock }) {
+async function safeFetchLogs(address, topic, fromBlock, toBlock, provider) {
+  const from = parseInt(fromBlock, 16);
+  const to = parseInt(toBlock, 16);
+
   try {
-    let from = parseInt(fromBlock, 16);
-    let to = parseInt(toBlock, 16);
-
-    if (to < from) {
-      throw new Error('❌ Invalid block range (to < from)');
-    }
-
-    // Clamp block range if too large
-    const span = to - from;
-    if (span > MAX_BLOCK_SPAN) {
-      to = from + MAX_BLOCK_SPAN;
-    }
+    // Limit block span
+    const safeTo = Math.min(to, from + MAX_BLOCK_SPAN);
 
     const logs = await provider.getLogs({
       address,
       topics: [topic],
       fromBlock: toHex(from),
-      toBlock: toHex(to),
+      toBlock: toHex(safeTo),
     });
 
     return logs;
+
   } catch (err) {
-    if (err.message.includes('invalid block range')) {
+    if (err.message.toLowerCase().includes('invalid block range')) {
       console.warn(`[${address}] Block range too large or invalid — fallback to single-block mode`);
+
       try {
         const logs = await provider.getLogs({
           address,
           topics: [topic],
-          fromBlock,
-          toBlock,
+          fromBlock: toHex(from),
+          toBlock: toHex(from), // single-block fallback
         });
+
         return logs;
-      } catch (innerErr) {
-        console.error(`[${address}] Failed even in single-block mode:`, innerErr.message);
+      } catch (fallbackErr) {
+        console.error(`[${address}] Failed even in single-block mode:`, fallbackErr.message);
         return [];
       }
     }
-    console.error(`[${address}] Uncaught log fetch error:`, err.message);
+
+    console.error(`[${address}] Unexpected log error:`, err.message);
     return [];
   }
 }
 
 async function fetchLogs(addresses, fromBlock, toBlock) {
-  const provider = getProvider('base'); // Adjust if dynamic chain is needed
+  const provider = getProvider('base'); // Use 'eth', 'ape', or dynamic if needed
   const topics = [
     id('Transfer(address,address,uint256)'),
     id('Transfer(address,address,uint amount)')
@@ -62,7 +59,7 @@ async function fetchLogs(addresses, fromBlock, toBlock) {
 
   for (const address of addresses) {
     for (const topic of topics) {
-      const logs = await safeFetchLogs(provider, { address, topic, fromBlock, toBlock });
+      const logs = await safeFetchLogs(address, topic, fromBlock, toBlock, provider);
       allLogs.push(...logs);
     }
   }
@@ -71,5 +68,6 @@ async function fetchLogs(addresses, fromBlock, toBlock) {
 }
 
 module.exports = { fetchLogs };
+
 
 
