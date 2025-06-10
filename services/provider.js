@@ -39,11 +39,12 @@ function getProvider(chain = 'base') {
 
   console.log(`🔌 Using provider for ${chain.toUpperCase()}: ${url}`);
 
-  // ✅ Just pass the RPC URL — Ethers v6 will auto-detect the network
-  return new JsonRpcProvider(url);
+  // ✅ DO NOT set network or staticNetwork — let Ethers detect everything
+  return new JsonRpcProvider(url); // ← This is the real fix
 }
 
 module.exports = { getProvider };
+
 
 
 
