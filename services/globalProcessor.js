@@ -69,7 +69,6 @@ async function handleTokenLog(client, tokenRows, log) {
 
   const tokenAddress = log.address.toLowerCase();
 
-  // ✅ On-chain previous balance logic
   let buyLabel = '🆕 New Buy';
   try {
     const abi = ['function balanceOf(address account) view returns (uint256)'];
@@ -88,15 +87,17 @@ async function handleTokenLog(client, tokenRows, log) {
   const tokenPrice = await getTokenPriceUSD(tokenAddress);
   const marketCap = await getMarketCapUSD(tokenAddress);
 
-  let usdSpent = 0, ethSpent = 0;
+  let usdSpent = 0, ethSpent = 0, tx;
   try {
-    const tx = await getProvider().getTransaction(log.transactionHash);
+    tx = await getProvider().getTransaction(log.transactionHash);
     const ethPrice = await getETHPrice();
     if (tx?.value) {
       ethSpent = parseFloat(formatUnits(tx.value, 18));
       usdSpent = ethSpent * ethPrice;
     }
   } catch {}
+
+  if (!tx?.to || ethSpent === 0) return; // 🛑 Likely LP/tax transaction
 
   const rocketIntensity = Math.min(Math.floor(tokenAmountRaw / 100), 10);
   const rocketLine = '🟥🟦🚀'.repeat(Math.max(1, rocketIntensity));
@@ -161,11 +162,3 @@ async function getMarketCapUSD(address) {
     return parseFloat(data?.data?.attributes?.fdv_usd || data?.data?.attributes?.market_cap_usd || '0');
   } catch { return 0; }
 }
-
-
-
-
-
-
-
-
