@@ -23,7 +23,7 @@ const RPCS = {
 // Store current index for each chain
 const rpcIndex = { eth: 0, base: 0, ape: 0 };
 
-// Hybrid RPC rotator
+// Hybrid RPC rotator with error handling
 function getProvider(chain) {
   chain = chain.toLowerCase();
   const urls = RPCS[chain];
@@ -31,13 +31,23 @@ function getProvider(chain) {
     throw new Error(`Unsupported chain: ${chain}`);
   }
 
-  // Pick current RPC URL
-  const url = urls[rpcIndex[chain]];
+  let attempts = 0;
+  let lastError = null;
 
-  // Advance index for next request (simple round-robin)
-  rpcIndex[chain] = (rpcIndex[chain] + 1) % urls.length;
+  while (attempts < urls.length) {
+    const url = urls[rpcIndex[chain]];
+    rpcIndex[chain] = (rpcIndex[chain] + 1) % urls.length;
+    try {
+      const provider = new JsonRpcProvider(url);
+      return provider;
+    } catch (err) {
+      console.warn(`⚠️ RPC failed for ${chain} at ${url}: ${err.message}`);
+      lastError = err;
+      attempts++;
+    }
+  }
 
-  return new JsonRpcProvider(url);
+  throw lastError || new Error(`All RPCs failed for chain: ${chain}`);
 }
 
 module.exports = { getProvider };
