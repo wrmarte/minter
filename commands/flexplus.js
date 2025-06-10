@@ -45,7 +45,10 @@ module.exports = {
       const { address, network } = res.rows[0];
       const chain = network;
       const maxTokenId = 50;
-      const selectedIds = Array.from({ length: maxTokenId }, (_, i) => i).sort(() => 0.5 - Math.random()).slice(0, 6);
+      const selectedIds = Array.from({ length: maxTokenId - 1 }, (_, i) => i + 1)
+      .sort(() => 0.5 - Math.random())
+      .slice(0, 6);
+
 
       const columns = 3, rows = 2, imgSize = 280, spacing = 20, padding = 40;
       const canvasWidth = columns * imgSize + (columns - 1) * spacing + padding * 2;
