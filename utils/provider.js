@@ -8,12 +8,13 @@ const RPCS = {
     'https://eth.llamarpc.com',
     'https://1rpc.io/eth'
   ],
-  base: [
-    'https://mainnet.base.org',
-    'https://base.publicnode.com',
-    'https://1rpc.io/base',
-    'https://base.llamarpc.com'
-  ],
+base: [
+  'https://mainnet.base.org',
+  'https://base.publicnode.com',
+  'https://1rpc.io/base',
+  'https://base.llamarpc.com',
+  'https://base.meowrpc.com'
+],
   ape: [
     'https://rpc.apexchain.io'
   ]
