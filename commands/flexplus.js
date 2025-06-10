@@ -1,7 +1,12 @@
 const { SlashCommandBuilder, EmbedBuilder, AttachmentBuilder } = require('discord.js');
-const fetch = require('node-fetch');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
 const { fetchMetadata } = require('../utils/fetchMetadata');
+
+const GATEWAYS = [
+  'https://cloudflare-ipfs.com/ipfs/',
+  'https://ipfs.io/ipfs/',
+  'https://dweb.link/ipfs/'
+];
 
 function roundRect(ctx, x, y, width, height, radius = 20) {
   ctx.save();
@@ -20,10 +25,7 @@ module.exports = {
     .setName('flexplus')
     .setDescription('Flex a collage of 6 random NFTs from a project')
     .addStringOption(opt =>
-      opt.setName('name')
-        .setDescription('Project name')
-        .setRequired(true)
-        .setAutocomplete(true)
+      opt.setName('name').setDescription('Project name').setRequired(true).setAutocomplete(true)
     ),
 
   async execute(interaction) {
@@ -36,93 +38,53 @@ module.exports = {
         interaction.guild.id,
         name
       ]);
-
       if (!res.rows.length) {
         return interaction.editReply('❌ Project not found. Use `/addflex` first.');
       }
 
       const { address, network } = res.rows[0];
-      const chain = network; // eth, base, ape
+      const chain = network;
+      const maxTokenId = 50;
+      const selectedIds = Array.from({ length: maxTokenId }, (_, i) => i).sort(() => 0.5 - Math.random()).slice(0, 6);
 
-      let nfts = [];
-
-      // Use Moralis only for eth and base
-      if (chain === 'eth' || chain === 'base') {
-        const url = `https://deep-index.moralis.io/api/v2.2/nft/${address}?chain=${chain}&format=decimal&limit=50`;
-        const headers = {
-          accept: 'application/json',
-          'X-API-Key': process.env.MORALIS_API_KEY
-        };
-
-        const moralisData = await fetch(url, { headers }).then(res => res.json());
-        nfts = moralisData?.result || [];
-      }
-
-      if (!nfts.length) {
-        return interaction.editReply('⚠️ No NFTs found via Moralis.');
-      }
-
-      const selected = nfts.sort(() => 0.5 - Math.random()).slice(0, 6);
-
-      // Canvas layout
-      const columns = 3;
-      const rows = 2;
-      const imgSize = 280;
-      const spacing = 20;
-      const padding = 40;
-      const gridWidth = columns * imgSize + (columns - 1) * spacing;
-      const gridHeight = rows * imgSize + (rows - 1) * spacing;
-      const canvasWidth = gridWidth + padding * 2;
-      const canvasHeight = gridHeight + padding * 2;
-
+      const columns = 3, rows = 2, imgSize = 280, spacing = 20, padding = 40;
+      const canvasWidth = columns * imgSize + (columns - 1) * spacing + padding * 2;
+      const canvasHeight = rows * imgSize + (rows - 1) * spacing + padding * 2;
       const canvas = createCanvas(canvasWidth, canvasHeight);
       const ctx = canvas.getContext('2d');
 
       ctx.fillStyle = '#0d1117';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      for (let i = 0; i < selected.length; i++) {
-        const nft = selected[i];
-        let meta = {};
-
-        try {
-          if (nft.metadata) {
-            meta = JSON.parse(nft.metadata || '{}');
-          }
-
-          if ((!meta || !meta.image) && nft.token_uri) {
-            const uri = nft.token_uri.replace('ipfs://', 'https://ipfs.io/ipfs/');
-            meta = await fetch(uri).then(res => res.json());
-          }
-        } catch {}
-
-        let imgUrl = null;
-        if (meta?.image) {
-          imgUrl = meta.image.startsWith('ipfs://')
-            ? meta.image.replace('ipfs://', 'https://ipfs.io/ipfs/')
-            : meta.image;
-        } else if (meta?.image_url) {
-          imgUrl = meta.image_url.startsWith('ipfs://')
-            ? meta.image_url.replace('ipfs://', 'https://ipfs.io/ipfs/')
-            : meta.image_url;
-        }
-
-        if (!imgUrl) continue;
-
-        let nftImage;
-        try {
-          nftImage = await loadImage(imgUrl);
-        } catch {
+      for (let i = 0; i < selectedIds.length; i++) {
+        const tokenId = selectedIds[i];
+        let meta = await fetchMetadata(address, tokenId, chain);
+        if (!meta?.image) {
+          console.warn(`❌ No image found for token ${tokenId}`);
           continue;
         }
 
-        const x = padding + (i % columns) * (imgSize + spacing);
-        const y = padding + Math.floor(i / columns) * (imgSize + spacing);
+        let imgUrl = meta.image.startsWith('ipfs://')
+          ? GATEWAYS.map(gw => gw + meta.image.replace('ipfs://', '')).find(async url => {
+              try {
+                const res = await fetch(url, { method: 'HEAD', timeout: 3000 });
+                return res.ok;
+              } catch { return false; }
+            })
+          : meta.image;
 
-        ctx.save();
-        roundRect(ctx, x, y, imgSize, imgSize);
-        ctx.drawImage(nftImage, x, y, imgSize, imgSize);
-        ctx.restore();
+        if (!imgUrl) continue;
+
+        try {
+          const nftImage = await loadImage(imgUrl);
+          const x = padding + (i % columns) * (imgSize + spacing);
+          const y = padding + Math.floor(i / columns) * (imgSize + spacing);
+          roundRect(ctx, x, y, imgSize, imgSize);
+          ctx.drawImage(nftImage, x, y, imgSize, imgSize);
+          ctx.restore();
+        } catch (err) {
+          console.warn(`❌ Failed to load image for token ${tokenId}:`, err.message);
+        }
       }
 
       const buffer = canvas.toBuffer('image/png');
@@ -143,6 +105,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
