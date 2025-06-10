@@ -71,25 +71,24 @@ async function handleTokenLog(client, tokenRows, log) {
 let buyLabel = '🆕 New Buy';
 try {
   const abi = ['function balanceOf(address account) view returns (uint256)'];
-  const contract = new ethers.Contract(tokenAddress, abi, getProvider());
+  const provider = getProvider();
+  const contract = new ethers.Contract(tokenAddress, abi, provider);
 
-  const balanceBN = await contract.balanceOf(toAddr);
-  const balance = parseFloat(formatUnits(balanceBN, 18));
+  // Get balance BEFORE the transaction block
+  const previousBlock = log.blockNumber - 1;
+  const prevBalanceBN = await contract.balanceOf(toAddr, { blockTag: previousBlock });
+  const prevBalance = parseFloat(formatUnits(prevBalanceBN, 18));
 
-  // Safe estimate: treat as new buyer if balance is only what they just received (±10%)
-  const lowerBound = tokenAmountRaw * 0.9;
-  const upperBound = tokenAmountRaw * 1.1;
-
-  if (balance >= lowerBound && balance <= upperBound) {
+  if (prevBalance === 0) {
     buyLabel = '🆕 New Buy';
   } else {
-    const oldBalance = Math.max(balance - tokenAmountRaw, 0.000001); // avoid divide-by-zero
-    const percentChange = ((tokenAmountRaw / oldBalance) * 100).toFixed(1);
+    const percentChange = ((tokenAmountRaw / prevBalance) * 100).toFixed(1);
     buyLabel = `🔁 Buy Added +${percentChange}%`;
   }
 } catch (err) {
-  console.warn(`⚠️ Failed to fetch balance for ${toAddr}:`, err.message);
+  console.warn(`⚠️ Failed to fetch PREVIOUS balance for ${toAddr}:`, err.message);
 }
+
 
 
 
