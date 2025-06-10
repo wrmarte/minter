@@ -1,4 +1,4 @@
-const { Contract } = require('ethers');
+const { Contract, JsonRpcProvider } = require('ethers');
 const { getProvider } = require('../utils/provider');
 const { fetchMetadata } = require('../utils/fetchMetadata');
 const { generateFlexCard } = require('../utils/canvas/flexcardRenderer');
@@ -8,14 +8,15 @@ const abi = [
   'function ownerOf(uint256 tokenId) view returns (address)'
 ];
 
+// Ethers v6: Must connect contract to a Runner (provider) for .call()
 async function fetchOwner(contractAddress, tokenId, chain) {
   try {
-    const provider = getProvider(chain);
-    const contract = new Contract(contractAddress, abi, provider);
+    const provider = getProvider(chain); // Already a JsonRpcProvider
+    const contract = new Contract(contractAddress, abi).connect(provider); // ✅ connect to runner
     const owner = await contract.ownerOf(tokenId);
     return owner;
   } catch (err) {
-    console.error('❌ Owner fetch failed:', err.message || err);
+    console.error('❌ Owner fetch failed:', err.message);
     return '0x0000000000000000000000000000000000000000';
   }
 }
