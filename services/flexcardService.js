@@ -14,17 +14,17 @@ async function fetchOwner(contractAddress, tokenId, chain) {
     const provider = getProvider(chain);
     const abi = ['function ownerOf(uint256 tokenId) view returns (address)'];
 
-    // Attach runner during creation
-    const contract = new Contract(contractAddress, abi, provider);
-    const owner = await contract.ownerOf(tokenId);
+    // 🔒 Forcibly connect the provider as runner
+    const contract = new Contract(contractAddress, abi).connect(provider);
 
+    // ✅ This now guarantees the runner supports `.call()`
+    const owner = await contract.ownerOf(tokenId);
     return owner;
   } catch (err) {
     console.error('❌ Owner fetch failed:', err.message);
     return '0x0000000000000000000000000000000000000000';
   }
 }
-
 
 
 function shortenAddress(address) {
