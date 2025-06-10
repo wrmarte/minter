@@ -1,4 +1,4 @@
-const { JsonRpcApiProvider } = require('ethers');
+const { JsonRpcProvider } = require('ethers');
 
 // 🔗 RPC Endpoints per chain
 const RPCS = {
@@ -35,7 +35,7 @@ function getProvider(chain = 'base') {
   chain = chain.toLowerCase();
 
   if (!RPCS[chain]) {
-    console.warn(`⚠️ Unknown chain requested: ${chain} — defaulting to 'base'`);
+    console.warn(`⚠️ Unknown chain requested: ${chain}, defaulting to base`);
     chain = 'base';
   }
 
@@ -43,11 +43,11 @@ function getProvider(chain = 'base') {
   const idx = rpcIndex[chain];
   const url = urls[idx];
 
-  // Rotate index for next call
+  // Rotate to the next RPC next time
   rpcIndex[chain] = (idx + 1) % urls.length;
 
-  // ✅ Ethers v6: Do NOT pass a Network object
-  return new JsonRpcApiProvider(url, CHAIN_IDS[chain]);
+  // ✅ Just pass the RPC URL and chainId (NOT a Network object or string)
+  return new JsonRpcProvider(url, CHAIN_IDS[chain]);
 }
 
 module.exports = { getProvider };
