@@ -6,8 +6,8 @@ const MORALIS_API_KEY = process.env.MORALIS_API_KEY;
 const RPCS = {
   eth: [
     `https://ethereum.rpc.moralis.io/${MORALIS_API_KEY}`,
-    `https://eth.llamarpc.com`,
-    `https://1rpc.io/eth`
+    'https://eth.llamarpc.com',
+    'https://1rpc.io/eth'
   ],
   base: [
     'https://mainnet.base.org',
@@ -23,31 +23,27 @@ const RPCS = {
 // Store current index for each chain
 const rpcIndex = { eth: 0, base: 0, ape: 0 };
 
-// Hybrid RPC rotator with error handling
+// Hybrid RPC rotator
 function getProvider(chain) {
   chain = chain.toLowerCase();
   const urls = RPCS[chain];
+
   if (!urls || urls.length === 0) {
-    throw new Error(`Unsupported chain: ${chain}`);
+    console.warn(`⚠️ Unsupported chain requested: ${chain}, defaulting to base`);
+    chain = 'base';
   }
 
-  let attempts = 0;
-  let lastError = null;
+  const url = urls[rpcIndex[chain]];
+  rpcIndex[chain] = (rpcIndex[chain] + 1) % urls.length;
 
-  while (attempts < urls.length) {
-    const url = urls[rpcIndex[chain]];
-    rpcIndex[chain] = (rpcIndex[chain] + 1) % urls.length;
-    try {
-      const provider = new JsonRpcProvider(url);
-      return provider;
-    } catch (err) {
-      console.warn(`⚠️ RPC failed for ${chain} at ${url}: ${err.message}`);
-      lastError = err;
-      attempts++;
-    }
-  }
+  const provider = new JsonRpcProvider(url);
 
-  throw lastError || new Error(`All RPCs failed for chain: ${chain}`);
+  // Patch: auto-skip network mismatch errors
+  provider._networkPromise.catch(err => {
+    console.warn(`⚠️ Network detection failed for ${chain}: ${err.message}`);
+  });
+
+  return provider;
 }
 
 module.exports = { getProvider };
