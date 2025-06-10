@@ -12,12 +12,14 @@ const abi = [
 async function fetchOwner(contractAddress, tokenId, chain) {
   try {
     const provider = getProvider(chain);
-    const contract = new Contract(contractAddress, [
-      'function ownerOf(uint256 tokenId) view returns (address)'
-    ]);
 
-    contract.connect(provider);             // Connect the provider
-    contract.runner = provider;            // 🧠 FORCE runner assignment
+    // ✅ Directly assign runner inside the constructor
+    const contract = new Contract(
+      contractAddress,
+      ['function ownerOf(uint256 tokenId) view returns (address)'],
+      provider // This sets the runner correctly in v6
+    );
+
     const owner = await contract.ownerOf(tokenId);
     return owner;
   } catch (err) {
@@ -25,6 +27,7 @@ async function fetchOwner(contractAddress, tokenId, chain) {
     return '0x0000000000000000000000000000000000000000';
   }
 }
+
 
 
 function shortenAddress(address) {
