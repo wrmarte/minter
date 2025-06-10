@@ -12,8 +12,12 @@ async function fetchOwner(contractAddress, tokenId, chain) {
   try {
     const provider = getProvider(chain);
 
-    // Forcefully bind a runner for read calls (this fixes the .call error)
-    const contract = new Contract(contractAddress, abi).connect(provider);
+    // 🔍 Optional: validate the provider is working and matches the correct chain
+    const network = await provider.getNetwork();
+    console.log(`🔍 Provider for ${chain.toUpperCase()}: ${provider.connection.url} | Chain ID: ${network.chainId}`);
+
+    // ✅ Use .connectRunner to attach a call-capable runner
+    const contract = new Contract(contractAddress, abi).connectRunner(provider);
 
     const owner = await contract.ownerOf(tokenId);
     return owner;
@@ -22,6 +26,7 @@ async function fetchOwner(contractAddress, tokenId, chain) {
     return '0x0000000000000000000000000000000000000000';
   }
 }
+
 
 
 function shortenAddress(address) {
