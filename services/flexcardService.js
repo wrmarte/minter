@@ -11,10 +11,17 @@ const abi = [
 // ✅ Correct .connect() and .staticCall() for Ethers v6
 async function fetchOwner(contractAddress, tokenId, chain) {
   try {
-    const provider = getProvider(chain);
+    const provider = getProvider(chain); // should be JsonRpcProvider
+    const abi = [
+      'function ownerOf(uint256 tokenId) view returns (address)'
+    ];
+
+    // ✅ Ethers v6: attach provider as runner
     const contract = new Contract(contractAddress, abi).connect(provider);
 
+    // ✅ Use staticCall for view function
     const owner = await contract.ownerOf.staticCall(tokenId);
+
     return owner;
   } catch (err) {
     console.error('❌ Owner fetch failed:', err.message);
