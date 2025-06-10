@@ -8,13 +8,11 @@ const abi = [
   'function ownerOf(uint256 tokenId) view returns (address)'
 ];
 
-// ✅ Ethers v6-compatible fetch using staticCall
+// ✅ Correct .connect() and .staticCall() for Ethers v6
 async function fetchOwner(contractAddress, tokenId, chain) {
   try {
     const provider = getProvider(chain);
-    const contract = new Contract(contractAddress, [
-      'function ownerOf(uint256 tokenId) view returns (address)'
-    ]).connect(provider); // ⬅️ Connect here!
+    const contract = new Contract(contractAddress, abi).connect(provider);
 
     const owner = await contract.ownerOf.staticCall(tokenId);
     return owner;
@@ -64,6 +62,7 @@ async function buildFlexCard(contractAddress, tokenId, collectionName, chain) {
 }
 
 module.exports = { buildFlexCard };
+
 
 
 
