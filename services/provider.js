@@ -48,12 +48,14 @@ function getProvider(chain = 'base') {
   // 🔁 Rotate index for next call
   rpcIndex[chain] = (idx + 1) % urls.length;
 
-  // 🔧 Return resilient provider
+  // 🔧 Return working JsonRpcProvider (no 3rd arg for Ethers v6!)
   const network = new Network(chain, CHAIN_IDS[chain]);
-  return new JsonRpcProvider(url, network, { staticNetwork: true });
+  console.log(`🔌 Using provider for ${chain.toUpperCase()}: ${url}`);
+  return new JsonRpcProvider(url, network);
 }
 
 module.exports = { getProvider };
+
 
 
 
