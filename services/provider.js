@@ -1,5 +1,6 @@
 const { JsonRpcApiProvider } = require('ethers');
 
+// 🔗 Valid RPC endpoints
 const RPCS = {
   eth: [
     'https://eth.llamarpc.com',
@@ -17,6 +18,7 @@ const RPCS = {
   ]
 };
 
+// 🆔 Valid chain IDs
 const CHAIN_IDS = {
   eth: 1,
   base: 8453,
@@ -29,11 +31,12 @@ const rpcIndex = {
   ape: 0
 };
 
+// ✅ Correct v6 provider creation
 function getProvider(chain = 'base') {
   chain = chain.toLowerCase();
 
   if (!RPCS[chain]) {
-    console.warn(`⚠️ Unknown chain requested: ${chain} — defaulting to 'base'`);
+    console.warn(`⚠️ Unknown chain requested: ${chain}, defaulting to base`);
     chain = 'base';
   }
 
