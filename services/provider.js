@@ -1,43 +1,29 @@
+// utils/provider.js
 const { JsonRpcProvider } = require('ethers');
 
-const RPCS = {
-  base: [
-    'https://mainnet.base.org',
-    'https://base.publicnode.com',
-    'https://1rpc.io/base',
-    'https://base.llamarpc.com'
-  ],
-  eth: [
-    'https://eth.llamarpc.com',
-    'https://1rpc.io/eth'
-  ],
-  ape: [
-    'https://apechain.drpc.org'
-    
-  ]
-};
+const BASE_RPC_URLS = [
+  'https://mainnet.base.org',
+  'https://base.publicnode.com',
+  'https://1rpc.io/base',
+  'https://base.llamarpc.com'
+];
 
-const rpcIndex = { base: 0, eth: 0, ape: 0 };
+let currentIndex = 0;
 
-function getProvider(chain = 'base') {
-  chain = chain.toLowerCase();
-  if (!RPCS[chain]) chain = 'base';
+function getProvider() {
+  const url = BASE_RPC_URLS[currentIndex];
+  currentIndex = (currentIndex + 1) % BASE_RPC_URLS.length;
 
-  const urls = RPCS[chain];
-  const idx = rpcIndex[chain];
-  const url = urls[idx];
-  rpcIndex[chain] = (idx + 1) % urls.length;
+  if (process.env.DEBUG_PROVIDERS === 'true') {
+    console.log(`🔌 Using provider for BASE: ${url}`);
+  }
 
- if (process.env.DEBUG_PROVIDERS === 'true') {
-  console.log(`🔌 Using provider for ${chain.toUpperCase()}: ${url}`);
-}
-
-
-  // Pass URL directly (Ethers v6 will auto-detect the network)
+  // JsonRpcProvider will auto-detect the network, no need to pass chain ID
   return new JsonRpcProvider(url);
 }
 
 module.exports = { getProvider };
+
 
 
 
