@@ -9,6 +9,7 @@ const RPCS = {
   ]
 };
 
+
 const rpcIndex = { base: 0 };
 
 function getProvider(chain = 'base') {
