@@ -13,7 +13,6 @@ const ROUTERS = [
   '0x95ebfcb1c6b345fda69cf56c51e30421e5a35aec'
 ];
 
-
 const seenTx = new Set();
 
 module.exports = async function processUnifiedBlock(client, fromBlock, toBlock) {
@@ -51,9 +50,8 @@ async function handleTokenLog(client, tokenRows, log) {
   const fromAddr = from.toLowerCase();
   const toAddr = to.toLowerCase();
 
-  // ✅ Filtering
-  if (!ROUTERS.includes(fromAddr)) return; // must come from router (buy)
-  if (ROUTERS.includes(toAddr)) return;    // skip LP adds
+  if (!ROUTERS.includes(fromAddr)) return;
+  if (ROUTERS.includes(toAddr)) return;
   if (toAddr === '0x0000000000000000000000000000000000000000') return;
   if (toAddr === '0x000000000000000000000000000000000000dEaD') return;
   if (toAddr === '0xdead000000000000000042069420694206942069') return;
@@ -69,13 +67,11 @@ async function handleTokenLog(client, tokenRows, log) {
 
   const tokenAddress = log.address.toLowerCase();
 
-  // 🔍 Real on-chain buyer balance check
+  // ✅ Real on-chain balance check
   let buyLabel = '🆕 New Buy';
   try {
-    const erc20 = new Interface([
-      'function balanceOf(address account) view returns (uint256)'
-    ]);
-    const contract = new ethers.Contract(tokenAddress, erc20, getProvider());
+    const abi = ['function balanceOf(address account) view returns (uint256)'];
+    const contract = new ethers.Contract(tokenAddress, abi, getProvider());
 
     const prevBalance = await contract.balanceOf(toAddr);
     const prevBalanceParsed = parseFloat(formatUnits(prevBalance, 18));
