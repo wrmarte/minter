@@ -1,43 +1,34 @@
-const { JsonRpcProvider } = require('ethers');
+const { ethers } = require('ethers');
 
-// ✅ Full list of Base RPC endpoints for rotation
-const rpcList = [
-  'https://mainnet.base.org',
-  'https://base.publicnode.com',
-  'https://1rpc.io/base',
-  'https://base.llamarpc.com',
-  'https://base.meowrpc.com'
-];
+const RPCS = {
+  base: [
+    'https://mainnet.base.org',
+    'https://base.publicnode.com',
+    'https://1rpc.io/base',
+    'https://base.llamarpc.com'
+  ]
+};
 
-// ✅ Provider state
-let currentIndex = 0;
-let provider = new JsonRpcProvider(rpcList[currentIndex]);
+const rpcIndex = { base: 0 };
 
-// ✅ Expose active provider
-function getProvider() {
-  return provider;
-}
+function getProvider(chain = 'base') {
+  chain = chain.toLowerCase();
+  if (!RPCS[chain]) chain = 'base';
 
-// ✅ Rotate RPC if failure happens
-function rotateProvider() {
-  currentIndex = (currentIndex + 1) % rpcList.length;
-  provider = new JsonRpcProvider(rpcList[currentIndex]);
-  console.warn(`⚠️ RPC rotated → Now using: ${rpcList[currentIndex]}`);
-}
+  const urls = RPCS[chain];
+  const idx = rpcIndex[chain];
+  const url = urls[idx];
+  rpcIndex[chain] = (idx + 1) % urls.length;
 
-// ✅ Automatic failover wrapper
-async function safeRpcCall(callFn, retries = rpcList.length) {
-  for (let attempt = 0; attempt < retries; attempt++) {
-    try {
-      return await callFn(provider);
-    } catch (err) {
-      console.warn(`⚠️ RPC error: ${err.code || err.message}`);
-      rotateProvider();
-    }
+  if (process.env.DEBUG_PROVIDERS === 'true') {
+    console.log(`🔌 Using provider for ${chain.toUpperCase()}: ${url}`);
   }
-  throw new Error('❌ All RPC endpoints failed.');
+
+  // ✅ Correctly use Ethers v6 runtime class
+  return new ethers.JsonRpcProvider(url);
 }
 
-module.exports = { getProvider, rotateProvider, safeRpcCall };
+module.exports = { getProvider };
+
 
 
