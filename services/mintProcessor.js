@@ -2,7 +2,7 @@ const { Interface, Contract, id, ZeroAddress, ethers } = require('ethers');
 const fetch = require('node-fetch');
 const { getRealDexPriceForToken, getEthPriceFromToken } = require('./price');
 const { shortWalletLink, loadJson, saveJson, seenPath, seenSalesPath } = require('../utils/helpers');
-const { getProvider } = require('./provider');
+const { getProvider } = require('./providerM');
 
 const TOKEN_NAME_TO_ADDRESS = {
   'ADRIAN': '0x7e99075ce287f1cf8cbcaaa6a1c7894e404fd7ea'
