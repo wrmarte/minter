@@ -1,4 +1,4 @@
-const { JsonRpcProvider } = require('ethers');
+const { ethers } = require('ethers');
 
 const RPCS = {
   base: [
@@ -12,16 +12,20 @@ const RPCS = {
 const rpcIndex = { base: 0 };
 
 function getProvider(chain = 'base') {
-  const urls = RPCS.base;
-  const idx = rpcIndex.base;
+  chain = chain.toLowerCase();
+  if (!RPCS[chain]) chain = 'base';
+
+  const urls = RPCS[chain];
+  const idx = rpcIndex[chain];
   const url = urls[idx];
-  rpcIndex.base = (idx + 1) % urls.length;
+  rpcIndex[chain] = (idx + 1) % urls.length;
 
   if (process.env.DEBUG_PROVIDERS === 'true') {
-    console.log(`🔌 Using provider for BASE: ${url}`);
+    console.log(`🔌 Using provider for ${chain.toUpperCase()}: ${url}`);
   }
 
-  return new JsonRpcProvider(url);
+  // ✅ Correctly use Ethers v6 runtime class
+  return new ethers.JsonRpcProvider(url);
 }
 
 module.exports = { getProvider };
