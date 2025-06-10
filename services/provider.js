@@ -1,4 +1,6 @@
-const { JsonRpcProvider } = require('ethers/providers'); // 👈 Correct module for Ethers v6+
+const { JsonRpcProvider } = require('ethers');
+const { Network } = require('ethers');
+
 const networks = {
   eth: [
     'https://eth.llamarpc.com',
@@ -30,7 +32,6 @@ const rpcIndex = {
 
 function getProvider(chain = 'base') {
   chain = chain.toLowerCase();
-
   if (!networks[chain]) {
     console.warn(`⚠️ Unknown chain: ${chain}, defaulting to base`);
     chain = 'base';
@@ -42,7 +43,7 @@ function getProvider(chain = 'base') {
   rpcIndex[chain] = (index + 1) % urls.length;
 
   console.log(`🔌 Using provider for ${chain.toUpperCase()}: ${url}`);
-  return new JsonRpcProvider(url); // ✅ No chainId, let it auto-detect
+  return new JsonRpcProvider(url, chainIds[chain]); // ✅ use chainId directly
 }
 
 module.exports = { getProvider };
