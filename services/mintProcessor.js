@@ -3,6 +3,7 @@ const fetch = require('node-fetch');
 const { getRealDexPriceForToken, getEthPriceFromToken } = require('./price');
 const { shortWalletLink, loadJson, saveJson, seenPath, seenSalesPath } = require('../utils/helpers');
 const { getProvider } = require('./provider');
+const { getLogsSafe } = require('../utils/getLogsSafe');
 
 const TOKEN_NAME_TO_ADDRESS = {
   'ADRIAN': '0x7e99075ce287f1cf8cbcaaa6a1c7894e404fd7ea'
@@ -27,6 +28,7 @@ async function trackAllContracts(client) {
     launchContractListener(client, addressKey, contractListeners[addressKey]);
   }
 }
+
 function launchContractListener(client, addressKey, contractRows) {
   const firstRow = contractRows[0];
   const { name, address, network } = firstRow;
@@ -57,7 +59,8 @@ function launchContractListener(client, addressKey, contractRows) {
 
   provider.on('block', async (blockNumber) => {
     try {
-      const fromBlock = Math.max(blockNumber - 20, 0);
+      const defaultWindow = chain === 'eth' ? 100 : 20;
+      const fromBlock = Math.max(blockNumber - defaultWindow, 0);
       const toBlock = blockNumber;
 
       const hexFrom = `0x${fromBlock.toString(16)}`;
@@ -70,37 +73,14 @@ function launchContractListener(client, addressKey, contractRows) {
         toBlock: hexTo
       };
 
-      let logs = [];
-      try {
-        logs = await provider.send('eth_getLogs', [filter]);
-      } catch (err) {
-        const msg = err?.error?.message || err?.message || '';
-        const isRangeError = msg.includes('range') || msg.includes('block') || msg.includes('coalesce') || msg.includes('invalid');
-
-        if (isRangeError) {
-          console.warn(`[${name}] Block range too large or invalid — fallback to single-block mode`);
-          try {
-            const singleBlockHex = `0x${blockNumber.toString(16)}`;
-            logs = await provider.send('eth_getLogs', [{
-              ...filter,
-              fromBlock: singleBlockHex,
-              toBlock: singleBlockHex
-            }]);
-          } catch (err2) {
-            console.warn(`[${name}] Failed even in single-block mode: ${err2.message}`);
-            return;
-          }
-        } else {
-          console.warn(`[${name}] Unexpected error: ${msg}`);
-          return;
-        }
-      }
+      const logs = await getLogsSafe(provider, filter, name, chain);
 
       for (const log of logs) {
         let parsed;
         try { parsed = iface.parseLog(log); } catch { continue; }
         const { from, to, tokenId } = parsed.args;
         const tokenIdStr = tokenId.toString();
+
         const allChannelIds = [...new Set(contractRows.flatMap(row => [row.channel_ids].flat()))];
 
         if (from === ZeroAddress) {
@@ -123,6 +103,14 @@ function launchContractListener(client, addressKey, contractRows) {
     }
   });
 }
+
+// handleMint and handleSale remain unchanged from your last working version
+
+module.exports = {
+  trackAllContracts,
+  contractListeners
+};
+
 async function handleMint(client, contractRow, contract, tokenId, to, channel_ids) {
   const { name, mint_price, mint_token, mint_token_symbol } = contractRow;
 
