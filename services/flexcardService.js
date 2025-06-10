@@ -1,4 +1,4 @@
-const { Contract, JsonRpcProvider } = require('ethers');
+const { Contract } = require('ethers');
 const { getProvider } = require('../utils/provider');
 const { fetchMetadata } = require('../utils/fetchMetadata');
 const { generateFlexCard } = require('../utils/canvas/flexcardRenderer');
@@ -8,21 +8,19 @@ const abi = [
   'function ownerOf(uint256 tokenId) view returns (address)'
 ];
 
+// ✅ Ethers v6-compatible fetch using staticCall
 async function fetchOwner(contractAddress, tokenId, chain) {
   try {
     const provider = getProvider(chain);
-
-    // Ethers v6 requires ContractRunner or callStatic
     const contract = new Contract(contractAddress, abi, provider);
-    const owner = await contract.ownerOf.staticCall(tokenId);
-
+    
+    const owner = await contract.ownerOf.staticCall(tokenId); // <-- 🔥 THIS is v6-compatible
     return owner;
   } catch (err) {
     console.error('❌ Owner fetch failed:', err.message);
     return '0x0000000000000000000000000000000000000000';
   }
 }
-
 
 function shortenAddress(address) {
   if (!address || address.length < 10) return address || 'Unknown';
@@ -64,6 +62,7 @@ async function buildFlexCard(contractAddress, tokenId, collectionName, chain) {
 }
 
 module.exports = { buildFlexCard };
+
 
 
 
