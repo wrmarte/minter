@@ -1,4 +1,4 @@
-const { Contract } = require('ethers');
+const { Contract, Interface } = require('ethers');
 const { getProvider } = require('../utils/provider');
 const { fetchMetadata } = require('../utils/fetchMetadata');
 const { generateFlexCard } = require('../utils/canvas/flexcardRenderer');
@@ -9,7 +9,6 @@ const abi = [
 ];
 
 // ✅ Smart validation to ensure provider supports calls
-const { Contract, Interface } = require('ethers');
 
 async function fetchOwner(contractAddress, tokenId, chain) {
   try {
