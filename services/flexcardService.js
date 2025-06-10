@@ -1,4 +1,4 @@
-const { Contract, Interface } = require('ethers');
+const { Interface } = require('ethers');
 const { getProvider } = require('../utils/provider');
 const { fetchMetadata } = require('../utils/fetchMetadata');
 const { generateFlexCard } = require('../utils/canvas/flexcardRenderer');
@@ -14,15 +14,13 @@ async function fetchOwner(contractAddress, tokenId, chain) {
   try {
     const provider = getProvider(chain);
 
-    // Create interface manually
     const iface = new Interface(['function ownerOf(uint256 tokenId) view returns (address)']);
     const data = iface.encodeFunctionData('ownerOf', [tokenId]);
 
-    // Manual raw call
     const result = await provider.send('eth_call', [
       {
         to: contractAddress,
-        data: data
+        data
       },
       'latest'
     ]);
