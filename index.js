@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 
 // Load helper services
-require('./services/provider');
+require('./services/providerM');
 require('./services/logScanner');
 
 console.log("👀 Booting from:", __dirname);
