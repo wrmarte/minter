@@ -1,4 +1,4 @@
-const { Contract } = require('ethers'); // this is okay
+const { Contract } = require('ethers');
 const { getProvider } = require('../utils/provider');
 const { fetchMetadata } = require('../utils/fetchMetadata');
 const { generateFlexCard } = require('../utils/canvas/flexcardRenderer');
@@ -8,21 +8,24 @@ const abi = [
   'function ownerOf(uint256 tokenId) view returns (address)'
 ];
 
+// ✅ Robust owner fetch with provider validation
 async function fetchOwner(contractAddress, tokenId, chain) {
   try {
     const provider = getProvider(chain);
 
-    // 🧠 REAL FIX: explicitly set provider as runner
-    const contract = new Contract(contractAddress, abi);
-    const result = await contract.connect(provider).ownerOf(tokenId); // ✅ runner set here
+    // Validate basic call capability
+    if (typeof provider.call !== 'function' && typeof provider.send !== 'function') {
+      throw new Error('❌ Provider does not support contract calls');
+    }
 
-    return result;
+    const contract = new Contract(contractAddress, abi, provider);
+    const owner = await contract.ownerOf(tokenId);
+    return owner;
   } catch (err) {
-    console.error('❌ Owner fetch failed:', err.message);
+    console.error('❌ Owner fetch failed:', err.message || err);
     return '0x0000000000000000000000000000000000000000';
   }
 }
-
 
 function shortenAddress(address) {
   if (!address || address.length < 10) return address || 'Unknown';
@@ -47,7 +50,6 @@ async function buildFlexCard(contractAddress, tokenId, collectionName, chain) {
     : ['No traits found'];
 
   const safeCollectionName = collectionName || metadata?.name || "NFT";
-
   const openseaUrl = chain === 'eth'
     ? `https://opensea.io/assets/ethereum/${contractAddress}/${tokenId}`
     : `https://opensea.io/assets/${chain}/${contractAddress}/${tokenId}`;
@@ -65,6 +67,7 @@ async function buildFlexCard(contractAddress, tokenId, collectionName, chain) {
 }
 
 module.exports = { buildFlexCard };
+
 
 
 
