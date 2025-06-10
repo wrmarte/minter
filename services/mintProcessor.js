@@ -1,3 +1,4 @@
+// PART 1
 const { Interface, Contract, id, ZeroAddress, ethers } = require('ethers');
 const fetch = require('node-fetch');
 const { getRealDexPriceForToken, getEthPriceFromToken } = require('./price');
@@ -59,7 +60,8 @@ function launchContractListener(client, addressKey, contractRows) {
 
   provider.on('block', async (blockNumber) => {
     try {
-      const fromBlock = Math.max(blockNumber - 20, 0);
+      const defaultWindow = chain === 'eth' ? 100 : 20;
+      const fromBlock = Math.max(blockNumber - defaultWindow, 0);
       const toBlock = blockNumber;
 
       const hexFrom = `0x${fromBlock.toString(16)}`;
@@ -77,7 +79,6 @@ function launchContractListener(client, addressKey, contractRows) {
       for (const log of logs) {
         let parsed;
         try { parsed = iface.parseLog(log); } catch { continue; }
-
         const { from, to, tokenId } = parsed.args;
         const tokenIdStr = tokenId.toString();
 
@@ -103,12 +104,52 @@ function launchContractListener(client, addressKey, contractRows) {
     }
   });
 }
+  provider.on('block', async (blockNumber) => {
+    try {
+      const defaultWindow = chain === 'eth' ? 100 : 20;
+      const fromBlock = Math.max(blockNumber - defaultWindow, 0);
+      const toBlock = blockNumber;
 
-module.exports = {
-  trackAllContracts,
-  contractListeners
-};
+      const hexFrom = `0x${fromBlock.toString(16)}`;
+      const hexTo = `0x${toBlock.toString(16)}`;
 
+      const filter = {
+        address,
+        topics: [id('Transfer(address,address,uint256)')],
+        fromBlock: hexFrom,
+        toBlock: hexTo
+      };
+
+      const logs = await getLogsSafe(provider, filter, name, chain);
+
+      for (const log of logs) {
+        let parsed;
+        try { parsed = iface.parseLog(log); } catch { continue; }
+        const { from, to, tokenId } = parsed.args;
+        const tokenIdStr = tokenId.toString();
+
+        const allChannelIds = [...new Set(contractRows.flatMap(row => [row.channel_ids].flat()))];
+
+        if (from === ZeroAddress) {
+          if (seenTokenIds.has(tokenIdStr)) continue;
+          seenTokenIds.add(tokenIdStr);
+          await handleMint(client, firstRow, contract, tokenId, to, allChannelIds);
+        } else {
+          if (seenSales.has(tokenIdStr)) continue;
+          seenSales.add(tokenIdStr);
+          await handleSale(client, firstRow, contract, tokenId, from, to, log.transactionHash, allChannelIds);
+        }
+      }
+
+      if (blockNumber % 10 === 0) {
+        saveJson(seenPath(name), [...seenTokenIds]);
+        saveJson(seenSalesPath(name), [...seenSales]);
+      }
+    } catch (err) {
+      console.warn(`[${name}] Block processing error: ${err.message}`);
+    }
+  });
+}
 async function handleMint(client, contractRow, contract, tokenId, to, channel_ids) {
   const { name, mint_price, mint_token, mint_token_symbol } = contractRow;
 
@@ -123,9 +164,8 @@ async function handleMint(client, contractRow, contract, tokenId, to, channel_id
   } catch {}
 
   const total = Number(mint_price);
-  let tokenAddr = mint_token?.toLowerCase() || '';
-
-  if (TOKEN_NAME_TO_ADDRESS[mint_token_symbol?.toUpperCase()]) {
+  let tokenAddr = mint_token.toLowerCase();
+  if (TOKEN_NAME_TO_ADDRESS[mint_token_symbol.toUpperCase()]) {
     tokenAddr = TOKEN_NAME_TO_ADDRESS[mint_token_symbol.toUpperCase()].toLowerCase();
   }
 
@@ -230,8 +270,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
   }
 }
 
-
-
-
-
-
+module.exports = {
+  trackAllContracts,
+  contractListeners
+};
