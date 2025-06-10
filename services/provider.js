@@ -1,19 +1,19 @@
-const { JsonRpcProvider } = require('ethers/providers'); // ✅ Use providers subpath
+const { JsonRpcProvider, Network } = require('ethers');
 
 const RPCS = {
   eth: [
     'https://eth.llamarpc.com',
-    'https://1rpc.io/eth',
+    'https://1rpc.io/eth'
   ],
   base: [
     'https://mainnet.base.org',
     'https://base.publicnode.com',
     'https://1rpc.io/base',
-    'https://base.llamarpc.com',
+    'https://base.llamarpc.com'
   ],
   ape: [
     'https://apechain.drpc.org',
-    'https://rpc.apechain.com',
+    'https://rpc.apechain.com'
   ]
 };
 
@@ -45,10 +45,14 @@ function getProvider(chain = 'base') {
   const chainId = CHAIN_IDS[chain];
   console.log(`🔌 Using provider for ${chain.toUpperCase()}: ${url}`);
 
-  return new JsonRpcProvider(url, chainId); // ✅ WORKS in ethers 6+
+  // ✅ FIX: Manually construct Network object (ethers 6+ requirement)
+  const network = Network.from(chainId);
+
+  return new JsonRpcProvider(url, network);
 }
 
 module.exports = { getProvider };
+
 
 
 
