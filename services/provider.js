@@ -28,7 +28,10 @@ function getProvider(chain = 'base') {
   const url = urls[idx];
   rpcIndex[chain] = (idx + 1) % urls.length;
 
+ if (process.env.DEBUG_PROVIDERS === 'true') {
   console.log(`🔌 Using provider for ${chain.toUpperCase()}: ${url}`);
+}
+
 
   // Pass URL directly (Ethers v6 will auto-detect the network)
   return new JsonRpcProvider(url);
