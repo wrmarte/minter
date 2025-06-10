@@ -1,4 +1,5 @@
-const { Contract, JsonRpcProvider } = require('ethers');
+// ✅ flexcardService.js (Base only, patched & working)
+const { Contract } = require('ethers');
 const { getProvider } = require('../utils/provider');
 const { fetchMetadata } = require('../utils/fetchMetadata');
 const { generateFlexCard } = require('../utils/canvas/flexcardRenderer');
@@ -8,16 +9,10 @@ const abi = [
   'function ownerOf(uint256 tokenId) view returns (address)'
 ];
 
-// Ethers v6: Must connect contract to a Runner (provider) for .call()
-async function fetchOwner(contractAddress, tokenId, chain) {
+async function fetchOwner(contractAddress, tokenId) {
   try {
-    const provider = getProvider(chain);
-    const abi = ['function ownerOf(uint256 tokenId) view returns (address)'];
-
-    // 🔒 Forcibly connect the provider as runner
-    const contract = new Contract(contractAddress, abi).connect(provider);
-
-    // ✅ This now guarantees the runner supports `.call()`
+    const provider = getProvider('base');
+    const contract = new Contract(contractAddress, abi, provider);
     const owner = await contract.ownerOf(tokenId);
     return owner;
   } catch (err) {
@@ -26,15 +21,15 @@ async function fetchOwner(contractAddress, tokenId, chain) {
   }
 }
 
-
 function shortenAddress(address) {
   if (!address || address.length < 10) return address || 'Unknown';
   return `${address.slice(0, 6)}...${address.slice(-4)}`;
 }
 
-async function buildFlexCard(contractAddress, tokenId, collectionName, chain) {
+async function buildFlexCard(contractAddress, tokenId, collectionName) {
+  const chain = 'base';
   const metadata = await fetchMetadata(contractAddress, tokenId, chain);
-  const owner = await fetchOwner(contractAddress, tokenId, chain);
+  const owner = await fetchOwner(contractAddress, tokenId);
   const ownerDisplay = shortenAddress(owner);
 
   let nftImageUrl = metadata?.image || null;
@@ -50,9 +45,7 @@ async function buildFlexCard(contractAddress, tokenId, collectionName, chain) {
     : ['No traits found'];
 
   const safeCollectionName = collectionName || metadata?.name || "NFT";
-  const openseaUrl = chain === 'eth'
-    ? `https://opensea.io/assets/ethereum/${contractAddress}/${tokenId}`
-    : `https://opensea.io/assets/${chain}/${contractAddress}/${tokenId}`;
+  const openseaUrl = `https://opensea.io/assets/base/${contractAddress}/${tokenId}`;
 
   const imageBuffer = await generateFlexCard({
     nftImageUrl,
@@ -67,6 +60,7 @@ async function buildFlexCard(contractAddress, tokenId, collectionName, chain) {
 }
 
 module.exports = { buildFlexCard };
+
 
 
 
