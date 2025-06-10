@@ -12,16 +12,17 @@ async function fetchOwner(contractAddress, tokenId, chain) {
   try {
     const provider = getProvider(chain);
 
-    // ✅ Connect contract with provider that supports .call()
-    const contract = new Contract(contractAddress, abi, provider);
-    const owner = await contract.ownerOf(tokenId);
+    // Forcefully bind a runner for read calls (this fixes the .call error)
+    const contract = new Contract(contractAddress, abi).connect(provider);
 
+    const owner = await contract.ownerOf(tokenId);
     return owner;
   } catch (err) {
     console.error('❌ Owner fetch failed:', err);
     return '0x0000000000000000000000000000000000000000';
   }
 }
+
 
 function shortenAddress(address) {
   if (!address || address === '0x0000000000000000000000000000000000000000') return 'Unknown';
