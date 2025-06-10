@@ -1,4 +1,4 @@
-const { Interface } = require('ethers');
+const { Contract, JsonRpcProvider } = require('ethers');
 const { getProvider } = require('../utils/provider');
 const { fetchMetadata } = require('../utils/fetchMetadata');
 const { generateFlexCard } = require('../utils/canvas/flexcardRenderer');
@@ -8,30 +8,21 @@ const abi = [
   'function ownerOf(uint256 tokenId) view returns (address)'
 ];
 
-// ✅ Smart validation to ensure provider supports calls
-
 async function fetchOwner(contractAddress, tokenId, chain) {
   try {
     const provider = getProvider(chain);
 
-    const iface = new Interface(['function ownerOf(uint256 tokenId) view returns (address)']);
-    const data = iface.encodeFunctionData('ownerOf', [tokenId]);
+    // Ethers v6 requires ContractRunner or callStatic
+    const contract = new Contract(contractAddress, abi, provider);
+    const owner = await contract.ownerOf.staticCall(tokenId);
 
-    const result = await provider.send('eth_call', [
-      {
-        to: contractAddress,
-        data
-      },
-      'latest'
-    ]);
-
-    const [owner] = iface.decodeFunctionResult('ownerOf', result);
     return owner;
   } catch (err) {
     console.error('❌ Owner fetch failed:', err.message);
     return '0x0000000000000000000000000000000000000000';
   }
 }
+
 
 function shortenAddress(address) {
   if (!address || address.length < 10) return address || 'Unknown';
