@@ -3,7 +3,6 @@ const fetch = require('node-fetch');
 const { getRealDexPriceForToken, getEthPriceFromToken } = require('./price');
 const { shortWalletLink, loadJson, saveJson, seenPath, seenSalesPath } = require('../utils/helpers');
 const { getProvider } = require('./provider');
-const { getLogsSafe } = require('../utils/getLogsSafe');
 
 const TOKEN_NAME_TO_ADDRESS = {
   'ADRIAN': '0x7e99075ce287f1cf8cbcaaa6a1c7894e404fd7ea'
@@ -31,49 +30,38 @@ async function trackAllContracts(client) {
 
 function launchContractListener(client, addressKey, contractRows) {
   const firstRow = contractRows[0];
-  const { name, address, network } = firstRow;
-  const chain = (network || 'base').toLowerCase();
+  const { name, address } = firstRow;
 
-  const provider = getProvider(chain);
   const abi = [
     'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
     'function tokenURI(uint256 tokenId) view returns (string)'
   ];
   const iface = new Interface(abi);
-  const contract = new Contract(address, abi, provider);
-
-  if (chain === 'eth') {
-    console.log(`[${name}] ETH tracking hybridized — skipping block listener.`);
-    return;
-  }
+  const contract = new Contract(address, abi, getProvider());
 
   let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
   let seenSales = new Set(loadJson(seenSalesPath(name)) || []);
 
   const listenerKey = `${addressKey}_mint_listener`;
-  if (provider[listenerKey]) {
+  if (getProvider()[listenerKey]) {
     console.log(`[${name}] Listener already active — skipping duplicate`);
     return;
   }
-  provider[listenerKey] = true;
+  getProvider()[listenerKey] = true;
 
-  provider.on('block', async (blockNumber) => {
+  getProvider().on('block', async (blockNumber) => {
     try {
-      const defaultWindow = chain === 'eth' ? 100 : 20;
-      const fromBlock = Math.max(blockNumber - defaultWindow, 0);
+      const fromBlock = Math.max(blockNumber - 5, 0);
       const toBlock = blockNumber;
-
-      const hexFrom = `0x${fromBlock.toString(16)}`;
-      const hexTo = `0x${toBlock.toString(16)}`;
 
       const filter = {
         address,
         topics: [id('Transfer(address,address,uint256)')],
-        fromBlock: hexFrom,
-        toBlock: hexTo
+        fromBlock,
+        toBlock
       };
 
-      const logs = await getLogsSafe(provider, filter, name, chain);
+      const logs = await getProvider().getLogs(filter);
 
       for (const log of logs) {
         let parsed;
@@ -81,15 +69,22 @@ function launchContractListener(client, addressKey, contractRows) {
         const { from, to, tokenId } = parsed.args;
         const tokenIdStr = tokenId.toString();
 
-        const allChannelIds = [...new Set(contractRows.flatMap(row => [row.channel_ids].flat()))];
-
         if (from === ZeroAddress) {
           if (seenTokenIds.has(tokenIdStr)) continue;
           seenTokenIds.add(tokenIdStr);
+
+          // ✅ Deduplicate all channel_ids across all contractRows BEFORE calling handleMint
+          const allChannelIds = [
+            ...new Set(contractRows.flatMap(row => [row.channel_ids].flat()))
+          ];
           await handleMint(client, firstRow, contract, tokenId, to, allChannelIds);
         } else {
           if (seenSales.has(tokenIdStr)) continue;
           seenSales.add(tokenIdStr);
+
+          const allChannelIds = [
+            ...new Set(contractRows.flatMap(row => [row.channel_ids].flat()))
+          ];
           await handleSale(client, firstRow, contract, tokenId, from, to, log.transactionHash, allChannelIds);
         }
       }
@@ -163,8 +158,8 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
 
   let receipt, tx;
   try {
-    receipt = await contract.provider.getTransactionReceipt(txHash);
-    tx = await contract.provider.getTransaction(txHash);
+    receipt = await getProvider().getTransactionReceipt(txHash);
+    tx = await getProvider().getTransaction(txHash);
     if (!receipt || !tx) return;
   } catch { return; }
 
@@ -226,6 +221,14 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
 
 module.exports = {
   trackAllContracts,
-  contractListeners
+  contractListeners // <-- EXPORT LISTENERS FOR STATUS MONITOR
 };
+
+
+
+
+
+
+
+
 
