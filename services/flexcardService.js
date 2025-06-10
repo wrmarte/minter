@@ -8,18 +8,12 @@ const abi = [
   'function ownerOf(uint256 tokenId) view returns (address)'
 ];
 
-// ✅ Correct .connect() and .staticCall() for Ethers v6
+// ✅ Fetch owner using .connect(provider) and .staticCall
 async function fetchOwner(contractAddress, tokenId, chain) {
   try {
-    const provider = getProvider(chain); // should be JsonRpcProvider
-    const abi = [
-      'function ownerOf(uint256 tokenId) view returns (address)'
-    ];
+    const provider = getProvider(chain);
 
-    // ✅ Ethers v6: attach provider as runner
     const contract = new Contract(contractAddress, abi).connect(provider);
-
-    // ✅ Use staticCall for view function
     const owner = await contract.ownerOf.staticCall(tokenId);
 
     return owner;
@@ -52,6 +46,7 @@ async function buildFlexCard(contractAddress, tokenId, collectionName, chain) {
     : ['No traits found'];
 
   const safeCollectionName = collectionName || metadata?.name || "NFT";
+
   const openseaUrl = chain === 'eth'
     ? `https://opensea.io/assets/ethereum/${contractAddress}/${tokenId}`
     : `https://opensea.io/assets/${chain}/${contractAddress}/${tokenId}`;
@@ -69,6 +64,7 @@ async function buildFlexCard(contractAddress, tokenId, collectionName, chain) {
 }
 
 module.exports = { buildFlexCard };
+
 
 
 
