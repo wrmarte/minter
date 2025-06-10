@@ -12,8 +12,8 @@ const RPCS = {
     'https://1rpc.io/eth'
   ],
   ape: [
-    'https://apechain.drpc.org',
-    'https://rpc.apechain.com'
+    'https://apechain.drpc.org'
+    
   ]
 };
 
