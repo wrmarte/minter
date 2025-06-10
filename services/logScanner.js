@@ -1,5 +1,5 @@
 const { id } = require('ethers');
-const { getProvider } = require('./provider');
+const { getProvider } = require('./providerM');
 
 const MAX_BLOCK_SPAN = 1000;
 
