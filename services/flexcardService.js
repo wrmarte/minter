@@ -12,12 +12,19 @@ async function fetchOwner(contractAddress, tokenId, chain) {
   try {
     const provider = getProvider(chain);
 
-    // 🔍 Optional validation (use internal _network for chain ID)
-    console.log(`🔍 Provider for ${chain.toUpperCase()}: ${provider.connection.url} | Chain ID: ${provider._network.chainId}`);
+    // ✅ Log which provider is being used (Ethers v6+)
+    const rpcUrl = provider?.transport?.url || '[unknown]';
+    console.log(`🔍 Using provider for ${chain.toUpperCase()}: ${rpcUrl}`);
 
-    // ✅ Required in Ethers v6 to allow read-only contract methods
+    // ✅ Validate if provider supports calling contracts
+    if (typeof provider.call !== 'function') {
+      throw new Error('❌ Provider does not support contract calls');
+    }
+
+    // ✅ Properly connect contract to the runner-compatible provider
     const contract = new Contract(contractAddress, abi).connectRunner(provider);
 
+    // ✅ Call ownerOf
     const owner = await contract.ownerOf(tokenId);
     return owner;
   } catch (err) {
@@ -25,6 +32,7 @@ async function fetchOwner(contractAddress, tokenId, chain) {
     return '0x0000000000000000000000000000000000000000';
   }
 }
+
 
 
 
