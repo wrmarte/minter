@@ -8,14 +8,13 @@ const abi = [
   'function ownerOf(uint256 tokenId) view returns (address)'
 ];
 
-// ✅ Fetch owner using .connect(provider) and .staticCall
+// ✅ Proper Ethers v6 pattern using provider as runner
 async function fetchOwner(contractAddress, tokenId, chain) {
   try {
     const provider = getProvider(chain);
 
-    const contract = new Contract(contractAddress, abi).connect(provider);
-    const owner = await contract.ownerOf.staticCall(tokenId);
-
+    const contract = new Contract(contractAddress, abi, provider); // provider is runner
+    const owner = await contract.ownerOf(tokenId);
     return owner;
   } catch (err) {
     console.error('❌ Owner fetch failed:', err.message);
@@ -64,6 +63,7 @@ async function buildFlexCard(contractAddress, tokenId, collectionName, chain) {
 }
 
 module.exports = { buildFlexCard };
+
 
 
 
