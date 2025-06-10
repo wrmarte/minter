@@ -68,22 +68,26 @@ async function handleTokenLog(client, tokenRows, log) {
   const tokenAddress = log.address.toLowerCase();
 
   // ✅ Real on-chain balance check with fallback protection
-  let buyLabel = '🆕 New Buy';
-  try {
-    const abi = ['function balanceOf(address account) view returns (uint256)'];
-    const contract = new ethers.Contract(tokenAddress, abi, getProvider());
+let buyLabel = '🆕 New Buy';
+try {
+  const abi = ['function balanceOf(address account) view returns (uint256)'];
+  const contract = new ethers.Contract(tokenAddress, abi, getProvider());
 
-    const currentBalanceBN = await contract.balanceOf(toAddr);
-    const currentBalance = parseFloat(formatUnits(currentBalanceBN, 18));
-    const oldBalance = Math.max(currentBalance - tokenAmountRaw, 0);
+  const balanceBN = await contract.balanceOf(toAddr);
+  const balanceParsed = parseFloat(formatUnits(balanceBN, 18));
 
-    if (oldBalance > 0) {
-      const percentChange = ((tokenAmountRaw / oldBalance) * 100).toFixed(1);
-      buyLabel = `🔁 Buy Added +${percentChange}%`;
-    }
-  } catch (err) {
-    console.warn(`⚠️ Failed to fetch balance for ${toAddr}:`, err.message);
+  // If wallet balance is close to or less than the amount received, it's a new buyer
+  if (balanceParsed < tokenAmountRaw * 1.05) {
+    buyLabel = '🆕 New Buy';
+  } else {
+    const oldBalance = balanceParsed - tokenAmountRaw;
+    const percentChange = ((tokenAmountRaw / oldBalance) * 100).toFixed(1);
+    buyLabel = `🔁 Buy Added +${percentChange}%`;
   }
+} catch (err) {
+  console.warn(`⚠️ Failed to fetch balance for ${toAddr}:`, err.message);
+}
+
 
   const tokenPrice = await getTokenPriceUSD(tokenAddress);
   const marketCap = await getMarketCapUSD(tokenAddress);
