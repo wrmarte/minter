@@ -1,58 +1,48 @@
-const { id } = require('ethers');
+// utils/getLogsSafe.js
+
+const { JsonRpcProvider } = require('ethers');
 
 /**
- * Attempts to fetch logs using `eth_getLogs`. If that fails due to RPC block errors,
- * it falls back to `eth_getBlockReceipts` and manually filters the logs by topic and address.
+ * Safe wrapper around provider.getLogs() with fallback to single-block query.
+ * Handles Base RPC quirks like invalid block range (-32000 error).
  */
-async function getLogsSafe(provider, filter, name = 'Unknown', chain = 'base') {
+async function getLogsSafe(provider, filter, name = 'Contract', chain = 'base') {
   try {
-    // 🔍 First attempt: standard getLogs call
-    return await provider.send('eth_getLogs', [filter]);
+    return await provider.getLogs(filter);
   } catch (err) {
-    const msg = err?.error?.message || err?.message || '';
-    console.warn(`[${name}] eth_getLogs failed: ${msg}`);
+    const isInvalidRange =
+      err.code === -32000 ||
+      err.message?.includes('invalid block range') ||
+      err.message?.includes('header not found');
 
-    const singleBlock = filter.toBlock;
-    if (typeof singleBlock !== 'string' || !singleBlock.startsWith('0x')) {
-      console.warn(`[${name}] Invalid block hex: ${singleBlock}`);
-      return [];
-    }
+    if (isInvalidRange) {
+      console.warn(`[${filter.address}] Block range too large or invalid — fallback to single-block mode`);
 
-    // 🛑 Only fallback for single-block queries
-    const fromBlock = filter.fromBlock;
-    if (fromBlock !== singleBlock) {
-      console.warn(`[${name}] Block range too large — skipping fallback.`);
-      return [];
-    }
-
-    try {
-      const receipts = await provider.send('eth_getBlockReceipts', [singleBlock]);
-      const topic0 = filter.topics?.[0]?.toLowerCase();
-      const targetAddr = filter.address?.toLowerCase();
-      const results = [];
-
-      for (const receipt of receipts) {
-        for (const log of receipt.logs) {
-          const logTopic0 = log.topics?.[0]?.toLowerCase();
-          const logAddr = log.address?.toLowerCase();
-
-          if (
-            logTopic0 === topic0 &&
-            (!targetAddr || logAddr === targetAddr)
-          ) {
-            results.push(log);
-          }
+      if (filter.fromBlock !== filter.toBlock) {
+        // Retry with single-block mode (just the 'toBlock')
+        const fallbackFilter = { ...filter, fromBlock: filter.toBlock };
+        try {
+          return await provider.getLogs(fallbackFilter);
+        } catch (e2) {
+          console.warn(
+            `[${filter.address}] Failed even in single-block mode: could not coalesce error`,
+            e2.message || e2
+          );
+          return [];
         }
       }
 
-      console.log(`[${name}] Fallback via eth_getBlockReceipts successful: ${results.length} logs`);
-      return results;
-    } catch (fallbackErr) {
-      console.warn(`[${name}] Fallback failed: ${fallbackErr.message}`);
+      console.warn(`[${filter.address}] Already single-block and still failed — giving up`);
       return [];
     }
+
+    // Unknown error — log and return empty array
+    console.warn(`[${filter.address}] Unexpected error while fetching logs:`, err.message || err);
+    return [];
   }
 }
 
 module.exports = { getLogsSafe };
+
+
 
