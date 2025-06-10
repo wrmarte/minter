@@ -52,9 +52,11 @@ async function handleTokenLog(client, tokenRows, log) {
 
   if (!ROUTERS.includes(fromAddr)) return;
   if (ROUTERS.includes(toAddr)) return;
-  if (toAddr === '0x0000000000000000000000000000000000000000') return;
-  if (toAddr === '0x000000000000000000000000000000000000dEaD') return;
-  if (toAddr === '0xdead000000000000000042069420694206942069') return;
+  if (
+    toAddr === '0x0000000000000000000000000000000000000000' ||
+    toAddr === '0x000000000000000000000000000000000000dEaD' ||
+    toAddr === '0xdead000000000000000042069420694206942069'
+  ) return;
 
   if (seenTx.has(log.transactionHash)) return;
   seenTx.add(log.transactionHash);
@@ -67,30 +69,21 @@ async function handleTokenLog(client, tokenRows, log) {
 
   const tokenAddress = log.address.toLowerCase();
 
-  // ✅ Real on-chain balance check with fallback protection
-let buyLabel = '🆕 New Buy';
-try {
-  const abi = ['function balanceOf(address account) view returns (uint256)'];
-  const provider = getProvider();
-  const contract = new ethers.Contract(tokenAddress, abi, provider);
-
-  // Get balance BEFORE the transaction block
-  const previousBlock = log.blockNumber - 1;
-  const prevBalanceBN = await contract.balanceOf(toAddr, { blockTag: previousBlock });
-  const prevBalance = parseFloat(formatUnits(prevBalanceBN, 18));
-
-  if (prevBalance === 0) {
-    buyLabel = '🆕 New Buy';
-  } else {
-    const percentChange = ((tokenAmountRaw / prevBalance) * 100).toFixed(1);
-    buyLabel = `🔁 Buy Added +${percentChange}%`;
+  // ✅ On-chain previous balance logic
+  let buyLabel = '🆕 New Buy';
+  try {
+    const abi = ['function balanceOf(address account) view returns (uint256)'];
+    const provider = getProvider();
+    const contract = new ethers.Contract(tokenAddress, abi, provider);
+    const prevBalanceBN = await contract.balanceOf(toAddr, { blockTag: log.blockNumber - 1 });
+    const prevBalance = parseFloat(formatUnits(prevBalanceBN, 18));
+    if (prevBalance > 0) {
+      const percentChange = ((tokenAmountRaw / prevBalance) * 100).toFixed(1);
+      buyLabel = `🔁 Buy Added +${percentChange}%`;
+    }
+  } catch (err) {
+    console.warn(`⚠️ Failed to fetch previous balance for ${toAddr} on ${tokenAddress}: ${err.message}`);
   }
-} catch (err) {
-  console.warn(`⚠️ Failed to fetch PREVIOUS balance for ${toAddr}:`, err.message);
-}
-
-
-
 
   const tokenPrice = await getTokenPriceUSD(tokenAddress);
   const marketCap = await getMarketCapUSD(tokenAddress);
@@ -137,7 +130,9 @@ try {
         footer: { text: 'Live on Base • Powered by PimpsDev' },
         timestamp: new Date().toISOString()
       };
-      await channel.send({ embeds: [embed] }).catch(() => {});
+      await channel.send({ embeds: [embed] }).catch(err => {
+        console.warn(`❌ Failed to send embed: ${err.message}`);
+      });
     }
   }
 }
@@ -166,6 +161,7 @@ async function getMarketCapUSD(address) {
     return parseFloat(data?.data?.attributes?.fdv_usd || data?.data?.attributes?.market_cap_usd || '0');
   } catch { return 0; }
 }
+
 
 
 
