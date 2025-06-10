@@ -1,4 +1,4 @@
-const { JsonRpcApiProvider, Network } = require('ethers');
+const { JsonRpcApiProvider } = require('ethers');
 
 // 🔗 RPC Endpoints per chain
 const RPCS = {
@@ -43,16 +43,15 @@ function getProvider(chain = 'base') {
   const idx = rpcIndex[chain];
   const url = urls[idx];
 
-  // Rotate for next call
+  // Rotate index for next call
   rpcIndex[chain] = (idx + 1) % urls.length;
 
-  const network = new Network(chain, CHAIN_IDS[chain]);
-
-  // ✅ Use JsonRpcApiProvider for Ethers v6 Runner compatibility
-  return new JsonRpcApiProvider(url, network, { staticNetwork: true });
+  // ✅ Ethers v6: Do NOT pass a Network object
+  return new JsonRpcApiProvider(url, CHAIN_IDS[chain]);
 }
 
 module.exports = { getProvider };
+
 
 
 
