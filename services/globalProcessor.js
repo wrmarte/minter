@@ -79,7 +79,7 @@ async function handleTokenLog(client, tokenRows, log) {
     const prevBalance = parseFloat(formatUnits(prevBalanceBN, 18));
     if (prevBalance > 0) {
       const percentChange = ((tokenAmountRaw / prevBalance) * 100).toFixed(1);
-      buyLabel = `🔁 Buy Added +${percentChange}%`;
+      buyLabel = `🔁 +${percentChange}%`;
     }
   } catch (err) {
     console.warn(`⚠️ Failed to fetch previous balance for ${toAddr} on ${tokenAddress}: ${err.message}`);
