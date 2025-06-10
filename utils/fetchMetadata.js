@@ -1,21 +1,30 @@
 const { Contract } = require('ethers');
 const fetch = require('node-fetch');
-const { getProvider } = require('../services/provider');  // ✅ make sure it's correct path for your structure
+const { getProvider } = require('../services/provider');
 
-const abi = [
-  'function tokenURI(uint256 tokenId) view returns (string)'
-];
+const abi = ['function tokenURI(uint256 tokenId) view returns (string)'];
 
-// Helper to sanitize IPFS links
 function fixIpfs(url) {
   if (!url) return null;
-  return url.startsWith('ipfs://')
-    ? url.replace('ipfs://', 'https://ipfs.io/ipfs/')
-    : url;
+  return url.startsWith('ipfs://') ? url.replace('ipfs://', 'https://ipfs.io/ipfs/') : url;
+}
+
+async function safeFetchJson(url) {
+  try {
+    const res = await fetch(url, { timeout: 6000 });
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      console.warn(`❌ Non-JSON content at ${url}`);
+      return null;
+    }
+    return await res.json();
+  } catch (err) {
+    console.warn(`❌ Failed JSON fetch: ${err.message}`);
+    return null;
+  }
 }
 
 async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
-  // ✅ Always sanitize chain lowercase
   chain = chain.toLowerCase();
 
   try {
@@ -23,26 +32,21 @@ async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
     const contract = new Contract(contractAddress, abi, provider);
     const tokenURI = await contract.tokenURI(tokenId);
     const metadataUrl = fixIpfs(tokenURI);
+    if (!metadataUrl) throw new Error('Empty tokenURI');
 
-    if (!metadataUrl) throw new Error('Empty tokenURI returned');
-
-    const response = await fetch(metadataUrl);
-    const metadata = await response.json();
-    if (metadata) return metadata;
+    const meta = await safeFetchJson(metadataUrl);
+    if (meta?.image) return meta;
   } catch (err) {
     console.warn(`⚠️ tokenURI fetch failed on ${chain}: ${err.message}`);
   }
 
-  // ✅ ETH-specific fallbacks (Reservoir -> Moralis)
   if (chain === 'eth') {
-    // ✅ First: Reservoir fallback
+    // Reservoir fallback
     try {
-      const reservoirUrl = `https://api.reservoir.tools/tokens/v6?tokens=${contractAddress}:${tokenId}`;
-      const headers = { 'x-api-key': process.env.RESERVOIR_API_KEY };
-
-      const res = await fetch(reservoirUrl, { headers });
+      const res = await fetch(`https://api.reservoir.tools/tokens/v6?tokens=${contractAddress}:${tokenId}`, {
+        headers: { 'x-api-key': process.env.RESERVOIR_API_KEY }
+      });
       const data = await res.json();
-
       const token = data?.tokens?.[0]?.token;
       if (token?.image) {
         return {
@@ -54,15 +58,14 @@ async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
       console.warn(`⚠️ Reservoir fallback failed: ${err.message}`);
     }
 
-    // ✅ Second: Moralis fallback
+    // Moralis fallback
     try {
-      const moralisUrl = `https://deep-index.moralis.io/api/v2.2/nft/${contractAddress}/${tokenId}?chain=eth&format=decimal`;
-      const headers = { 'X-API-Key': process.env.MORALIS_API_KEY };
-
-      const moralisRes = await fetch(moralisUrl, { headers });
-      const moralisData = await moralisRes.json();
-
-      const raw = moralisData?.metadata ? JSON.parse(moralisData.metadata) : {};
+      const res = await fetch(
+        `https://deep-index.moralis.io/api/v2.2/nft/${contractAddress}/${tokenId}?chain=eth&format=decimal`,
+        { headers: { 'X-API-Key': process.env.MORALIS_API_KEY } }
+      );
+      const data = await res.json();
+      const raw = data?.metadata ? JSON.parse(data.metadata) : {};
       if (raw?.image) {
         return {
           image: fixIpfs(raw.image),
@@ -74,9 +77,10 @@ async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
     }
   }
 
-  console.warn('⚠️ Metadata fully unavailable after all fallback attempts');
+  console.warn(`⚠️ Metadata fully unavailable after all fallback attempts`);
   return {};
 }
 
 module.exports = { fetchMetadata };
+
 
