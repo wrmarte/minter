@@ -24,9 +24,11 @@ async function fetchOwner(contractAddress, tokenId, chain) {
 }
 
 function shortenAddress(address) {
-  if (!address || address.length < 10) return address || 'Unknown';
-  return address.substring(0, 6) + '...' + address.substring(address.length - 4);
+  if (!address || address === '0x0000000000000000000000000000000000000000') return 'Unknown';
+  if (address.length !== 42) return address;
+  return `${address.slice(0, 6)}...${address.slice(-4)}`;
 }
+
 
 async function buildFlexCard(contractAddress, tokenId, collectionName, chain) {
   const metadata = await fetchMetadata(contractAddress, tokenId, chain);
