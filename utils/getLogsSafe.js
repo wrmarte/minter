@@ -1,5 +1,4 @@
 // utils/getLogsSafe.js
-
 const { JsonRpcProvider } = require('ethers');
 
 /**
