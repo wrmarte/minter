@@ -111,7 +111,7 @@ fields: [
   { name: buyLabel.startsWith('🆕') ? '🆕 New Buyer' : '🔁 Accumulated', value: buyLabel.replace(/^(🆕|🔁) /, ''), inline: true },
   { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
   { name: '📊 MCap', value: marketCap ? `$${marketCap.toLocaleString()}` : 'Fetching...', inline: true }
-]
+],
 
         url: `https://www.geckoterminal.com/base/pools/${tokenAddress}`,
         color: getColorByUsdSpent(usdSpent),
