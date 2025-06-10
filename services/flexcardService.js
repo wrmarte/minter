@@ -1,4 +1,3 @@
-// ✅ flexcardService.js (Base only, patched & working)
 const { Contract } = require('ethers');
 const { getProvider } = require('../utils/provider');
 const { fetchMetadata } = require('../utils/fetchMetadata');
@@ -11,9 +10,10 @@ const abi = [
 
 async function fetchOwner(contractAddress, tokenId) {
   try {
-    const provider = getProvider('base');
-    const contract = new Contract(contractAddress, abi, provider);
-    const owner = await contract.ownerOf(tokenId);
+    const provider = getProvider(); // only BASE supported for now
+    const contract = new Contract(contractAddress, abi, provider); // ✅ pass provider as 3rd arg
+
+    const owner = await contract.ownerOf(tokenId); // will only work if runner is present
     return owner;
   } catch (err) {
     console.error('❌ Owner fetch failed:', err.message);
@@ -26,8 +26,7 @@ function shortenAddress(address) {
   return `${address.slice(0, 6)}...${address.slice(-4)}`;
 }
 
-async function buildFlexCard(contractAddress, tokenId, collectionName) {
-  const chain = 'base';
+async function buildFlexCard(contractAddress, tokenId, collectionName, chain = 'base') {
   const metadata = await fetchMetadata(contractAddress, tokenId, chain);
   const owner = await fetchOwner(contractAddress, tokenId);
   const ownerDisplay = shortenAddress(owner);
@@ -45,6 +44,7 @@ async function buildFlexCard(contractAddress, tokenId, collectionName) {
     : ['No traits found'];
 
   const safeCollectionName = collectionName || metadata?.name || "NFT";
+
   const openseaUrl = `https://opensea.io/assets/base/${contractAddress}/${tokenId}`;
 
   const imageBuffer = await generateFlexCard({
@@ -60,6 +60,7 @@ async function buildFlexCard(contractAddress, tokenId, collectionName) {
 }
 
 module.exports = { buildFlexCard };
+
 
 
 
