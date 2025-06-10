@@ -1,4 +1,4 @@
-const { Interface, formatUnits } = require('ethers');
+const { Interface, formatUnits, ethers } = require('ethers');
 const fetch = require('node-fetch');
 const { fetchLogs } = require('./logScanner');
 const { getProvider } = require('./providerM');
@@ -14,7 +14,6 @@ const ROUTERS = [
 ];
 
 const seenTx = new Set();
-const buyerHistory = new Map(); // memory store for tracking previous buys
 
 module.exports = async function processUnifiedBlock(client, fromBlock, toBlock) {
   const pg = client.pg;
@@ -62,18 +61,30 @@ async function handleTokenLog(client, tokenRows, log) {
   seenTx.add(log.transactionHash);
 
   const tokenAmountRaw = parseFloat(formatUnits(amount, 18));
-  const tokenAmountFormatted = (tokenAmountRaw * 1000).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const tokenAmountFormatted = (tokenAmountRaw * 1000).toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  });
 
   const tokenAddress = log.address.toLowerCase();
-  const buyerKey = `${toAddr}_${tokenAddress}`;
-  const prevAmount = buyerHistory.get(buyerKey) || 0;
-  const newAmount = prevAmount + tokenAmountRaw;
-  buyerHistory.set(buyerKey, newAmount);
 
+  // 🔍 Real on-chain buyer balance check
   let buyLabel = '🆕 New Buy';
-  if (prevAmount > 0) {
-    const percentChange = ((tokenAmountRaw / prevAmount) * 100).toFixed(1);
-    buyLabel = `🔁 Old Buy Added +${percentChange}%`;
+  try {
+    const erc20 = new Interface([
+      'function balanceOf(address account) view returns (uint256)'
+    ]);
+    const contract = new ethers.Contract(tokenAddress, erc20, getProvider());
+
+    const prevBalance = await contract.balanceOf(toAddr);
+    const prevBalanceParsed = parseFloat(formatUnits(prevBalance, 18));
+
+    if (prevBalanceParsed > 0) {
+      const percentChange = ((tokenAmountRaw / prevBalanceParsed) * 100).toFixed(1);
+      buyLabel = `🔁 Old Buy Added +${percentChange}%`;
+    }
+  } catch (err) {
+    console.warn(`⚠️ Failed to fetch balance for ${toAddr}:`, err.message);
   }
 
   const tokenPrice = await getTokenPriceUSD(tokenAddress);
@@ -102,17 +113,20 @@ async function handleTokenLog(client, tokenRows, log) {
     }
     if (channel) {
       const embed = {
-        title: `${token.name.toUpperCase()} Buy!}`,
+        title: `${token.name.toUpperCase()} Buy!`,
         description: rocketLine,
         image: { url: 'https://iili.io/3tSecKP.gif' },
-fields: [
-  { name: '💸 Spent', value: `$${usdSpent.toFixed(4)} / ${ethSpent.toFixed(4)} ETH`, inline: true },
-  { name: '🎯 Got', value: `${tokenAmountFormatted} ${token.name.toUpperCase()}`, inline: true },
-  { name: buyLabel.startsWith('🆕') ? '🆕 New Buyer' : '🔁 Accumulated', value: buyLabel.replace(/^(🆕|🔁) /, ''), inline: true },
-  { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
-  { name: '📊 MCap', value: marketCap ? `$${marketCap.toLocaleString()}` : 'Fetching...', inline: true }
-],
-
+        fields: [
+          { name: '💸 Spent', value: `$${usdSpent.toFixed(4)} / ${ethSpent.toFixed(4)} ETH`, inline: true },
+          { name: '🎯 Got', value: `${tokenAmountFormatted} ${token.name.toUpperCase()}`, inline: true },
+          {
+            name: buyLabel.startsWith('🆕') ? '🆕 New Buyer' : '🔁 Accumulated',
+            value: buyLabel.replace(/^(🆕|🔁) /, ''),
+            inline: true
+          },
+          { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
+          { name: '📊 MCap', value: marketCap ? `$${marketCap.toLocaleString()}` : 'Fetching...', inline: true }
+        ],
         url: `https://www.geckoterminal.com/base/pools/${tokenAddress}`,
         color: getColorByUsdSpent(usdSpent),
         footer: { text: 'Live on Base • Powered by PimpsDev' },
