@@ -74,19 +74,23 @@ try {
   const contract = new ethers.Contract(tokenAddress, abi, getProvider());
 
   const balanceBN = await contract.balanceOf(toAddr);
-  const balanceParsed = parseFloat(formatUnits(balanceBN, 18));
+  const balance = parseFloat(formatUnits(balanceBN, 18));
 
-  // If wallet balance is close to or less than the amount received, it's a new buyer
-  if (balanceParsed < tokenAmountRaw * 1.05) {
+  // Safe estimate: treat as new buyer if balance is only what they just received (±10%)
+  const lowerBound = tokenAmountRaw * 0.9;
+  const upperBound = tokenAmountRaw * 1.1;
+
+  if (balance >= lowerBound && balance <= upperBound) {
     buyLabel = '🆕 New Buy';
   } else {
-    const oldBalance = balanceParsed - tokenAmountRaw;
+    const oldBalance = Math.max(balance - tokenAmountRaw, 0.000001); // avoid divide-by-zero
     const percentChange = ((tokenAmountRaw / oldBalance) * 100).toFixed(1);
     buyLabel = `🔁 Buy Added +${percentChange}%`;
   }
 } catch (err) {
   console.warn(`⚠️ Failed to fetch balance for ${toAddr}:`, err.message);
 }
+
 
 
   const tokenPrice = await getTokenPriceUSD(tokenAddress);
