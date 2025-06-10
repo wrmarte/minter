@@ -50,16 +50,19 @@ async function handleTokenLog(client, tokenRows, log) {
   const fromAddr = from.toLowerCase();
   const toAddr = to.toLowerCase();
 
-  if (!ROUTERS.includes(fromAddr)) return;
-  if (ROUTERS.includes(toAddr)) return;
+  const tokenAddress = log.address.toLowerCase();
+  if (seenTx.has(log.transactionHash)) return;
+  seenTx.add(log.transactionHash);
+
+  // ❌ Skip router-to-router transfers or tax/burn destinations
   if (
+    ROUTERS.includes(toAddr) ||
     toAddr === '0x0000000000000000000000000000000000000000' ||
     toAddr === '0x000000000000000000000000000000000000dEaD' ||
     toAddr === '0xdead000000000000000042069420694206942069'
   ) return;
 
-  if (seenTx.has(log.transactionHash)) return;
-  seenTx.add(log.transactionHash);
+  if (!ROUTERS.includes(fromAddr)) return; // ✅ Only handle Router -> Real Wallet
 
   const tokenAmountRaw = parseFloat(formatUnits(amount, 18));
   const tokenAmountFormatted = (tokenAmountRaw * 1000).toLocaleString(undefined, {
@@ -67,8 +70,7 @@ async function handleTokenLog(client, tokenRows, log) {
     maximumFractionDigits: 2
   });
 
-  const tokenAddress = log.address.toLowerCase();
-
+  // ✅ On-chain previous balance logic
   let buyLabel = '🆕 New Buy';
   try {
     const abi = ['function balanceOf(address account) view returns (uint256)'];
@@ -87,17 +89,15 @@ async function handleTokenLog(client, tokenRows, log) {
   const tokenPrice = await getTokenPriceUSD(tokenAddress);
   const marketCap = await getMarketCapUSD(tokenAddress);
 
-  let usdSpent = 0, ethSpent = 0, tx;
+  let usdSpent = 0, ethSpent = 0;
   try {
-    tx = await getProvider().getTransaction(log.transactionHash);
+    const tx = await getProvider().getTransaction(log.transactionHash);
     const ethPrice = await getETHPrice();
     if (tx?.value) {
       ethSpent = parseFloat(formatUnits(tx.value, 18));
       usdSpent = ethSpent * ethPrice;
     }
   } catch {}
-
-  if (!tx?.to || ethSpent === 0) return; // 🛑 Likely LP/tax transaction
 
   const rocketIntensity = Math.min(Math.floor(tokenAmountRaw / 100), 10);
   const rocketLine = '🟥🟦🚀'.repeat(Math.max(1, rocketIntensity));
@@ -162,3 +162,4 @@ async function getMarketCapUSD(address) {
     return parseFloat(data?.data?.attributes?.fdv_usd || data?.data?.attributes?.market_cap_usd || '0');
   } catch { return 0; }
 }
+
