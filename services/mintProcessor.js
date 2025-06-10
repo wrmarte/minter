@@ -106,10 +106,6 @@ function launchContractListener(client, addressKey, contractRows) {
 
 // handleMint and handleSale remain unchanged from your last working version
 
-module.exports = {
-  trackAllContracts,
-  contractListeners
-};
 
 async function handleMint(client, contractRow, contract, tokenId, to, channel_ids) {
   const { name, mint_price, mint_token, mint_token_symbol } = contractRow;
