@@ -32,7 +32,4 @@ function getProvider(chain = 'base') {
 module.exports = { getProvider };
 
 
-module.exports = { getProvider };
-
-
 
