@@ -1,46 +1,41 @@
 const { JsonRpcProvider } = require('ethers');
 
-// Known RPC endpoints
 const RPCS = {
-  eth: [ 'https://eth.llamarpc.com' ],
-  base: [ 'https://mainnet.base.org' ],
-  ape: [ 'https://apechain.drpc.org' ]
+  base: [
+    'https://mainnet.base.org',
+    'https://base.publicnode.com',
+    'https://1rpc.io/base',
+    'https://base.llamarpc.com'
+  ],
+  eth: [
+    'https://eth.llamarpc.com',
+    'https://1rpc.io/eth'
+  ],
+  ape: [
+    'https://apechain.drpc.org',
+    'https://rpc.apechain.com'
+  ]
 };
 
-// Chain IDs
-const CHAIN_IDS = {
-  eth: 1,
-  base: 8453,
-  ape: 6969
-};
+const rpcIndex = { base: 0, eth: 0, ape: 0 };
 
-const rpcIndex = { eth: 0, base: 0, ape: 0 };
-
-// ✅ Safe, guaranteed runner
 function getProvider(chain = 'base') {
   chain = chain.toLowerCase();
+  if (!RPCS[chain]) chain = 'base';
+
   const urls = RPCS[chain];
-  const id = CHAIN_IDS[chain];
-
-  if (!urls || !id) {
-    console.warn(`⚠️ Unknown chain: ${chain}, defaulting to base`);
-    chain = 'base';
-  }
-
   const idx = rpcIndex[chain];
   const url = urls[idx];
   rpcIndex[chain] = (idx + 1) % urls.length;
 
   console.log(`🔌 Using provider for ${chain.toUpperCase()}: ${url}`);
 
-  // ✅ Critical: this creates a working runner with .call() support
-  const provider = new JsonRpcProvider(url);
-  provider._network = { chainId: id, name: chain }; // 🧠 manual override: fixes ethers v6 detection issue
-
-  return provider;
+  // Pass URL directly (Ethers v6 will auto-detect the network)
+  return new JsonRpcProvider(url);
 }
 
 module.exports = { getProvider };
+
 
 
 
