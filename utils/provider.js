@@ -20,6 +20,7 @@ base: [
   ]
 };
 
+
 const rpcIndex = { eth: 0, base: 0, ape: 0 };
 
 // Async-safe rotating provider with validation
