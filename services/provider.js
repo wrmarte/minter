@@ -1,4 +1,5 @@
-const { JsonRpcProvider } = require('ethers');
+const { JsonRpcProvider } = require('ethers/providers'); // ✅ not from 'ethers' directly
+
 
 // RPC endpoints per chain
 const RPCS = {
