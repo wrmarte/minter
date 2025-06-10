@@ -12,15 +12,12 @@ const abi = [
 async function fetchOwner(contractAddress, tokenId, chain) {
   try {
     const provider = getProvider(chain);
+    const abi = ['function ownerOf(uint256 tokenId) view returns (address)'];
 
-    // ✅ Directly assign runner inside the constructor
-    const contract = new Contract(
-      contractAddress,
-      ['function ownerOf(uint256 tokenId) view returns (address)'],
-      provider // This sets the runner correctly in v6
-    );
-
+    // Attach runner during creation
+    const contract = new Contract(contractAddress, abi, provider);
     const owner = await contract.ownerOf(tokenId);
+
     return owner;
   } catch (err) {
     console.error('❌ Owner fetch failed:', err.message);
