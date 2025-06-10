@@ -11,7 +11,7 @@ const RPCS = {
     'https://base.publicnode.com',
     'https://1rpc.io/base',
     'https://base.llamarpc.com',
-    'https://base.meowrpc.com'
+    // 'https://base.meowrpc.com' // ❌ unstable — skipped automatically if re-added
   ],
   ape: [
     'https://apechain.drpc.org',
@@ -32,29 +32,40 @@ const rpcIndex = {
   ape: 0
 };
 
-// ✅ Rotating provider per chain
+// ✅ Smart rotating provider with failover
 function getProvider(chain = 'base') {
   chain = chain.toLowerCase();
 
   if (!RPCS[chain]) {
-    console.warn(`⚠️ Unknown chain requested: ${chain} — defaulting to 'base'`);
+    console.warn(`⚠️ Unknown chain: ${chain} — defaulting to 'base'`);
     chain = 'base';
   }
 
   const urls = RPCS[chain];
-  const idx = rpcIndex[chain];
-  const url = urls[idx];
+  const maxTries = urls.length;
 
-  // 🔁 Rotate index for next call
-  rpcIndex[chain] = (idx + 1) % urls.length;
+  for (let attempt = 0; attempt < maxTries; attempt++) {
+    const idx = rpcIndex[chain];
+    const url = urls[idx];
 
-  // 🔧 Return working JsonRpcProvider (no 3rd arg for Ethers v6!)
-  const network = new Network(chain, CHAIN_IDS[chain]);
-  console.log(`🔌 Using provider for ${chain.toUpperCase()}: ${url}`);
-  return new JsonRpcProvider(url, network);
+    rpcIndex[chain] = (idx + 1) % urls.length;
+
+    try {
+      const network = new Network(chain, CHAIN_IDS[chain]);
+      const provider = new JsonRpcProvider(url, network, { staticNetwork: true });
+
+      console.log(`🔌 Using provider for ${chain.toUpperCase()}: ${url}`);
+      return provider;
+    } catch (err) {
+      console.warn(`⚠️ Failed provider ${url}: ${err.message}`);
+    }
+  }
+
+  throw new Error(`🚨 All ${chain.toUpperCase()} RPCs failed. Check RPC endpoints.`);
 }
 
 module.exports = { getProvider };
+
 
 
 
