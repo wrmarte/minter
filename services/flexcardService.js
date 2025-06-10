@@ -11,8 +11,13 @@ const abi = [
 // Ethers v6: Must connect contract to a Runner (provider) for .call()
 async function fetchOwner(contractAddress, tokenId, chain) {
   try {
-    const provider = getProvider(chain); // Already a JsonRpcProvider
-    const contract = new Contract(contractAddress, abi).connect(provider); // ✅ connect to runner
+    const provider = getProvider(chain);
+    const contract = new Contract(contractAddress, [
+      'function ownerOf(uint256 tokenId) view returns (address)'
+    ]);
+
+    contract.connect(provider);             // Connect the provider
+    contract.runner = provider;            // 🧠 FORCE runner assignment
     const owner = await contract.ownerOf(tokenId);
     return owner;
   } catch (err) {
@@ -20,6 +25,7 @@ async function fetchOwner(contractAddress, tokenId, chain) {
     return '0x0000000000000000000000000000000000000000';
   }
 }
+
 
 function shortenAddress(address) {
   if (!address || address.length < 10) return address || 'Unknown';
