@@ -14,6 +14,7 @@ const ROUTERS = [
 ];
 
 const seenTx = new Set();
+const buyerHistory = new Map(); // memory store for tracking previous buys
 
 module.exports = async function processUnifiedBlock(client, fromBlock, toBlock) {
   const pg = client.pg;
@@ -37,7 +38,7 @@ module.exports = async function processUnifiedBlock(client, fromBlock, toBlock) 
   for (const log of logs) {
     await handleTokenLog(client, tokenRows, log);
   }
-}
+};
 
 async function handleTokenLog(client, tokenRows, log) {
   const iface = new Interface(['event Transfer(address indexed from, address indexed to, uint amount)']);
@@ -48,9 +49,15 @@ async function handleTokenLog(client, tokenRows, log) {
 
   const { from, to, amount } = parsed.args;
   const fromAddr = from.toLowerCase();
+  const toAddr = to.toLowerCase();
 
-  if (!ROUTERS.includes(fromAddr)) return;
-  if (to.toLowerCase() === '0x0000000000000000000000000000000000000000') return;
+  // ✅ Filtering
+  if (!ROUTERS.includes(fromAddr)) return; // must come from router (buy)
+  if (ROUTERS.includes(toAddr)) return;    // skip LP adds
+  if (toAddr === '0x0000000000000000000000000000000000000000') return;
+  if (toAddr === '0x000000000000000000000000000000000000dEaD') return;
+  if (toAddr === '0xdead000000000000000042069420694206942069') return;
+
   if (seenTx.has(log.transactionHash)) return;
   seenTx.add(log.transactionHash);
 
@@ -58,6 +65,17 @@ async function handleTokenLog(client, tokenRows, log) {
   const tokenAmountFormatted = (tokenAmountRaw * 1000).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
   const tokenAddress = log.address.toLowerCase();
+  const buyerKey = `${toAddr}_${tokenAddress}`;
+  const prevAmount = buyerHistory.get(buyerKey) || 0;
+  const newAmount = prevAmount + tokenAmountRaw;
+  buyerHistory.set(buyerKey, newAmount);
+
+  let buyLabel = '🆕 New Buy';
+  if (prevAmount > 0) {
+    const percentChange = ((tokenAmountRaw / prevAmount) * 100).toFixed(1);
+    buyLabel = `🔁 Old Buy Added +${percentChange}%`;
+  }
+
   const tokenPrice = await getTokenPriceUSD(tokenAddress);
   const marketCap = await getMarketCapUSD(tokenAddress);
 
@@ -84,7 +102,7 @@ async function handleTokenLog(client, tokenRows, log) {
     }
     if (channel) {
       const embed = {
-        title: `${token.name.toUpperCase()} Buy!`,
+        title: `${token.name.toUpperCase()} Buy! • ${buyLabel}`,
         description: rocketLine,
         image: { url: 'https://iili.io/3tSecKP.gif' },
         fields: [
@@ -127,6 +145,7 @@ async function getMarketCapUSD(address) {
     return parseFloat(data?.data?.attributes?.fdv_usd || data?.data?.attributes?.market_cap_usd || '0');
   } catch { return 0; }
 }
+
 
 
 
