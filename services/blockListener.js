@@ -1,4 +1,4 @@
-const { getProvider } = require('./provider');
+const { getProvider } = require('./providerM');
 const processUnifiedBlock = require('./globalBlockProcessor');
 
 module.exports = async function startGlobalBlockListener(client) {
