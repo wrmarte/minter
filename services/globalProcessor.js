@@ -102,15 +102,17 @@ async function handleTokenLog(client, tokenRows, log) {
     }
     if (channel) {
       const embed = {
-        title: `${token.name.toUpperCase()} Buy! • ${buyLabel}`,
+        title: `${token.name.toUpperCase()} Buy!}`,
         description: rocketLine,
         image: { url: 'https://iili.io/3tSecKP.gif' },
-        fields: [
-          { name: '💸 Spent', value: `$${usdSpent.toFixed(4)} / ${ethSpent.toFixed(4)} ETH`, inline: true },
-          { name: '🎯 Got', value: `${tokenAmountFormatted} ${token.name.toUpperCase()}`, inline: true },
-          { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
-          { name: '📊 MCap', value: marketCap ? `$${marketCap.toLocaleString()}` : 'Fetching...', inline: true }
-        ],
+fields: [
+  { name: '💸 Spent', value: `$${usdSpent.toFixed(4)} / ${ethSpent.toFixed(4)} ETH`, inline: true },
+  { name: '🎯 Got', value: `${tokenAmountFormatted} ${token.name.toUpperCase()}`, inline: true },
+  { name: buyLabel.startsWith('🆕') ? '🆕 New Buyer' : '🔁 Accumulated', value: buyLabel.replace(/^(🆕|🔁) /, ''), inline: true },
+  { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
+  { name: '📊 MCap', value: marketCap ? `$${marketCap.toLocaleString()}` : 'Fetching...', inline: true }
+]
+
         url: `https://www.geckoterminal.com/base/pools/${tokenAddress}`,
         color: getColorByUsdSpent(usdSpent),
         footer: { text: 'Live on Base • Powered by PimpsDev' },
