@@ -1,7 +1,7 @@
 const { Interface, formatUnits } = require('ethers');
 const fetch = require('node-fetch');
 const { fetchLogs } = require('./logScanner');
-const { getProvider } = require('./provider');
+const { getProvider } = require('./providerM');
 const { shortWalletLink } = require('../utils/helpers');
 
 const ROUTERS = [
