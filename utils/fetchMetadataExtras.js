@@ -4,8 +4,10 @@ const { format } = require('date-fns');
 
 const BASESCAN_API = process.env.BASESCAN_API_KEY;
 const OPENSEA_API_KEY = process.env.OPENSEA_API_KEY;
+const RESERVOIR_API_KEY = process.env.RESERVOIR_API_KEY;
 
 async function fetchMintDate(contractAddress, tokenId, network) {
+  if (network !== 'base') return 'Unknown';
   try {
     const url = `https://api.basescan.org/api?module=account&action=tokennfttx&contractaddress=${contractAddress}&sort=asc&apikey=${BASESCAN_API}`;
     const res = await fetch(url);
@@ -33,7 +35,7 @@ async function fetchRarityRankReservoir(contract, tokenId, network) {
     const res = await fetch(url, {
       headers: {
         'accept': 'application/json',
-        'x-api-key': process.env.RESERVOIR_API_KEY || ''
+        'x-api-key': RESERVOIR_API_KEY || ''
       }
     });
     const json = await res.json();
@@ -69,7 +71,7 @@ async function fetchTotalSupply(contract, network) {
     const res = await fetch(url, {
       headers: {
         'accept': 'application/json',
-        'x-api-key': process.env.RESERVOIR_API_KEY || ''
+        'x-api-key': RESERVOIR_API_KEY || ''
       }
     });
     const json = await res.json();
@@ -101,6 +103,7 @@ async function fetchMetadataExtras(contractAddress, tokenId, network) {
 }
 
 module.exports = { fetchMetadataExtras };
+
 
 
 
