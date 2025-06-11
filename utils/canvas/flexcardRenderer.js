@@ -42,7 +42,7 @@ async function generateFlexCard({
   ctx.font = 'bold 30px Exo2';
   ctx.fillText('TRAITS', 50, 1145);
 
-  const maxTraits = 8;
+  const maxTraits = 7;
   const displayedTraits = traits.slice(0, maxTraits);
   ctx.font = '28px Exo2';
   let traitY = 1190;
