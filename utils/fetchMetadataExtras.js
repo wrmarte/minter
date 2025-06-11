@@ -1,64 +1,53 @@
+// utils/fetchMetadataExtras.js
 const { JsonRpcProvider, Contract } = require('ethers');
 const fetch = require('node-fetch');
+require('dotenv').config();
 
-const abi = [
-  'function totalSupply() view returns (uint256)',
-  'function tokenURI(uint256 tokenId) view returns (string)',
-  'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)'
-];
+const MORALIS_API_KEY = process.env.MORALIS_API_KEY;
+
+const RPCS = {
+  base: 'https://mainnet.base.org',
+  eth: 'https://eth.llamarpc.com',
+  ape: 'https://rpc.apecoin.com'
+};
 
 async function fetchMetadataExtras(contractAddress, tokenId, network = 'base') {
-  const provider = new JsonRpcProvider(
-    network === 'base'
-      ? 'https://mainnet.base.org'
-      : network === 'eth'
-      ? 'https://eth.llamarpc.com'
-      : 'https://rpc.ankr.com/eth'
-  );
-
-  const contract = new Contract(contractAddress, abi, provider);
-
   let rank = 'N/A';
   let mintedDate = 'Unknown';
-  let totalSupply = 'N/A';
+  let totalSupply = '???';
+
+  const rpc = RPCS[network.toLowerCase()] || RPCS.base;
+  const provider = new JsonRpcProvider(rpc);
 
   try {
-    // Get totalSupply
-    totalSupply = (await contract.totalSupply()).toString();
-  } catch {}
+    // Use Moralis API for token transfer data
+    const chainMap = { base: 'base', eth: 'eth', ape: 'apecoin' };
+    const moralisChain = chainMap[network.toLowerCase()] || 'base';
+    const url = `https://deep-index.moralis.io/api/v2/nft/${contractAddress}/${tokenId}/transfers?chain=${moralisChain}&format=decimal`;
 
-  try {
-    // Use Reservoir to get rarity rank
-    const res = await fetch(`https://api.reservoir.tools/tokens/v6?tokens=${contractAddress}:${tokenId}`, {
-      headers: { 'x-api-key': process.env.RESERVOIR_API_KEY }
-    });
-    const json = await res.json();
-    rank = json?.tokens?.[0]?.rarity?.rank ? `#${json.tokens[0].rarity.rank}` : 'N/A';
-  } catch {}
-
-  try {
-    // Get mint date from first Transfer event (mint)
-    const logs = await provider.getLogs({
-      address: contractAddress,
-      topics: [
-        '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef', // Transfer
-        '0x0000000000000000000000000000000000000000000000000000000000000000', // from zero
-        null,
-        '0x' + tokenId.toString(16).padStart(64, '0') // indexed tokenId
-      ],
-      fromBlock: 0,
-      toBlock: 'latest'
+    const res = await fetch(url, {
+      headers: { 'X-API-Key': MORALIS_API_KEY }
     });
 
-    if (logs.length > 0) {
-      const block = await provider.getBlock(logs[0].blockNumber);
-      mintedDate = new Date(block.timestamp * 1000).toLocaleDateString('en-US', {
-        month: 'short',
-        day: 'numeric',
-        year: 'numeric'
+    const data = await res.json();
+    if (data?.result?.length > 0) {
+      const firstTx = data.result[data.result.length - 1];
+      mintedDate = new Date(firstTx.block_timestamp).toLocaleDateString('en-US', {
+        year: 'numeric', month: 'short', day: 'numeric'
       });
     }
-  } catch {}
+  } catch (err) {
+    console.warn('⚠️ Failed to fetch minted date from Moralis:', err);
+  }
+
+  try {
+    const abi = ['function totalSupply() view returns (uint256)'];
+    const contract = new Contract(contractAddress, abi, provider);
+    const total = await contract.totalSupply();
+    totalSupply = total.toString();
+  } catch (err) {
+    console.warn('⚠️ Failed to fetch total supply:', err);
+  }
 
   return {
     rank,
@@ -69,3 +58,4 @@ async function fetchMetadataExtras(contractAddress, tokenId, network = 'base') {
 }
 
 module.exports = { fetchMetadataExtras };
+
