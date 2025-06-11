@@ -1,6 +1,6 @@
 const { Contract } = require('ethers');
 const fetch = require('node-fetch');
-const provider = require('../utils/provider'); // 👈 use imported base provider
+const { getProvider } = require('../utils/provider');
 const { generateFlexCard } = require('../utils/canvas/flexcardRenderer');
 
 const abi = [
@@ -10,8 +10,10 @@ const abi = [
 
 async function fetchMetadata(contractAddress, tokenId) {
   try {
+    const provider = getProvider('base');
     const contract = new Contract(contractAddress, abi, provider);
     const tokenURI = await contract.tokenURI(tokenId);
+
     let metadataUrl = tokenURI.startsWith('ipfs://')
       ? tokenURI.replace('ipfs://', 'https://ipfs.io/ipfs/')
       : tokenURI;
@@ -27,6 +29,7 @@ async function fetchMetadata(contractAddress, tokenId) {
 
 async function fetchOwner(contractAddress, tokenId) {
   try {
+    const provider = getProvider('base');
     const contract = new Contract(contractAddress, abi, provider);
     const owner = await contract.ownerOf(tokenId);
     return owner;
@@ -38,7 +41,7 @@ async function fetchOwner(contractAddress, tokenId) {
 
 function shortenAddress(address) {
   if (!address || address.length < 10) return address || 'Unknown';
-  return address.substring(0, 6) + '...' + address.substring(address.length - 4);
+  return `${address.slice(0, 6)}...${address.slice(-4)}`;
 }
 
 async function buildFlexCard(contractAddress, tokenId, collectionName) {
