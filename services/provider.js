@@ -1,34 +1,14 @@
+// utils/provider.js
 const { ethers } = require('ethers');
 
-const RPCS = {
-  base: [
-    'https://mainnet.base.org',
-    'https://base.publicnode.com',
-    'https://1rpc.io/base',
-    'https://base.llamarpc.com'
-  ]
-};
+// Locked to only BASE since v1 uses Base
+const BASE_RPC = 'https://mainnet.base.org';
 
-const rpcIndex = { base: 0 };
+// ✅ Correct instantiation of JsonRpcProvider using Ethers v6
+const provider = new ethers.JsonRpcProvider(BASE_RPC);
 
-function getProvider(chain = 'base') {
-  chain = chain.toLowerCase();
-  if (!RPCS[chain]) chain = 'base';
+module.exports = provider;
 
-  const urls = RPCS[chain];
-  const idx = rpcIndex[chain];
-  const url = urls[idx];
-  rpcIndex[chain] = (idx + 1) % urls.length;
-
-  if (process.env.DEBUG_PROVIDERS === 'true') {
-    console.log(`🔌 Using provider for ${chain.toUpperCase()}: ${url}`);
-  }
-
-  // ✅ Correctly use Ethers v6 runtime class
-  return new ethers.JsonRpcProvider(url);
-}
-
-module.exports = { getProvider };
 
 
 
