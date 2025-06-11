@@ -23,7 +23,7 @@ async function generateFlexCard({
   const canvas = createCanvas(width, height);
   const ctx = canvas.getContext('2d');
 
-  // Constants
+  // Layout constants
   const margin = 40;
   const usableWidth = width - 2 * margin;
   const titleHeight = 120;
@@ -33,7 +33,7 @@ async function generateFlexCard({
   const qrSize = 300;
   const qrPadding = 20;
   const nftSize = 680;
-  const traitsHeight = 280;
+  const traitsHeight = 340;
   const metaHeight = qrSize - 10;
 
   const olive = '#4e7442';
@@ -59,7 +59,7 @@ async function generateFlexCard({
   ctx.textAlign = 'right';
   ctx.fillText(`#${tokenId}`, margin + usableWidth - 20, margin + 70);
 
-  // NFT zone
+  // NFT image
   const nftX = margin + (usableWidth - ownerWidth - nftSize) / 2;
   const nftY = margin + titleHeight + 40;
   ctx.fillStyle = olive;
@@ -95,37 +95,33 @@ async function generateFlexCard({
   ctx.textAlign = 'left';
   ctx.fillText('TRAITS', margin + 20, traitsHeaderY + traitsHeaderHeight / 2 + 8);
 
-  // Traits info
+  // Traits block (no bottom border)
   const traitsY = traitsHeaderY + traitsHeaderHeight;
   ctx.fillStyle = olive;
   ctx.fillRect(margin, traitsY, usableWidth - ownerWidth, traitsHeight);
   ctx.strokeStyle = 'white';
-  ctx.lineWidth = 2;
   ctx.beginPath();
   ctx.moveTo(margin, traitsY);
   ctx.lineTo(margin, traitsY + traitsHeight);
+  ctx.moveTo(margin + usableWidth - ownerWidth, traitsY);
   ctx.lineTo(margin + usableWidth - ownerWidth, traitsY + traitsHeight);
-  ctx.lineTo(margin + usableWidth - ownerWidth, traitsY);
-  ctx.closePath();
   ctx.stroke();
 
   ctx.fillStyle = 'white';
   ctx.font = '22px Exo2';
   let traitY = traitsY + 36;
-  for (const trait of traits) {
+  for (const trait of traits.slice(0, 12)) {
     ctx.fillText(`• ${trait}`, margin + 20, traitY);
     traitY += 30;
   }
 
-  // Metadata section
+  // Metadata block
   const metaY = traitsY + traitsHeight + 10;
   const metaX = margin;
   const metaWidth = usableWidth;
   ctx.fillStyle = olive;
   ctx.fillRect(metaX, metaY, metaWidth, metaHeight);
-  // Only top/left/right borders
   ctx.strokeStyle = 'white';
-  ctx.lineWidth = 2;
   ctx.beginPath();
   ctx.moveTo(metaX, metaY);
   ctx.lineTo(metaX + metaWidth, metaY);
@@ -150,9 +146,9 @@ async function generateFlexCard({
     ctx.fillText(metaLines[i], metaX + 20, metaStartY + i * 28);
   }
 
-  // QR code zone
+  // QR code block
   const qrX = width - margin - qrSize;
-  const qrY = height - margin - qrSize - footerHeight;
+  const qrY = height - margin - footerHeight - qrSize;
   ctx.fillStyle = 'white';
   ctx.fillRect(qrX, qrY, qrSize, qrSize);
   ctx.strokeRect(qrX, qrY, qrSize, qrSize);
@@ -175,4 +171,5 @@ async function generateFlexCard({
 }
 
 module.exports = { generateFlexCard };
+
 
