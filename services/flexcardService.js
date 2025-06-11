@@ -1,82 +1,80 @@
-const { Contract } = require('ethers');
-const fetch = require('node-fetch');
-const { getProvider } = require('../utils/provider');
-const { generateFlexCard } = require('../utils/canvas/flexcardRenderer');
 
-const abi = [
-  'function tokenURI(uint256 tokenId) view returns (string)',
-  'function ownerOf(uint256 tokenId) view returns (address)'
-];
 
-async function fetchMetadata(contractAddress, tokenId) {
-  try {
-    const provider = getProvider('base');
-    const contract = new Contract(contractAddress, abi, provider);
-    const tokenURI = await contract.tokenURI(tokenId);
+🎯 Received slash command: /flexcard
 
-    let metadataUrl = tokenURI.startsWith('ipfs://')
-      ? tokenURI.replace('ipfs://', 'https://ipfs.io/ipfs/')
-      : tokenURI;
+❌ Metadata fetch failed: Error: contract runner does not support calling (operation="call", code=UNSUPPORTED_OPERATION, version=6.14.3)
 
-    const response = await fetch(metadataUrl);
-    const metadata = await response.json();
-    return metadata || {};
-  } catch (err) {
-    console.error('❌ Metadata fetch failed:', err);
-    return {};
-  }
+    at makeError (/app/node_modules/ethers/lib.commonjs/utils/errors.js:137:21)
+
+    at assert (/app/node_modules/ethers/lib.commonjs/utils/errors.js:157:15)
+
+    at staticCallResult (/app/node_modules/ethers/lib.commonjs/contract/contract.js:241:31)
+
+    at staticCall (/app/node_modules/ethers/lib.commonjs/contract/contract.js:219:30)
+
+    at Proxy.tokenURI (/app/node_modules/ethers/lib.commonjs/contract/contract.js:259:26)
+
+    at fetchMetadata (/app/services/flexcardService.js:15:37)
+
+    at buildFlexCard (/app/services/flexcardService.js:48:26)
+
+    at Object.execute (/app/commands/flexcard.js:61:27)
+
+    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+
+    at async Client.<anonymous> (/app/events/interactionCreate.js:119:9) {
+
+  code: 'UNSUPPORTED_OPERATION',
+
+  operation: 'call',
+
+  shortMessage: 'contract runner does not support calling'
+
 }
 
-async function fetchOwner(contractAddress, tokenId) {
-  try {
-    const provider = getProvider('base');
-    const contract = new Contract(contractAddress, abi, provider);
-    const owner = await contract.ownerOf(tokenId);
-    return owner;
-  } catch (err) {
-    console.error('❌ Owner fetch failed:', err);
-    return '0x0000000000000000000000000000000000000000';
-  }
+❌ Owner fetch failed: Error: contract runner does not support calling (operation="call", code=UNSUPPORTED_OPERATION, version=6.14.3)
+
+    at makeError (/app/node_modules/ethers/lib.commonjs/utils/errors.js:137:21)
+
+    at assert (/app/node_modules/ethers/lib.commonjs/utils/errors.js:157:15)
+
+    at staticCallResult (/app/node_modules/ethers/lib.commonjs/contract/contract.js:241:31)
+
+    at staticCall (/app/node_modules/ethers/lib.commonjs/contract/contract.js:219:30)
+
+    at Proxy.ownerOf (/app/node_modules/ethers/lib.commonjs/contract/contract.js:259:26)
+
+    at fetchOwner (/app/services/flexcardService.js:34:34)
+
+    at buildFlexCard (/app/services/flexcardService.js:49:23)
+
+    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+
+    at async Object.execute (/app/commands/flexcard.js:61:21)
+
+    at async Client.<anonymous> (/app/events/interactionCreate.js:119:9) {
+
+  code: 'UNSUPPORTED_OPERATION',
+
+  operation: 'call',
+
+  shortMessage: 'contract runner does not support calling'
+
 }
 
-function shortenAddress(address) {
-  if (!address || address.length < 10) return address || 'Unknown';
-  return `${address.slice(0, 6)}...${address.slice(-4)}`;
+❌ FlexCard error: Error: getaddrinfo ENOTFOUND via.placeholder.com
+
+    at GetAddrInfoReqWrap.onlookupall [as oncomplete] (node:dns:120:26) {
+
+  errno: -3008,
+
+  code: 'ENOTFOUND',
+
+  syscall: 'getaddrinfo',
+
+  hostname: 'via.placeholder.com'
+
 }
-
-async function buildFlexCard(contractAddress, tokenId, collectionName) {
-  const metadata = await fetchMetadata(contractAddress, tokenId);
-  const owner = await fetchOwner(contractAddress, tokenId);
-  const ownerDisplay = shortenAddress(owner);
-
-  let nftImageUrl = metadata.image || null;
-  if (nftImageUrl?.startsWith('ipfs://')) {
-    nftImageUrl = nftImageUrl.replace('ipfs://', 'https://ipfs.io/ipfs/');
-  }
-  if (!nftImageUrl) {
-    nftImageUrl = 'https://via.placeholder.com/400x400.png?text=No+Image';
-  }
-
-  const traits = Array.isArray(metadata.attributes) && metadata.attributes.length > 0
-    ? metadata.attributes.map(attr => `${attr.trait_type} / ${attr.value}`)
-    : ['No traits found'];
-
-  const safeCollectionName = collectionName || metadata.name || "NFT";
-  const openseaUrl = `https://opensea.io/assets/base/${contractAddress}/${tokenId}`;
-
-  const imageBuffer = await generateFlexCard({
-    nftImageUrl,
-    collectionName: safeCollectionName,
-    tokenId,
-    traits,
-    owner: ownerDisplay,
-    openseaUrl
-  });
-
-  return imageBuffer;
-}
-
-module.exports = { buildFlexCard };
 
 
 
