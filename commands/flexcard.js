@@ -1,6 +1,19 @@
 const { SlashCommandBuilder, AttachmentBuilder } = require('discord.js');
-const { buildFlexCard } = require('../services/flexcardService');
 const { buildUltraFlexCard } = require('../services/ultraFlexService');
+
+// Dynamically select the right flex service per chain
+function getFlexService(chain) {
+  switch (chain) {
+    case 'base':
+      return require('../services/flexcardBaseS');
+    case 'eth':
+      return require('../services/flexcardEthS');
+    case 'ape':
+      return require('../services/flexcardApeS');
+    default:
+      throw new Error(`Unsupported network: ${chain}`);
+  }
+}
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -45,21 +58,23 @@ module.exports = {
       const { address, display_name, name: storedName, network } = res.rows[0];
       const contractAddress = address;
       const collectionName = display_name || storedName;
-      const chain = network; // 'eth', 'base', 'ape'
+      const chain = network.toLowerCase(); // 'eth', 'base', 'ape'
 
       if (ultraRequested && !userIsOwner) {
         return interaction.editReply('🚫 Only the bot owner can use Ultra mode for now.');
       }
 
-      let imageBuffer;
-      if (ultraRequested) {
-        imageBuffer = await buildUltraFlexCard(contractAddress, tokenId, collectionName, chain);
-        const attachment = new AttachmentBuilder(imageBuffer, { name: 'ultraflexcard.png' });
-        return interaction.editReply({ files: [attachment] });
-      }
+      // Dynamically pick the proper flex service module
+      const { buildFlexCard } = getFlexService(chain);
 
-      imageBuffer = await buildFlexCard(contractAddress, tokenId, collectionName, chain);
-      const attachment = new AttachmentBuilder(imageBuffer, { name: 'flexcard.png' });
+      const imageBuffer = ultraRequested
+        ? await buildUltraFlexCard(contractAddress, tokenId, collectionName, chain)
+        : await buildFlexCard(contractAddress, tokenId, collectionName, chain);
+
+      const attachment = new AttachmentBuilder(
+        imageBuffer,
+        { name: ultraRequested ? 'ultraflexcard.png' : 'flexcard.png' }
+      );
 
       await interaction.editReply({ files: [attachment] });
 
@@ -69,6 +84,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
