@@ -2,11 +2,12 @@
 const { JsonRpcProvider, Contract } = require('ethers');
 const fetch = require('node-fetch');
 const { generateFlexCard } = require('../utils/canvas/flexcardRenderer');
-const { fetchMetadataExtras } = require('../utils/fetchMetadataExtras');
+const { fetchMetadataExtras } = require('../utils/fetchMetadataExtras'); // ✅ new import
 
 const abi = [
   'function tokenURI(uint256 tokenId) view returns (string)',
-  'function ownerOf(uint256 tokenId) view returns (address)'
+  'function ownerOf(uint256 tokenId) view returns (address)',
+  'function totalSupply() view returns (uint256)' // ✅ optional
 ];
 
 const provider = new JsonRpcProvider('https://mainnet.base.org');
@@ -41,6 +42,32 @@ async function fetchOwner(contractAddress, tokenId) {
   }
 }
 
+async function fetchReservoirRank(contractAddress, tokenId) {
+  try {
+    const res = await fetch(`https://api.reservoir.tools/tokens/v6?tokens=base:${contractAddress}:${tokenId}`);
+    const json = await res.json();
+    return json?.tokens?.[0]?.token?.rarity?.rank || 'N/A';
+  } catch (err) {
+    console.warn('⚠️ Reservoir rank fetch failed:', err);
+    return 'N/A';
+  }
+}
+
+async function fetchTotalSupply(contractAddress, tokenId) {
+  try {
+    const contract = new Contract(contractAddress, abi, provider);
+    const total = await contract.totalSupply();
+    const totalStr = total.toString();
+    if (parseInt(tokenId) < parseInt(totalStr)) {
+      return `${totalStr} (Still minting)`;
+    }
+    return totalStr;
+  } catch (err) {
+    console.warn('⚠️ Total supply not available:', err);
+    return 'Unknown';
+  }
+}
+
 async function buildFlexCard(contractAddress, tokenId, collectionName) {
   const metadata = await fetchMetadata(contractAddress, tokenId);
   const owner = await fetchOwner(contractAddress, tokenId);
@@ -58,8 +85,9 @@ async function buildFlexCard(contractAddress, tokenId, collectionName) {
   const safeCollectionName = collectionName || metadata?.name || 'NFT';
   const openseaUrl = `https://opensea.io/assets/base/${contractAddress}/${tokenId}`;
 
-  // ✅ Pull extra metadata: rank, minted date, network, totalSupply
   const extras = await fetchMetadataExtras(contractAddress, tokenId, 'base');
+  extras.rank = await fetchReservoirRank(contractAddress, tokenId);
+  extras.totalSupply = await fetchTotalSupply(contractAddress, tokenId);
 
   return await generateFlexCard({
     nftImageUrl,
@@ -68,10 +96,11 @@ async function buildFlexCard(contractAddress, tokenId, collectionName) {
     traits,
     owner: ownerDisplay,
     openseaUrl,
-    ...extras // 🧩 include: mintedDate, rank, network, totalSupply
+    ...extras // ✅ inject metadata
   });
 }
 
 module.exports = { buildFlexCard };
+
 
 
