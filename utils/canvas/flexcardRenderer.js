@@ -2,7 +2,6 @@ const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const QRCode = require('qrcode');
 const path = require('path');
 
-// Load font
 const fontPath = path.join(__dirname, '../../fonts/Exo2-Bold.ttf');
 GlobalFonts.registerFromPath(fontPath, 'Exo2');
 
@@ -14,105 +13,115 @@ async function generateFlexCard({
   owner,
   openseaUrl
 }) {
-  const canvasWidth = 1124;
-  const canvasHeight = 1650;
-  const borderPadding = 40;
-  const contentWidth = canvasWidth - borderPadding * 2;
-
-  const canvas = createCanvas(canvasWidth, canvasHeight);
+  const width = 1124;
+  const height = 1650;
+  const canvas = createCanvas(width, height);
   const ctx = canvas.getContext('2d');
 
-  // Background
-  ctx.fillStyle = '#31613D';
-  ctx.fillRect(0, 0, canvasWidth, canvasHeight);
-
-  // Outer Card Border
-  ctx.strokeStyle = '#ffffff';
-  ctx.lineWidth = 2;
-  ctx.strokeRect(borderPadding, borderPadding, contentWidth, canvasHeight - borderPadding * 2);
-
-  // Heights
-  const titleHeight = 80;
-  const imageHeight = 900;
-  const traitQrHeight = 320;
+  // Colors & Dimensions
+  const bgColor = '#31613D';
+  const borderColor = '#ffffff';
+  const titleBarHeight = 120;
   const footerHeight = 40;
+  const ownerWidth = 140;
+  const margin = 40;
+  const contentWidth = width - 2 * margin - ownerWidth;
+  const qrSize = 300;
+  const qrPadding = 20;
 
-  const titleY = borderPadding;
-  const imageY = titleY + titleHeight;
-  const traitQrY = imageY + imageHeight;
-  const footerY = traitQrY + traitQrHeight;
+  // Background
+  ctx.fillStyle = bgColor;
+  ctx.fillRect(0, 0, width, height);
 
-  // Title
+  // Outer border
+  ctx.strokeStyle = borderColor;
+  ctx.lineWidth = 2;
+  ctx.strokeRect(margin, margin, width - 2 * margin, height - 2 * margin);
+
+  // Title bar
   ctx.fillStyle = '#000';
-  ctx.fillRect(borderPadding, titleY, contentWidth, titleHeight);
-  ctx.strokeRect(borderPadding, titleY, contentWidth, titleHeight);
-
+  ctx.fillRect(margin, margin, width - 2 * margin, titleBarHeight);
+  ctx.strokeRect(margin, margin, width - 2 * margin, titleBarHeight);
+  ctx.fillStyle = '#fff';
   ctx.font = 'bold 42px Exo2';
-  ctx.fillStyle = '#fff';
-  ctx.fillText(`${collectionName.toUpperCase()} #${tokenId}`, borderPadding + 20, titleY + 52);
+  ctx.fillText(`${(collectionName || 'NFT').toUpperCase()} #${tokenId}`, width / 2, margin + titleBarHeight / 2 + 15);
 
-  // NFT Image
+  // NFT image
+  const nftWidth = contentWidth - 160;
+  const nftHeight = 800;
+  const nftX = margin + (contentWidth - nftWidth) / 2;
+  const nftY = 190 + (880 - nftHeight) / 2;
+
   const nftImg = await loadImage(nftImageUrl);
-  const imageX = borderPadding + 112;
-  ctx.drawImage(nftImg, imageX, imageY + 20, 900, 860);
-  ctx.strokeRect(imageX, imageY + 20, 900, 860);
+  ctx.drawImage(nftImg, nftX, nftY, nftWidth, nftHeight);
+  ctx.strokeRect(nftX, nftY, nftWidth, nftHeight);
 
-  // OWNER Tag from top of NFT to top of QR
-  const ownerStripY = imageY;
-  const ownerStripHeight = traitQrY - imageY;
+  // Owner strip (right)
+  const ownerX = width - margin - ownerWidth;
+  const ownerY = 160;
+  const ownerH = 1220;
+  ctx.strokeRect(ownerX, ownerY, ownerWidth, ownerH);
   ctx.save();
-  ctx.translate(canvasWidth - 25, ownerStripY + ownerStripHeight / 2);
+  ctx.translate(ownerX + ownerWidth / 2, ownerY + ownerH / 2);
   ctx.rotate(-Math.PI / 2);
-  ctx.font = 'bold 34px Exo2';
+  ctx.font = 'bold 32px Exo2';
   ctx.fillStyle = '#fff';
-  ctx.fillText('OWNER', -50, 0);
+  ctx.textAlign = 'center';
+  ctx.fillText(`OWNER: ${owner || 'Unknown'}`, 0, 0);
   ctx.restore();
 
-  // Traits + QR Section
+  // Traits title bar
+  const traitsTitleY = nftY + 800 + 40;
+  const traitsTitleHeight = 60;
   ctx.fillStyle = '#000';
-  ctx.fillRect(borderPadding, traitQrY, contentWidth, traitQrHeight);
-  ctx.strokeRect(borderPadding, traitQrY, contentWidth, traitQrHeight);
-
-  // Traits
-  ctx.font = 'bold 28px Exo2';
+  ctx.fillRect(margin, traitsTitleY, contentWidth, traitsTitleHeight);
+  ctx.strokeRect(margin, traitsTitleY, contentWidth, traitsTitleHeight);
   ctx.fillStyle = '#fff';
-  ctx.fillText('TRAITS', borderPadding + 20, traitQrY + 40);
+  ctx.font = 'bold 26px Exo2';
+  ctx.fillText('TRAITS', margin + 20, traitsTitleY + 40);
 
-  ctx.font = '24px Exo2';
-  let traitY = traitQrY + 80;
-  const maxTraits = 7;
+  // Traits info
+  const traitsY = traitsTitleY + traitsTitleHeight;
+  const traitsHeight = 240;
+  ctx.fillStyle = bgColor;
+  ctx.fillRect(margin, traitsY, contentWidth, traitsHeight);
+  ctx.strokeRect(margin, traitsY, contentWidth, traitsHeight);
+  ctx.fillStyle = '#fff';
+  ctx.font = '22px Exo2';
+  const maxTraits = 8;
+  let traitY = traitsY + 36;
   for (let i = 0; i < Math.min(traits.length, maxTraits); i++) {
-    ctx.fillText(traits[i], borderPadding + 20, traitY);
+    ctx.fillText(`• ${traits[i]}`, margin + 20, traitY);
     traitY += 30;
   }
   if (traits.length > maxTraits) {
-    ctx.fillText(`+ ${traits.length - maxTraits} more...`, borderPadding + 20, traitY);
+    ctx.fillText(`+ ${traits.length - maxTraits} more...`, margin + 20, traitY);
   }
 
-  // QR Code inside traits box
-  const qrSize = 220;
-  const qrBuffer = await QRCode.toBuffer(openseaUrl, { width: qrSize });
+  // QR Zone
+  const qrX = width - margin - qrSize;
+  const qrY = height - footerHeight - qrSize;
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(qrX, qrY, qrSize, qrSize);
+
+  const qrBuffer = await QRCode.toBuffer(openseaUrl, { width: qrSize - qrPadding * 2, margin: 1 });
   const qrImg = await loadImage(qrBuffer);
-  const qrX = canvasWidth - borderPadding - qrSize - 20;
-  const qrY = traitQrY + 50;
-  ctx.drawImage(qrImg, qrX, qrY, qrSize, qrSize);
-  ctx.strokeRect(qrX, qrY, qrSize, qrSize);
+  ctx.drawImage(qrImg, qrX + qrPadding, qrY + qrPadding, qrSize - qrPadding * 2, qrSize - qrPadding * 2);
 
   // Footer
   ctx.fillStyle = '#000';
-  ctx.fillRect(borderPadding, footerY, contentWidth, footerHeight);
-  ctx.strokeRect(borderPadding, footerY, contentWidth, footerHeight);
-
-  ctx.font = 'bold 22px Exo2';
+  ctx.fillRect(margin, height - footerHeight, width - 2 * margin, footerHeight);
+  ctx.strokeRect(margin, height - footerHeight, width - 2 * margin, footerHeight);
   ctx.fillStyle = '#fff';
-  const footerText = 'Powered by PimpsDev 🚀';
-  const textWidth = ctx.measureText(footerText).width;
-  ctx.fillText(footerText, borderPadding + (contentWidth - textWidth) / 2, footerY + 27);
+  ctx.font = 'bold 24px Exo2';
+  ctx.textAlign = 'center';
+  ctx.fillText('Powered by PimpsDev 🚀', width / 2, height - footerHeight / 2 + 8);
 
   return canvas.toBuffer('image/png');
 }
 
 module.exports = { generateFlexCard };
+
 
 
 
