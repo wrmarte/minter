@@ -8,11 +8,10 @@ const abi = [
   'function ownerOf(uint256 tokenId) view returns (address)'
 ];
 
-const provider = getProvider('base'); // Set it once here
-
 async function fetchMetadata(contractAddress, tokenId) {
   try {
-    const contract = new Contract(contractAddress, abi, provider); // ✅ provider here
+    const provider = await getProvider(); // ✅ FIXED
+    const contract = new Contract(contractAddress, abi, provider);
     const tokenURI = await contract.tokenURI(tokenId);
 
     let metadataUrl = tokenURI.startsWith('ipfs://')
@@ -30,7 +29,8 @@ async function fetchMetadata(contractAddress, tokenId) {
 
 async function fetchOwner(contractAddress, tokenId) {
   try {
-    const contract = new Contract(contractAddress, abi, provider); // ✅ provider here
+    const provider = await getProvider(); // ✅ FIXED
+    const contract = new Contract(contractAddress, abi, provider);
     const owner = await contract.ownerOf(tokenId);
     return owner;
   } catch (err) {
@@ -77,6 +77,7 @@ async function buildFlexCard(contractAddress, tokenId, collectionName) {
 }
 
 module.exports = { buildFlexCard };
+
 
 
 
