@@ -2,6 +2,8 @@ require('dotenv').config();
 const fetch = require('node-fetch');
 
 const MORALIS_API_KEY = process.env.MORALIS_API_KEY;
+const BASESCAN_API_KEY = process.env.BASESCAN_API_KEY;
+
 
 async function fetchMetadataExtras(contractAddress, tokenId, network = 'base') {
   let rank = 'N/A';
