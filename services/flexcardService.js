@@ -13,7 +13,9 @@ function shortenAddress(address) {
 async function fetchOwner(contractAddress, tokenId, chain = 'base') {
   try {
     const provider = getProvider(chain);
-    const contract = new Contract(contractAddress, abi, provider); // ✅ no .connect()
+    const contract = new Contract(contractAddress, abi, null);
+    contract.runner = provider; // ✅ Required for Ethers v6
+
     return await contract.ownerOf(tokenId);
   } catch (err) {
     console.error('❌ Owner fetch failed:', err);
@@ -32,7 +34,7 @@ async function buildFlexCard(contractAddress, tokenId, collectionName, chain = '
   }
 
   if (!nftImageUrl) {
-    nftImageUrl = 'https://i.imgur.com/EVQFHhA.png'; // ✅ avoids via.placeholder.com
+    nftImageUrl = 'https://i.imgur.com/EVQFHhA.png'; // ✅ Avoid DNS resolution error
   }
 
   const traits = Array.isArray(metadata?.attributes) && metadata.attributes.length > 0
@@ -57,6 +59,7 @@ async function buildFlexCard(contractAddress, tokenId, collectionName, chain = '
 }
 
 module.exports = { buildFlexCard };
+
 
 
 
