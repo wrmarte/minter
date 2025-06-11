@@ -8,6 +8,8 @@ async function fetchMetadataExtras(contractAddress, tokenId, network = 'base') {
   let minted = 'Unknown';
   let totalSupply = 'Unknown';
 
+  const normalizedTokenId = BigInt(tokenId).toString();
+
   const networkMap = {
     base: {
       chainId: '0x2105',
@@ -25,15 +27,14 @@ async function fetchMetadataExtras(contractAddress, tokenId, network = 'base') {
       scanKey: process.env.APESCAN_API_KEY
     }
   };
-console.log('📦 Moralis token transfer response:', data);
 
   const net = networkMap[network.toLowerCase()] || networkMap.base;
 
   try {
-    // Try BaseScan (or equivalent) for first mint transfer
-    const scanUrl = `${net.api}?module=account&action=tokennfttx&contractaddress=${contractAddress}&tokenid=${tokenId}&page=1&offset=1&sort=asc&apikey=${net.scanKey}`;
+    const scanUrl = `${net.api}?module=account&action=tokennfttx&contractaddress=${contractAddress}&tokenid=${normalizedTokenId}&page=1&offset=1&sort=asc&apikey=${net.scanKey}`;
     const res = await fetch(scanUrl);
     const json = await res.json();
+    console.log('📦 BaseScan token tx:', json);
     if (json?.result?.[0]?.timeStamp) {
       const timestamp = parseInt(json.result[0].timeStamp) * 1000;
       minted = new Date(timestamp).toLocaleDateString('en-US');
@@ -44,11 +45,12 @@ console.log('📦 Moralis token transfer response:', data);
 
   if (minted === 'Unknown') {
     try {
-      const url = `https://deep-index.moralis.io/api/v2.2/nft/${contractAddress}/${tokenId}/transfers?chain=${network}`;
+      const url = `https://deep-index.moralis.io/api/v2.2/nft/${contractAddress}/${normalizedTokenId}/transfers?chain=${network}`;
       const res = await fetch(url, {
         headers: { 'X-API-Key': MORALIS_API_KEY }
       });
       const json = await res.json();
+      console.log('📦 Moralis token transfer response:', json);
       if (json?.result?.length > 0) {
         const timestamp = new Date(json.result[json.result.length - 1].block_timestamp);
         minted = timestamp.toLocaleDateString('en-US');
