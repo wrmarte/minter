@@ -3,31 +3,23 @@ const fetch = require('node-fetch');
 const { format } = require('date-fns');
 
 const BASESCAN_API = process.env.BASESCAN_API_KEY;
-const OPENSEA_API_KEY = process.env.OPENSEA_API_KEY;
 const RESERVOIR_API_KEY = process.env.RESERVOIR_API_KEY;
+const OPENSEA_API_KEY = process.env.OPENSEA_API_KEY;
 
-async function fetchMintDate(contractAddress, tokenId, network) {
-  if (network !== 'base') return 'Unknown';
+async function fetchMintDate(contractAddress, tokenId) {
   try {
     const url = `https://api.basescan.org/api?module=account&action=tokennfttx&contractaddress=${contractAddress}&sort=asc&apikey=${BASESCAN_API}`;
     const res = await fetch(url);
     const json = await res.json();
 
-    if (!Array.isArray(json.result)) return 'Unknown';
-
-    const matches = json.result.filter(tx =>
+    const mintTx = json.result.find(tx =>
       tx.tokenID === tokenId.toString() &&
       tx.from.toLowerCase() === '0x0000000000000000000000000000000000000000'
     );
 
-    if (matches.length) {
-      // Sort by timestamp just in case
-      matches.sort((a, b) => parseInt(a.timeStamp) - parseInt(b.timeStamp));
-      const mintTx = matches[0];
+    if (mintTx?.timeStamp) {
       const timestamp = parseInt(mintTx.timeStamp) * 1000;
       return format(new Date(timestamp), 'yyyy-MM-dd HH:mm');
-    } else {
-      console.warn(`⚠️ No mint tx found for tokenId ${tokenId}`);
     }
   } catch (err) {
     console.error('❌ Mint date fetch failed:', err);
@@ -35,11 +27,9 @@ async function fetchMintDate(contractAddress, tokenId, network) {
   return 'Unknown';
 }
 
-
-async function fetchRarityRankReservoir(contract, tokenId, network) {
+async function fetchRarityRankReservoir(contract, tokenId) {
   try {
-    const chain = network === 'eth' ? 'ethereum' : network;
-    const url = `https://api.reservoir.tools/tokens/v5?tokens=${chain}:${contract}:${tokenId}`;
+    const url = `https://api.reservoir.tools/tokens/v5?tokens=${contract}:${tokenId}`;
     const res = await fetch(url, {
       headers: {
         'accept': 'application/json',
@@ -47,9 +37,6 @@ async function fetchRarityRankReservoir(contract, tokenId, network) {
       }
     });
     const json = await res.json();
-
-    console.log('🔎 Reservoir Rank Response:', JSON.stringify(json, null, 2));
-
     const rank = json?.tokens?.[0]?.token?.rarity?.rank;
     return rank ? `#${rank}` : 'N/A';
   } catch (err) {
@@ -68,10 +55,7 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
       }
     });
     const json = await res.json();
-
-    console.log('🔍 OpenSea Rank Response:', JSON.stringify(json, null, 2));
-
-    const rank = json?.rarity?.rank;
+    const rank = json?.rarity?.rank || json?.nft?.rarity?.rank;
     return rank ? `#${rank}` : 'N/A';
   } catch (err) {
     console.error('❌ OpenSea rank fetch failed:', err);
@@ -89,10 +73,8 @@ async function fetchTotalSupply(contract, network) {
       }
     });
     const json = await res.json();
-
     const count = json?.collections?.[0]?.tokenCount;
     const isMinting = json?.collections?.[0]?.mintKind === 'public';
-
     return count ? `${count}${isMinting ? ' (Still Minting)' : ''}` : 'Unknown';
   } catch (err) {
     console.error('❌ Total supply fetch failed:', err);
@@ -101,11 +83,9 @@ async function fetchTotalSupply(contract, network) {
 }
 
 async function fetchMetadataExtras(contractAddress, tokenId, network) {
-  tokenId = tokenId.toString(); // ✅ enforce string format
-
   const [minted, rankReservoir, rankOpenSea, totalSupply] = await Promise.all([
-    fetchMintDate(contractAddress, tokenId, network),
-    fetchRarityRankReservoir(contractAddress, tokenId, network),
+    fetchMintDate(contractAddress, tokenId),
+    fetchRarityRankReservoir(contractAddress, tokenId),
     fetchRarityRankOpenSea(contractAddress, tokenId, network),
     fetchTotalSupply(contractAddress, network)
   ]);
@@ -121,6 +101,7 @@ async function fetchMetadataExtras(contractAddress, tokenId, network) {
 }
 
 module.exports = { fetchMetadataExtras };
+
 
 
 
