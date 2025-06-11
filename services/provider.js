@@ -9,13 +9,16 @@ const RPCS = {
   ]
 };
 
-let rpcIndex = 0;
+let currentIndex = 0;
 
-function getProvider(chain = 'base') {
-  const urls = RPCS[chain];
-  const url = urls[rpcIndex];
-  rpcIndex = (rpcIndex + 1) % urls.length;
-  return new JsonRpcProvider(url);
+async function getProvider() {
+  const url = RPCS.base[currentIndex];
+  currentIndex = (currentIndex + 1) % RPCS.base.length;
+
+  const provider = new JsonRpcProvider(url);
+  await provider._detectNetwork(); // ✅ force resolve the runner
+
+  return provider;
 }
 
 module.exports = { getProvider };
