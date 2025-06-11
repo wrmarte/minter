@@ -101,7 +101,7 @@ for (const file of eventFiles) {
 
 const processUnifiedBlock = require('./services/globalProcessor');
 const { trackAllContracts } = require('./services/mintProcessor');
-const { getProvider } = require('./services/provider');
+const { getProvider } = require('./services/providerM');
 
 // Start token global scanner (token buys/sales)
 setInterval(async () => {
