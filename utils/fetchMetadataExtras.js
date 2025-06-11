@@ -13,6 +13,8 @@ async function fetchMintDate(contractAddress, tokenId, network) {
     const res = await fetch(url);
     const json = await res.json();
 
+    console.log('📦 BaseScan TX Result:', json.result);
+
     const mintTx = json.result.find(tx =>
       tx.tokenID === tokenId.toString() &&
       tx.from.toLowerCase() === '0x0000000000000000000000000000000000000000'
@@ -21,6 +23,8 @@ async function fetchMintDate(contractAddress, tokenId, network) {
     if (mintTx?.timeStamp) {
       const timestamp = parseInt(mintTx.timeStamp) * 1000;
       return format(new Date(timestamp), 'yyyy-MM-dd HH:mm');
+    } else {
+      console.log(`⛔ No matching mint tx for tokenId ${tokenId}`);
     }
   } catch (err) {
     console.error('❌ Mint date fetch failed:', err);
@@ -39,6 +43,9 @@ async function fetchRarityRankReservoir(contract, tokenId, network) {
       }
     });
     const json = await res.json();
+
+    console.log('🔎 Reservoir Rank Response:', JSON.stringify(json, null, 2));
+
     const rank = json?.tokens?.[0]?.token?.rarity?.rank;
     return rank ? `#${rank}` : 'N/A';
   } catch (err) {
@@ -57,6 +64,9 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
       }
     });
     const json = await res.json();
+
+    console.log('🔍 OpenSea Rank Response:', JSON.stringify(json, null, 2));
+
     const rank = json?.rarity?.rank;
     return rank ? `#${rank}` : 'N/A';
   } catch (err) {
@@ -75,8 +85,10 @@ async function fetchTotalSupply(contract, network) {
       }
     });
     const json = await res.json();
+
     const count = json?.collections?.[0]?.tokenCount;
     const isMinting = json?.collections?.[0]?.mintKind === 'public';
+
     return count ? `${count}${isMinting ? ' (Still Minting)' : ''}` : 'Unknown';
   } catch (err) {
     console.error('❌ Total supply fetch failed:', err);
@@ -85,6 +97,8 @@ async function fetchTotalSupply(contract, network) {
 }
 
 async function fetchMetadataExtras(contractAddress, tokenId, network) {
+  tokenId = tokenId.toString(); // ✅ enforce string format
+
   const [minted, rankReservoir, rankOpenSea, totalSupply] = await Promise.all([
     fetchMintDate(contractAddress, tokenId, network),
     fetchRarityRankReservoir(contractAddress, tokenId, network),
