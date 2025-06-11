@@ -1,61 +1,70 @@
-// utils/fetchMetadataExtras.js
-const { JsonRpcProvider, Contract } = require('ethers');
-const fetch = require('node-fetch');
 require('dotenv').config();
+const fetch = require('node-fetch');
 
 const MORALIS_API_KEY = process.env.MORALIS_API_KEY;
 
-const RPCS = {
-  base: 'https://mainnet.base.org',
-  eth: 'https://eth.llamarpc.com',
-  ape: 'https://rpc.apecoin.com'
-};
-
 async function fetchMetadataExtras(contractAddress, tokenId, network = 'base') {
   let rank = 'N/A';
-  let mintedDate = 'Unknown';
-  let totalSupply = '???';
+  let minted = 'Unknown';
+  let totalSupply = 'Unknown';
 
-  const rpc = RPCS[network.toLowerCase()] || RPCS.base;
-  const provider = new JsonRpcProvider(rpc);
+  const networkMap = {
+    base: {
+      chainId: '0x2105',
+      api: 'https://api.basescan.org/api',
+      scanKey: process.env.BASESCAN_API_KEY
+    },
+    eth: {
+      chainId: '0x1',
+      api: 'https://api.etherscan.io/api',
+      scanKey: process.env.ETHERSCAN_API_KEY
+    },
+    ape: {
+      chainId: '0x1252',
+      api: 'https://api.apescan.dev/api',
+      scanKey: process.env.APESCAN_API_KEY
+    }
+  };
+
+  const net = networkMap[network.toLowerCase()] || networkMap.base;
 
   try {
-    // Use Moralis API for token transfer data
-    const chainMap = { base: 'base', eth: 'eth', ape: 'apecoin' };
-    const moralisChain = chainMap[network.toLowerCase()] || 'base';
-    const url = `https://deep-index.moralis.io/api/v2/nft/${contractAddress}/${tokenId}/transfers?chain=${moralisChain}&format=decimal`;
-
-    const res = await fetch(url, {
-      headers: { 'X-API-Key': MORALIS_API_KEY }
-    });
-
-    const data = await res.json();
-    if (data?.result?.length > 0) {
-      const firstTx = data.result[data.result.length - 1];
-      mintedDate = new Date(firstTx.block_timestamp).toLocaleDateString('en-US', {
-        year: 'numeric', month: 'short', day: 'numeric'
-      });
+    // Try BaseScan (or equivalent) for first mint transfer
+    const scanUrl = `${net.api}?module=account&action=tokennfttx&contractaddress=${contractAddress}&tokenid=${tokenId}&page=1&offset=1&sort=asc&apikey=${net.scanKey}`;
+    const res = await fetch(scanUrl);
+    const json = await res.json();
+    if (json?.result?.[0]?.timeStamp) {
+      const timestamp = parseInt(json.result[0].timeStamp) * 1000;
+      minted = new Date(timestamp).toLocaleDateString('en-US');
     }
-  } catch (err) {
-    console.warn('⚠️ Failed to fetch minted date from Moralis:', err);
+  } catch (e) {
+    console.warn('⚠️ Scan fetch failed, trying Moralis...');
   }
 
-  try {
-    const abi = ['function totalSupply() view returns (uint256)'];
-    const contract = new Contract(contractAddress, abi, provider);
-    const total = await contract.totalSupply();
-    totalSupply = total.toString();
-  } catch (err) {
-    console.warn('⚠️ Failed to fetch total supply:', err);
+  if (minted === 'Unknown') {
+    try {
+      const url = `https://deep-index.moralis.io/api/v2.2/nft/${contractAddress}/${tokenId}/transfers?chain=${network}`;
+      const res = await fetch(url, {
+        headers: { 'X-API-Key': MORALIS_API_KEY }
+      });
+      const json = await res.json();
+      if (json?.result?.length > 0) {
+        const timestamp = new Date(json.result[json.result.length - 1].block_timestamp);
+        minted = timestamp.toLocaleDateString('en-US');
+      }
+    } catch (err) {
+      console.error('❌ Moralis mint fetch failed:', err);
+    }
   }
 
   return {
     rank,
-    mintedDate,
-    network: network.charAt(0).toUpperCase() + network.slice(1),
+    minted,
+    network: network.toUpperCase(),
     totalSupply
   };
 }
 
 module.exports = { fetchMetadataExtras };
+
 
