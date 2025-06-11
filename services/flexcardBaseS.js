@@ -2,7 +2,7 @@
 const { JsonRpcProvider, Contract } = require('ethers');
 const fetch = require('node-fetch');
 const { generateFlexCard } = require('../utils/canvas/flexcardRenderer');
-const { fetchMetadataExtras } = require('../utils/fetchMetadataExtras'); // ✅ new import
+const { fetchMetadataExtras } = require('../utils/fetchMetadataExtras'); // ✅ extras module
 
 const abi = [
   'function tokenURI(uint256 tokenId) view returns (string)',
@@ -58,7 +58,7 @@ async function buildFlexCard(contractAddress, tokenId, collectionName) {
   const safeCollectionName = collectionName || metadata?.name || 'NFT';
   const openseaUrl = `https://opensea.io/assets/base/${contractAddress}/${tokenId}`;
 
-  // ✅ Fetch extra metadata (rank, mintedDate, network, totalSupply)
+  // ✅ Fetch extended metadata: rank, mintDate, network, totalSupply
   const extras = await fetchMetadataExtras(contractAddress, tokenId, 'base');
 
   return await generateFlexCard({
@@ -68,20 +68,9 @@ async function buildFlexCard(contractAddress, tokenId, collectionName) {
     traits,
     owner: ownerDisplay,
     openseaUrl,
-    ...extras // ✅ inject metadata
+    ...extras // ✅ include in render
   });
 }
 
 module.exports = { buildFlexCard };
-
-
-
-
-
-
-
-
-
-
-
 
