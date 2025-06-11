@@ -15,85 +15,94 @@ async function generateFlexCard({
 }) {
   const width = 1124;
   const height = 1650;
+  const marginX = 40;
+
   const canvas = createCanvas(width, height);
   const ctx = canvas.getContext('2d');
 
-  // Green background + outer border
+  // Background and outer stroke
   ctx.fillStyle = '#31613D';
   ctx.fillRect(0, 0, width, height);
-  ctx.lineWidth = 2;
   ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 2;
   ctx.strokeRect(0, 0, width, height);
 
-  // Title Bar
+  // === Title Box ===
+  const sectionX = marginX;
+  const sectionWidth = width - marginX * 2;
+  const titleHeight = 80;
+  const titleY = marginX;
+
   ctx.fillStyle = '#000';
-  ctx.fillRect(40, 40, width - 80, 80);
-  ctx.strokeRect(40, 40, width - 80, 80);
+  ctx.fillRect(sectionX, titleY, sectionWidth, titleHeight);
+  ctx.strokeRect(sectionX, titleY, sectionWidth, titleHeight);
   ctx.font = 'bold 42px Exo2';
   ctx.fillStyle = '#fff';
-  ctx.fillText(`${collectionName.toUpperCase()} #${tokenId}`, 60, 95);
+  ctx.fillText(`${collectionName.toUpperCase()} #${tokenId}`, sectionX + 20, titleY + 52);
 
-  // NFT Image box (centered)
-  const imgX = 112;
-  const imgY = 140;
+  // === Image Box ===
   const imgSize = 900;
+  const imgY = titleY + titleHeight + 20;
+  const imgX = sectionX + (sectionWidth - imgSize) / 2;
   const nftImg = await loadImage(nftImageUrl);
   ctx.drawImage(nftImg, imgX, imgY, imgSize, imgSize);
   ctx.strokeRect(imgX, imgY, imgSize, imgSize);
 
-  // OWNER vertical tag
+  // === OWNER Vertical ===
   ctx.save();
-  ctx.translate(width - 35, imgY + imgSize / 2);
+  ctx.translate(width - 30, imgY + imgSize / 2);
   ctx.rotate(-Math.PI / 2);
   ctx.font = 'bold 34px Exo2';
   ctx.fillStyle = '#fff';
   ctx.fillText('OWNER', -50, 0);
   ctx.restore();
 
-  // Traits + QR Container
+  // === Traits + QR Code Section ===
   const traitsY = imgY + imgSize + 30;
-  const boxHeight = 320;
+  const traitsHeight = 300;
   ctx.fillStyle = '#000';
-  ctx.fillRect(40, traitsY, width - 80, boxHeight);
+  ctx.fillRect(sectionX, traitsY, sectionWidth, traitsHeight);
   ctx.strokeStyle = '#fff';
-  ctx.strokeRect(40, traitsY, width - 80, boxHeight);
+  ctx.strokeRect(sectionX, traitsY, sectionWidth, traitsHeight);
 
-  // "TRAITS" header
+  // Traits Title
   ctx.font = 'bold 30px Exo2';
   ctx.fillStyle = '#fff';
-  ctx.fillText('TRAITS', 60, traitsY + 40);
+  ctx.fillText('TRAITS', sectionX + 20, traitsY + 40);
 
-  // Traits list
+  // Traits List
   ctx.font = '24px Exo2';
-  let traitY = traitsY + 80;
+  let ty = traitsY + 80;
   const maxTraits = 7;
   for (let i = 0; i < Math.min(traits.length, maxTraits); i++) {
-    ctx.fillText(traits[i], 60, traitY);
-    traitY += 30;
+    ctx.fillText(traits[i], sectionX + 20, ty);
+    ty += 30;
   }
   if (traits.length > maxTraits) {
-    ctx.fillText(`+ ${traits.length - maxTraits} more...`, 60, traitY);
+    ctx.fillText(`+ ${traits.length - maxTraits} more...`, sectionX + 20, ty);
   }
 
-  // QR Code
+  // QR Code Placement
   const qrSize = 220;
+  const qrX = sectionX + sectionWidth - qrSize - 20;
+  const qrY = traitsY + 40;
   const qrBuffer = await QRCode.toBuffer(openseaUrl, { width: qrSize });
   const qrImg = await loadImage(qrBuffer);
-  const qrX = width - qrSize - 80;
-  const qrY = traitsY + 50;
   ctx.drawImage(qrImg, qrX, qrY, qrSize, qrSize);
   ctx.strokeRect(qrX, qrY, qrSize, qrSize);
 
-  // Footer
-  const footerY = height - 60;
+  // === Footer ===
+  const footerHeight = 40;
+  const footerY = height - footerHeight - marginX;
   ctx.fillStyle = '#000';
-  ctx.fillRect(40, footerY, width - 80, 40);
-  ctx.strokeRect(40, footerY, width - 80, 40);
+  ctx.fillRect(sectionX, footerY, sectionWidth, footerHeight);
+  ctx.strokeRect(sectionX, footerY, sectionWidth, footerHeight);
+
   ctx.font = 'bold 22px Exo2';
   ctx.fillStyle = '#fff';
   const footerText = 'Powered by PimpsDev 🚀';
   const textWidth = ctx.measureText(footerText).width;
-  ctx.fillText(footerText, (width - textWidth) / 2, footerY + 27);
+  ctx.fillText(footerText, sectionX + (sectionWidth - textWidth) / 2, footerY + 27);
 
   return canvas.toBuffer('image/png');
 }
