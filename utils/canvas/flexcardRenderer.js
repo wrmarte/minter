@@ -1,6 +1,5 @@
 const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const QRCode = require('qrcode');
-const fs = require('fs');
 const path = require('path');
 
 // Register font globally
@@ -20,127 +19,126 @@ async function generateFlexCard({
   const canvas = createCanvas(width, height);
   const ctx = canvas.getContext('2d');
 
-  // Constants
   const margin = 40;
+  const usableWidth = width - 2 * margin;
   const titleHeight = 120;
   const footerHeight = 40;
   const ownerWidth = 140;
   const traitsHeaderHeight = 60;
-  const traitsInfoHeight = 560;
-  const qrZoneSize = 300;
-  const usableWidth = width - margin * 2;
+  const qrSize = 300;
+  const qrPadding = 20;
+  const nftSize = 620;
 
-  // Background
-  ctx.fillStyle = '#31613D';
+  const olive = '#4e7442';
+  const forest = '#294f30';
+
+  // Fill background olive green
+  ctx.fillStyle = olive;
   ctx.fillRect(0, 0, width, height);
 
-  // Outer border
+  // Outer white border
+  ctx.strokeStyle = 'white';
   ctx.lineWidth = 2;
-  ctx.strokeStyle = '#FFFFFF';
   ctx.strokeRect(margin, margin, usableWidth, height - 2 * margin);
 
-  // Title bar
-  ctx.fillStyle = '#000';
+  // Title Bar (forest green)
+  ctx.fillStyle = forest;
   ctx.fillRect(margin, margin, usableWidth, titleHeight);
   ctx.strokeRect(margin, margin, usableWidth, titleHeight);
-
-  ctx.font = 'bold 42px Exo2';
-  ctx.fillStyle = '#fff';
+  ctx.fillStyle = 'white';
+  ctx.font = 'bold 38px Exo2';
+  ctx.textAlign = 'left';
   ctx.fillText((collectionName || 'NFT').toUpperCase(), margin + 20, margin + 70);
   ctx.textAlign = 'right';
-  ctx.fillText(`#${tokenId}`, width - margin - 20, margin + 70);
-  ctx.textAlign = 'left';
+  ctx.fillText(`#${tokenId}`, margin + usableWidth - 20, margin + 70);
 
-  // Footer
-  const footerY = height - margin - footerHeight;
-  ctx.fillStyle = '#000';
-  ctx.fillRect(margin, footerY, usableWidth, footerHeight);
-  ctx.strokeRect(margin, footerY, usableWidth, footerHeight);
+  // NFT zone (olive framed, centered)
+  const nftX = margin + (usableWidth - ownerWidth - nftSize) / 2;
+  const nftY = margin + titleHeight + 40;
+  ctx.fillStyle = olive;
+  ctx.fillRect(nftX, nftY, nftSize, nftSize);
+  ctx.strokeRect(nftX, nftY, nftSize, nftSize);
 
-  ctx.fillStyle = '#fff';
-  ctx.font = 'bold 24px Exo2';
-  const footerText = 'Powered by PimpsDev 🚀';
-  const textWidth = ctx.measureText(footerText).width;
-  ctx.fillText(footerText, (width - textWidth) / 2, footerY + 28);
+  const nftImg = await loadImage(nftImageUrl);
+  ctx.drawImage(nftImg, nftX, nftY, nftSize, nftSize);
 
-  // QR Code
-  const qrZoneX = width - margin - qrZoneSize;
-  const qrZoneY = footerY - qrZoneSize;
-  ctx.fillStyle = '#fff';
-  ctx.fillRect(qrZoneX, qrZoneY, qrZoneSize, qrZoneSize);
-  ctx.strokeStyle = '#fff';
-  ctx.strokeRect(qrZoneX, qrZoneY, qrZoneSize, qrZoneSize);
-
-  const qrBuffer = await QRCode.toBuffer(openseaUrl, { width: 256, margin: 1 });
-  const qrImg = await loadImage(qrBuffer);
-  ctx.drawImage(qrImg, qrZoneX + 22, qrZoneY + 22, 256, 256);
-
-  // Owner vertical strip
-  const ownerY = margin + titleHeight;
-  const ownerHeight = qrZoneY - ownerY;
+  // Owner zone (forest green, vertical text)
   const ownerX = width - margin - ownerWidth;
+  const ownerY = margin + titleHeight;
+  const ownerHeight = height - margin - footerHeight - qrSize - ownerY;
+  ctx.fillStyle = forest;
+  ctx.fillRect(ownerX, ownerY, ownerWidth, ownerHeight);
   ctx.strokeRect(ownerX, ownerY, ownerWidth, ownerHeight);
   ctx.save();
   ctx.translate(ownerX + ownerWidth / 2, ownerY + ownerHeight / 2);
   ctx.rotate(-Math.PI / 2);
-  ctx.font = 'bold 46px Exo2';
-  ctx.fillStyle = '#fff';
+  ctx.fillStyle = 'white';
+  ctx.font = 'bold 42px Exo2';
   ctx.textAlign = 'center';
-  ctx.fillText(`OWNER: ${owner || 'Unknown'}`, 0, 16);
+  ctx.fillText(`OWNER: ${owner || 'Unknown'}`, 0, 10);
   ctx.restore();
 
-  // Traits header
-  const traitsHeaderY = qrZoneY - traitsHeaderHeight - traitsInfoHeight;
-  ctx.fillStyle = '#000';
-  ctx.fillRect(margin, traitsHeaderY, usableWidth - ownerWidth, traitsHeaderHeight);
-  ctx.strokeRect(margin, traitsHeaderY, usableWidth - ownerWidth, traitsHeaderHeight);
-
-  ctx.fillStyle = '#fff';
+  // Traits Header (forest green)
+  const traitsHeaderY = nftY + nftSize + 40;
+  const traitsHeaderWidth = usableWidth - ownerWidth;
+  ctx.fillStyle = forest;
+  ctx.fillRect(margin, traitsHeaderY, traitsHeaderWidth, traitsHeaderHeight);
+  ctx.strokeRect(margin, traitsHeaderY, traitsHeaderWidth, traitsHeaderHeight);
+  ctx.fillStyle = 'white';
   ctx.font = 'bold 28px Exo2';
-  ctx.fillText('TRAITS', margin + 20, traitsHeaderY + 42);
+  ctx.textAlign = 'left';
+  ctx.fillText('TRAITS', margin + 20, traitsHeaderY + 40);
 
-  // Traits info zone
-  const traitsInfoY = traitsHeaderY + traitsHeaderHeight;
-  const traitsInfoWidth = usableWidth - ownerWidth;
-  ctx.fillStyle = '#294f30';
-  ctx.fillRect(margin, traitsInfoY, traitsInfoWidth, traitsInfoHeight);
-  ctx.strokeStyle = '#fff';
+  // Traits Info (olive green)
+  const traitsY = traitsHeaderY + traitsHeaderHeight;
+  const traitsHeight = height - traitsY - qrSize - footerHeight - 20;
+  ctx.fillStyle = olive;
+  ctx.fillRect(margin, traitsY, traitsHeaderWidth, traitsHeight);
+  ctx.strokeStyle = 'white';
+  ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(margin, traitsInfoY);
-  ctx.lineTo(margin, traitsInfoY + traitsInfoHeight);
-  ctx.lineTo(margin + traitsInfoWidth, traitsInfoY + traitsInfoHeight);
-  ctx.lineTo(margin + traitsInfoWidth, traitsInfoY);
+  ctx.moveTo(margin, traitsY);
+  ctx.lineTo(margin, traitsY + traitsHeight);
+  ctx.lineTo(margin + traitsHeaderWidth, traitsY + traitsHeight);
+  ctx.lineTo(margin + traitsHeaderWidth, traitsY);
   ctx.stroke();
 
-  ctx.fillStyle = '#fff';
-  ctx.font = '20px Exo2';
-  const maxTraits = 14;
-  const displayedTraits = traits.slice(0, maxTraits);
-  let traitY = traitsInfoY + 32;
-  for (const trait of displayedTraits) {
-    ctx.fillText(`• ${trait}`, margin + 20, traitY);
-    traitY += 34;
-  }
-  if (traits.length > maxTraits) {
-    ctx.fillText(`+ ${traits.length - maxTraits} more...`, margin + 20, traitY);
+  // Traits List
+  ctx.fillStyle = 'white';
+  ctx.font = '22px Exo2';
+  ctx.textAlign = 'left';
+  let traitY = traitsY + 36;
+  for (let i = 0; i < traits.length; i++) {
+    ctx.fillText(`• ${traits[i]}`, margin + 20, traitY);
+    traitY += 30;
   }
 
-  // NFT Image Zone
-  const nftZoneTop = margin + titleHeight + 40;
-  const nftZoneBottom = traitsHeaderY - 40;
-  const nftZoneHeight = nftZoneBottom - nftZoneTop;
-  const nftSize = 700; // perfect square
-  const nftX = margin + ((usableWidth - ownerWidth - nftSize) / 2);
-  const nftY = nftZoneTop + ((nftZoneHeight - nftSize) / 2);
+  // QR Code block (white box)
+  const qrX = width - margin - qrSize;
+  const qrY = height - margin - qrSize - footerHeight;
+  ctx.fillStyle = 'white';
+  ctx.fillRect(qrX, qrY, qrSize, qrSize);
+  ctx.strokeRect(qrX, qrY, qrSize, qrSize);
 
-  ctx.strokeRect(nftX, nftY, nftSize, nftSize);
-  const nftImg = await loadImage(nftImageUrl);
-  ctx.drawImage(nftImg, nftX, nftY, nftSize, nftSize);
+  const qrBuffer = await QRCode.toBuffer(openseaUrl, { width: qrSize - 2 * qrPadding, margin: 1 });
+  const qrImg = await loadImage(qrBuffer);
+  ctx.drawImage(qrImg, qrX + qrPadding, qrY + qrPadding, qrSize - 2 * qrPadding, qrSize - 2 * qrPadding);
+
+  // Footer (forest green)
+  const footerY = height - margin - footerHeight;
+  ctx.fillStyle = forest;
+  ctx.fillRect(margin, footerY, usableWidth, footerHeight);
+  ctx.strokeRect(margin, footerY, usableWidth, footerHeight);
+  ctx.fillStyle = 'white';
+  ctx.font = 'bold 24px Exo2';
+  ctx.textAlign = 'center';
+  ctx.fillText('Powered by PimpsDev 🚀', width / 2, footerY + 28);
 
   return canvas.toBuffer('image/png');
 }
 
 module.exports = { generateFlexCard };
+
 
 
 
