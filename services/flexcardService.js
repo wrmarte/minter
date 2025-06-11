@@ -1,14 +1,12 @@
-const { JsonRpcProvider, Contract } = require('ethers');
+const { Contract } = require('ethers');
 const fetch = require('node-fetch');
+const provider = require('../utils/provider'); // 👈 use imported base provider
 const { generateFlexCard } = require('../utils/canvas/flexcardRenderer');
 
 const abi = [
   'function tokenURI(uint256 tokenId) view returns (string)',
   'function ownerOf(uint256 tokenId) view returns (address)'
 ];
-
-const BASE_RPC = 'https://mainnet.base.org';
-const provider = new JsonRpcProvider(BASE_RPC);
 
 async function fetchMetadata(contractAddress, tokenId) {
   try {
