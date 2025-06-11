@@ -25,6 +25,7 @@ async function fetchMetadataExtras(contractAddress, tokenId, network = 'base') {
       scanKey: process.env.APESCAN_API_KEY
     }
   };
+console.log('📦 Moralis token transfer response:', data);
 
   const net = networkMap[network.toLowerCase()] || networkMap.base;
 
