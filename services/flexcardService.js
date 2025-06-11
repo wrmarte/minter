@@ -1,5 +1,5 @@
 const { Contract } = require('ethers');
-const { getProvider } = require('./provider'); // <- make sure it's services/provider.js
+const { getProvider } = require('./provider');
 const { fetchMetadata } = require('../utils/fetchMetadata');
 const { generateFlexCard } = require('../utils/canvas/flexcardRenderer');
 
@@ -13,9 +13,8 @@ function shortenAddress(address) {
 async function fetchOwner(contractAddress, tokenId, chain = 'base') {
   try {
     const provider = getProvider(chain);
-    const contract = new Contract(contractAddress, abi, provider);
-    const owner = await contract.ownerOf(tokenId);
-    return owner;
+    const contract = new Contract(contractAddress, abi, provider); // ✅ no .connect()
+    return await contract.ownerOf(tokenId);
   } catch (err) {
     console.error('❌ Owner fetch failed:', err);
     return '0x0000000000000000000000000000000000000000';
@@ -31,8 +30,9 @@ async function buildFlexCard(contractAddress, tokenId, collectionName, chain = '
   if (nftImageUrl?.startsWith('ipfs://')) {
     nftImageUrl = nftImageUrl.replace('ipfs://', 'https://ipfs.io/ipfs/');
   }
+
   if (!nftImageUrl) {
-    nftImageUrl = 'https://via.placeholder.com/400x400.png?text=No+Image';
+    nftImageUrl = 'https://i.imgur.com/EVQFHhA.png'; // ✅ avoids via.placeholder.com
   }
 
   const traits = Array.isArray(metadata?.attributes) && metadata.attributes.length > 0
@@ -57,6 +57,7 @@ async function buildFlexCard(contractAddress, tokenId, collectionName, chain = '
 }
 
 module.exports = { buildFlexCard };
+
 
 
 
