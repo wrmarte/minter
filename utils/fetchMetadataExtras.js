@@ -16,7 +16,16 @@ async function fetchMintDate(contractAddress, tokenId) {
     const res = await fetch(url);
     const json = await res.json();
 
-    if (!Array.isArray(json.result)) return 'Unknown';
+    if (!Array.isArray(json.result)) {
+      console.log('⚠️ Invalid BaseScan result:', json.result);
+      return 'Unknown';
+    }
+
+    console.log(`🔍 BaseScan TXs for ${tokenId}:`, json.result.map(tx => ({
+      tokenID: tx.tokenID,
+      from: tx.from,
+      time: tx.timeStamp
+    })));
 
     const mintTx = json.result.find(tx =>
       tx.tokenID?.toString() === tokenId.toString() &&
@@ -27,11 +36,14 @@ async function fetchMintDate(contractAddress, tokenId) {
       const timestamp = parseInt(mintTx.timeStamp) * 1000;
       return format(new Date(timestamp), 'yyyy-MM-dd HH:mm');
     }
+
+    console.log('⚠️ No matching mintTx found for token:', tokenId);
   } catch (err) {
     console.error('❌ Mint date fetch failed:', err);
   }
   return 'Unknown';
 }
+
 
 async function fetchRarityRankReservoir(contract, tokenId) {
   try {
