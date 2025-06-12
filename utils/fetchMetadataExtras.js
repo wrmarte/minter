@@ -13,7 +13,7 @@ async function fetchMintDate(contractAddress, tokenId, network) {
     const json = await res.json();
 
     const mintTx = json.result.find(tx =>
-      tx.tokenID == tokenId &&  // ✅ fix: loose equality for tokenID type mismatch
+      tx.tokenID === tokenId.toString() &&
       tx.from.toLowerCase() === '0x0000000000000000000000000000000000000000'
     );
 
@@ -77,13 +77,7 @@ async function fetchTotalSupply(contract, network) {
     const json = await res.json();
     const count = json?.collections?.[0]?.tokenCount;
     const isMinting = json?.collections?.[0]?.mintKind === 'public';
-
-    if (count && !isNaN(count)) {
-      return `${count}${isMinting ? ' (Still Minting)' : ''}`;
-    }
-
-    console.warn('⚠️ Total supply missing or invalid from Reservoir, fallback triggered.');
-    return 'Unknown';
+    return count ? `${count}${isMinting ? ' (Still Minting)' : ''}` : 'Unknown';
   } catch (err) {
     console.error('❌ Total supply fetch failed:', err);
     return 'Unknown';
