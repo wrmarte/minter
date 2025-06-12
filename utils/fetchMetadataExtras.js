@@ -3,10 +3,10 @@ const fetch = require('node-fetch');
 const { format } = require('date-fns');
 
 const BASESCAN_API = process.env.BASESCAN_API_KEY;
-const OPENSEA_API_KEY = process.env.OPENSEA_API_KEY;
 const RESERVOIR_API_KEY = process.env.RESERVOIR_API_KEY;
+const OPENSEA_API_KEY = process.env.OPENSEA_API_KEY;
 
-async function fetchMintDate(contractAddress, tokenId, network) {
+async function fetchMintDate(contractAddress, tokenId) {
   try {
     const url = `https://api.basescan.org/api?module=account&action=tokennfttx&contractaddress=${contractAddress}&sort=asc&apikey=${BASESCAN_API}`;
     const res = await fetch(url);
@@ -27,10 +27,9 @@ async function fetchMintDate(contractAddress, tokenId, network) {
   return 'Unknown';
 }
 
-async function fetchRarityRankReservoir(contract, tokenId, network) {
+async function fetchRarityRankReservoir(contract, tokenId) {
   try {
-    const chain = network === 'eth' ? 'ethereum' : network;
-    const url = `https://api.reservoir.tools/tokens/v5?tokens=${chain}:${contract}:${tokenId}`;
+    const url = `https://api.reservoir.tools/tokens/v5?tokens=${contract}:${tokenId}`;
     const res = await fetch(url, {
       headers: {
         'accept': 'application/json',
@@ -56,7 +55,7 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
       }
     });
     const json = await res.json();
-    const rank = json?.rarity?.rank;
+    const rank = json?.rarity?.rank || json?.nft?.rarity?.rank;
     return rank ? `#${rank}` : 'N/A';
   } catch (err) {
     console.error('❌ OpenSea rank fetch failed:', err);
@@ -66,8 +65,7 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
 
 async function fetchTotalSupply(contract, network) {
   try {
-    const chain = network === 'eth' ? 'ethereum' : network;
-    const url = `https://api.reservoir.tools/collections/v5?id=${chain}:${contract}`;
+    const url = `https://api.reservoir.tools/collections/v5?id=${network === 'eth' ? 'ethereum' : network}:${contract}`;
     const res = await fetch(url, {
       headers: {
         'accept': 'application/json',
@@ -86,8 +84,8 @@ async function fetchTotalSupply(contract, network) {
 
 async function fetchMetadataExtras(contractAddress, tokenId, network) {
   const [minted, rankReservoir, rankOpenSea, totalSupply] = await Promise.all([
-    fetchMintDate(contractAddress, tokenId, network),
-    fetchRarityRankReservoir(contractAddress, tokenId, network),
+    fetchMintDate(contractAddress, tokenId),
+    fetchRarityRankReservoir(contractAddress, tokenId),
     fetchRarityRankOpenSea(contractAddress, tokenId, network),
     fetchTotalSupply(contractAddress, network)
   ]);
@@ -103,6 +101,11 @@ async function fetchMetadataExtras(contractAddress, tokenId, network) {
 }
 
 module.exports = { fetchMetadataExtras };
+
+
+
+
+
 
 
 
