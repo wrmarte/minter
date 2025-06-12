@@ -17,26 +17,28 @@ async function fetchMintDate(contractAddress, tokenId) {
     const json = await res.json();
 
     if (!Array.isArray(json.result)) {
-      console.log('⚠️ Invalid BaseScan result:', json.result);
+      console.warn('❌ Unexpected BaseScan result:', json.result);
       return 'Unknown';
     }
 
-    const normalizedTokenId = tokenId.toString();
-    const mintTx = json.result.find(tx =>
-      tx.tokenID?.toString() === normalizedTokenId &&
+    const normalizedId = tokenId.toString().trim();
+    const mints = json.result.filter(tx =>
+      tx.tokenID?.toString().trim() === normalizedId &&
       tx.from?.toLowerCase() === '0x0000000000000000000000000000000000000000'
     );
 
-    if (mintTx?.timeStamp) {
-      const timestamp = parseInt(mintTx.timeStamp) * 1000;
-      return format(new Date(timestamp), 'yyyy-MM-dd HH:mm');
+    if (mints.length === 0) {
+      console.warn(`⚠️ No mint transaction found for token ${tokenId} on contract ${contractAddress}`);
+      return 'Unknown';
     }
 
-    console.log(`⚠️ No mint tx found for token ${tokenId}`);
+    const tx = mints[0];
+    const timestamp = parseInt(tx.timeStamp) * 1000;
+    return format(new Date(timestamp), 'yyyy-MM-dd HH:mm');
   } catch (err) {
     console.error('❌ Mint date fetch failed:', err);
+    return 'Unknown';
   }
-  return 'Unknown';
 }
 
 
