@@ -11,7 +11,7 @@ async function fetchMintDate(contractAddress, tokenId) {
     const res = await fetch(url);
     const json = await res.json();
 
-    if (json?.status !== '1' || !Array.isArray(json.result)) return 'Unknown';
+    if (!Array.isArray(json.result)) return 'Unknown';
 
     const mintTx = json.result.find(tx =>
       tx.tokenID?.toString() === tokenId.toString() &&
@@ -27,6 +27,7 @@ async function fetchMintDate(contractAddress, tokenId) {
   }
   return 'Unknown';
 }
+
 
 async function fetchRarityRankReservoir(contract, tokenId) {
   try {
