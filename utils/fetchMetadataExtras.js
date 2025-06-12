@@ -1,50 +1,44 @@
-// fetchMetadataExtras.js
 const fetch = require('node-fetch');
 const { format } = require('date-fns');
-const { JsonRpcProvider, Contract } = require('ethers');
 
 const BASESCAN_API = process.env.BASESCAN_API_KEY;
 const RESERVOIR_API_KEY = process.env.RESERVOIR_API_KEY;
 const OPENSEA_API_KEY = process.env.OPENSEA_API_KEY;
 
-const provider = new JsonRpcProvider('https://mainnet.base.org');
-const erc721Abi = ['function totalSupply() view returns (uint256)'];
-
 async function fetchMintDate(contractAddress, tokenId) {
   try {
-    console.log(`🕵️ Fetching mint date for token ${tokenId} on ${contractAddress}`);
     const url = `https://api.basescan.org/api?module=account&action=tokennfttx&contractaddress=${contractAddress}&sort=asc&apikey=${BASESCAN_API}`;
     const res = await fetch(url);
     const json = await res.json();
 
-    if (!Array.isArray(json.result)) {
-      console.warn('❌ BaseScan response is not an array:', json);
+    if (!json.result || !Array.isArray(json.result)) {
+      console.warn('⚠️ Invalid BaseScan result format');
       return 'Unknown';
     }
 
-    const txs = json.result.filter(tx => {
-      const from = (tx.from || '').toLowerCase();
-      const id = (tx.tokenID || tx.tokenId || '').toString().trim();
-      const matches = from === '0x0000000000000000000000000000000000000000' && id === tokenId.toString().trim();
-      if (matches) {
-        console.log(`✅ Found mint tx:`, tx);
-      }
-      return matches;
-    });
+    const mintTx = json.result.find(tx =>
+      tx.tokenID?.toString() === tokenId.toString() &&
+      tx.from?.toLowerCase() === '0x0000000000000000000000000000000000000000'
+    );
 
-    if (txs.length > 0) {
-      const ts = parseInt(txs[0].timeStamp) * 1000;
-      return format(new Date(ts), 'yyyy-MM-dd HH:mm');
+    if (mintTx?.timeStamp) {
+      console.log('✅ Found mint tx:', {
+        tokenID: mintTx.tokenID,
+        from: mintTx.from,
+        time: mintTx.timeStamp,
+      });
+
+      const timestamp = parseInt(mintTx.timeStamp) * 1000;
+      return format(new Date(timestamp), 'yyyy-MM-dd HH:mm');
+    } else {
+      console.warn('⚠️ Mint transaction not found');
     }
-
-    console.warn(`⚠️ No matching mint found for tokenID ${tokenId}`);
-    return 'Unknown';
   } catch (err) {
-    console.error('❌ fetchMintDate error:', err);
-    return 'Unknown';
+    console.error('❌ Mint date fetch failed:', err);
   }
-}
 
+  return 'Unknown';
+}
 
 async function fetchRarityRankReservoir(contract, tokenId) {
   try {
@@ -82,17 +76,22 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
   }
 }
 
-async function fetchTotalSupply(contractAddress, tokenId) {
+async function fetchTotalSupply(contract, network) {
   try {
-    const contract = new Contract(contractAddress, erc721Abi, provider);
-    const supply = await contract.totalSupply();
-    const current = parseInt(tokenId);
-    const total = parseInt(supply.toString());
-
-    const stillMinting = current < total;
-    return `${total} (On-Chain${stillMinting ? ' — Still Minting' : ''})`;
+    const chain = network === 'eth' ? 'ethereum' : network;
+    const url = `https://api.reservoir.tools/collections/v5?id=${chain}:${contract}`;
+    const res = await fetch(url, {
+      headers: {
+        'accept': 'application/json',
+        'x-api-key': RESERVOIR_API_KEY || ''
+      }
+    });
+    const json = await res.json();
+    const count = json?.collections?.[0]?.tokenCount;
+    const isMinting = json?.collections?.[0]?.mintKind === 'public';
+    return count ? `${count}${isMinting ? ' (Still Minting)' : ''}` : 'Unknown';
   } catch (err) {
-    console.error('❌ On-chain total supply fetch failed:', err);
+    console.error('❌ Total supply fetch failed:', err);
     return 'Unknown';
   }
 }
@@ -102,7 +101,7 @@ async function fetchMetadataExtras(contractAddress, tokenId, network) {
     fetchMintDate(contractAddress, tokenId),
     fetchRarityRankReservoir(contractAddress, tokenId),
     fetchRarityRankOpenSea(contractAddress, tokenId, network),
-    fetchTotalSupply(contractAddress, tokenId)
+    fetchTotalSupply(contractAddress, network)
   ]);
 
   const rank = rankReservoir !== 'N/A' ? rankReservoir : rankOpenSea;
@@ -116,4 +115,5 @@ async function fetchMetadataExtras(contractAddress, tokenId, network) {
 }
 
 module.exports = { fetchMetadataExtras };
+
 
