@@ -12,35 +12,38 @@ const erc721Abi = ['function totalSupply() view returns (uint256)'];
 
 async function fetchMintDate(contractAddress, tokenId) {
   try {
+    console.log(`🕵️ Fetching mint date for token ${tokenId} on ${contractAddress}`);
     const url = `https://api.basescan.org/api?module=account&action=tokennfttx&contractaddress=${contractAddress}&sort=asc&apikey=${BASESCAN_API}`;
     const res = await fetch(url);
     const json = await res.json();
 
     if (!Array.isArray(json.result)) {
-      console.warn('❌ Unexpected BaseScan result:', json.result);
+      console.warn('❌ BaseScan response is not an array:', json);
       return 'Unknown';
     }
 
-    const normalizedId = tokenId.toString().trim();
-    const mints = json.result.filter(tx =>
-      tx.tokenID?.toString().trim() === normalizedId &&
-      tx.from?.toLowerCase() === '0x0000000000000000000000000000000000000000'
-    );
+    const txs = json.result.filter(tx => {
+      const from = (tx.from || '').toLowerCase();
+      const id = (tx.tokenID || tx.tokenId || '').toString().trim();
+      const matches = from === '0x0000000000000000000000000000000000000000' && id === tokenId.toString().trim();
+      if (matches) {
+        console.log(`✅ Found mint tx:`, tx);
+      }
+      return matches;
+    });
 
-    if (mints.length === 0) {
-      console.warn(`⚠️ No mint transaction found for token ${tokenId} on contract ${contractAddress}`);
-      return 'Unknown';
+    if (txs.length > 0) {
+      const ts = parseInt(txs[0].timeStamp) * 1000;
+      return format(new Date(ts), 'yyyy-MM-dd HH:mm');
     }
 
-    const tx = mints[0];
-    const timestamp = parseInt(tx.timeStamp) * 1000;
-    return format(new Date(timestamp), 'yyyy-MM-dd HH:mm');
+    console.warn(`⚠️ No matching mint found for tokenID ${tokenId}`);
+    return 'Unknown';
   } catch (err) {
-    console.error('❌ Mint date fetch failed:', err);
+    console.error('❌ fetchMintDate error:', err);
     return 'Unknown';
   }
 }
-
 
 
 async function fetchRarityRankReservoir(contract, tokenId) {
