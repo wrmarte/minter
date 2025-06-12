@@ -1,3 +1,4 @@
+// fetchMetadataExtras.js
 const fetch = require('node-fetch');
 const { format } = require('date-fns');
 
@@ -11,23 +12,28 @@ async function fetchMintDate(contractAddress, tokenId) {
     const res = await fetch(url);
     const json = await res.json();
 
-    if (!Array.isArray(json.result)) return 'Unknown';
+    if (!json.result || !Array.isArray(json.result)) {
+      console.error('🛑 BaseScan result missing or invalid');
+      return 'Unknown';
+    }
 
-    const mintTx = json.result.find(tx =>
-      tx.tokenID?.toString() === tokenId.toString() &&
-      tx.from?.toLowerCase() === '0x0000000000000000000000000000000000000000'
-    );
+    const mintTx = json.result.find(tx => {
+      const isMint = tx.from?.toLowerCase() === '0x0000000000000000000000000000000000000000';
+      const matchesToken = tx.tokenID?.toString() === tokenId.toString();
+      return isMint && matchesToken;
+    });
 
-    if (mintTx?.timeStamp) {
+    if (mintTx && mintTx.timeStamp) {
       const timestamp = parseInt(mintTx.timeStamp) * 1000;
       return format(new Date(timestamp), 'yyyy-MM-dd HH:mm');
     }
+
+    console.warn('🛑 Mint TX not found for tokenId', tokenId);
   } catch (err) {
     console.error('❌ Mint date fetch failed:', err);
   }
   return 'Unknown';
 }
-
 
 async function fetchRarityRankReservoir(contract, tokenId) {
   try {
@@ -77,11 +83,14 @@ async function fetchTotalSupply(contract, network) {
     });
     const json = await res.json();
     const collection = json?.collections?.[0];
-    const count = collection?.tokenCount;
-    const mintKind = collection?.mintKind;
-    const minting = mintKind && mintKind !== 'unknown';
+    if (!collection) {
+      console.warn('⚠️ No collection found in Reservoir');
+      return 'Unknown';
+    }
 
-    return count ? `${count}${minting ? ' (Still Minting)' : ''}` : 'Unknown';
+    const count = collection.tokenCount;
+    const isMinting = collection.mintKind === 'public';
+    return count ? `${count}${isMinting ? ' (Still Minting)' : ''}` : 'Unknown';
   } catch (err) {
     console.error('❌ Total supply fetch failed:', err);
     return 'Unknown';
