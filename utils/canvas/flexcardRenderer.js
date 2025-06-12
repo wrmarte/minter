@@ -131,12 +131,13 @@ async function generateFlexCard({
   ctx.lineTo(metaX + metaWidth, metaY + metaHeight);
   ctx.stroke();
 
-  const metaLines = [
-    `• Rank: ${rank || 'N/A'}`,
-    `• Minted: ${mintedDate || 'Unknown'}`,
-    `• Network: ${network || 'Base'}`,
-    `• Total Supply: ${totalSupply || 'N/A'}`
-  ];
+const metaLines = [
+  `• Rank: ${rank ?? 'N/A'}`,
+  `• Minted: ${mintedDate && mintedDate !== 'Unknown' ? mintedDate : '❌ Not Found'}`,
+  `• Network: ${network ?? 'Base'}`,
+  `• Total Supply: ${totalSupply ?? 'N/A'}`
+];
+
   ctx.fillStyle = 'white';
   ctx.font = '22px Exo2';
   ctx.textAlign = 'left';
