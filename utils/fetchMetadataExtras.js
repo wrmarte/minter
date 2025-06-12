@@ -22,10 +22,11 @@ async function fetchMintDate(contractAddress, tokenId) {
     }
 
     const tokenIdStr = tokenId.toString();
-    const mintTx = json.result.find(tx =>
-      tx.tokenID?.toString() === tokenIdStr &&
-      tx.from?.toLowerCase() === '0x0000000000000000000000000000000000000000'
-    );
+const mintTx = json.result.find(tx =>
+  `${tx.tokenID}` === `${tokenId}` &&
+  tx.from?.toLowerCase() === '0x0000000000000000000000000000000000000000'
+);
+
 
     if (mintTx?.timeStamp) {
       const timestampMs = parseInt(mintTx.timeStamp) * 1000;
