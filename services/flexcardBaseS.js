@@ -1,108 +1,78 @@
-// fetchMetadataExtras.js
+// flexcardBaseS.js
+const { JsonRpcProvider, Contract } = require('ethers');
 const fetch = require('node-fetch');
-const { format } = require('date-fns');
+const { generateFlexCard } = require('../utils/canvas/flexcardRenderer');
+const { fetchMetadataExtras } = require('../utils/fetchMetadataExtras');
 
-const BASESCAN_API = process.env.BASESCAN_API_KEY;
-const OPENSEA_API_KEY = process.env.OPENSEA_API_KEY;
-const RESERVOIR_API_KEY = process.env.RESERVOIR_API_KEY;
+const abi = [
+  'function tokenURI(uint256 tokenId) view returns (string)',
+  'function ownerOf(uint256 tokenId) view returns (address)'
+];
 
-async function fetchMintDate(contractAddress, tokenId, network) {
-  try {
-    const url = `https://api.basescan.org/api?module=account&action=tokennfttx&contractaddress=${contractAddress}&sort=asc&apikey=${BASESCAN_API}`;
-    const res = await fetch(url);
-    const json = await res.json();
+const provider = new JsonRpcProvider('https://mainnet.base.org');
 
-    const mintTx = json.result.find(tx =>
-      tx.tokenID.toString() === tokenId.toString() &&
-      tx.from.toLowerCase() === '0x0000000000000000000000000000000000000000'
-    );
-
-    if (mintTx?.timeStamp) {
-      const timestamp = parseInt(mintTx.timeStamp) * 1000;
-      return format(new Date(timestamp), 'yyyy-MM-dd HH:mm');
-    }
-  } catch (err) {
-    console.error('❌ Mint date fetch failed:', err);
-  }
-  return 'Unknown';
+function shortenAddress(address) {
+  if (!address || address.length < 10) return address || 'Unknown';
+  return `${address.substring(0, 6)}...${address.substring(address.length - 4)}`;
 }
 
-async function fetchRarityRankReservoir(contract, tokenId, network) {
+async function fetchMetadata(contractAddress, tokenId) {
   try {
-    const chain = network === 'eth' ? 'ethereum' : network;
-    const url = `https://api.reservoir.tools/tokens/v5?tokens=${chain}:${contract}:${tokenId}`;
-    const res = await fetch(url, {
-      headers: {
-        'accept': 'application/json',
-        'x-api-key': RESERVOIR_API_KEY || ''
-      }
-    });
-    const json = await res.json();
-    const rank = json?.tokens?.[0]?.token?.rarity?.rank;
-    return rank ? `#${rank}` : 'N/A';
+    const contract = new Contract(contractAddress, abi, provider);
+    const tokenURI = await contract.tokenURI(tokenId);
+    const metadataUrl = tokenURI.startsWith('ipfs://')
+      ? tokenURI.replace('ipfs://', 'https://ipfs.io/ipfs/')
+      : tokenURI;
+    const res = await fetch(metadataUrl);
+    return await res.json();
   } catch (err) {
-    console.error('❌ Reservoir rank fetch failed:', err);
-    return 'N/A';
+    console.error('❌ Metadata fetch failed:', err);
+    return {};
   }
 }
 
-async function fetchRarityRankOpenSea(contract, tokenId, network) {
+async function fetchOwner(contractAddress, tokenId) {
   try {
-    const url = `https://api.opensea.io/api/v2/chain/${network}/contract/${contract}/nfts/${tokenId}`;
-    const res = await fetch(url, {
-      headers: {
-        'accept': 'application/json',
-        'x-api-key': OPENSEA_API_KEY || ''
-      }
-    });
-    const json = await res.json();
-    const rank = json?.rarity?.rank;
-    return rank ? `#${rank}` : 'N/A';
+    const contract = new Contract(contractAddress, abi, provider);
+    return await contract.ownerOf(tokenId);
   } catch (err) {
-    console.error('❌ OpenSea rank fetch failed:', err);
-    return 'N/A';
+    console.error('❌ Owner fetch failed:', err);
+    return '0x0000000000000000000000000000000000000000';
   }
 }
 
-async function fetchTotalSupply(contract, network) {
-  try {
-    const chain = network === 'eth' ? 'ethereum' : network;
-    const url = `https://api.reservoir.tools/collections/v5?id=${chain}:${contract}`;
-    const res = await fetch(url, {
-      headers: {
-        'accept': 'application/json',
-        'x-api-key': RESERVOIR_API_KEY || ''
-      }
-    });
-    const json = await res.json();
-    const count = json?.collections?.[0]?.tokenCount;
-    const isMinting = json?.collections?.[0]?.mintKind === 'public';
-    return count ? `${count}${isMinting ? ' (Still Minting)' : ''}` : 'Unknown';
-  } catch (err) {
-    console.error('❌ Total supply fetch failed:', err);
-    return 'Unknown';
+async function buildFlexCard(contractAddress, tokenId, collectionName) {
+  const metadata = await fetchMetadata(contractAddress, tokenId);
+  const owner = await fetchOwner(contractAddress, tokenId);
+  const ownerDisplay = shortenAddress(owner);
+
+  let nftImageUrl = metadata?.image || 'https://i.imgur.com/EVQFHhA.png';
+  if (nftImageUrl.startsWith('ipfs://')) {
+    nftImageUrl = nftImageUrl.replace('ipfs://', 'https://ipfs.io/ipfs/');
   }
+
+  const traits = Array.isArray(metadata?.attributes) && metadata.attributes.length > 0
+    ? metadata.attributes.map(attr => `${attr.trait_type} / ${attr.value}`)
+    : ['No traits found'];
+
+  const safeCollectionName = collectionName || metadata?.name || 'NFT';
+  const openseaUrl = `https://opensea.io/assets/base/${contractAddress}/${tokenId}`;
+
+  // 🧠 Fetch extra data like minted date, rank, supply, and network
+  const extras = await fetchMetadataExtras(contractAddress, tokenId, 'base');
+
+  return await generateFlexCard({
+    nftImageUrl,
+    collectionName: safeCollectionName,
+    tokenId,
+    traits,
+    owner: ownerDisplay,
+    openseaUrl,
+    ...extras // Injects: minted, rank, network, totalSupply
+  });
 }
 
-async function fetchMetadataExtras(contractAddress, tokenId, network) {
-  const [minted, rankReservoir, rankOpenSea, totalSupply] = await Promise.all([
-    fetchMintDate(contractAddress, tokenId, network),
-    fetchRarityRankReservoir(contractAddress, tokenId, network),
-    fetchRarityRankOpenSea(contractAddress, tokenId, network),
-    fetchTotalSupply(contractAddress, network)
-  ]);
-
-  const rank = rankReservoir !== 'N/A' ? rankReservoir : rankOpenSea;
-
-  return {
-    minted,
-    rank,
-    network: network.toUpperCase(),
-    totalSupply
-  };
-}
-
-module.exports = { fetchMetadataExtras };
+module.exports = { buildFlexCard }; // ✅ Ensure function is exported correctly
 
 
 
