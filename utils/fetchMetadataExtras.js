@@ -12,38 +12,30 @@ const erc721Abi = ['function totalSupply() view returns (uint256)'];
 
 async function fetchMintDate(contractAddress, tokenId) {
   try {
-    console.log(`🕵️ Fetching mint date for token ${tokenId} on ${contractAddress}`);
     const url = `https://api.basescan.org/api?module=account&action=tokennfttx&contractaddress=${contractAddress}&sort=asc&apikey=${BASESCAN_API}`;
     const res = await fetch(url);
     const json = await res.json();
 
-    if (!Array.isArray(json.result)) {
-      console.warn('❌ BaseScan response is not an array:', json);
-      return 'Unknown';
+    if (!Array.isArray(json.result)) return 'Unknown';
+
+    const tokenIdStr = tokenId.toString();
+    const mintTx = json.result.find(tx =>
+      tx.tokenID?.toString() === tokenIdStr &&
+      tx.from?.toLowerCase() === '0x0000000000000000000000000000000000000000'
+    );
+
+    if (mintTx?.timeStamp) {
+      console.log(`✅ Mint TX found for Token ${tokenIdStr} → ${mintTx.timeStamp}`);
+      const date = new Date(parseInt(mintTx.timeStamp) * 1000);
+      return format(date, 'yyyy-MM-dd HH:mm');
     }
-
-    const txs = json.result.filter(tx => {
-      const from = (tx.from || '').toLowerCase();
-      const id = (tx.tokenID || tx.tokenId || '').toString().trim();
-      const matches = from === '0x0000000000000000000000000000000000000000' && id === tokenId.toString().trim();
-      if (matches) {
-        console.log(`✅ Found mint tx:`, tx);
-      }
-      return matches;
-    });
-
-    if (txs.length > 0) {
-      const ts = parseInt(txs[0].timeStamp) * 1000;
-      return format(new Date(ts), 'yyyy-MM-dd HH:mm');
-    }
-
-    console.warn(`⚠️ No matching mint found for tokenID ${tokenId}`);
-    return 'Unknown';
   } catch (err) {
-    console.error('❌ fetchMintDate error:', err);
-    return 'Unknown';
+    console.error('❌ Mint date fetch failed:', err);
   }
+
+  return 'Unknown';
 }
+
 
 
 async function fetchRarityRankReservoir(contract, tokenId) {
