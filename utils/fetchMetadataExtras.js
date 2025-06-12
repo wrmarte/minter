@@ -1,4 +1,3 @@
-// fetchMetadataExtras.js
 const fetch = require('node-fetch');
 const { format } = require('date-fns');
 
@@ -12,9 +11,11 @@ async function fetchMintDate(contractAddress, tokenId) {
     const res = await fetch(url);
     const json = await res.json();
 
+    if (json?.status !== '1' || !Array.isArray(json.result)) return 'Unknown';
+
     const mintTx = json.result.find(tx =>
-      tx.tokenID === tokenId.toString() &&
-      tx.from.toLowerCase() === '0x0000000000000000000000000000000000000000'
+      tx.tokenID?.toString() === tokenId.toString() &&
+      tx.from?.toLowerCase() === '0x0000000000000000000000000000000000000000'
     );
 
     if (mintTx?.timeStamp) {
@@ -65,7 +66,8 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
 
 async function fetchTotalSupply(contract, network) {
   try {
-    const url = `https://api.reservoir.tools/collections/v5?id=${network === 'eth' ? 'ethereum' : network}:${contract}`;
+    const chain = network === 'eth' ? 'ethereum' : network;
+    const url = `https://api.reservoir.tools/collections/v5?id=${chain}:${contract}`;
     const res = await fetch(url, {
       headers: {
         'accept': 'application/json',
@@ -73,9 +75,12 @@ async function fetchTotalSupply(contract, network) {
       }
     });
     const json = await res.json();
-    const count = json?.collections?.[0]?.tokenCount;
-    const isMinting = json?.collections?.[0]?.mintKind === 'public';
-    return count ? `${count}${isMinting ? ' (Still Minting)' : ''}` : 'Unknown';
+    const collection = json?.collections?.[0];
+    const count = collection?.tokenCount;
+    const mintKind = collection?.mintKind;
+    const minting = mintKind && mintKind !== 'unknown';
+
+    return count ? `${count}${minting ? ' (Still Minting)' : ''}` : 'Unknown';
   } catch (err) {
     console.error('❌ Total supply fetch failed:', err);
     return 'Unknown';
@@ -101,6 +106,7 @@ async function fetchMetadataExtras(contractAddress, tokenId, network) {
 }
 
 module.exports = { fetchMetadataExtras };
+
 
 
 
