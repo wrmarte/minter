@@ -99,12 +99,13 @@ async function fetchMetadataExtras(contractAddress, tokenId, network) {
 
   const rank = rankReservoir !== 'N/A' ? rankReservoir : rankOpenSea;
 
-  return {
-    minted,
-    rank,
-    network: network.toUpperCase(),
-    totalSupply
-  };
+return {
+  minted,             // ✅ Now works
+  rank,               // ✅ Reservoir/OpenSea fallback
+  network: network.toUpperCase(),
+  totalSupply         // ✅ Already working
+};
+
 }
 
 module.exports = { fetchMetadataExtras };
