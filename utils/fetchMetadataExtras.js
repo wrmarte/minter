@@ -16,9 +16,11 @@ async function fetchMintDate(contractAddress, tokenId) {
     const res = await fetch(url);
     const json = await res.json();
 
+    if (!Array.isArray(json.result)) return 'Unknown';
+
     const mintTx = json.result.find(tx =>
-      tx.tokenID === tokenId.toString() &&
-      tx.from.toLowerCase() === '0x0000000000000000000000000000000000000000'
+      tx.tokenID?.toString() === tokenId.toString() &&
+      tx.from?.toLowerCase() === '0x0000000000000000000000000000000000000000'
     );
 
     if (mintTx?.timeStamp) {
@@ -67,11 +69,15 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
   }
 }
 
-async function fetchTotalSupply(contractAddress) {
+async function fetchTotalSupply(contractAddress, tokenId) {
   try {
     const contract = new Contract(contractAddress, erc721Abi, provider);
     const supply = await contract.totalSupply();
-    return `${supply.toString()} (On-Chain)`;
+    const current = parseInt(tokenId);
+    const total = parseInt(supply.toString());
+
+    const stillMinting = current < total;
+    return `${total} (On-Chain${stillMinting ? ' — Still Minting' : ''})`;
   } catch (err) {
     console.error('❌ On-chain total supply fetch failed:', err);
     return 'Unknown';
@@ -83,7 +89,7 @@ async function fetchMetadataExtras(contractAddress, tokenId, network) {
     fetchMintDate(contractAddress, tokenId),
     fetchRarityRankReservoir(contractAddress, tokenId),
     fetchRarityRankOpenSea(contractAddress, tokenId, network),
-    fetchTotalSupply(contractAddress)
+    fetchTotalSupply(contractAddress, tokenId)
   ]);
 
   const rank = rankReservoir !== 'N/A' ? rankReservoir : rankOpenSea;
@@ -97,3 +103,4 @@ async function fetchMetadataExtras(contractAddress, tokenId, network) {
 }
 
 module.exports = { fetchMetadataExtras };
+
