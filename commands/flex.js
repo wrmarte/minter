@@ -104,9 +104,22 @@ module.exports = {
         return interaction.editReply('⚠️ Could not load the NFT image.');
       }
 
-      const traits = (metadata?.attributes || []).map(attr =>
-        `• **${attr.trait_type}**: ${attr.value}`
-      ).join('\n') || 'None found';
+let traitsList = [];
+
+try {
+  const rawTraits = metadata?.attributes || metadata?.traits || [];
+
+  traitsList = rawTraits
+    .filter(t => t?.trait_type && t?.value)
+    .map(t => `• **${t.trait_type}**: ${t.value}`);
+} catch (err) {
+  console.warn(`⚠️ Failed to parse traits for ${name} #${tokenId}: ${err.message}`);
+}
+
+const traits = traitsList.length > 0
+  ? traitsList.join('\n')
+  : '⚠️ No traits available or unrevealed.';
+
 
       const canvasSize = 480;
       const canvas = createCanvas(canvasSize, canvasSize);
