@@ -61,19 +61,27 @@ async function handleTokenLog(client, tokenRows, log) {
     '0xdead000000000000000042069420694206942069'
   ];
 
-  // ❌ SKIP spam routes
+  // ❌ Skip known spam
   if (
     ROUTERS_LOWER.includes(fromAddr) && ROUTERS_LOWER.includes(toAddr)
   ) return;
-
   if (taxOrBurn.includes(toAddr) || taxOrBurn.includes(fromAddr)) return;
 
-  // 🔍 Figure out if it's a BUY or SELL
+  // ✅ Determine buy/sell
   const isBuy = ROUTERS_LOWER.includes(fromAddr) && !ROUTERS_LOWER.includes(toAddr);
   const isSell = !ROUTERS_LOWER.includes(fromAddr) && ROUTERS_LOWER.includes(toAddr);
-  if (!isBuy && !isSell) return; // ignore unknown flows
+  if (!isBuy && !isSell) return;
 
-  // 💸 Value check
+  // ⛔ Skip LP contract sells
+  if (isSell) {
+    const code = await getProvider().getCode(fromAddr);
+    if (code !== '0x') {
+      console.log(`⛔ Skipping contract sell from ${fromAddr}`);
+      return;
+    }
+  }
+
+  // 💰 Check tx value
   let usdSpent = 0, ethSpent = 0;
   try {
     const tx = await getProvider().getTransaction(log.transactionHash);
@@ -84,7 +92,6 @@ async function handleTokenLog(client, tokenRows, log) {
     }
   } catch {}
 
-  // ❌ Skip spam if value is 0 and tokens too small
   const tokenAmountRaw = parseFloat(formatUnits(amount, 18));
   if (usdSpent === 0 && ethSpent === 0 && tokenAmountRaw < 5) return;
 
@@ -93,7 +100,7 @@ async function handleTokenLog(client, tokenRows, log) {
     maximumFractionDigits: 2
   });
 
-  // 🧠 Buy label logic
+  // 🧠 Buy label
   let buyLabel = isBuy ? '🆕 New Buy' : '💥 Sell';
   try {
     const abi = ['function balanceOf(address account) view returns (uint256)'];
@@ -160,6 +167,7 @@ async function handleTokenLog(client, tokenRows, log) {
     }
   }
 }
+
 
 async function getETHPrice() {
   try {
