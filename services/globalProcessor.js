@@ -49,8 +49,8 @@ async function handleTokenLog(client, tokenRows, log) {
   const { from, to, amount } = parsed.args;
   const fromAddr = from.toLowerCase();
   const toAddr = to.toLowerCase();
-
   const tokenAddress = log.address.toLowerCase();
+
   if (seenTx.has(log.transactionHash)) return;
   seenTx.add(log.transactionHash);
 
@@ -61,22 +61,22 @@ async function handleTokenLog(client, tokenRows, log) {
     '0xdead000000000000000042069420694206942069'
   ];
 
-  // ❌ Filter unwanted transfers
+  // ❌ SKIP spam routes
   if (
     ROUTERS_LOWER.includes(fromAddr) && ROUTERS_LOWER.includes(toAddr)
-  ) return; // router ➝ router (LP activity)
+  ) return;
 
   if (taxOrBurn.includes(toAddr) || taxOrBurn.includes(fromAddr)) return;
 
-  const provider = getProvider();
-const code = await provider.getCode(toAddr);
-if (code !== '0x' && code !== '0x0') return; // Skip if receiver is a contract (LP vault/tax)
+  // 🔍 Figure out if it's a BUY or SELL
+  const isBuy = ROUTERS_LOWER.includes(fromAddr) && !ROUTERS_LOWER.includes(toAddr);
+  const isSell = !ROUTERS_LOWER.includes(fromAddr) && ROUTERS_LOWER.includes(toAddr);
+  if (!isBuy && !isSell) return; // ignore unknown flows
 
-
-  // 💰 Check ETH value to confirm real buy/sell
+  // 💸 Value check
   let usdSpent = 0, ethSpent = 0;
   try {
-    const tx = await provider.getTransaction(log.transactionHash);
+    const tx = await getProvider().getTransaction(log.transactionHash);
     const ethPrice = await getETHPrice();
     if (tx?.value) {
       ethSpent = parseFloat(formatUnits(tx.value, 18));
@@ -84,36 +84,35 @@ if (code !== '0x' && code !== '0x0') return; // Skip if receiver is a contract (
     }
   } catch {}
 
+  // ❌ Skip spam if value is 0 and tokens too small
+  const tokenAmountRaw = parseFloat(formatUnits(amount, 18));
   if (usdSpent === 0 && ethSpent === 0 && tokenAmountRaw < 5) return;
 
-
-  const tokenAmountRaw = parseFloat(formatUnits(amount, 18));
   const tokenAmountFormatted = (tokenAmountRaw * 1000).toLocaleString(undefined, {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2
   });
 
-  // 🧠 Estimate buy vs accumulate
-  let buyLabel = '🆕 New Buy';
+  // 🧠 Buy label logic
+  let buyLabel = isBuy ? '🆕 New Buy' : '💥 Sell';
   try {
     const abi = ['function balanceOf(address account) view returns (uint256)'];
-    const contract = new ethers.Contract(tokenAddress, abi, provider);
+    const contract = new ethers.Contract(tokenAddress, abi, getProvider());
     const prevBalanceBN = await contract.balanceOf(toAddr, { blockTag: log.blockNumber - 1 });
     const prevBalance = parseFloat(formatUnits(prevBalanceBN, 18));
-    if (prevBalance > 0) {
+    if (isBuy && prevBalance > 0) {
       const percentChange = ((tokenAmountRaw / prevBalance) * 100).toFixed(1);
       buyLabel = `🔁 +${percentChange}%`;
     }
-  } catch (err) {
-    console.warn(`⚠️ Failed to fetch previous balance for ${toAddr} on ${tokenAddress}: ${err.message}`);
-  }
+  } catch {}
 
   const tokenPrice = await getTokenPriceUSD(tokenAddress);
   const marketCap = await getMarketCapUSD(tokenAddress);
 
-  const rocketIntensity = Math.min(Math.floor(tokenAmountRaw / 100), 10);
-  const rocketLine = '🟥🟦🚀'.repeat(Math.max(1, rocketIntensity));
-  const getColorByUsdSpent = (usd) => usd < 10 ? 0xff0000 : usd < 20 ? 0x3498db : 0x00cc66;
+  const emojiLine = isBuy ? '🟥🟦🚀'.repeat(Math.max(1, Math.floor(tokenAmountRaw / 100))) : '🔻💀🔻'.repeat(Math.max(1, Math.floor(tokenAmountRaw / 100)));
+  const getColorByUsd = (usd) => isBuy
+    ? (usd < 10 ? 0xff0000 : usd < 20 ? 0x3498db : 0x00cc66)
+    : (usd < 10 ? 0x999999 : usd < 50 ? 0xff6600 : 0xff0000);
 
   for (const token of tokenRows.filter(row => row.address.toLowerCase() === tokenAddress)) {
     const guild = client.guilds.cache.get(token.guild_id);
@@ -126,22 +125,32 @@ if (code !== '0x' && code !== '0x0') return; // Skip if receiver is a contract (
 
     if (channel) {
       const embed = {
-        title: `${token.name.toUpperCase()} Buy!`,
-        description: rocketLine,
-        image: { url: 'https://iili.io/3tSecKP.gif' },
+        title: `${token.name.toUpperCase()} ${isBuy ? 'Buy' : 'Sell'}!`,
+        description: emojiLine,
+        image: { url: isBuy ? 'https://iili.io/3tSecKP.gif' : 'https://iili.io/3tSeiEF.gif' },
         fields: [
-          { name: '💸 Spent', value: `$${usdSpent.toFixed(4)} / ${ethSpent.toFixed(4)} ETH`, inline: true },
-          { name: '🎯 Got', value: `${tokenAmountFormatted} ${token.name.toUpperCase()}`, inline: true },
           {
-            name: buyLabel.startsWith('🆕') ? '🆕 New Buyer' : '🔁 Accumulated',
-            value: buyLabel.replace(/^(🆕|🔁) /, ''),
+            name: isBuy ? '💸 Spent' : '💰 Value',
+            value: `$${usdSpent.toFixed(4)} / ${ethSpent.toFixed(4)} ETH`,
             inline: true
           },
+          {
+            name: isBuy ? '🎯 Got' : '📤 Sold',
+            value: `${tokenAmountFormatted} ${token.name.toUpperCase()}`,
+            inline: true
+          },
+          ...(isBuy
+            ? [{
+                name: buyLabel.startsWith('🆕') ? '🆕 New Buyer' : '🔁 Accumulated',
+                value: buyLabel.replace(/^(🆕|🔁) /, ''),
+                inline: true
+              }]
+            : []),
           { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
           { name: '📊 MCap', value: marketCap ? `$${marketCap.toLocaleString()}` : 'Fetching...', inline: true }
         ],
         url: `https://www.geckoterminal.com/base/pools/${tokenAddress}`,
-        color: getColorByUsdSpent(usdSpent),
+        color: getColorByUsd(usdSpent),
         footer: { text: 'Live on Base • Powered by PimpsDev' },
         timestamp: new Date().toISOString()
       };
