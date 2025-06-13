@@ -29,11 +29,7 @@ async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
 
   try {
     const provider = getProvider(chain);
-
-    // ✅ Ethers v6 fix: use runner instead of signer
-    const contract = new Contract(contractAddress, abi, null);
-    contract.runner = provider;
-
+    const contract = new Contract(contractAddress, abi, provider);
     const tokenURI = await contract.tokenURI(tokenId);
     const metadataUrl = fixIpfs(tokenURI);
     if (!metadataUrl) throw new Error('Empty tokenURI');
@@ -45,7 +41,7 @@ async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
   }
 
   if (chain === 'eth') {
-    // 🔁 Reservoir fallback
+    // Reservoir fallback
     try {
       const res = await fetch(`https://api.reservoir.tools/tokens/v6?tokens=${contractAddress}:${tokenId}`, {
         headers: { 'x-api-key': process.env.RESERVOIR_API_KEY }
@@ -62,7 +58,7 @@ async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
       console.warn(`⚠️ Reservoir fallback failed: ${err.message}`);
     }
 
-    // 🔁 Moralis fallback
+    // Moralis fallback
     try {
       const res = await fetch(
         `https://deep-index.moralis.io/api/v2.2/nft/${contractAddress}/${tokenId}?chain=eth&format=decimal`,
@@ -84,6 +80,10 @@ async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
   console.warn(`⚠️ Metadata fully unavailable after all fallback attempts`);
   return {};
 }
+
+module.exports = { fetchMetadata };
+
+
 
 module.exports = { fetchMetadata };
 
