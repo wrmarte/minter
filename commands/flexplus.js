@@ -67,14 +67,23 @@ module.exports = {
           continue;
         }
 
-        let imgUrl = meta.image.startsWith('ipfs://')
-          ? GATEWAYS.map(gw => gw + meta.image.replace('ipfs://', '')).find(async url => {
-              try {
-                const res = await fetch(url, { method: 'HEAD', timeout: 3000 });
-                return res.ok;
-              } catch { return false; }
-            })
-          : meta.image;
+       let imgUrl = meta.image;
+
+if (meta.image.startsWith('ipfs://')) {
+  const ipfsHash = meta.image.replace('ipfs://', '');
+  for (const gw of GATEWAYS) {
+    const testUrl = gw + ipfsHash;
+    try {
+      const head = await fetch(testUrl, { method: 'HEAD', timeout: 3000 });
+      if (head.ok) {
+        imgUrl = testUrl;
+        break;
+      }
+    } catch {
+      continue;
+    }
+  }
+}
 
         if (!imgUrl) continue;
 
