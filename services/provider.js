@@ -5,8 +5,7 @@ const MORALIS_API_KEY = process.env.MORALIS_API_KEY;
 const RPCS = {
   eth: [
     'https://eth.llamarpc.com',
-    'https://1rpc.io/eth',
-    'https://rpc.ankr.com/eth'
+    'https://1rpc.io/eth'
   ],
   base: [
     'https://mainnet.base.org',
