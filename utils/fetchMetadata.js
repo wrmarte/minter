@@ -85,7 +85,4 @@ module.exports = { fetchMetadata };
 
 
 
-module.exports = { fetchMetadata };
-
-
 
