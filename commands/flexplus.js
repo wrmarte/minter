@@ -1,6 +1,7 @@
 const { SlashCommandBuilder, EmbedBuilder, AttachmentBuilder } = require('discord.js');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
 const { fetchMetadata } = require('../utils/fetchMetadata');
+const { getProvider } = require('../services/provider');
 
 const GATEWAYS = [
   'https://cloudflare-ipfs.com/ipfs/',
@@ -18,6 +19,13 @@ function roundRect(ctx, x, y, width, height, radius = 20) {
   ctx.arcTo(x, y, x + width, y, radius);
   ctx.closePath();
   ctx.clip();
+}
+
+async function timeoutFetch(url, ms = 3000) {
+  return await Promise.race([
+    fetch(url),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), ms))
+  ]);
 }
 
 module.exports = {
@@ -38,6 +46,7 @@ module.exports = {
         interaction.guild.id,
         name
       ]);
+
       if (!res.rows.length) {
         return interaction.editReply('❌ Project not found. Use `/addflex` first.');
       }
@@ -46,9 +55,13 @@ module.exports = {
       const chain = network;
       const maxTokenId = 50;
       const selectedIds = Array.from({ length: maxTokenId - 1 }, (_, i) => i + 1)
-      .sort(() => 0.5 - Math.random())
-      .slice(0, 6);
+        .sort(() => 0.5 - Math.random())
+        .slice(0, 6);
 
+      const provider = getProvider(chain);
+      const metas = await Promise.all(
+        selectedIds.map(id => fetchMetadata(address, id, chain, provider))
+      );
 
       const columns = 3, rows = 2, imgSize = 280, spacing = 20, padding = 40;
       const canvasWidth = columns * imgSize + (columns - 1) * spacing + padding * 2;
@@ -59,43 +72,27 @@ module.exports = {
       ctx.fillStyle = '#0d1117';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      for (let i = 0; i < selectedIds.length; i++) {
-        const tokenId = selectedIds[i];
-        let meta = await fetchMetadata(address, tokenId, chain);
-        if (!meta?.image) {
-          console.warn(`❌ No image found for token ${tokenId}`);
-          continue;
-        }
+      for (let i = 0; i < metas.length; i++) {
+        const meta = metas[i];
+        if (!meta?.image) continue;
 
-       let imgUrl = meta.image;
-
-if (meta.image.startsWith('ipfs://')) {
-  const ipfsHash = meta.image.replace('ipfs://', '');
-  for (const gw of GATEWAYS) {
-    const testUrl = gw + ipfsHash;
-    try {
-      const head = await fetch(testUrl, { method: 'HEAD', timeout: 3000 });
-      if (head.ok) {
-        imgUrl = testUrl;
-        break;
-      }
-    } catch {
-      continue;
-    }
-  }
-}
-
-        if (!imgUrl) continue;
+        let imgUrl = meta.image.startsWith('ipfs://')
+          ? GATEWAYS.map(gw => gw + meta.image.replace('ipfs://', ''))[0]
+          : meta.image;
 
         try {
-          const nftImage = await loadImage(imgUrl);
+          const response = await timeoutFetch(imgUrl);
+          if (!response.ok) continue;
+          const arrayBuffer = await response.arrayBuffer();
+          const nftImage = await loadImage(Buffer.from(arrayBuffer));
+
           const x = padding + (i % columns) * (imgSize + spacing);
           const y = padding + Math.floor(i / columns) * (imgSize + spacing);
           roundRect(ctx, x, y, imgSize, imgSize);
           ctx.drawImage(nftImage, x, y, imgSize, imgSize);
           ctx.restore();
         } catch (err) {
-          console.warn(`❌ Failed to load image for token ${tokenId}:`, err.message);
+          console.warn(`❌ Failed to load image for token ${selectedIds[i]}:`, err.message);
         }
       }
 
@@ -117,6 +114,7 @@ if (meta.image.startsWith('ipfs://')) {
     }
   }
 };
+
 
 
 
