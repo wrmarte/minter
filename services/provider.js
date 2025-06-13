@@ -1,52 +1,66 @@
 const { JsonRpcProvider } = require('ethers');
 
+const MORALIS_API_KEY = process.env.MORALIS_API_KEY;
+
 const RPCS = {
+  eth: [
+    'https://eth.llamarpc.com',
+    'https://1rpc.io/eth',
+    'https://rpc.ankr.com/eth'
+  ],
   base: [
     'https://mainnet.base.org',
     'https://base.publicnode.com',
     'https://1rpc.io/base',
     'https://base.llamarpc.com'
   ],
-  eth: [
-    'https://eth.llamarpc.com',
-    'https://1rpc.io/eth'
-  ],
   ape: [
-    'https://rpc.apecoin.com',
-    'https://apechain.drpc.org'
+    'https://apechain.drpc.org',
+    'https://rpc.apechain.com',
+    'https://node.histori.xyz/apechain-mainnet/8ry9f6t9dct1se2hlagxnd9n2a'
   ]
 };
 
+// Rotation index tracker per chain
 const rpcIndex = {
-  base: 0,
   eth: 0,
+  base: 0,
   ape: 0
 };
 
-// ✅ Async getProvider — always returns a detected JsonRpcProvider
-async function getProvider(chain = 'base') {
+function getProvider(chain = 'base') {
   chain = chain.toLowerCase();
-  if (!RPCS[chain]) chain = 'base';
+
+  if (!RPCS.hasOwnProperty(chain)) {
+    console.warn(`⚠️ Unknown chain requested: ${chain} — defaulting to 'base'`);
+    chain = 'base';
+  }
 
   const urls = RPCS[chain];
-  const idx = rpcIndex[chain];
-  const url = urls[idx];
-  rpcIndex[chain] = (idx + 1) % urls.length;
-
-  if (process.env.DEBUG_PROVIDERS === 'true') {
-    console.log(`🔌 Using provider for ${chain.toUpperCase()}: ${url}`);
+  if (!urls || urls.length === 0) {
+    throw new Error(`🚫 No RPC URLs defined for chain: ${chain}`);
   }
 
-  const provider = new JsonRpcProvider(url);
+  const url = urls[rpcIndex[chain]];
+  rpcIndex[chain] = (rpcIndex[chain] + 1) % urls.length;
 
-  // 🧠 Ensure the network is set before any .call() or .getBlockNumber()
-  try {
-    await provider._detectNetwork(); // Required for Ethers v6
-  } catch (err) {
-    console.warn(`⚠️ Network detection failed for ${chain}: ${err.message}`);
+  // 🧠 ApeChain: manually define the network to prevent infinite retries
+  if (chain === 'ape') {
+    return new JsonRpcProvider(url, {
+      name: 'apechain',
+      chainId: 6969 // 📝 Replace with real chainId if known
+    });
   }
 
-  return provider;
+  return new JsonRpcProvider(url);
 }
 
 module.exports = { getProvider };
+
+
+
+
+
+
+
+
