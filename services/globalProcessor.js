@@ -54,15 +54,42 @@ async function handleTokenLog(client, tokenRows, log) {
   if (seenTx.has(log.transactionHash)) return;
   seenTx.add(log.transactionHash);
 
-  // ❌ Skip router-to-router transfers or tax/burn destinations
+  const ROUTERS_LOWER = ROUTERS.map(r => r.toLowerCase());
+  const taxLikeAddresses = [
+    '0x0000000000000000000000000000000000000000',
+    '0x000000000000000000000000000000000000dEaD',
+    '0xdead000000000000000042069420694206942069'
+  ];
+
+  // ✅ Must come from a router
+  if (!ROUTERS_LOWER.includes(fromAddr)) return;
+
+  // ❌ Skip burn/tax addresses and router-to-router
   if (
-    ROUTERS.includes(toAddr) ||
-    toAddr === '0x0000000000000000000000000000000000000000' ||
-    toAddr === '0x000000000000000000000000000000000000dEaD' ||
-    toAddr === '0xdead000000000000000042069420694206942069'
+    ROUTERS_LOWER.includes(toAddr) ||
+    taxLikeAddresses.includes(toAddr)
   ) return;
 
-  if (!ROUTERS.includes(fromAddr)) return; // ✅ Only handle Router -> Real Wallet
+  // ❌ Skip if recipient is a contract (LP vault, tax contract, etc)
+  const provider = getProvider();
+  const code = await provider.getCode(toAddr);
+  if (code && code !== '0x') return;
+
+  // Fetch transaction + ETH value
+  let usdSpent = 0, ethSpent = 0;
+  try {
+    const tx = await provider.getTransaction(log.transactionHash);
+    const ethPrice = await getETHPrice();
+    if (tx?.value) {
+      ethSpent = parseFloat(formatUnits(tx.value, 18));
+      usdSpent = ethSpent * ethPrice;
+    }
+  } catch (err) {
+    console.warn(`⚠️ Failed to get tx value: ${err.message}`);
+  }
+
+  // ❌ Skip if no ETH was spent = likely tax or LP transfer
+  if (usdSpent === 0 && ethSpent === 0) return;
 
   const tokenAmountRaw = parseFloat(formatUnits(amount, 18));
   const tokenAmountFormatted = (tokenAmountRaw * 1000).toLocaleString(undefined, {
@@ -70,11 +97,10 @@ async function handleTokenLog(client, tokenRows, log) {
     maximumFractionDigits: 2
   });
 
-  // ✅ On-chain previous balance logic
+  // 🧠 Estimate previous balance to determine if new or repeat buyer
   let buyLabel = '🆕 New Buy';
   try {
     const abi = ['function balanceOf(address account) view returns (uint256)'];
-    const provider = getProvider();
     const contract = new ethers.Contract(tokenAddress, abi, provider);
     const prevBalanceBN = await contract.balanceOf(toAddr, { blockTag: log.blockNumber - 1 });
     const prevBalance = parseFloat(formatUnits(prevBalanceBN, 18));
@@ -88,16 +114,6 @@ async function handleTokenLog(client, tokenRows, log) {
 
   const tokenPrice = await getTokenPriceUSD(tokenAddress);
   const marketCap = await getMarketCapUSD(tokenAddress);
-
-  let usdSpent = 0, ethSpent = 0;
-  try {
-    const tx = await getProvider().getTransaction(log.transactionHash);
-    const ethPrice = await getETHPrice();
-    if (tx?.value) {
-      ethSpent = parseFloat(formatUnits(tx.value, 18));
-      usdSpent = ethSpent * ethPrice;
-    }
-  } catch {}
 
   const rocketIntensity = Math.min(Math.floor(tokenAmountRaw / 100), 10);
   const rocketLine = '🟥🟦🚀'.repeat(Math.max(1, rocketIntensity));
