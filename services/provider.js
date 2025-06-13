@@ -14,8 +14,7 @@ const RPCS = {
     'https://base.llamarpc.com'
   ],
   ape: [
-    'https://apechain.drpc.org',
-    'https://node.histori.xyz/apechain-mainnet/8ry9f6t9dct1se2hlagxnd9n2a'
+    'https://apechain.drpc.org'
   ]
 };
 
