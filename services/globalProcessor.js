@@ -69,9 +69,9 @@ async function handleTokenLog(client, tokenRows, log) {
   if (taxOrBurn.includes(toAddr) || taxOrBurn.includes(fromAddr)) return;
 
   const provider = getProvider();
-  const fromCode = await provider.getCode(fromAddr);
-  const toCode = await provider.getCode(toAddr);
-  if (fromCode !== '0x' || toCode !== '0x') return; // one side is a contract
+const code = await provider.getCode(toAddr);
+if (code !== '0x' && code !== '0x0') return; // Skip if receiver is a contract (LP vault/tax)
+
 
   // 💰 Check ETH value to confirm real buy/sell
   let usdSpent = 0, ethSpent = 0;
@@ -84,7 +84,8 @@ async function handleTokenLog(client, tokenRows, log) {
     }
   } catch {}
 
-  if (usdSpent === 0 && ethSpent === 0) return;
+  if (usdSpent === 0 && ethSpent === 0 && tokenAmountRaw < 5) return;
+
 
   const tokenAmountRaw = parseFloat(formatUnits(amount, 18));
   const tokenAmountFormatted = (tokenAmountRaw * 1000).toLocaleString(undefined, {
