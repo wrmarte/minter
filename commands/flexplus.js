@@ -1,6 +1,6 @@
 const { SlashCommandBuilder, EmbedBuilder, AttachmentBuilder } = require('discord.js');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
-const { fetchMetadata } = require('../utils/fetchMetadata');
+const { fetchMetadata } = require('../utils/fetchMetadataExtras');
 
 const GATEWAYS = [
   'https://cloudflare-ipfs.com/ipfs/',
