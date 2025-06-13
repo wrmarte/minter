@@ -35,11 +35,13 @@ module.exports = async function processUnifiedBlock(client, fromBlock, toBlock) 
   }
 
   for (const log of logs) {
-    await handleTokenLog(client, tokenRows, log);
+    await handleTokenBuyLog(client, tokenRows, log);
+    await handleTokenSellLog(client, tokenRows, log);
   }
 };
 
-async function handleTokenLog(client, tokenRows, log) {
+// ✅ BUY HANDLER
+async function handleTokenBuyLog(client, tokenRows, log) {
   const iface = new Interface(['event Transfer(address indexed from, address indexed to, uint amount)']);
   let parsed;
   try {
@@ -61,21 +63,13 @@ async function handleTokenLog(client, tokenRows, log) {
     '0xdead000000000000000042069420694206942069'
   ];
 
-  // ✅ Must come from a router
   if (!ROUTERS_LOWER.includes(fromAddr)) return;
+  if (ROUTERS_LOWER.includes(toAddr) || taxLikeAddresses.includes(toAddr)) return;
 
-  // ❌ Skip burn/tax addresses and router-to-router
-  if (
-    ROUTERS_LOWER.includes(toAddr) ||
-    taxLikeAddresses.includes(toAddr)
-  ) return;
-
-  // ❌ Skip if recipient is a contract (LP vault, tax contract, etc)
   const provider = getProvider();
   const code = await provider.getCode(toAddr);
   if (code && code !== '0x') return;
 
-  // Fetch transaction + ETH value
   let usdSpent = 0, ethSpent = 0;
   try {
     const tx = await provider.getTransaction(log.transactionHash);
@@ -84,11 +78,8 @@ async function handleTokenLog(client, tokenRows, log) {
       ethSpent = parseFloat(formatUnits(tx.value, 18));
       usdSpent = ethSpent * ethPrice;
     }
-  } catch (err) {
-    console.warn(`⚠️ Failed to get tx value: ${err.message}`);
-  }
+  } catch {}
 
-  // ❌ Skip if no ETH was spent = likely tax or LP transfer
   if (usdSpent === 0 && ethSpent === 0) return;
 
   const tokenAmountRaw = parseFloat(formatUnits(amount, 18));
@@ -97,7 +88,6 @@ async function handleTokenLog(client, tokenRows, log) {
     maximumFractionDigits: 2
   });
 
-  // 🧠 Estimate previous balance to determine if new or repeat buyer
   let buyLabel = '🆕 New Buy';
   try {
     const abi = ['function balanceOf(address account) view returns (uint256)'];
@@ -108,16 +98,14 @@ async function handleTokenLog(client, tokenRows, log) {
       const percentChange = ((tokenAmountRaw / prevBalance) * 100).toFixed(1);
       buyLabel = `🔁 +${percentChange}%`;
     }
-  } catch (err) {
-    console.warn(`⚠️ Failed to fetch previous balance for ${toAddr} on ${tokenAddress}: ${err.message}`);
-  }
+  } catch {}
 
   const tokenPrice = await getTokenPriceUSD(tokenAddress);
   const marketCap = await getMarketCapUSD(tokenAddress);
 
   const rocketIntensity = Math.min(Math.floor(tokenAmountRaw / 100), 10);
   const rocketLine = '🟥🟦🚀'.repeat(Math.max(1, rocketIntensity));
-  const getColorByUsdSpent = (usd) => usd < 10 ? 0xff0000 : usd < 20 ? 0x3498db : 0x00cc66;
+  const getColorByUsd = (usd) => usd < 10 ? 0xff0000 : usd < 20 ? 0x3498db : 0x00cc66;
 
   for (const token of tokenRows.filter(row => row.address.toLowerCase() === tokenAddress)) {
     const guild = client.guilds.cache.get(token.guild_id);
@@ -143,17 +131,98 @@ async function handleTokenLog(client, tokenRows, log) {
           { name: '📊 MCap', value: marketCap ? `$${marketCap.toLocaleString()}` : 'Fetching...', inline: true }
         ],
         url: `https://www.geckoterminal.com/base/pools/${tokenAddress}`,
-        color: getColorByUsdSpent(usdSpent),
+        color: getColorByUsd(usdSpent),
         footer: { text: 'Live on Base • Powered by PimpsDev' },
         timestamp: new Date().toISOString()
       };
-      await channel.send({ embeds: [embed] }).catch(err => {
-        console.warn(`❌ Failed to send embed: ${err.message}`);
-      });
+      await channel.send({ embeds: [embed] }).catch(() => {});
     }
   }
 }
 
+// 🔴 SELL HANDLER
+async function handleTokenSellLog(client, tokenRows, log) {
+  const iface = new Interface(['event Transfer(address indexed from, address indexed to, uint amount)']);
+  let parsed;
+  try {
+    parsed = iface.parseLog(log);
+  } catch { return; }
+
+  const { from, to, amount } = parsed.args;
+  const fromAddr = from.toLowerCase();
+  const toAddr = to.toLowerCase();
+
+  const tokenAddress = log.address.toLowerCase();
+  if (seenTx.has(log.transactionHash)) return;
+  seenTx.add(log.transactionHash);
+
+  const ROUTERS_LOWER = ROUTERS.map(r => r.toLowerCase());
+  const taxLikeAddresses = [
+    '0x0000000000000000000000000000000000000000',
+    '0x000000000000000000000000000000000000dEaD',
+    '0xdead000000000000000042069420694206942069'
+  ];
+
+  if (!ROUTERS_LOWER.includes(toAddr)) return;
+  if (ROUTERS_LOWER.includes(fromAddr) || taxLikeAddresses.includes(fromAddr)) return;
+
+  const provider = getProvider();
+  const code = await provider.getCode(fromAddr);
+  if (code && code !== '0x') return;
+
+  let usdGained = 0, ethGained = 0;
+  try {
+    const tx = await provider.getTransaction(log.transactionHash);
+    const ethPrice = await getETHPrice();
+    if (tx?.value) {
+      ethGained = parseFloat(formatUnits(tx.value, 18));
+      usdGained = ethGained * ethPrice;
+    }
+  } catch {}
+
+  if (usdGained === 0 && ethGained === 0) return;
+
+  const tokenAmountRaw = parseFloat(formatUnits(amount, 18));
+  const tokenAmountFormatted = (tokenAmountRaw * 1000).toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  });
+
+  const tokenPrice = await getTokenPriceUSD(tokenAddress);
+  const marketCap = await getMarketCapUSD(tokenAddress);
+
+  const rocketLine = '🔻💀🔻'.repeat(Math.max(1, Math.floor(tokenAmountRaw / 100)));
+  const getColorByUsd = (usd) => usd < 10 ? 0x999999 : usd < 50 ? 0xff6600 : 0xff0000;
+
+  for (const token of tokenRows.filter(row => row.address.toLowerCase() === tokenAddress)) {
+    const guild = client.guilds.cache.get(token.guild_id);
+    if (!guild) continue;
+    let channel = token.channel_id ? guild.channels.cache.get(token.channel_id) : null;
+    if (!channel || !channel.isTextBased() || !channel.permissionsFor(guild.members.me).has('SendMessages')) {
+      channel = guild.channels.cache.find(c => c.isTextBased() && c.permissionsFor(guild.members.me).has('SendMessages'));
+    }
+    if (channel) {
+      const embed = {
+        title: `💥 ${token.name.toUpperCase()} Sell Detected!`,
+        description: rocketLine,
+        image: { url: 'https://iili.io/3tSeiEF.gif' },
+        fields: [
+          { name: '💰 Value', value: `$${usdGained.toFixed(4)} / ${ethGained.toFixed(4)} ETH`, inline: true },
+          { name: '📤 Sold', value: `${tokenAmountFormatted} ${token.name.toUpperCase()}`, inline: true },
+          { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
+          { name: '📊 MCap', value: marketCap ? `$${marketCap.toLocaleString()}` : 'Fetching...', inline: true }
+        ],
+        url: `https://www.geckoterminal.com/base/pools/${tokenAddress}`,
+        color: getColorByUsd(usdGained),
+        footer: { text: 'Live on Base • Powered by PimpsDev' },
+        timestamp: new Date().toISOString()
+      };
+      await channel.send({ embeds: [embed] }).catch(() => {});
+    }
+  }
+}
+
+// ⚡ Prices
 async function getETHPrice() {
   try {
     const res = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd');
