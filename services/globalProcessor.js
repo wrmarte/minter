@@ -61,18 +61,18 @@ async function handleTokenLog(client, tokenRows, log) {
     '0xdead000000000000000042069420694206942069'
   ];
 
-  // ❌ Skip known spam
+  // ❌ Skip router-to-router or known tax/burn
   if (
     ROUTERS_LOWER.includes(fromAddr) && ROUTERS_LOWER.includes(toAddr)
   ) return;
   if (taxOrBurn.includes(toAddr) || taxOrBurn.includes(fromAddr)) return;
 
-  // ✅ Determine buy/sell
+  // ✅ Detect type
   const isBuy = ROUTERS_LOWER.includes(fromAddr) && !ROUTERS_LOWER.includes(toAddr);
   const isSell = !ROUTERS_LOWER.includes(fromAddr) && ROUTERS_LOWER.includes(toAddr);
   if (!isBuy && !isSell) return;
 
-  // ⛔ Skip LP contract sells
+  // ⛔ Skip contract sell sources
   if (isSell) {
     const code = await getProvider().getCode(fromAddr);
     if (code !== '0x') {
@@ -81,7 +81,7 @@ async function handleTokenLog(client, tokenRows, log) {
     }
   }
 
-  // 💰 Check tx value
+  // 💰 Value tracking
   let usdSpent = 0, ethSpent = 0;
   try {
     const tx = await getProvider().getTransaction(log.transactionHash);
@@ -93,7 +93,25 @@ async function handleTokenLog(client, tokenRows, log) {
   } catch {}
 
   const tokenAmountRaw = parseFloat(formatUnits(amount, 18));
+
+  // ❌ Skip tiny tax reroutes
   if (usdSpent === 0 && ethSpent === 0 && tokenAmountRaw < 5) return;
+
+  // ⛔ LP removal filter
+  if (isBuy && usdSpent === 0 && ethSpent === 0) {
+    try {
+      const abi = ['function balanceOf(address account) view returns (uint256)'];
+      const contract = new ethers.Contract(tokenAddress, abi, getProvider());
+      const prevBalanceBN = await contract.balanceOf(toAddr, { blockTag: log.blockNumber - 1 });
+      const prevBalance = parseFloat(formatUnits(prevBalanceBN, 18));
+      if (prevBalance > 0) {
+        console.log(`⛔ Skipping LP removal pretending to be a buy [${toAddr}]`);
+        return;
+      }
+    } catch (err) {
+      console.warn(`⚠️ LP filter failed: ${err.message}`);
+    }
+  }
 
   const tokenAmountFormatted = (tokenAmountRaw * 1000).toLocaleString(undefined, {
     minimumFractionDigits: 2,
@@ -103,13 +121,15 @@ async function handleTokenLog(client, tokenRows, log) {
   // 🧠 Buy label
   let buyLabel = isBuy ? '🆕 New Buy' : '💥 Sell';
   try {
-    const abi = ['function balanceOf(address account) view returns (uint256)'];
-    const contract = new ethers.Contract(tokenAddress, abi, getProvider());
-    const prevBalanceBN = await contract.balanceOf(toAddr, { blockTag: log.blockNumber - 1 });
-    const prevBalance = parseFloat(formatUnits(prevBalanceBN, 18));
-    if (isBuy && prevBalance > 0) {
-      const percentChange = ((tokenAmountRaw / prevBalance) * 100).toFixed(1);
-      buyLabel = `🔁 +${percentChange}%`;
+    if (isBuy) {
+      const abi = ['function balanceOf(address account) view returns (uint256)'];
+      const contract = new ethers.Contract(tokenAddress, abi, getProvider());
+      const prevBalanceBN = await contract.balanceOf(toAddr, { blockTag: log.blockNumber - 1 });
+      const prevBalance = parseFloat(formatUnits(prevBalanceBN, 18));
+      if (prevBalance > 0) {
+        const percentChange = ((tokenAmountRaw / prevBalance) * 100).toFixed(1);
+        buyLabel = `🔁 +${percentChange}%`;
+      }
     }
   } catch {}
 
@@ -167,6 +187,7 @@ async function handleTokenLog(client, tokenRows, log) {
     }
   }
 }
+
 
 
 async function getETHPrice() {
