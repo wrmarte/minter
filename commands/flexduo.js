@@ -30,30 +30,30 @@ module.exports = {
     ),
 
   async execute(interaction) {
+    await interaction.deferReply();
     const pg = interaction.client.pg;
     const name = interaction.options.getString('name').toLowerCase();
     const tokenIdInput = interaction.options.getInteger('tokenid');
     const guildId = interaction.guild.id;
 
     try {
+      // ✅ Load duo config
       const result = await pg.query(
         'SELECT * FROM flex_duo WHERE guild_id = $1 AND name = $2',
         [guildId, name]
       );
 
       if (!result.rows.length) {
-        return await interaction.reply('❌ Duo not found. Use `/addflexduo` first.');
+        return interaction.editReply('❌ Duo not found. Use `/addflexduo` first.');
       }
 
       const { contract1, network1, contract2, network2 } = result.rows[0];
+
       const provider1 = getProvider(network1);
       const provider2 = getProvider(network2);
 
-      // ✅ Use working pattern from flex.js
       const nft1 = new Contract(contract1, abi, provider1);
       const nft2 = new Contract(contract2, abi, provider2);
-
-      await interaction.deferReply();
 
       let tokenId = tokenIdInput;
 
@@ -64,6 +64,7 @@ module.exports = {
         tokenId = Math.floor(Math.random() * total);
       }
 
+      // ✅ Use hybridized fetchMetadata for both
       const meta1 = await fetchMetadata(contract1, tokenId, network1);
       const meta2 = await fetchMetadata(contract2, tokenId, network2);
 
@@ -78,6 +79,7 @@ module.exports = {
       const targetHeight = 400;
       const canvasPadding = 30;
       const labelHeight = 50;
+
       const canvasWidth = targetWidth * 2 + canvasPadding * 3;
       const canvasHeight = targetHeight + labelHeight + canvasPadding * 2;
 
@@ -114,20 +116,10 @@ module.exports = {
 
     } catch (err) {
       console.error('❌ FlexDuo error:', err);
-      try {
-        if (interaction.deferred || interaction.replied) {
-          await interaction.editReply({ content: '❌ Something went wrong while flexing this duo.' });
-        }
-      } catch (sendErr) {
-        console.error('⚠️ Failed to send error reply:', sendErr);
-      }
+      return interaction.editReply('❌ Something went wrong flexing that duo.\nCheck bot logs for more.');
     }
   }
 };
-
-
-
-
 
 
 
