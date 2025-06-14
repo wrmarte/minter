@@ -34,11 +34,17 @@ module.exports = {
 
   async execute(interaction) {
     const pg = interaction.client.pg;
-    const name = interaction.options.getString('name').toLowerCase();
+    const name = interaction.options.getString('name')?.toLowerCase();
     const tokenIdInput = interaction.options.getInteger('tokenid');
-    const guildId = interaction.guild.id;
+    const guildId = interaction.guild?.id;
 
-    await interaction.deferReply(); // ✅ Defer ASAP to prevent timeout
+    // 🟢 Defer early and safely
+    try {
+      await interaction.deferReply();
+    } catch (err) {
+      console.warn('⚠️ Interaction already acknowledged or expired.');
+      return;
+    }
 
     try {
       const result = await pg.query(
@@ -47,11 +53,13 @@ module.exports = {
       );
 
       if (!result.rows.length) {
-        return interaction.editReply('❌ Duo not found. Use `/addflexduo` first.');
+        if (interaction.deferred || interaction.replied) {
+          return interaction.editReply('❌ Duo not found. Use `/addflexduo` first.');
+        }
+        return;
       }
 
       const { contract1, network1, contract2, network2 } = result.rows[0];
-
       const provider1 = await getProvider(network1);
       const provider2 = await getProvider(network2);
 
@@ -102,7 +110,6 @@ module.exports = {
       const img1 = await loadImage(Buffer.from(await res1.arrayBuffer()));
       const img2 = await loadImage(Buffer.from(await res2.arrayBuffer()));
 
-      // Canvas settings
       const imgSize = 400;
       const spacing = 30;
       const labelHeight = 60;
@@ -144,8 +151,9 @@ module.exports = {
 
     } catch (err) {
       console.error('❌ FlexDuo Error:', err);
-      if (!interaction.replied && !interaction.deferred) return;
-      return interaction.editReply('❌ Something went wrong while flexing the duo. Try again.');
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply('❌ Something went wrong while flexing the duo. Try again.');
+      }
     }
   }
 };
