@@ -1,7 +1,7 @@
 const { SlashCommandBuilder, AttachmentBuilder, EmbedBuilder } = require('discord.js');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
 const { Contract } = require('ethers');
-const { getProvider } = require('../utils/provider');
+const { getProvider } = require('../services/provider');
 const { fetchMetadata } = require('../utils/fetchMetadata');
 
 const GATEWAYS = [
