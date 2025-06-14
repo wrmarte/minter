@@ -133,8 +133,17 @@ module.exports = {
       ctx.fillStyle = '#eaeaea';
       ctx.font = '26px sans-serif';
       ctx.textAlign = 'center';
-      ctx.fillText(meta1?.name || `#${tokenId}`, x1 + imgSize / 2, y + imgSize + 40);
-      ctx.fillText(meta2?.name || `#${tokenId}`, x2 + imgSize / 2, y + imgSize + 40);
+
+// Token name or ID
+ctx.fillText(meta1?.name || `#${tokenId}`, x1 + imgSize / 2, y + imgSize + 35);
+ctx.fillText(meta2?.name || `#${tokenId}`, x2 + imgSize / 2, y + imgSize + 35);
+
+// Project names under
+ctx.font = '20px sans-serif';
+ctx.fillStyle = '#aaaaaa';
+ctx.fillText(name.split(/[^a-z0-9]/i)[0] || 'Project 1', x1 + imgSize / 2, y + imgSize + 60);
+ctx.fillText(name.split(/[^a-z0-9]/i)[1] || 'Project 2', x2 + imgSize / 2, y + imgSize + 60);
+
 
       const buffer = canvas.toBuffer('image/png');
       const attachment = new AttachmentBuilder(buffer, { name: `duo-${tokenId}.png` });
