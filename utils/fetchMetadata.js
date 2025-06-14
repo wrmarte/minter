@@ -34,10 +34,17 @@ async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
     const provider = await getProvider(chain);
     const contract = new Contract(contractAddress, abi, provider);
 
-    // ✅ Confirm the token is minted
-    await contract.ownerOf(tokenId).catch(() => {
-      throw new Error(`Token ${tokenId} not minted yet`);
-    });
+    // ✅ Safely try ownerOf to determine if token is truly unminted
+    try {
+      await contract.ownerOf(tokenId);
+    } catch (err) {
+      const msg = err?.error?.message || err?.reason || err?.message || '';
+      const isNotMinted = msg.toLowerCase().includes('nonexistent') || msg.toLowerCase().includes('invalid token');
+      if (isNotMinted) {
+        throw new Error(`Token ${tokenId} not minted yet`);
+      }
+      console.warn(`⚠️ ownerOf failed but continuing: ${msg}`);
+    }
 
     const tokenURI = await contract.tokenURI(tokenId);
     const metadataUrl = fixIpfs(tokenURI);
@@ -92,6 +99,7 @@ async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
 }
 
 module.exports = { fetchMetadata };
+
 
 
 
