@@ -137,7 +137,12 @@ module.exports = {
         .setFooter({ text: '🧪 Powered by PimpsDev' })
         .setTimestamp();
 
-      await interaction.editReply({ embeds: [embed], files: [a]()
+      await interaction.editReply({ embeds: [embed], files: [attachment] });
 
-
+    } catch (err) {
+      console.error('❌ FlexDuo Error:', err);
+      return interaction.editReply('❌ Something went wrong while flexing the duo. Try again.');
+    }
+  }
+};
 
