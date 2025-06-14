@@ -129,12 +129,15 @@ module.exports = {
       const buffer = canvas.toBuffer('image/png');
       const attachment = new AttachmentBuilder(buffer, { name: `duo-${tokenId}.png` });
 
-      const embed = new EmbedBuil
+      const embed = new EmbedBuilder()
+        .setTitle(`🎭 Flex Duo: ${name.toUpperCase()} #${tokenId}`)
+        .setDescription(tokenIdInput ? '🎯 Flexed specific token' : '🎲 Random flex duo')
+        .setImage(`attachment://duo-${tokenId}.png`)
+        .setColor(0x2e8b57)
+        .setFooter({ text: '🧪 Powered by PimpsDev' })
+        .setTimestamp();
 
-
-
-
-
+      await interaction.editReply({ embeds: [embed], files: [a]()
 
 
 
