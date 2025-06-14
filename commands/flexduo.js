@@ -37,7 +37,6 @@ module.exports = {
     const guildId = interaction.guild.id;
 
     try {
-      // ✅ Load duo config
       const result = await pg.query(
         'SELECT * FROM flex_duo WHERE guild_id = $1 AND name = $2',
         [guildId, name]
@@ -48,11 +47,10 @@ module.exports = {
       }
 
       const { contract1, network1, contract2, network2 } = result.rows[0];
-
       const provider1 = getProvider(network1);
       const provider2 = getProvider(network2);
 
-      // ✅ Proper runner injection for ethers v6 compatibility
+      // Ethers v6 fix: use runner
       const nft1 = new Contract(contract1, abi, { runner: provider1 });
       const nft2 = new Contract(contract2, abi, { runner: provider2 });
 
@@ -65,7 +63,6 @@ module.exports = {
         tokenId = Math.floor(Math.random() * total);
       }
 
-      // ✅ Use hybridized fetchMetadata for both
       const meta1 = await fetchMetadata(contract1, tokenId, network1);
       const meta2 = await fetchMetadata(contract2, tokenId, network2);
 
@@ -80,7 +77,6 @@ module.exports = {
       const targetHeight = 400;
       const canvasPadding = 30;
       const labelHeight = 50;
-
       const canvasWidth = targetWidth * 2 + canvasPadding * 3;
       const canvasHeight = targetHeight + labelHeight + canvasPadding * 2;
 
