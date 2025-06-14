@@ -30,19 +30,34 @@ async function safeFetchJson(url) {
 async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
   chain = chain.toLowerCase();
 
+  // ✅ 1. Try Reservoir first (for ALL chains)
+  try {
+    const res = await fetch(`https://api.reservoir.tools/tokens/v6?tokens=${contractAddress}:${tokenId}`, {
+      headers: { 'x-api-key': process.env.RESERVOIR_API_KEY }
+    });
+    const data = await res.json();
+    const token = data?.tokens?.[0]?.token;
+    if (token?.image) {
+      return {
+        image: token.image,
+        attributes: token.attributes || []
+      };
+    }
+  } catch (err) {
+    console.warn(`⚠️ Reservoir failed: ${err.message}`);
+  }
+
+  // ✅ 2. Try native contract fetch
   try {
     const provider = await getProvider(chain);
     const contract = new Contract(contractAddress, abi, provider);
 
-    // ✅ Safely try ownerOf to determine if token is truly unminted
     try {
       await contract.ownerOf(tokenId);
     } catch (err) {
       const msg = err?.error?.message || err?.reason || err?.message || '';
       const isNotMinted = msg.toLowerCase().includes('nonexistent') || msg.toLowerCase().includes('invalid token');
-      if (isNotMinted) {
-        throw new Error(`Token ${tokenId} not minted yet`);
-      }
+      if (isNotMinted) throw new Error(`Token ${tokenId} not minted yet`);
       console.warn(`⚠️ ownerOf failed but continuing: ${msg}`);
     }
 
@@ -56,26 +71,8 @@ async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
     console.warn(`⚠️ tokenURI fetch failed on ${chain}: ${err.message}`);
   }
 
-  // 🔁 ETH fallback
+  // ✅ 3. Moralis fallback for ETH only
   if (chain === 'eth') {
-    // Reservoir fallback
-    try {
-      const res = await fetch(`https://api.reservoir.tools/tokens/v6?tokens=${contractAddress}:${tokenId}`, {
-        headers: { 'x-api-key': process.env.RESERVOIR_API_KEY }
-      });
-      const data = await res.json();
-      const token = data?.tokens?.[0]?.token;
-      if (token?.image) {
-        return {
-          image: token.image,
-          attributes: token.attributes || []
-        };
-      }
-    } catch (err) {
-      console.warn(`⚠️ Reservoir fallback failed: ${err.message}`);
-    }
-
-    // Moralis fallback
     try {
       const res = await fetch(
         `https://deep-index.moralis.io/api/v2.2/nft/${contractAddress}/${tokenId}?chain=eth&format=decimal`,
