@@ -4,15 +4,17 @@ const { Contract } = require('ethers');
 const { getProvider } = require('../utils/provider');
 const { fetchMetadata } = require('../utils/fetchMetadata');
 
-const abi = [
-  'function tokenURI(uint256 tokenId) view returns (string)',
-  'function totalSupply() view returns (uint256)'
+const GATEWAYS = [
+  'https://cloudflare-ipfs.com/ipfs/',
+  'https://ipfs.io/ipfs/',
+  'https://dweb.link/ipfs/'
 ];
 
-function getTodayFormatted() {
-  return new Date().toLocaleDateString('en-US', {
-    year: 'numeric', month: 'short', day: 'numeric'
-  });
+async function timeoutFetch(url, ms = 3000) {
+  return await Promise.race([
+    fetch(url),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), ms))
+  ]);
 }
 
 module.exports = {
@@ -26,7 +28,8 @@ module.exports = {
         .setAutocomplete(true)
     )
     .addIntegerOption(opt =>
-      opt.setName('tokenid').setDescription('Token ID to flex (optional)')
+      opt.setName('tokenid')
+        .setDescription('Token ID to flex (optional)')
     ),
 
   async execute(interaction) {
@@ -37,7 +40,6 @@ module.exports = {
     const guildId = interaction.guild.id;
 
     try {
-      // ✅ Load duo config
       const result = await pg.query(
         'SELECT * FROM flex_duo WHERE guild_id = $1 AND name = $2',
         [guildId, name]
@@ -52,74 +54,83 @@ module.exports = {
       const provider1 = getProvider(network1);
       const provider2 = getProvider(network2);
 
-      const nft1 = new Contract(contract1, abi, provider1);
-      const nft2 = new Contract(contract2, abi, provider2);
+      const nft1 = new Contract(contract1, [
+        'function tokenURI(uint256 tokenId) view returns (string)',
+        'function totalSupply() view returns (uint256)'
+      ], provider1);
+
+      const nft2 = new Contract(contract2, [
+        'function tokenURI(uint256 tokenId) view returns (string)'
+      ], provider2);
 
       let tokenId = tokenIdInput;
 
       if (tokenId == null) {
-        const totalSupply = await nft1.totalSupply();
-        const total = typeof totalSupply === 'number' ? totalSupply : Number(totalSupply);
-        if (total === 0) return interaction.editReply('❌ No tokens minted yet.');
+        const supply = await nft1.totalSupply();
+        const total = typeof supply === 'number' ? supply : Number(supply);
+        if (!total || isNaN(total)) {
+          return interaction.editReply('❌ No tokens minted yet.');
+        }
         tokenId = Math.floor(Math.random() * total);
       }
 
-      // ✅ Use hybridized fetchMetadata for both
-      const meta1 = await fetchMetadata(contract1, tokenId, network1);
-      const meta2 = await fetchMetadata(contract2, tokenId, network2);
+      const meta1 = await fetchMetadata(contract1, tokenId, network1, provider1);
+      const meta2 = await fetchMetadata(contract2, tokenId, network2, provider2);
 
-      const image1 = meta1?.image?.replace('ipfs://', 'https://ipfs.io/ipfs/');
-      const image2 = meta2?.image?.replace('ipfs://', 'https://ipfs.io/ipfs/');
-      if (!image1 || !image2) throw new Error('Missing image URLs in metadata');
+      let imgUrl1 = meta1?.image?.startsWith('ipfs://')
+        ? GATEWAYS.map(gw => gw + meta1.image.replace('ipfs://', ''))[0]
+        : meta1?.image;
 
-      const img1 = await loadImage(image1);
-      const img2 = await loadImage(image2);
+      let imgUrl2 = meta2?.image?.startsWith('ipfs://')
+        ? GATEWAYS.map(gw => gw + meta2.image.replace('ipfs://', ''))[0]
+        : meta2?.image;
 
-      const targetWidth = 400;
-      const targetHeight = 400;
-      const canvasPadding = 30;
-      const labelHeight = 50;
+      if (!imgUrl1 || !imgUrl2) throw new Error('Missing image URLs in metadata');
 
-      const canvasWidth = targetWidth * 2 + canvasPadding * 3;
-      const canvasHeight = targetHeight + labelHeight + canvasPadding * 2;
+      const [res1, res2] = await Promise.all([
+        timeoutFetch(imgUrl1),
+        timeoutFetch(imgUrl2)
+      ]);
+
+      if (!res1.ok || !res2.ok) throw new Error('Image fetch failed');
+
+      const img1 = await loadImage(Buffer.from(await res1.arrayBuffer()));
+      const img2 = await loadImage(Buffer.from(await res2.arrayBuffer()));
+
+      // Canvas dimensions
+      const imgSize = 400;
+      const spacing = 30;
+      const labelHeight = 60;
+      const padding = 40;
+
+      const canvasWidth = imgSize * 2 + spacing + padding * 2;
+      const canvasHeight = imgSize + labelHeight + padding * 2;
 
       const canvas = createCanvas(canvasWidth, canvasHeight);
       const ctx = canvas.getContext('2d');
 
-      ctx.fillStyle = '#000';
+      ctx.fillStyle = '#0d1117';
       ctx.fillRect(0, 0, canvasWidth, canvasHeight);
 
-      const x1 = canvasPadding;
-      const x2 = x1 + targetWidth + canvasPadding;
-      const y = canvasPadding;
+      const x1 = padding;
+      const x2 = x1 + imgSize + spacing;
+      const y = padding;
 
-      ctx.drawImage(img1, x1, y, targetWidth, targetHeight);
-      ctx.drawImage(img2, x2, y, targetWidth, targetHeight);
+      ctx.drawImage(img1, x1, y, imgSize, imgSize);
+      ctx.drawImage(img2, x2, y, imgSize, imgSize);
 
-      ctx.fillStyle = '#ccc';
-      ctx.font = '22px sans-serif';
+      // Labels
+      ctx.fillStyle = '#eaeaea';
+      ctx.font = '26px sans-serif';
       ctx.textAlign = 'center';
-      ctx.fillText(meta1?.name || `#${tokenId}`, x1 + targetWidth / 2, y + targetHeight + 35);
-      ctx.fillText(meta2?.name || `#${tokenId}`, x2 + targetWidth / 2, y + targetHeight + 35);
+      ctx.fillText(meta1?.name || `#${tokenId}`, x1 + imgSize / 2, y + imgSize + 40);
+      ctx.fillText(meta2?.name || `#${tokenId}`, x2 + imgSize / 2, y + imgSize + 40);
 
       const buffer = canvas.toBuffer('image/png');
       const attachment = new AttachmentBuilder(buffer, { name: `duo-${tokenId}.png` });
 
-      const embed = new EmbedBuilder()
-        .setTitle(`🎭 ${name.toUpperCase()} Duo #${tokenId}`)
-        .setDescription(tokenIdInput ? `🎯 Specific token flexed` : `🎲 Randomly flexed`)
-        .setImage(`attachment://duo-${tokenId}.png`)
-        .setColor(0x0099ff)
-        .setFooter({ text: `Powered by PimpsDev • ${getTodayFormatted()}` });
+      const embed = new EmbedBuil
 
-      await interaction.editReply({ embeds: [embed], files: [attachment] });
-
-    } catch (err) {
-      console.error('❌ FlexDuo error:', err);
-      return interaction.editReply('❌ Something went wrong flexing that duo.\nCheck bot logs for more.');
-    }
-  }
-};
 
 
 
