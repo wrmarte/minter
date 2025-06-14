@@ -23,7 +23,7 @@ module.exports = {
     .setDescription('Display a side-by-side duo of NFTs')
     .addStringOption(opt =>
       opt.setName('name')
-        .setDescription('Duo name')
+        .setDescription('Duo name (set via /addflexduo)')
         .setRequired(true)
         .setAutocomplete(true)
     )
@@ -33,11 +33,18 @@ module.exports = {
     ),
 
   async execute(interaction) {
-    await interaction.deferReply();
     const pg = interaction.client.pg;
-    const name = interaction.options.getString('name').toLowerCase();
+    const name = interaction.options.getString('name')?.toLowerCase();
     const tokenIdInput = interaction.options.getInteger('tokenid');
-    const guildId = interaction.guild.id;
+    const guildId = interaction.guild?.id;
+
+    // 🟢 Defer as early as possible
+    try {
+      await interaction.deferReply({ ephemeral: false });
+    } catch (err) {
+      console.warn('⚠️ Interaction already acknowledged or expired.');
+      return;
+    }
 
     try {
       const result = await pg.query(
@@ -46,13 +53,15 @@ module.exports = {
       );
 
       if (!result.rows.length) {
-        return interaction.editReply('❌ Duo not found. Use `/addflexduo` first.');
+        if (interaction.deferred || interaction.replied) {
+          return interaction.editReply('❌ Duo not found. Use `/addflexduo` first.');
+        }
+        return;
       }
 
       const { contract1, network1, contract2, network2 } = result.rows[0];
-
-      const provider1 = getProvider(network1);
-      const provider2 = getProvider(network2);
+      const provider1 = await getProvider(network1);
+      const provider2 = await getProvider(network2);
 
       const nft1 = new Contract(contract1, [
         'function tokenURI(uint256 tokenId) view returns (string)',
@@ -64,58 +73,47 @@ module.exports = {
       ], provider2);
 
       let tokenId = tokenIdInput;
-
       if (tokenId == null) {
-        const supply = await nft1.totalSupply();
-        const total = typeof supply === 'number' ? supply : Number(supply);
+        const total = Number(await nft1.totalSupply());
         if (!total || isNaN(total)) {
           return interaction.editReply('❌ No tokens minted yet.');
         }
         tokenId = Math.floor(Math.random() * total);
+        if (tokenId === 0) tokenId = 1;
       }
 
       const meta1 = await fetchMetadata(contract1, tokenId, network1, provider1);
       const meta2 = await fetchMetadata(contract2, tokenId, network2, provider2);
 
-      let imgUrl1 = meta1?.image?.startsWith('ipfs://')
+      if (!meta1?.image || !meta2?.image) {
+        return interaction.editReply(`❌ Token #${tokenId} not available on one or both chains.`);
+      }
+
+      const imgUrl1 = meta1.image.startsWith('ipfs://')
         ? GATEWAYS.map(gw => gw + meta1.image.replace('ipfs://', ''))[0]
-        : meta1?.image;
+        : meta1.image;
 
-      let imgUrl2 = meta2?.image?.startsWith('ipfs://')
+      const imgUrl2 = meta2.image.startsWith('ipfs://')
         ? GATEWAYS.map(gw => gw + meta2.image.replace('ipfs://', ''))[0]
-        : meta2?.image;
-
-      if (!imgUrl1 || !imgUrl2) throw new Error('Missing image URLs in metadata');
+        : meta2.image;
 
       const [res1, res2] = await Promise.all([
         timeoutFetch(imgUrl1),
         timeoutFetch(imgUrl2)
       ]);
 
-      if (!res1.ok || !res2.ok) throw new Error('Image fetch failed');
+      if (!res1.ok || !res2.ok) {
+        return interaction.editReply(`❌ Failed to load images for token #${tokenId}`);
+      }
 
       const img1 = await loadImage(Buffer.from(await res1.arrayBuffer()));
       const img2 = await loadImage(Buffer.from(await res2.arrayBuffer()));
 
-      // 🔍 Lookup actual project names
-      const project1 = await pg.query(
-        'SELECT name FROM flex_projects WHERE address = $1 AND guild_id = $2',
-        [contract1.toLowerCase(), guildId]
-      );
-      const project2 = await pg.query(
-        'SELECT name FROM flex_projects WHERE address = $1 AND guild_id = $2',
-        [contract2.toLowerCase(), guildId]
-      );
-
-      const projectName1 = project1.rows[0]?.name || 'Project 1';
-      const projectName2 = project2.rows[0]?.name || 'Project 2';
-
-      // Canvas dimensions
+      // 🎨 Canvas config
       const imgSize = 400;
       const spacing = 30;
-      const labelHeight = 90;
+      const labelHeight = 60;
       const padding = 40;
-
       const canvasWidth = imgSize * 2 + spacing + padding * 2;
       const canvasHeight = imgSize + labelHeight + padding * 2;
 
@@ -132,17 +130,20 @@ module.exports = {
       ctx.drawImage(img1, x1, y, imgSize, imgSize);
       ctx.drawImage(img2, x2, y, imgSize, imgSize);
 
-      // Labels
       ctx.fillStyle = '#eaeaea';
       ctx.font = '26px sans-serif';
       ctx.textAlign = 'center';
-      ctx.fillText(meta1?.name || `#${tokenId}`, x1 + imgSize / 2, y + imgSize + 35);
-      ctx.fillText(meta2?.name || `#${tokenId}`, x2 + imgSize / 2, y + imgSize + 35);
 
-      ctx.font = '20px sans-serif';
-      ctx.fillStyle = '#aaaaaa';
-      ctx.fillText(projectName1, x1 + imgSize / 2, y + imgSize + 60);
-      ctx.fillText(projectName2, x2 + imgSize / 2, y + imgSize + 60);
+// Token name or ID
+ctx.fillText(meta1?.name || `#${tokenId}`, x1 + imgSize / 2, y + imgSize + 35);
+ctx.fillText(meta2?.name || `#${tokenId}`, x2 + imgSize / 2, y + imgSize + 35);
+
+// Project names under
+ctx.font = '20px sans-serif';
+ctx.fillStyle = '#aaaaaa';
+ctx.fillText(name.split(/[^a-z0-9]/i)[0] || 'Project 1', x1 + imgSize / 2, y + imgSize + 60);
+ctx.fillText(name.split(/[^a-z0-9]/i)[1] || 'Project 2', x2 + imgSize / 2, y + imgSize + 60);
+
 
       const buffer = canvas.toBuffer('image/png');
       const attachment = new AttachmentBuilder(buffer, { name: `duo-${tokenId}.png` });
@@ -155,14 +156,23 @@ module.exports = {
         .setFooter({ text: '🧪 Powered by PimpsDev' })
         .setTimestamp();
 
-      await interaction.editReply({ embeds: [embed], files: [attachment] });
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply({ embeds: [embed], files: [attachment] });
+      }
 
     } catch (err) {
       console.error('❌ FlexDuo Error:', err);
-      return interaction.editReply('❌ Something went wrong while flexing the duo. Try again.');
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply('❌ Something went wrong. Try again later.');
+      }
     }
   }
 };
+
+
+
+
+
 
 
 
