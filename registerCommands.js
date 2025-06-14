@@ -24,6 +24,7 @@ for (const file of commandFiles) {
   }
 }
 
+
 if (commands.length === 0) {
   console.warn('⚠️ No valid commands found to register.');
   process.exit(1);
