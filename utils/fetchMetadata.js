@@ -2,7 +2,10 @@ const { Contract } = require('ethers');
 const fetch = require('node-fetch');
 const { getProvider } = require('../services/provider');
 
-const abi = ['function tokenURI(uint256 tokenId) view returns (string)'];
+const abi = [
+  'function tokenURI(uint256 tokenId) view returns (string)',
+  'function ownerOf(uint256 tokenId) view returns (address)'
+];
 
 function fixIpfs(url) {
   if (!url) return null;
@@ -28,8 +31,14 @@ async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
   chain = chain.toLowerCase();
 
   try {
-    const provider = getProvider(chain);
+    const provider = await getProvider(chain);
     const contract = new Contract(contractAddress, abi, provider);
+
+    // ✅ Confirm the token is minted
+    await contract.ownerOf(tokenId).catch(() => {
+      throw new Error(`Token ${tokenId} not minted yet`);
+    });
+
     const tokenURI = await contract.tokenURI(tokenId);
     const metadataUrl = fixIpfs(tokenURI);
     if (!metadataUrl) throw new Error('Empty tokenURI');
@@ -40,6 +49,7 @@ async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
     console.warn(`⚠️ tokenURI fetch failed on ${chain}: ${err.message}`);
   }
 
+  // 🔁 ETH fallback
   if (chain === 'eth') {
     // Reservoir fallback
     try {
@@ -82,6 +92,7 @@ async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
 }
 
 module.exports = { fetchMetadata };
+
 
 
 
