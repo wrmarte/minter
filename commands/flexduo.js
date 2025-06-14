@@ -61,8 +61,9 @@ module.exports = {
       const provider1 = getProvider(network1);
       const provider2 = getProvider(network2);
 
-      const nft1 = new Contract(contract1, abi, { runner: provider1 });
-      const nft2 = new Contract(contract2, abi, { runner: provider2 });
+      // ✅ Use .connect(provider) like flex.js
+      const nft1 = new Contract(contract1, abi).connect(provider1);
+      const nft2 = new Contract(contract2, abi).connect(provider2);
 
       let tokenId = tokenIdInput;
 
@@ -133,6 +134,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
