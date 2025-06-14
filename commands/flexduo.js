@@ -35,10 +35,7 @@ module.exports = {
     const tokenIdInput = interaction.options.getInteger('tokenid');
     const guildId = interaction.guild.id;
 
-    let contract1, contract2, network1, network2, provider1, provider2, nft1, nft2;
-
     try {
-      // Preload DB, provider, and contract before deferReply()
       const result = await pg.query(
         'SELECT * FROM flex_duo WHERE guild_id = $1 AND name = $2',
         [guildId, name]
@@ -48,25 +45,16 @@ module.exports = {
         return await interaction.reply('❌ Duo not found. Use `/addflexduo` first.');
       }
 
-      ({ contract1, network1, contract2, network2 } = result.rows[0]);
-      provider1 = getProvider(network1);
-      provider2 = getProvider(network2);
-      nft1 = new Contract(contract1, abi).connect(provider1);
-      nft2 = new Contract(contract2, abi).connect(provider2);
+      const { contract1, network1, contract2, network2 } = result.rows[0];
+      const provider1 = getProvider(network1);
+      const provider2 = getProvider(network2);
 
-      // Defer once ready
+      // ✅ Use working pattern from flex.js
+      const nft1 = new Contract(contract1, abi, provider1);
+      const nft2 = new Contract(contract2, abi, provider2);
+
       await interaction.deferReply();
 
-    } catch (err) {
-      if (err.code === 10062) {
-        console.warn('⚠️ Interaction expired before deferReply.');
-        return;
-      }
-      console.error('❌ Setup or deferReply error:', err);
-      return;
-    }
-
-    try {
       let tokenId = tokenIdInput;
 
       if (tokenId == null) {
@@ -136,6 +124,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
