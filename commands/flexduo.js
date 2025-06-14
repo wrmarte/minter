@@ -33,11 +33,12 @@ module.exports = {
     ),
 
   async execute(interaction) {
-    await interaction.deferReply();
     const pg = interaction.client.pg;
     const name = interaction.options.getString('name').toLowerCase();
     const tokenIdInput = interaction.options.getInteger('tokenid');
     const guildId = interaction.guild.id;
+
+    await interaction.deferReply(); // ✅ Defer ASAP to prevent timeout
 
     try {
       const result = await pg.query(
@@ -50,6 +51,7 @@ module.exports = {
       }
 
       const { contract1, network1, contract2, network2 } = result.rows[0];
+
       const provider1 = await getProvider(network1);
       const provider2 = await getProvider(network2);
 
@@ -63,6 +65,7 @@ module.exports = {
       ], provider2);
 
       let tokenId = tokenIdInput;
+
       if (tokenId == null) {
         const total = Number(await nft1.totalSupply());
         if (!total || isNaN(total)) {
@@ -99,7 +102,7 @@ module.exports = {
       const img1 = await loadImage(Buffer.from(await res1.arrayBuffer()));
       const img2 = await loadImage(Buffer.from(await res2.arrayBuffer()));
 
-      // Canvas setup
+      // Canvas settings
       const imgSize = 400;
       const spacing = 30;
       const labelHeight = 60;
@@ -120,7 +123,6 @@ module.exports = {
       ctx.drawImage(img1, x1, y, imgSize, imgSize);
       ctx.drawImage(img2, x2, y, imgSize, imgSize);
 
-      // Labels
       ctx.fillStyle = '#eaeaea';
       ctx.font = '26px sans-serif';
       ctx.textAlign = 'center';
@@ -142,10 +144,12 @@ module.exports = {
 
     } catch (err) {
       console.error('❌ FlexDuo Error:', err);
+      if (!interaction.replied && !interaction.deferred) return;
       return interaction.editReply('❌ Something went wrong while flexing the duo. Try again.');
     }
   }
 };
+
 
 
 
