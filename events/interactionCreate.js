@@ -78,7 +78,14 @@ module.exports = (client, pg) => {
             .slice(0, 25);
 
           console.log(`🔁 Optimized Autocomplete for /exp:`, filtered);
-          return await interaction.respond(filtered);
+
+          try {
+            return await interaction.respond(filtered);
+          } catch (err) {
+            if (err.code === 10062) console.warn('⚠️ Autocomplete timeout: interaction expired.');
+            else console.error('❌ Autocomplete respond error:', err);
+            return;
+          }
         }
 
         // --- DEFAULT AUTOCOMPLETE ---
@@ -88,15 +95,17 @@ module.exports = (client, pg) => {
           .slice(0, 25);
 
         console.log(`🔁 Default Autocomplete for /${commandName}:`, filtered);
-        return await interaction.respond(filtered.map(name => ({ name, value: name })));
+
+        try {
+          return await interaction.respond(filtered.map(name => ({ name, value: name })));
+        } catch (err) {
+          if (err.code === 10062) console.warn('⚠️ Autocomplete timeout: interaction expired.');
+          else console.error('❌ Autocomplete respond error:', err);
+          return;
+        }
 
       } catch (err) {
         console.error('❌ Autocomplete error:', err);
-        try {
-          return await interaction.respond([]);
-        } catch (timeoutErr) {
-          console.warn('⚠️ Autocomplete fallback timeout:', timeoutErr.message);
-        }
       }
     }
 
@@ -133,23 +142,3 @@ module.exports = (client, pg) => {
     }
   });
 };
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
