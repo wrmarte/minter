@@ -50,7 +50,6 @@ module.exports = {
       }
 
       const { contract1, network1, contract2, network2 } = result.rows[0];
-
       const provider1 = await getProvider(network1);
       const provider2 = await getProvider(network2);
 
@@ -64,18 +63,15 @@ module.exports = {
       ], provider2);
 
       let tokenId = tokenIdInput;
-
       if (tokenId == null) {
-        const supply = await nft1.totalSupply();
-        const total = typeof supply === 'number' ? supply : Number(supply);
+        const total = Number(await nft1.totalSupply());
         if (!total || isNaN(total)) {
           return interaction.editReply('❌ No tokens minted yet.');
         }
         tokenId = Math.floor(Math.random() * total);
-        if (tokenId === 0) tokenId = 1; // avoid 0 if collection skips it
+        if (tokenId === 0) tokenId = 1;
       }
 
-      // Fetch metadata with safety checks (includes ownerOf inside)
       const meta1 = await fetchMetadata(contract1, tokenId, network1, provider1);
       const meta2 = await fetchMetadata(contract2, tokenId, network2, provider2);
 
@@ -83,11 +79,11 @@ module.exports = {
         return interaction.editReply(`❌ Token #${tokenId} not available on one or both chains. Try a different ID.`);
       }
 
-      let imgUrl1 = meta1.image.startsWith('ipfs://')
+      const imgUrl1 = meta1.image.startsWith('ipfs://')
         ? GATEWAYS.map(gw => gw + meta1.image.replace('ipfs://', ''))[0]
         : meta1.image;
 
-      let imgUrl2 = meta2.image.startsWith('ipfs://')
+      const imgUrl2 = meta2.image.startsWith('ipfs://')
         ? GATEWAYS.map(gw => gw + meta2.image.replace('ipfs://', ''))[0]
         : meta2.image;
 
@@ -103,7 +99,7 @@ module.exports = {
       const img1 = await loadImage(Buffer.from(await res1.arrayBuffer()));
       const img2 = await loadImage(Buffer.from(await res2.arrayBuffer()));
 
-      // Canvas settings
+      // Canvas setup
       const imgSize = 400;
       const spacing = 30;
       const labelHeight = 60;
@@ -150,5 +146,6 @@ module.exports = {
     }
   }
 };
+
 
 
