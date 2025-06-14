@@ -23,7 +23,7 @@ module.exports = {
     .setDescription('Display a side-by-side duo of NFTs')
     .addStringOption(opt =>
       opt.setName('name')
-        .setDescription('Duo name')
+        .setDescription('Duo name (set via /addflexduo)')
         .setRequired(true)
         .setAutocomplete(true)
     )
@@ -38,9 +38,9 @@ module.exports = {
     const tokenIdInput = interaction.options.getInteger('tokenid');
     const guildId = interaction.guild?.id;
 
-    // 🟢 Defer early and safely
+    // 🟢 Defer as early as possible
     try {
-      await interaction.deferReply();
+      await interaction.deferReply({ ephemeral: false });
     } catch (err) {
       console.warn('⚠️ Interaction already acknowledged or expired.');
       return;
@@ -73,7 +73,6 @@ module.exports = {
       ], provider2);
 
       let tokenId = tokenIdInput;
-
       if (tokenId == null) {
         const total = Number(await nft1.totalSupply());
         if (!total || isNaN(total)) {
@@ -87,7 +86,7 @@ module.exports = {
       const meta2 = await fetchMetadata(contract2, tokenId, network2, provider2);
 
       if (!meta1?.image || !meta2?.image) {
-        return interaction.editReply(`❌ Token #${tokenId} not available on one or both chains. Try a different ID.`);
+        return interaction.editReply(`❌ Token #${tokenId} not available on one or both chains.`);
       }
 
       const imgUrl1 = meta1.image.startsWith('ipfs://')
@@ -104,12 +103,13 @@ module.exports = {
       ]);
 
       if (!res1.ok || !res2.ok) {
-        return interaction.editReply(`❌ Failed to load one or both images for token #${tokenId}`);
+        return interaction.editReply(`❌ Failed to load images for token #${tokenId}`);
       }
 
       const img1 = await loadImage(Buffer.from(await res1.arrayBuffer()));
       const img2 = await loadImage(Buffer.from(await res2.arrayBuffer()));
 
+      // 🎨 Canvas config
       const imgSize = 400;
       const spacing = 30;
       const labelHeight = 60;
@@ -147,16 +147,19 @@ module.exports = {
         .setFooter({ text: '🧪 Powered by PimpsDev' })
         .setTimestamp();
 
-      await interaction.editReply({ embeds: [embed], files: [attachment] });
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply({ embeds: [embed], files: [attachment] });
+      }
 
     } catch (err) {
       console.error('❌ FlexDuo Error:', err);
       if (interaction.deferred || interaction.replied) {
-        await interaction.editReply('❌ Something went wrong while flexing the duo. Try again.');
+        await interaction.editReply('❌ Something went wrong. Try again later.');
       }
     }
   }
 };
+
 
 
 
