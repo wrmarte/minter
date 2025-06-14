@@ -41,18 +41,15 @@ function getProvider(chain = 'base') {
   const url = urls[rpcIndex[chain]];
   rpcIndex[chain] = (rpcIndex[chain] + 1) % urls.length;
 
-  // ✅ Correct ApeChain chainId
-  if (chain === 'ape') {
-    return new JsonRpcProvider(url, {
-      name: 'apechain',
-      chainId: 33139
-    });
-  }
-
-  return new JsonRpcProvider(url);
+  // ✅ Required for Ethers v6 compatibility
+  return new JsonRpcProvider(url, chain === 'ape'
+    ? { name: 'apechain', chainId: 33139 }
+    : undefined
+  );
 }
 
 module.exports = { getProvider };
+
 
 
 
