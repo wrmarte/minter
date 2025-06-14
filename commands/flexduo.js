@@ -30,7 +30,18 @@ module.exports = {
     ),
 
   async execute(interaction) {
-    await interaction.deferReply();
+    try {
+      await interaction.deferReply();
+    } catch (err) {
+      if (err.code === 10062) {
+        console.warn('⚠️ Interaction expired before deferReply.');
+        return;
+      } else {
+        console.error('❌ deferReply error:', err);
+        throw err;
+      }
+    }
+
     const pg = interaction.client.pg;
     const name = interaction.options.getString('name').toLowerCase();
     const tokenIdInput = interaction.options.getInteger('tokenid');
@@ -50,7 +61,6 @@ module.exports = {
       const provider1 = getProvider(network1);
       const provider2 = getProvider(network2);
 
-      // Ethers v6 fix: use runner
       const nft1 = new Contract(contract1, abi, { runner: provider1 });
       const nft2 = new Contract(contract2, abi, { runner: provider2 });
 
@@ -113,7 +123,13 @@ module.exports = {
 
     } catch (err) {
       console.error('❌ FlexDuo error:', err);
-      return interaction.editReply('❌ Something went wrong flexing that duo.\nCheck bot logs for more.');
+      try {
+        if (interaction.deferred || interaction.replied) {
+          await interaction.editReply({ content: '❌ Something went wrong while flexing this duo.' });
+        }
+      } catch (sendErr) {
+        console.error('⚠️ Failed to send error reply:', sendErr);
+      }
     }
   }
 };
