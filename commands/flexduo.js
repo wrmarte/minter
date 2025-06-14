@@ -51,8 +51,8 @@ module.exports = {
 
       const { contract1, network1, contract2, network2 } = result.rows[0];
 
-      const provider1 = getProvider(network1);
-      const provider2 = getProvider(network2);
+      const provider1 = await getProvider(network1);
+      const provider2 = await getProvider(network2);
 
       const nft1 = new Contract(contract1, [
         'function tokenURI(uint256 tokenId) view returns (string)',
@@ -72,37 +72,42 @@ module.exports = {
           return interaction.editReply('❌ No tokens minted yet.');
         }
         tokenId = Math.floor(Math.random() * total);
+        if (tokenId === 0) tokenId = 1; // avoid 0 if collection skips it
       }
 
+      // Fetch metadata with safety checks (includes ownerOf inside)
       const meta1 = await fetchMetadata(contract1, tokenId, network1, provider1);
       const meta2 = await fetchMetadata(contract2, tokenId, network2, provider2);
 
-      let imgUrl1 = meta1?.image?.startsWith('ipfs://')
+      if (!meta1?.image || !meta2?.image) {
+        return interaction.editReply(`❌ Token #${tokenId} not available on one or both chains. Try a different ID.`);
+      }
+
+      let imgUrl1 = meta1.image.startsWith('ipfs://')
         ? GATEWAYS.map(gw => gw + meta1.image.replace('ipfs://', ''))[0]
-        : meta1?.image;
+        : meta1.image;
 
-      let imgUrl2 = meta2?.image?.startsWith('ipfs://')
+      let imgUrl2 = meta2.image.startsWith('ipfs://')
         ? GATEWAYS.map(gw => gw + meta2.image.replace('ipfs://', ''))[0]
-        : meta2?.image;
-
-      if (!imgUrl1 || !imgUrl2) throw new Error('Missing image URLs in metadata');
+        : meta2.image;
 
       const [res1, res2] = await Promise.all([
         timeoutFetch(imgUrl1),
         timeoutFetch(imgUrl2)
       ]);
 
-      if (!res1.ok || !res2.ok) throw new Error('Image fetch failed');
+      if (!res1.ok || !res2.ok) {
+        return interaction.editReply(`❌ Failed to load one or both images for token #${tokenId}`);
+      }
 
       const img1 = await loadImage(Buffer.from(await res1.arrayBuffer()));
       const img2 = await loadImage(Buffer.from(await res2.arrayBuffer()));
 
-      // Canvas dimensions
+      // Canvas settings
       const imgSize = 400;
       const spacing = 30;
       const labelHeight = 60;
       const padding = 40;
-
       const canvasWidth = imgSize * 2 + spacing + padding * 2;
       const canvasHeight = imgSize + labelHeight + padding * 2;
 
@@ -145,4 +150,5 @@ module.exports = {
     }
   }
 };
+
 
