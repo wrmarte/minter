@@ -35,10 +35,10 @@ module.exports = (client, pg) => {
 
         // --- FLEX RANDOM TOKENID AUTOCOMPLETE ---
         if (commandName === 'flex') {
-          const sub = interaction.options.getSubcommand(false);
+          const sub = options.getSubcommand(false);
 
           if (sub === 'random' && focused.name === 'tokenid') {
-            const projectName = interaction.options.getString('name');
+            const projectName = options.getString('name');
             if (!projectName) return;
 
             const res = await pg.query(
@@ -197,5 +197,6 @@ module.exports = (client, pg) => {
     }
   });
 };
+
 
 
