@@ -12,16 +12,6 @@ function fixIpfs(url) {
   return url.startsWith('ipfs://') ? url.replace('ipfs://', 'https://ipfs.io/ipfs/') : url;
 }
 
-function extractTraits(token) {
-  if (Array.isArray(token?.attributes)) return token.attributes;
-  if (Array.isArray(token?.traits)) return token.traits;
-  if (Array.isArray(token?.metadata?.attributes)) return token.metadata.attributes;
-  if (typeof token?.attributes === 'object') {
-    return Object.entries(token.attributes).map(([trait_type, value]) => ({ trait_type, value }));
-  }
-  return [];
-}
-
 async function safeFetchJson(url) {
   try {
     const res = await fetch(url, { timeout: 6000 });
@@ -40,31 +30,35 @@ async function safeFetchJson(url) {
 async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
   chain = chain.toLowerCase();
 
-  // ✅ 1. Try Reservoir first (for ALL chains)
+  // ✅ 1. Try Reservoir first
   try {
     const res = await fetch(`https://api.reservoir.tools/tokens/v6?tokens=${contractAddress}:${tokenId}`, {
       headers: { 'x-api-key': process.env.RESERVOIR_API_KEY }
     });
     const data = await res.json();
     const token = data?.tokens?.[0]?.token;
-    if (token?.image) {
-      const attributes = extractTraits(token);
-      if (attributes.length > 0) {
-        const extracted = {
-          image: fixIpfs(token.image),
-          attributes
-        };
-        console.log('🧬 [Reservoir] Extracted:', JSON.stringify(extracted, null, 2));
-        return extracted;
-      } else {
-        console.warn('⚠️ Reservoir returned image but no traits. Trying fallback...');
-      }
+
+    const image = token?.image;
+    let attributes = token?.attributes || [];
+
+    // 👇 Fallback: dig into token.metadata if needed
+    if ((!attributes || attributes.length === 0) && token?.metadata?.attributes) {
+      attributes = token.metadata.attributes;
+    }
+
+    console.log('🧬 [Reservoir] Extracted:', JSON.stringify({ image, attributes }, null, 2));
+
+    if (image) {
+      return {
+        image,
+        attributes
+      };
     }
   } catch (err) {
     console.warn(`⚠️ Reservoir failed: ${err.message}`);
   }
 
-  // ✅ 2. Try native contract fetch
+  // ✅ 2. Native contract
   try {
     const provider = await getProvider(chain);
     const contract = new Contract(contractAddress, abi, provider);
@@ -101,6 +95,7 @@ async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
       const data = await res.json();
       const raw = data?.metadata ? JSON.parse(data.metadata) : {};
       if (raw?.image) {
+        console.log('🧬 [Moralis] Extracted:', JSON.stringify(raw, null, 2));
         return {
           image: fixIpfs(raw.image),
           attributes: raw.attributes || []
