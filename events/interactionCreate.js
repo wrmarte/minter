@@ -24,21 +24,21 @@ module.exports = (client, pg) => {
           rows = res.rows;
         }
 
-        // --- FLEX FAMILY ---
-        if (
-          ['flex', 'flexplus', 'flexcard', 'flexspin'].includes(commandName) &&
-          focused.name === 'name'
-        ) {
-          const res = await pg.query(`SELECT name FROM flex_projects WHERE guild_id = $1`, [guildId]);
-          rows = res.rows;
-        }
+// --- FLEX FAMILY --- (PROJECT NAME AUTOCOMPLETE)
+if (
+  ['flex', 'flexplus', 'flexcard', 'flexspin'].includes(commandName) &&
+  focused.name === 'name'
+) {
+  const res = await pg.query(`SELECT name FROM flex_projects WHERE guild_id = $1`, [guildId]);
+  rows = res.rows;
+}
 
-        // --- FLEX RANDOM TOKENID AUTOCOMPLETE ---
-       if (commandName === 'flex') {
-  const sub = interaction.options._hoistedOptions?.[0]?.name;
+// --- FLEX RANDOM TOKENID AUTOCOMPLETE ---
+if (commandName === 'flex') {
+  const sub = interaction.options._hoistedOptions?.[0];
 
-  if (sub === 'random' && focused.name === 'tokenid') {
-    const subOptions = interaction.options._hoistedOptions?.[0]?.options || [];
+  if (sub?.name === 'random' && focused.name === 'tokenid') {
+    const subOptions = sub.options || [];
     const nameOpt = subOptions.find(opt => opt.name === 'name');
     const projectName = nameOpt?.value;
     if (!projectName) return;
@@ -86,6 +86,7 @@ module.exports = (client, pg) => {
     return interaction.respond(filtered);
   }
 }
+
 
 
         // --- EXP AUTOCOMPLETE ---
