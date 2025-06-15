@@ -113,19 +113,31 @@ module.exports = {
 
 let traitsList = [];
 
-try {
-  const rawTraits = metadata?.attributes || metadata?.traits || [];
+      try {
+        let rawTraits = [];
 
-  traitsList = rawTraits
-    .filter(t => t?.trait_type && t?.value)
-    .map(t => `• **${t.trait_type}**: ${t.value}`);
-} catch (err) {
-  console.warn(`⚠️ Failed to parse traits for ${name} #${tokenId}: ${err.message}`);
-}
+        if (Array.isArray(metadata?.attributes)) {
+          rawTraits = metadata.attributes;
+        } else if (Array.isArray(metadata?.traits)) {
+          rawTraits = metadata.traits;
+        } else if (Array.isArray(metadata?.metadata?.attributes)) {
+          rawTraits = metadata.metadata.attributes;
+        } else if (Array.isArray(metadata?.metadata?.traits)) {
+          rawTraits = metadata.metadata.traits;
+        } else if (typeof metadata?.attributes === 'object' && metadata.attributes !== null) {
+          rawTraits = Object.entries(metadata.attributes).map(([trait_type, value]) => ({ trait_type, value }));
+        }
 
-const traits = traitsList.length > 0
-  ? traitsList.join('\n')
-  : '⚠️ No traits available or unrevealed.';
+        traitsList = rawTraits
+          .filter(t => t?.trait_type && t?.value)
+          .map(t => `• **${t.trait_type}**: ${t.value}`);
+      } catch (err) {
+        console.warn(`⚠️ Failed to parse traits for ${name} #${tokenId}: ${err.message}`);
+      }
+
+      const traits = traitsList.length > 0
+        ? traitsList.join('\n')
+        : '⚠️ No traits available or unrevealed.';
 
       const canvasSize = 480;
       const canvas = createCanvas(canvasSize, canvasSize);
