@@ -22,11 +22,10 @@ async function fetchMintDate(contractAddress, tokenId) {
     }
 
     const tokenIdStr = tokenId.toString();
-const mintTx = json.result.find(tx =>
-  `${tx.tokenID}` === `${tokenId}` &&
-  tx.from?.toLowerCase() === '0x0000000000000000000000000000000000000000'
-);
-
+    const mintTx = json.result.find(tx =>
+      `${tx.tokenID}` === `${tokenId}` &&
+      tx.from?.toLowerCase() === '0x0000000000000000000000000000000000000000'
+    );
 
     if (mintTx?.timeStamp) {
       const timestampMs = parseInt(mintTx.timeStamp) * 1000;
@@ -50,8 +49,6 @@ const mintTx = json.result.find(tx =>
   return 'Unknown';
 }
 
-
-
 async function fetchRarityRankReservoir(contract, tokenId) {
   try {
     const url = `https://api.reservoir.tools/tokens/v5?tokens=${contract}:${tokenId}`;
@@ -63,10 +60,14 @@ async function fetchRarityRankReservoir(contract, tokenId) {
     });
     const json = await res.json();
     const rank = json?.tokens?.[0]?.token?.rarity?.rank;
-    return rank ? `#${rank}` : 'N/A';
+    const score = json?.tokens?.[0]?.token?.rarity?.score;
+    return {
+      rank: rank ? `#${rank}` : 'N/A',
+      score: score ? `${score.toFixed(2)}` : 'N/A'
+    };
   } catch (err) {
     console.error('❌ Reservoir rank fetch failed:', err);
-    return 'N/A';
+    return { rank: 'N/A', score: 'N/A' };
   }
 }
 
@@ -104,30 +105,23 @@ async function fetchTotalSupply(contractAddress, tokenId) {
 }
 
 async function fetchMetadataExtras(contractAddress, tokenId, network) {
-  const [minted, rankReservoir, rankOpenSea, totalSupply] = await Promise.all([
+  const [minted, resRankObj, rankOpenSea, totalSupply] = await Promise.all([
     fetchMintDate(contractAddress, tokenId),
     fetchRarityRankReservoir(contractAddress, tokenId),
     fetchRarityRankOpenSea(contractAddress, tokenId, network),
     fetchTotalSupply(contractAddress, tokenId)
   ]);
 
-  const rank = rankReservoir !== 'N/A' ? rankReservoir : rankOpenSea;
+  const rank = resRankObj.rank !== 'N/A' ? resRankObj.rank : rankOpenSea;
+  const score = resRankObj.score || 'N/A';
 
-return {
-  minted,             // ✅ Now works
-  rank,               // ✅ Reservoir/OpenSea fallback
-  network: network.toUpperCase(),
-  totalSupply         // ✅ Already working
-};
-
+  return {
+    minted,             // ✅ Works
+    rank,               // ✅ With fallback
+    score,              // ✅ New: rarity score
+    network: network.toUpperCase(),
+    totalSupply         // ✅ Already working
+  };
 }
 
 module.exports = { fetchMetadataExtras };
-
-
-
-
-
-
-
-
