@@ -41,15 +41,16 @@ module.exports = {
     const name = interaction.options.getString('name').toLowerCase();
     const tokenId = interaction.options.getInteger('tokenid');
     const ultraRequested = interaction.options.getBoolean('ultra') || false;
-
-    const userIsOwner = (interaction.user.id === process.env.BOT_OWNER_ID);
-    await interaction.deferReply();
+    const userIsOwner = interaction.user.id === process.env.BOT_OWNER_ID;
 
     try {
-      const res = await pg.query(`SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`, [
-        interaction.guild.id,
-        name,
-      ]);
+      // ⏳ Early deferReply to avoid Discord timeout
+      await interaction.deferReply({ ephemeral: false });
+
+      const res = await pg.query(
+        `SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`,
+        [interaction.guild.id, name]
+      );
 
       if (!res.rows.length) {
         return interaction.editReply('❌ Project not found. Use `/addflex` first.');
@@ -58,15 +59,13 @@ module.exports = {
       const { address, display_name, name: storedName, network } = res.rows[0];
       const contractAddress = address;
       const collectionName = display_name || storedName;
-      const chain = network.toLowerCase(); // 'eth', 'base', 'ape'
+      const chain = network.toLowerCase(); // eth, base, ape
 
       if (ultraRequested && !userIsOwner) {
         return interaction.editReply('🚫 Only the bot owner can use Ultra mode for now.');
       }
 
-      // Dynamically pick the proper flex service module
       const { buildFlexCard } = getFlexService(chain);
-
       const imageBuffer = ultraRequested
         ? await buildUltraFlexCard(contractAddress, tokenId, collectionName, chain)
         : await buildFlexCard(contractAddress, tokenId, collectionName, chain);
@@ -80,7 +79,15 @@ module.exports = {
 
     } catch (err) {
       console.error('❌ FlexCard error:', err);
-      await interaction.editReply('❌ Failed to generate FlexCard.');
+
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply('❌ Failed to generate FlexCard.');
+      } else {
+        await interaction.reply({
+          content: '❌ Failed to generate FlexCard (late error).',
+          ephemeral: true
+        });
+      }
     }
   }
 };
