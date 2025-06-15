@@ -13,6 +13,11 @@ module.exports = {
             .setRequired(true)
             .setAutocomplete(true)
         )
+        .addIntegerOption(opt =>
+          opt.setName('tokenid')
+            .setDescription('Token ID to flex (optional)')
+            .setAutocomplete(true) // ✅ ADDED AUTOCOMPLETE
+        )
     )
     .addSubcommand(sub =>
       sub.setName('card')
@@ -82,3 +87,4 @@ module.exports = {
     }
   }
 };
+
