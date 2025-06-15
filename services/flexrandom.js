@@ -39,7 +39,6 @@ module.exports = {
     ),
 
   async execute(interaction) {
-    // Handle interaction timeout safely
     try {
       await interaction.deferReply();
     } catch (err) {
@@ -115,7 +114,18 @@ module.exports = {
       let traitsList = [];
 
       try {
-        const rawTraits = metadata?.attributes || metadata?.traits || metadata?.metadata?.attributes || [];
+        let rawTraits = [];
+
+        if (Array.isArray(metadata?.attributes)) {
+          rawTraits = metadata.attributes;
+        } else if (Array.isArray(metadata?.traits)) {
+          rawTraits = metadata.traits;
+        } else if (Array.isArray(metadata?.metadata?.attributes)) {
+          rawTraits = metadata.metadata.attributes;
+        } else if (typeof metadata?.attributes === 'object' && metadata.attributes !== null) {
+          rawTraits = Object.entries(metadata.attributes).map(([trait_type, value]) => ({ trait_type, value }));
+        }
+
         traitsList = rawTraits
           .filter(t => t?.trait_type && t?.value)
           .map(t => `• **${t.trait_type}**: ${t.value}`);
@@ -168,6 +178,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
