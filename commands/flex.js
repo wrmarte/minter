@@ -68,36 +68,43 @@ module.exports = {
     let hasDeferred = false;
 
     try {
-      // 🔒 IMMEDIATE defer
-      await interaction.deferReply({ ephemeral: false });
+      await interaction.deferReply();
       hasDeferred = true;
 
-      const modules = {
-        random: require('../services/flexrandom'),
-        card: require('../services/flexcard'),
-        plus: require('../services/flexplus'),
-        duo: require('../services/flexduo')
-      };
+      let module;
 
-      const module = modules[sub];
-      if (!module) throw new Error(`No handler found for subcommand: ${sub}`);
+      switch (sub) {
+        case 'random':
+          module = require('../services/flexrandom');
+          break;
+        case 'card':
+          module = require('../services/flexcard');
+          break;
+        case 'plus':
+          module = require('../services/flexplus');
+          break;
+        case 'duo':
+          module = require('../services/flexduo');
+          break;
+        default:
+          throw new Error('Unknown flex subcommand.');
+      }
 
       await module.execute(interaction);
 
     } catch (err) {
-      console.error(`❌ Flex /${interaction.options.getSubcommand()} error:`, err);
-
-      // If already deferred, send editReply fallback
+      console.error(`❌ Flex /${sub} error:`, err);
       if (hasDeferred) {
         try {
-          await interaction.editReply('❌ Something went wrong while flexing.');
-        } catch (fallbackErr) {
-          console.warn('⚠️ Failed to send fallback error message:', fallbackErr.message);
+          await interaction.editReply('❌ Something went wrong while executing this flex command.');
+        } catch (innerErr) {
+          console.warn('⚠️ Failed to send fallback error message:', innerErr.message);
         }
       }
     }
   }
 };
+
 
 
 
