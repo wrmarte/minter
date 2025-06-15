@@ -27,32 +27,45 @@ async function safeFetchJson(url) {
   }
 }
 
+function extractTraits(meta) {
+  if (!meta) return [];
+
+  if (Array.isArray(meta.attributes)) return meta.attributes;
+  if (Array.isArray(meta.traits)) return meta.traits;
+  if (Array.isArray(meta.metadata?.attributes)) return meta.metadata.attributes;
+  if (Array.isArray(meta.token?.attributes)) return meta.token.attributes;
+  if (Array.isArray(meta.token?.metadata?.attributes)) return meta.token.metadata.attributes;
+
+  if (typeof meta.attributes === 'object') {
+    return Object.entries(meta.attributes).map(([trait_type, value]) => ({ trait_type, value }));
+  }
+
+  return [];
+}
+
 async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
   chain = chain.toLowerCase();
 
-  // ✅ 1. Try Reservoir first (for ALL chains)
+  // ✅ 1. Reservoir API (unified)
   try {
     const res = await fetch(`https://api.reservoir.tools/tokens/v6?tokens=${contractAddress}:${tokenId}`, {
       headers: { 'x-api-key': process.env.RESERVOIR_API_KEY }
     });
     const data = await res.json();
     const token = data?.tokens?.[0]?.token;
-    const metadata = token?.metadata || {};
-
-    // Patch to normalize attributes
-    const attributes = metadata.attributes || token?.attributes || token?.traits || token?.metadata?.attributes || [];
-
-    if (token?.image || metadata?.image) {
-      return {
-        image: token.image || metadata.image,
-        attributes
+    if (token?.image) {
+      const extracted = {
+        image: fixIpfs(token.image),
+        attributes: extractTraits(token)
       };
+      console.log('🧬 [Reservoir] Extracted:', JSON.stringify(extracted, null, 2));
+      return extracted;
     }
   } catch (err) {
     console.warn(`⚠️ Reservoir failed: ${err.message}`);
   }
 
-  // ✅ 2. Try native contract fetch
+  // ✅ 2. On-chain metadata
   try {
     const provider = await getProvider(chain);
     const contract = new Contract(contractAddress, abi, provider);
@@ -63,20 +76,24 @@ async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
       const msg = err?.error?.message || err?.reason || err?.message || '';
       const isNotMinted = msg.toLowerCase().includes('nonexistent') || msg.toLowerCase().includes('invalid token');
       if (isNotMinted) throw new Error(`Token ${tokenId} not minted yet`);
-      console.warn(`⚠️ ownerOf failed but continuing: ${msg}`);
     }
 
     const tokenURI = await contract.tokenURI(tokenId);
     const metadataUrl = fixIpfs(tokenURI);
-    if (!metadataUrl) throw new Error('Empty tokenURI');
-
     const meta = await safeFetchJson(metadataUrl);
-    if (meta?.image) return meta;
+    if (meta?.image) {
+      const extracted = {
+        image: fixIpfs(meta.image),
+        attributes: extractTraits(meta)
+      };
+      console.log('🧬 [On-Chain] Extracted:', JSON.stringify(extracted, null, 2));
+      return extracted;
+    }
   } catch (err) {
     console.warn(`⚠️ tokenURI fetch failed on ${chain}: ${err.message}`);
   }
 
-  // ✅ 3. Moralis fallback for ETH only
+  // ✅ 3. Moralis fallback (ETH only)
   if (chain === 'eth') {
     try {
       const res = await fetch(
@@ -86,10 +103,12 @@ async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
       const data = await res.json();
       const raw = data?.metadata ? JSON.parse(data.metadata) : {};
       if (raw?.image) {
-        return {
+        const extracted = {
           image: fixIpfs(raw.image),
-          attributes: raw.attributes || []
+          attributes: extractTraits(raw)
         };
+        console.log('🧬 [Moralis] Extracted:', JSON.stringify(extracted, null, 2));
+        return extracted;
       }
     } catch (err) {
       console.warn(`⚠️ Moralis fallback failed: ${err.message}`);
@@ -101,6 +120,7 @@ async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
 }
 
 module.exports = { fetchMetadata };
+
 
 
 
