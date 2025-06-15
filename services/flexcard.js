@@ -1,17 +1,13 @@
 const { SlashCommandBuilder, AttachmentBuilder } = require('discord.js');
 const { buildUltraFlexCard } = require('../services/ultraFlexService');
 
-// Dynamically select the right flex service per chain
+// Dynamic import per chain
 function getFlexService(chain) {
   switch (chain) {
-    case 'base':
-      return require('../services/flexcardBaseS');
-    case 'eth':
-      return require('../services/flexcardEthS');
-    case 'ape':
-      return require('../services/flexcardApeS');
-    default:
-      throw new Error(`Unsupported network: ${chain}`);
+    case 'base': return require('../services/flexcardBaseS');
+    case 'eth': return require('../services/flexcardEthS');
+    case 'ape': return require('../services/flexcardApeS');
+    default: throw new Error(`Unsupported chain: ${chain}`);
   }
 }
 
@@ -33,7 +29,6 @@ module.exports = {
     .addBooleanOption(opt =>
       opt.setName('ultra')
         .setDescription('Use Ultra Flex mode (Bot Owner only)')
-        .setRequired(false)
     ),
 
   async execute(interaction) {
@@ -43,28 +38,31 @@ module.exports = {
     const ultraRequested = interaction.options.getBoolean('ultra') || false;
     const userIsOwner = interaction.user.id === process.env.BOT_OWNER_ID;
 
-    let deferred = false;
+    let hasDeferred = false;
 
     try {
-      await interaction.deferReply({ ephemeral: false });
-      deferred = true;
+      await interaction.deferReply({ fetchReply: false });
+      hasDeferred = true;
 
-      const res = await pg.query(
+      const result = await pg.query(
         `SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`,
         [interaction.guild.id, name]
       );
 
-      if (!res.rows.length) {
-        return interaction.editReply('❌ Project not found. Use `/addflex` first.');
+      if (!result.rows.length) {
+        if (hasDeferred) {
+          return await interaction.editReply('❌ Project not found. Use `/addflex` first.');
+        }
+        return;
       }
 
-      const { address, display_name, name: storedName, network } = res.rows[0];
+      const { address, display_name, name: storedName, network } = result.rows[0];
       const contractAddress = address;
       const collectionName = display_name || storedName;
       const chain = network.toLowerCase();
 
       if (ultraRequested && !userIsOwner) {
-        return interaction.editReply('🚫 Only the bot owner can use Ultra mode for now.');
+        return await interaction.editReply('🚫 Only the bot owner can use Ultra mode for now.');
       }
 
       const { buildFlexCard } = getFlexService(chain);
@@ -81,15 +79,14 @@ module.exports = {
     } catch (err) {
       console.error('❌ FlexCard error:', err);
 
-      if (deferred) {
-        await interaction.editReply('❌ Failed to generate FlexCard.');
-      } else if (!interaction.replied) {
-        try {
-          await interaction.reply({ content: '❌ FlexCard error occurred.', ephemeral: true });
-        } catch (innerErr) {
-          console.error('⚠️ Failed to send fallback error message:', innerErr);
+      try {
+        if (hasDeferred) {
+          await interaction.editReply('❌ Failed to generate FlexCard.');
         }
+      } catch (errorAfterDefer) {
+        console.warn('⚠️ Could not send error message:', errorAfterDefer.message);
       }
     }
   }
 };
+
