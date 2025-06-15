@@ -39,17 +39,23 @@ module.exports = {
     ),
 
   async execute(interaction) {
+    // Handle interaction timeout safely
+    try {
+      await interaction.deferReply();
+    } catch (err) {
+      console.warn('⚠️ Interaction expired before deferReply:', err.message);
+      return;
+    }
+
     const pg = interaction.client.pg;
     const name = interaction.options.getString('name').toLowerCase();
     const tokenIdOption = interaction.options.getInteger('tokenid');
 
-    await interaction.deferReply();
-
     try {
-      const res = await pg.query(`SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`, [
-        interaction.guild.id,
-        name
-      ]);
+      const res = await pg.query(
+        `SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`,
+        [interaction.guild.id, name]
+      );
 
       if (!res.rows.length) {
         return interaction.editReply('❌ Project not found. Use `/addflex` first.');
@@ -69,7 +75,9 @@ module.exports = {
             const resvRes = await fetch(reservoirUrl, { headers });
             const resvData = await resvRes.json();
             const tokens = resvData?.tokens?.map(t => t?.token?.tokenId).filter(Boolean) || [];
-            tokenId = tokens.length > 0 ? tokens[Math.floor(Math.random() * tokens.length)] : Math.floor(Math.random() * 10000).toString();
+            tokenId = tokens.length > 0
+              ? tokens[Math.floor(Math.random() * tokens.length)]
+              : Math.floor(Math.random() * 10000).toString();
           } catch {
             tokenId = Math.floor(Math.random() * 10000).toString();
           }
@@ -81,19 +89,12 @@ module.exports = {
 
       const cacheKey = `${address}:${tokenId}:${chain}`;
       let metadata = metadataCache.get(cacheKey);
-
       if (!metadata) {
         metadata = await fetchMetadata(address, tokenId, chain);
         if (!metadata || !metadata.image) {
           return interaction.editReply('⚠️ Metadata not found for this token.');
         }
         metadataCache.set(cacheKey, metadata);
-      } else {
-        // Even if cached, re-fetch if ETH to ensure traits are complete
-        if (chain === 'eth') {
-          const fresh = await fetchMetadata(address, tokenId, chain);
-          if (fresh?.attributes || fresh?.traits) metadata = fresh;
-        }
       }
 
       const imageUrl = metadata.image.startsWith('ipfs://')
@@ -114,7 +115,7 @@ module.exports = {
       let traitsList = [];
 
       try {
-        const rawTraits = metadata?.attributes || metadata?.traits || [];
+        const rawTraits = metadata?.attributes || metadata?.traits || metadata?.metadata?.attributes || [];
         traitsList = rawTraits
           .filter(t => t?.trait_type && t?.value)
           .map(t => `• **${t.trait_type}**: ${t.value}`);
@@ -167,6 +168,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
