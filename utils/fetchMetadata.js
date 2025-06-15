@@ -27,26 +27,26 @@ async function safeFetchJson(url) {
   }
 }
 
-function deepExtractAttributes(metadata) {
-  const tryList = [
-    metadata?.attributes,
-    metadata?.traits,
-    metadata?.properties?.traits,
-    metadata?.metadata?.attributes,
-    metadata?.meta?.attributes,
-    metadata?.token?.attributes,
-    metadata?.token?.metadata?.attributes,
-    metadata?.details?.attributes,
-    metadata?.properties?.attributes
+function deepExtractAttributes(meta) {
+  const candidates = [
+    meta?.attributes,
+    meta?.traits,
+    meta?.properties?.traits,
+    meta?.metadata?.attributes,
+    meta?.token?.attributes,
+    meta?.token?.metadata?.attributes,
+    Array.isArray(meta) ? meta : null
   ];
 
-  for (const candidate of tryList) {
-    if (Array.isArray(candidate) && candidate.length > 0) return candidate;
+  for (const entry of candidates) {
+    if (Array.isArray(entry) && entry.length > 0 && entry[0].hasOwnProperty('trait_type')) {
+      return entry;
+    }
   }
 
-  // Handle object-style traits (e.g. { background: 'blue', hat: 'cap' })
-  if (typeof metadata?.attributes === 'object' && !Array.isArray(metadata.attributes)) {
-    return Object.entries(metadata.attributes).map(([trait_type, value]) => ({ trait_type, value }));
+  // Handle object form (trait_type: value)
+  if (typeof meta?.attributes === 'object' && !Array.isArray(meta.attributes)) {
+    return Object.entries(meta.attributes).map(([trait_type, value]) => ({ trait_type, value }));
   }
 
   return [];
@@ -55,7 +55,7 @@ function deepExtractAttributes(metadata) {
 async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
   chain = chain.toLowerCase();
 
-  // ✅ 1. Try Reservoir first
+  // 1. Reservoir first
   try {
     const res = await fetch(`https://api.reservoir.tools/tokens/v6?tokens=${contractAddress}:${tokenId}`, {
       headers: { 'x-api-key': process.env.RESERVOIR_API_KEY }
@@ -63,45 +63,39 @@ async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
     const data = await res.json();
     const token = data?.tokens?.[0]?.token;
     if (token?.image) {
-      return {
-        image: token.image,
-        attributes: token.attributes || []
-      };
+      const traits = token.attributes || [];
+      if (traits.length > 0) {
+        console.log('🧬 [Reservoir] Extracted traits:', traits);
+        return { image: token.image, attributes: traits };
+      } else {
+        console.warn(`⚠️ [Reservoir] Empty traits, will try fallback...`);
+      }
     }
   } catch (err) {
     console.warn(`⚠️ Reservoir failed: ${err.message}`);
   }
 
-  // ✅ 2. Try tokenURI from contract
+  // 2. tokenURI fallback
   try {
     const provider = await getProvider(chain);
     const contract = new Contract(contractAddress, abi, provider);
-
-    try {
-      await contract.ownerOf(tokenId);
-    } catch (err) {
-      const msg = err?.error?.message || err?.reason || err?.message || '';
-      const isNotMinted = msg.toLowerCase().includes('nonexistent') || msg.toLowerCase().includes('invalid token');
-      if (isNotMinted) throw new Error(`Token ${tokenId} not minted yet`);
-      console.warn(`⚠️ ownerOf failed but continuing: ${msg}`);
-    }
-
     const tokenURI = await contract.tokenURI(tokenId);
     const metadataUrl = fixIpfs(tokenURI);
-    if (!metadataUrl) throw new Error('Empty tokenURI');
+    const raw = await safeFetchJson(metadataUrl);
 
-    const meta = await safeFetchJson(metadataUrl);
-    if (meta?.image) {
+    if (raw?.image) {
+      const extracted = deepExtractAttributes(raw);
+      console.log('🧬 [tokenURI] Extracted:', extracted);
       return {
-        image: fixIpfs(meta.image),
-        attributes: deepExtractAttributes(meta)
+        image: fixIpfs(raw.image),
+        attributes: extracted
       };
     }
   } catch (err) {
-    console.warn(`⚠️ tokenURI fetch failed on ${chain}: ${err.message}`);
+    console.warn(`⚠️ tokenURI fetch failed: ${err.message}`);
   }
 
-  // ✅ 3. Moralis fallback (ETH only)
+  // 3. Moralis fallback (ETH only)
   if (chain === 'eth') {
     try {
       const res = await fetch(
@@ -111,9 +105,11 @@ async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
       const data = await res.json();
       const raw = data?.metadata ? JSON.parse(data.metadata) : {};
       if (raw?.image) {
+        const extracted = deepExtractAttributes(raw);
+        console.log('🧬 [Moralis] Extracted:', extracted);
         return {
           image: fixIpfs(raw.image),
-          attributes: deepExtractAttributes(raw)
+          attributes: extracted
         };
       }
     } catch (err) {
@@ -126,6 +122,7 @@ async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
 }
 
 module.exports = { fetchMetadata };
+
 
 
 
