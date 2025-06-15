@@ -60,14 +60,10 @@ async function fetchRarityRankReservoir(contract, tokenId) {
     });
     const json = await res.json();
     const rank = json?.tokens?.[0]?.token?.rarity?.rank;
-    const score = json?.tokens?.[0]?.token?.rarity?.score;
-    return {
-      rank: rank ? `#${rank}` : 'N/A',
-      score: score ? `${score.toFixed(2)}` : 'N/A'
-    };
+    return rank ? `#${rank}` : 'N/A';
   } catch (err) {
     console.error('❌ Reservoir rank fetch failed:', err);
-    return { rank: 'N/A', score: 'N/A' };
+    return 'N/A';
   }
 }
 
@@ -81,12 +77,21 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
       }
     });
     const json = await res.json();
-    const rank = json?.rarity?.rank || json?.nft?.rarity?.rank;
-    return rank ? `#${rank}` : 'N/A';
+    const rarity = json?.rarity || json?.nft?.rarity;
+    const rank = rarity?.rank;
+    const score = rarity?.score;
+
+    if (rank) {
+      return {
+        rank: `#${rank}`,
+        score: score ? parseFloat(score).toFixed(2) : 'N/A'
+      };
+    }
   } catch (err) {
     console.error('❌ OpenSea rank fetch failed:', err);
-    return 'N/A';
   }
+
+  return { rank: 'N/A', score: 'N/A' };
 }
 
 async function fetchTotalSupply(contractAddress, tokenId) {
@@ -105,23 +110,24 @@ async function fetchTotalSupply(contractAddress, tokenId) {
 }
 
 async function fetchMetadataExtras(contractAddress, tokenId, network) {
-  const [minted, resRankObj, rankOpenSea, totalSupply] = await Promise.all([
+  const [minted, resRank, openseaData, totalSupply] = await Promise.all([
     fetchMintDate(contractAddress, tokenId),
     fetchRarityRankReservoir(contractAddress, tokenId),
     fetchRarityRankOpenSea(contractAddress, tokenId, network),
     fetchTotalSupply(contractAddress, tokenId)
   ]);
 
-  const rank = resRankObj.rank !== 'N/A' ? resRankObj.rank : rankOpenSea;
-  const score = resRankObj.score || 'N/A';
+  const finalRank = resRank !== 'N/A' ? resRank : openseaData.rank;
+  const finalScore = openseaData?.score || 'N/A';
 
   return {
-    minted,             // ✅ Works
-    rank,               // ✅ With fallback
-    score,              // ✅ New: rarity score
+    minted,
+    rank: finalRank,
+    score: finalScore,
     network: network.toUpperCase(),
-    totalSupply         // ✅ Already working
+    totalSupply
   };
 }
 
 module.exports = { fetchMetadataExtras };
+
