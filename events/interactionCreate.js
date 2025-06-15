@@ -1,4 +1,4 @@
-const { flavorMap } = require('../utils/flavorMap');  // ✅ pulling from external now
+const { flavorMap } = require('../utils/flavorMap');
 
 module.exports = (client, pg) => {
   const guildNameCache = new Map();
@@ -6,6 +6,7 @@ module.exports = (client, pg) => {
   client.on('interactionCreate', async interaction => {
     if (interaction.isAutocomplete()) {
       const { commandName, options } = interaction;
+      const subcommand = options.getSubcommand(false);
       const focused = options.getFocused(true);
       const guildId = interaction.guild?.id;
       const userId = interaction.user.id;
@@ -16,18 +17,22 @@ module.exports = (client, pg) => {
         let rows = [];
 
         // --- FLEXDUO ---
-        if (commandName === 'flexduo' && focused.name === 'name') {
-          const res = await pg.query(`SELECT name FROM flex_duo WHERE guild_id = $1`, [guildId]);
-          rows = res.rows;
+        if ((commandName === 'flex' && subcommand === 'duo') || (commandName === 'flexduo')) {
+          if (focused.name === 'name') {
+            const res = await pg.query(`SELECT name FROM flex_duo WHERE guild_id = $1`, [guildId]);
+            rows = res.rows;
+          }
         }
 
         // --- FLEX FAMILY ---
         if (
-          ['flex', 'flexplus', 'flexcard', 'flexspin'].includes(commandName) &&
-          focused.name === 'name'
+          (commandName === 'flex' && ['random', 'plus', 'card', 'spin'].includes(subcommand)) ||
+          ['flex', 'flexplus', 'flexcard', 'flexspin'].includes(commandName)
         ) {
-          const res = await pg.query(`SELECT name FROM flex_projects WHERE guild_id = $1`, [guildId]);
-          rows = res.rows;
+          if (focused.name === 'name') {
+            const res = await pg.query(`SELECT name FROM flex_projects WHERE guild_id = $1`, [guildId]);
+            rows = res.rows;
+          }
         }
 
         // --- EXP AUTOCOMPLETE ---
@@ -142,3 +147,4 @@ module.exports = (client, pg) => {
     }
   });
 };
+
