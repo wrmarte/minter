@@ -111,22 +111,22 @@ module.exports = {
         return interaction.editReply('⚠️ Could not load the NFT image.');
       }
 
-let traitsList = [];
+let rawTraits = [];
 
-      try {
-        let rawTraits = [];
+if (Array.isArray(metadata?.attributes)) {
+  rawTraits = metadata.attributes;
+} else if (Array.isArray(metadata?.traits)) {
+  rawTraits = metadata.traits;
+} else if (Array.isArray(metadata?.metadata?.attributes)) {
+  rawTraits = metadata.metadata.attributes;
+} else if (metadata?.token?.attributes) {
+  rawTraits = metadata.token.attributes;
+} else if (metadata?.token?.metadata?.attributes) {
+  rawTraits = metadata.token.metadata.attributes;
+} else if (typeof metadata?.attributes === 'object') {
+  rawTraits = Object.entries(metadata.attributes).map(([trait_type, value]) => ({ trait_type, value }));
+}
 
-        if (Array.isArray(metadata?.attributes)) {
-          rawTraits = metadata.attributes;
-        } else if (Array.isArray(metadata?.traits)) {
-          rawTraits = metadata.traits;
-        } else if (Array.isArray(metadata?.metadata?.attributes)) {
-          rawTraits = metadata.metadata.attributes;
-        } else if (Array.isArray(metadata?.metadata?.traits)) {
-          rawTraits = metadata.metadata.traits;
-        } else if (typeof metadata?.attributes === 'object' && metadata.attributes !== null) {
-          rawTraits = Object.entries(metadata.attributes).map(([trait_type, value]) => ({ trait_type, value }));
-        }
 
         traitsList = rawTraits
           .filter(t => t?.trait_type && t?.value)
