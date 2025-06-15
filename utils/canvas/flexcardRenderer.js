@@ -14,6 +14,7 @@ async function generateFlexCard({
   owner,
   openseaUrl,
   rank,
+  score,
   mintedDate,
   network,
   totalSupply
@@ -131,12 +132,13 @@ async function generateFlexCard({
   ctx.lineTo(metaX + metaWidth, metaY + metaHeight);
   ctx.stroke();
 
-const metaLines = [
-  `• Rank: ${rank ?? 'N/A'}`,
-  `• Minted: ${mintedDate && mintedDate !== 'Unknown' ? mintedDate : '❌ Not Found'}`,
-  `• Network: ${network ?? 'Base'}`,
-  `• Total Supply: ${totalSupply ?? 'N/A'}`
-];
+  const metaLines = [
+    `• Rank: ${rank ?? 'N/A'}`,
+    `• Score: ${score ?? 'N/A'}`,
+    `• Minted: ${mintedDate && mintedDate !== 'Unknown' ? mintedDate : '❌ Not Found'}`,
+    `• Network: ${network ?? 'Base'}`,
+    `• Total Supply: ${totalSupply ?? 'N/A'}`
+  ];
 
   ctx.fillStyle = 'white';
   ctx.font = '22px Exo2';
@@ -172,5 +174,6 @@ const metaLines = [
 }
 
 module.exports = { generateFlexCard };
+
 
 
