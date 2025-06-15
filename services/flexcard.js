@@ -43,9 +43,11 @@ module.exports = {
     const ultraRequested = interaction.options.getBoolean('ultra') || false;
     const userIsOwner = interaction.user.id === process.env.BOT_OWNER_ID;
 
+    let deferred = false;
+
     try {
-      // ⏳ Early deferReply to avoid Discord timeout
       await interaction.deferReply({ ephemeral: false });
+      deferred = true;
 
       const res = await pg.query(
         `SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`,
@@ -59,7 +61,7 @@ module.exports = {
       const { address, display_name, name: storedName, network } = res.rows[0];
       const contractAddress = address;
       const collectionName = display_name || storedName;
-      const chain = network.toLowerCase(); // eth, base, ape
+      const chain = network.toLowerCase();
 
       if (ultraRequested && !userIsOwner) {
         return interaction.editReply('🚫 Only the bot owner can use Ultra mode for now.');
@@ -70,37 +72,24 @@ module.exports = {
         ? await buildUltraFlexCard(contractAddress, tokenId, collectionName, chain)
         : await buildFlexCard(contractAddress, tokenId, collectionName, chain);
 
-      const attachment = new AttachmentBuilder(
-        imageBuffer,
-        { name: ultraRequested ? 'ultraflexcard.png' : 'flexcard.png' }
-      );
+      const attachment = new AttachmentBuilder(imageBuffer, {
+        name: ultraRequested ? 'ultraflexcard.png' : 'flexcard.png'
+      });
 
-      await interaction.editReply({ files: [attachment] });
+      return await interaction.editReply({ files: [attachment] });
 
     } catch (err) {
       console.error('❌ FlexCard error:', err);
 
-      if (interaction.deferred || interaction.replied) {
+      if (deferred) {
         await interaction.editReply('❌ Failed to generate FlexCard.');
-      } else {
-        await interaction.reply({
-          content: '❌ Failed to generate FlexCard (late error).',
-          ephemeral: true
-        });
+      } else if (!interaction.replied) {
+        try {
+          await interaction.reply({ content: '❌ FlexCard error occurred.', ephemeral: true });
+        } catch (innerErr) {
+          console.error('⚠️ Failed to send fallback error message:', innerErr);
+        }
       }
     }
   }
 };
-
-
-
-
-
-
-
-
-
-
-
-
-
