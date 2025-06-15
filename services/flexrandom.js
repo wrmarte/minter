@@ -122,6 +122,8 @@ module.exports = {
           rawTraits = metadata.traits;
         } else if (Array.isArray(metadata?.metadata?.attributes)) {
           rawTraits = metadata.metadata.attributes;
+        } else if (Array.isArray(metadata?.metadata?.traits)) {
+          rawTraits = metadata.metadata.traits;
         } else if (typeof metadata?.attributes === 'object' && metadata.attributes !== null) {
           rawTraits = Object.entries(metadata.attributes).map(([trait_type, value]) => ({ trait_type, value }));
         }
@@ -178,6 +180,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
