@@ -16,7 +16,7 @@ module.exports = {
         .addIntegerOption(opt =>
           opt.setName('tokenid')
             .setDescription('Token ID to flex (optional)')
-            .setAutocomplete(true) // ✅ ADDED AUTOCOMPLETE
+            .setAutocomplete(true)
         )
     )
     .addSubcommand(sub =>
@@ -65,26 +65,44 @@ module.exports = {
 
   async execute(interaction) {
     const sub = interaction.options.getSubcommand();
+    let hasDeferred = false;
 
-    if (sub === 'random') {
-      const module = require('../services/flexrandom');
-      return module.execute(interaction);
-    }
+    try {
+      await interaction.deferReply();
+      hasDeferred = true;
 
-    if (sub === 'card') {
-      const module = require('../services/flexcard');
-      return module.execute(interaction);
-    }
+      let module;
 
-    if (sub === 'plus') {
-      const module = require('../services/flexplus');
-      return module.execute(interaction);
-    }
+      switch (sub) {
+        case 'random':
+          module = require('../services/flexrandom');
+          break;
+        case 'card':
+          module = require('../services/flexcard');
+          break;
+        case 'plus':
+          module = require('../services/flexplus');
+          break;
+        case 'duo':
+          module = require('../services/flexduo');
+          break;
+        default:
+          throw new Error('Unknown flex subcommand.');
+      }
 
-    if (sub === 'duo') {
-      const module = require('../services/flexduo');
-      return module.execute(interaction);
+      await module.execute(interaction);
+
+    } catch (err) {
+      console.error(`❌ Flex /${sub} error:`, err);
+      if (hasDeferred) {
+        try {
+          await interaction.editReply('❌ Something went wrong while executing this flex command.');
+        } catch (innerErr) {
+          console.warn('⚠️ Failed to send fallback error message:', innerErr.message);
+        }
+      }
     }
   }
 };
+
 
