@@ -30,7 +30,30 @@ async function safeFetchJson(url) {
 async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
   chain = chain.toLowerCase();
 
-  // ✅ 1. Try Reservoir first
+  // ✅ 1. ETH special case — try native tokenURI first
+  if (chain === 'eth') {
+    try {
+      const provider = await getProvider(chain);
+      const contract = new Contract(contractAddress, abi, provider);
+
+      const tokenURI = await contract.tokenURI(tokenId);
+      const metadataUrl = fixIpfs(tokenURI);
+      if (!metadataUrl) throw new Error('Empty tokenURI');
+
+      const meta = await safeFetchJson(metadataUrl);
+      if (meta?.image) {
+        console.log('🧬 [ETH Native] Extracted:', JSON.stringify(meta, null, 2));
+        return {
+          image: fixIpfs(meta.image),
+          attributes: meta.attributes || []
+        };
+      }
+    } catch (err) {
+      console.warn(`⚠️ ETH tokenURI failed: ${err.message}`);
+    }
+  }
+
+  // ✅ 2. Reservoir fallback
   try {
     const res = await fetch(`https://api.reservoir.tools/tokens/v6?tokens=${contractAddress}:${tokenId}`, {
       headers: { 'x-api-key': process.env.RESERVOIR_API_KEY }
@@ -41,7 +64,6 @@ async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
     const image = token?.image;
     let attributes = token?.attributes || [];
 
-    // 👇 Fallback: dig into token.metadata if needed
     if ((!attributes || attributes.length === 0) && token?.metadata?.attributes) {
       attributes = token.metadata.attributes;
     }
@@ -58,34 +80,7 @@ async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
     console.warn(`⚠️ Reservoir failed: ${err.message}`);
   }
 
-  // ✅ 2. Native contract
-  try {
-    const provider = await getProvider(chain);
-    const contract = new Contract(contractAddress, abi, provider);
-
-    try {
-      await contract.ownerOf(tokenId);
-    } catch (err) {
-      const msg = err?.error?.message || err?.reason || err?.message || '';
-      const isNotMinted = msg.toLowerCase().includes('nonexistent') || msg.toLowerCase().includes('invalid token');
-      if (isNotMinted) throw new Error(`Token ${tokenId} not minted yet`);
-      console.warn(`⚠️ ownerOf failed but continuing: ${msg}`);
-    }
-
-    const tokenURI = await contract.tokenURI(tokenId);
-    const metadataUrl = fixIpfs(tokenURI);
-    if (!metadataUrl) throw new Error('Empty tokenURI');
-
-    const meta = await safeFetchJson(metadataUrl);
-    if (meta?.image) {
-      console.log('🧬 Raw metadata:', JSON.stringify(meta, null, 2));
-      return meta;
-    }
-  } catch (err) {
-    console.warn(`⚠️ tokenURI fetch failed on ${chain}: ${err.message}`);
-  }
-
-  // ✅ 3. Moralis fallback for ETH only
+  // ✅ 3. Moralis fallback
   if (chain === 'eth') {
     try {
       const res = await fetch(
@@ -111,6 +106,7 @@ async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
 }
 
 module.exports = { fetchMetadata };
+
 
 
 
