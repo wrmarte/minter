@@ -37,10 +37,15 @@ async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
     });
     const data = await res.json();
     const token = data?.tokens?.[0]?.token;
-    if (token?.image) {
+    const metadata = token?.metadata || {};
+
+    // Patch to normalize attributes
+    const attributes = metadata.attributes || token?.attributes || token?.traits || token?.metadata?.attributes || [];
+
+    if (token?.image || metadata?.image) {
       return {
-        image: token.image,
-        attributes: token.attributes || []
+        image: token.image || metadata.image,
+        attributes
       };
     }
   } catch (err) {
