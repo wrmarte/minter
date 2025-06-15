@@ -1,202 +1,170 @@
-const { flavorMap } = require('../utils/flavorMap');
+const { SlashCommandBuilder, EmbedBuilder, AttachmentBuilder } = require('discord.js');
+const { createCanvas, loadImage } = require('@napi-rs/canvas');
 const { Contract } = require('ethers');
-const fetch = require('node-fetch');
 const { getProvider } = require('../services/provider');
+const { fetchMetadata } = require('../utils/fetchMetadata');
+const fetch = require('node-fetch');
+const NodeCache = require("node-cache");
 
-module.exports = (client, pg) => {
-  const guildNameCache = new Map();
+const metadataCache = new NodeCache({ stdTTL: 900 });
 
-  client.on('interactionCreate', async interaction => {
-    if (interaction.isAutocomplete()) {
-      const { commandName, options } = interaction;
-      const focused = options.getFocused(true);
-      const guildId = interaction.guild?.id;
-      const userId = interaction.user.id;
-      const ownerId = process.env.BOT_OWNER_ID;
-      const isOwner = userId === ownerId;
+const abi = [
+  'function totalSupply() view returns (uint256)',
+  'function tokenURI(uint256 tokenId) view returns (string)'
+];
 
-      try {
-        let rows = [];
+function roundRect(ctx, x, y, width, height, radius = 20) {
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.arcTo(x + width, y, x + width, y + height, radius);
+  ctx.arcTo(x + width, y + height, x, y + height, radius);
+  ctx.arcTo(x, y + height, x, y, radius);
+  ctx.arcTo(x, y, x + width, y, radius);
+  ctx.closePath();
+  ctx.clip();
+}
 
-        // --- FLEXDUO ---
-        if (commandName === 'flexduo' && focused.name === 'name') {
-          const res = await pg.query(`SELECT name FROM flex_duo WHERE guild_id = $1`, [guildId]);
-          rows = res.rows;
-        }
+module.exports = {
+  data: new SlashCommandBuilder()
+    .setName('flex')
+    .setDescription('Flex a random NFT or specific token ID from a project')
+    .addStringOption(opt =>
+      opt.setName('name')
+        .setDescription('Project name')
+        .setRequired(true)
+        .setAutocomplete(true)
+    )
+    .addIntegerOption(opt =>
+      opt.setName('tokenid').setDescription('Token ID to flex (optional)')
+    ),
 
-        // --- FLEX FAMILY ---
-        if (
-          ['flex', 'flexplus', 'flexcard', 'flexspin'].includes(commandName) &&
-          focused.name === 'name'
-        ) {
-          const res = await pg.query(`SELECT name FROM flex_projects WHERE guild_id = $1`, [guildId]);
-          rows = res.rows;
-        }
+  async execute(interaction) {
+    const pg = interaction.client.pg;
+    const name = interaction.options.getString('name').toLowerCase();
+    const tokenIdOption = interaction.options.getInteger('tokenid');
 
-        // --- FLEX RANDOM TOKENID AUTOCOMPLETE ---
-        if (commandName === 'flex') {
-          const sub = interaction.options.getSubcommand(false);
-
-          if (sub === 'random' && focused.name === 'tokenid') {
-            const projectName = interaction.options.getString('name');
-            if (!projectName) return;
-
-            const res = await pg.query(
-              `SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`,
-              [guildId, projectName.toLowerCase()]
-            );
-
-            if (!res.rows.length) return;
-
-            const { address, network } = res.rows[0];
-            const chain = (network || 'base').toLowerCase();
-
-            let tokenIds = [];
-
-            if (chain === 'eth') {
-              try {
-                const resv = await fetch(
-                  `https://api.reservoir.tools/tokens/v6?collection=${address}&limit=100&sortBy=floorAskPrice`,
-                  { headers: { 'x-api-key': process.env.RESERVOIR_API_KEY } }
-                );
-                const data = await resv.json();
-                tokenIds = data?.tokens?.map(t => t.token?.tokenId).filter(Boolean) || [];
-              } catch {
-                tokenIds = [];
-              }
-            } else {
-              try {
-                const provider = getProvider(chain);
-                const contract = new Contract(address, ['function totalSupply() view returns (uint256)'], provider);
-                const total = await contract.totalSupply();
-                const totalNum = parseInt(total);
-                tokenIds = Array.from({ length: Math.min(100, totalNum) }, (_, i) => (i + 1).toString());
-              } catch {
-                tokenIds = [];
-              }
-            }
-
-            const filtered = tokenIds
-              .filter(id => id.includes(focused.value))
-              .slice(0, 25)
-              .map(id => ({ name: `#${id}`, value: parseInt(id) }));
-
-            return interaction.respond(filtered);
-          }
-        }
-
-        // --- EXP AUTOCOMPLETE ---
-        if (commandName === 'exp' && focused.name === 'name') {
-          const builtInChoices = Object.keys(flavorMap).map(name => ({
-            name: `🔥 ${name} (Built-in)`,
-            value: name
-          }));
-
-          let query, params;
-
-          if (isOwner) {
-            query = `SELECT DISTINCT name, guild_id FROM expressions`;
-            params = [];
-          } else {
-            query = `SELECT DISTINCT name, guild_id FROM expressions WHERE guild_id = $1 OR guild_id IS NULL`;
-            params = [guildId];
-          }
-
-          const res = await pg.query(query, params);
-
-          const thisServer = [];
-          const global = [];
-          const otherServers = [];
-
-          for (const row of res.rows) {
-            if (!row.name) continue;
-
-            if (row.guild_id === null) {
-              global.push({ name: `🌐 ${row.name} (Global)`, value: row.name });
-            } else if (row.guild_id === guildId) {
-              thisServer.push({ name: `🏠 ${row.name} (This Server)`, value: row.name });
-            } else {
-              let guildName = guildNameCache.get(row.guild_id);
-              if (!guildName) {
-                const guild = await client.guilds.fetch(row.guild_id).catch(() => null);
-                guildName = guild?.name ?? 'Other Server';
-                guildNameCache.set(row.guild_id, guildName);
-              }
-              otherServers.push({ name: `🛡️ ${row.name} (${guildName})`, value: row.name });
-            }
-          }
-
-          const combined = [...builtInChoices, ...thisServer, ...global, ...otherServers];
-
-          const filtered = combined
-            .filter(c => c.name.toLowerCase().includes(focused.value.toLowerCase()))
-            .slice(0, 25);
-
-          console.log(`🔁 Optimized Autocomplete for /exp:`, filtered);
-
-          try {
-            return await interaction.respond(filtered);
-          } catch (err) {
-            if (err.code === 10062) console.warn('⚠️ Autocomplete timeout: interaction expired.');
-            else console.error('❌ Autocomplete respond error:', err);
-            return;
-          }
-        }
-
-        // --- DEFAULT AUTOCOMPLETE ---
-        const choices = rows.map(row => row.name).filter(Boolean);
-        const filtered = choices
-          .filter(name => name.toLowerCase().includes(focused.value.toLowerCase()))
-          .slice(0, 25);
-
-        console.log(`🔁 Default Autocomplete for /${commandName}:`, filtered);
-
-        try {
-          return await interaction.respond(filtered.map(name => ({ name, value: name })));
-        } catch (err) {
-          if (err.code === 10062) console.warn('⚠️ Autocomplete timeout: interaction expired.');
-          else console.error('❌ Autocomplete respond error:', err);
-          return;
-        }
-
-      } catch (err) {
-        console.error('❌ Autocomplete error:', err);
-      }
-    }
-
-    // --- Slash Command Execution ---
-    if (!interaction.isChatInputCommand()) return;
-
-    console.log(`🎯 Received slash command: /${interaction.commandName}`);
-
-    const command = client.commands.get(interaction.commandName);
-    if (!command) {
-      console.warn(`❌ No command found for: /${interaction.commandName}`);
-      return;
-    }
+    await interaction.deferReply();
 
     try {
-      const needsPg = command.execute.length > 1;
-      if (needsPg) {
-        await command.execute(interaction, { pg });
-      } else {
-        await command.execute(interaction);
-      }
-    } catch (error) {
-      console.error(`❌ Error executing /${interaction.commandName}:`, error);
+      const res = await pg.query(`SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`, [
+        interaction.guild.id,
+        name
+      ]);
 
-      try {
-        if (interaction.deferred || interaction.replied) {
-          await interaction.editReply({ content: '⚠️ Something went wrong.' });
-        } else {
-          await interaction.reply({ content: '⚠️ Error executing command.', ephemeral: true });
-        }
-      } catch (fallbackError) {
-        console.error('⚠️ Failed to send error message:', fallbackError.message);
+      if (!res.rows.length) {
+        return interaction.editReply('❌ Project not found. Use `/addflex` first.');
       }
+
+      const { address, network } = res.rows[0];
+      const chain = (network || 'base').toLowerCase();
+      const provider = getProvider(chain);
+      const contract = new Contract(address, abi, provider);
+      let tokenId = tokenIdOption;
+
+      if (!tokenId) {
+        if (chain === 'eth') {
+          try {
+            const reservoirUrl = `https://api.reservoir.tools/tokens/v6?collection=${address}&limit=50&sortBy=floorAskPrice`;
+            const headers = { 'x-api-key': process.env.RESERVOIR_API_KEY };
+            const resvRes = await fetch(reservoirUrl, { headers });
+            const resvData = await resvRes.json();
+            const tokens = resvData?.tokens?.map(t => t?.token?.tokenId).filter(Boolean) || [];
+            tokenId = tokens.length > 0 ? tokens[Math.floor(Math.random() * tokens.length)] : Math.floor(Math.random() * 10000).toString();
+          } catch {
+            tokenId = Math.floor(Math.random() * 10000).toString();
+          }
+        } else {
+          const totalSupply = await contract.totalSupply();
+          tokenId = Math.floor(Math.random() * parseInt(totalSupply)).toString();
+        }
+      }
+
+      const cacheKey = `${address}:${tokenId}:${chain}`;
+      let metadata = metadataCache.get(cacheKey);
+      if (!metadata) {
+        metadata = await fetchMetadata(address, tokenId, chain);
+        if (!metadata || !metadata.image) {
+          return interaction.editReply('⚠️ Metadata not found for this token.');
+        }
+        metadataCache.set(cacheKey, metadata);
+      }
+
+      const imageUrl = metadata.image.startsWith('ipfs://')
+        ? metadata.image.replace('ipfs://', 'https://ipfs.io/ipfs/')
+        : metadata.image;
+
+      let image;
+      try {
+        const response = await fetch(imageUrl, { redirect: 'follow' });
+        if (!response.ok) throw new Error(`Fetch failed: ${response.status}`);
+        const arrayBuffer = await response.arrayBuffer();
+        image = await loadImage(Buffer.from(arrayBuffer));
+      } catch (err) {
+        console.error(`❌ Failed to load image: ${imageUrl}`, err);
+        return interaction.editReply('⚠️ Could not load the NFT image.');
+      }
+
+let traitsList = [];
+
+try {
+  const rawTraits = metadata?.attributes || metadata?.traits || [];
+
+  traitsList = rawTraits
+    .filter(t => t?.trait_type && t?.value)
+    .map(t => `• **${t.trait_type}**: ${t.value}`);
+} catch (err) {
+  console.warn(`⚠️ Failed to parse traits for ${name} #${tokenId}: ${err.message}`);
+}
+
+const traits = traitsList.length > 0
+  ? traitsList.join('\n')
+  : '⚠️ No traits available or unrevealed.';
+
+
+      const canvasSize = 480;
+      const canvas = createCanvas(canvasSize, canvasSize);
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#0d1117';
+      ctx.fillRect(0, 0, canvasSize, canvasSize);
+
+      const { width, height } = image;
+      const scale = Math.min(canvasSize / width, canvasSize / height);
+      const scaledWidth = width * scale;
+      const scaledHeight = height * scale;
+      const offsetX = (canvasSize - scaledWidth) / 2;
+      const offsetY = (canvasSize - scaledHeight) / 2;
+
+      roundRect(ctx, 0, 0, canvasSize, canvasSize, 30);
+      ctx.drawImage(image, offsetX, offsetY, scaledWidth, scaledHeight);
+      const buffer = canvas.toBuffer('image/png');
+      const attachment = new AttachmentBuilder(buffer, { name: 'flex.png' });
+
+      const chainDisplay = chain === 'base' ? 'Base' : chain === 'eth' ? 'Ethereum' : 'ApeChain';
+      const openseaUrl = chain === 'eth'
+        ? `https://opensea.io/assets/ethereum/${address}/${tokenId}`
+        : `https://opensea.io/assets/${chain}/${address}/${tokenId}`;
+
+      const embed = new EmbedBuilder()
+        .setTitle(`🖼️ Flexing: ${name} #${tokenId}`)
+        .setDescription(tokenIdOption ? `🎯 Specific token flexed` : `🎲 Random token flexed`)
+        .setImage('attachment://flex.png')
+        .setURL(openseaUrl)
+        .setColor(chain === 'base' ? 0x1d9bf0 : chain === 'ape' ? 0xff6600 : 0xf5851f)
+        .addFields({ name: '🧬 Traits', value: traits, inline: false })
+        .setFooter({ text: `🔧 Powered by PimpsDev • ${chainDisplay}` })
+        .setTimestamp();
+
+      await interaction.editReply({ content: null, embeds: [embed], files: [attachment] });
+
+    } catch (err) {
+      console.error('❌ Error in /flex:', err);
+      await interaction.editReply('⚠️ Something went wrong while flexing.');
     }
-  });
+  }
 };
+
+
+
 
 
 
