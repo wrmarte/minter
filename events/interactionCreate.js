@@ -1,4 +1,7 @@
 const { flavorMap } = require('../utils/flavorMap');
+const { Contract } = require('ethers');
+const fetch = require('node-fetch');
+const { getProvider } = require('../services/provider');
 
 module.exports = (client, pg) => {
   const guildNameCache = new Map();
@@ -6,7 +9,6 @@ module.exports = (client, pg) => {
   client.on('interactionCreate', async interaction => {
     if (interaction.isAutocomplete()) {
       const { commandName, options } = interaction;
-      const subcommand = options.getSubcommand(false);
       const focused = options.getFocused(true);
       const guildId = interaction.guild?.id;
       const userId = interaction.user.id;
@@ -17,21 +19,69 @@ module.exports = (client, pg) => {
         let rows = [];
 
         // --- FLEXDUO ---
-        if ((commandName === 'flex' && subcommand === 'duo') || (commandName === 'flexduo')) {
-          if (focused.name === 'name') {
-            const res = await pg.query(`SELECT name FROM flex_duo WHERE guild_id = $1`, [guildId]);
-            rows = res.rows;
-          }
+        if (commandName === 'flexduo' && focused.name === 'name') {
+          const res = await pg.query(`SELECT name FROM flex_duo WHERE guild_id = $1`, [guildId]);
+          rows = res.rows;
         }
 
         // --- FLEX FAMILY ---
         if (
-          (commandName === 'flex' && ['random', 'plus', 'card', 'spin'].includes(subcommand)) ||
-          ['flex', 'flexplus', 'flexcard', 'flexspin'].includes(commandName)
+          ['flex', 'flexplus', 'flexcard', 'flexspin'].includes(commandName) &&
+          focused.name === 'name'
         ) {
-          if (focused.name === 'name') {
-            const res = await pg.query(`SELECT name FROM flex_projects WHERE guild_id = $1`, [guildId]);
-            rows = res.rows;
+          const res = await pg.query(`SELECT name FROM flex_projects WHERE guild_id = $1`, [guildId]);
+          rows = res.rows;
+        }
+
+        // --- FLEX RANDOM TOKENID AUTOCOMPLETE ---
+        if (commandName === 'flex') {
+          const sub = interaction.options.getSubcommand(false);
+
+          if (sub === 'random' && focused.name === 'tokenid') {
+            const projectName = interaction.options.getString('name');
+            if (!projectName) return;
+
+            const res = await pg.query(
+              `SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`,
+              [guildId, projectName.toLowerCase()]
+            );
+
+            if (!res.rows.length) return;
+
+            const { address, network } = res.rows[0];
+            const chain = (network || 'base').toLowerCase();
+
+            let tokenIds = [];
+
+            if (chain === 'eth') {
+              try {
+                const resv = await fetch(
+                  `https://api.reservoir.tools/tokens/v6?collection=${address}&limit=100&sortBy=floorAskPrice`,
+                  { headers: { 'x-api-key': process.env.RESERVOIR_API_KEY } }
+                );
+                const data = await resv.json();
+                tokenIds = data?.tokens?.map(t => t.token?.tokenId).filter(Boolean) || [];
+              } catch {
+                tokenIds = [];
+              }
+            } else {
+              try {
+                const provider = getProvider(chain);
+                const contract = new Contract(address, ['function totalSupply() view returns (uint256)'], provider);
+                const total = await contract.totalSupply();
+                const totalNum = parseInt(total);
+                tokenIds = Array.from({ length: Math.min(100, totalNum) }, (_, i) => (i + 1).toString());
+              } catch {
+                tokenIds = [];
+              }
+            }
+
+            const filtered = tokenIds
+              .filter(id => id.includes(focused.value))
+              .slice(0, 25)
+              .map(id => ({ name: `#${id}`, value: parseInt(id) }));
+
+            return interaction.respond(filtered);
           }
         }
 
@@ -147,4 +197,5 @@ module.exports = (client, pg) => {
     }
   });
 };
+
 
