@@ -81,12 +81,19 @@ module.exports = {
 
       const cacheKey = `${address}:${tokenId}:${chain}`;
       let metadata = metadataCache.get(cacheKey);
+
       if (!metadata) {
         metadata = await fetchMetadata(address, tokenId, chain);
         if (!metadata || !metadata.image) {
           return interaction.editReply('⚠️ Metadata not found for this token.');
         }
         metadataCache.set(cacheKey, metadata);
+      } else {
+        // Even if cached, re-fetch if ETH to ensure traits are complete
+        if (chain === 'eth') {
+          const fresh = await fetchMetadata(address, tokenId, chain);
+          if (fresh?.attributes || fresh?.traits) metadata = fresh;
+        }
       }
 
       const imageUrl = metadata.image.startsWith('ipfs://')
@@ -104,22 +111,20 @@ module.exports = {
         return interaction.editReply('⚠️ Could not load the NFT image.');
       }
 
-let traitsList = [];
+      let traitsList = [];
 
-try {
-  const rawTraits = metadata?.attributes || metadata?.traits || [];
+      try {
+        const rawTraits = metadata?.attributes || metadata?.traits || [];
+        traitsList = rawTraits
+          .filter(t => t?.trait_type && t?.value)
+          .map(t => `• **${t.trait_type}**: ${t.value}`);
+      } catch (err) {
+        console.warn(`⚠️ Failed to parse traits for ${name} #${tokenId}: ${err.message}`);
+      }
 
-  traitsList = rawTraits
-    .filter(t => t?.trait_type && t?.value)
-    .map(t => `• **${t.trait_type}**: ${t.value}`);
-} catch (err) {
-  console.warn(`⚠️ Failed to parse traits for ${name} #${tokenId}: ${err.message}`);
-}
-
-const traits = traitsList.length > 0
-  ? traitsList.join('\n')
-  : '⚠️ No traits available or unrevealed.';
-
+      const traits = traitsList.length > 0
+        ? traitsList.join('\n')
+        : '⚠️ No traits available or unrevealed.';
 
       const canvasSize = 480;
       const canvas = createCanvas(canvasSize, canvasSize);
@@ -162,7 +167,6 @@ const traits = traitsList.length > 0
     }
   }
 };
-
 
 
 
