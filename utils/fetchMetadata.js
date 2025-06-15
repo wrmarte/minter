@@ -12,6 +12,16 @@ function fixIpfs(url) {
   return url.startsWith('ipfs://') ? url.replace('ipfs://', 'https://ipfs.io/ipfs/') : url;
 }
 
+function extractTraits(token) {
+  if (Array.isArray(token?.attributes)) return token.attributes;
+  if (Array.isArray(token?.traits)) return token.traits;
+  if (Array.isArray(token?.metadata?.attributes)) return token.metadata.attributes;
+  if (typeof token?.attributes === 'object') {
+    return Object.entries(token.attributes).map(([trait_type, value]) => ({ trait_type, value }));
+  }
+  return [];
+}
+
 async function safeFetchJson(url) {
   try {
     const res = await fetch(url, { timeout: 6000 });
@@ -27,26 +37,10 @@ async function safeFetchJson(url) {
   }
 }
 
-function extractTraits(meta) {
-  if (!meta) return [];
-
-  if (Array.isArray(meta.attributes)) return meta.attributes;
-  if (Array.isArray(meta.traits)) return meta.traits;
-  if (Array.isArray(meta.metadata?.attributes)) return meta.metadata.attributes;
-  if (Array.isArray(meta.token?.attributes)) return meta.token.attributes;
-  if (Array.isArray(meta.token?.metadata?.attributes)) return meta.token.metadata.attributes;
-
-  if (typeof meta.attributes === 'object') {
-    return Object.entries(meta.attributes).map(([trait_type, value]) => ({ trait_type, value }));
-  }
-
-  return [];
-}
-
 async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
   chain = chain.toLowerCase();
 
-  // ✅ 1. Reservoir API (unified)
+  // ✅ 1. Try Reservoir first (for ALL chains)
   try {
     const res = await fetch(`https://api.reservoir.tools/tokens/v6?tokens=${contractAddress}:${tokenId}`, {
       headers: { 'x-api-key': process.env.RESERVOIR_API_KEY }
@@ -54,18 +48,23 @@ async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
     const data = await res.json();
     const token = data?.tokens?.[0]?.token;
     if (token?.image) {
-      const extracted = {
-        image: fixIpfs(token.image),
-        attributes: extractTraits(token)
-      };
-      console.log('🧬 [Reservoir] Extracted:', JSON.stringify(extracted, null, 2));
-      return extracted;
+      const attributes = extractTraits(token);
+      if (attributes.length > 0) {
+        const extracted = {
+          image: fixIpfs(token.image),
+          attributes
+        };
+        console.log('🧬 [Reservoir] Extracted:', JSON.stringify(extracted, null, 2));
+        return extracted;
+      } else {
+        console.warn('⚠️ Reservoir returned image but no traits. Trying fallback...');
+      }
     }
   } catch (err) {
     console.warn(`⚠️ Reservoir failed: ${err.message}`);
   }
 
-  // ✅ 2. On-chain metadata
+  // ✅ 2. Try native contract fetch
   try {
     const provider = await getProvider(chain);
     const contract = new Contract(contractAddress, abi, provider);
@@ -76,24 +75,23 @@ async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
       const msg = err?.error?.message || err?.reason || err?.message || '';
       const isNotMinted = msg.toLowerCase().includes('nonexistent') || msg.toLowerCase().includes('invalid token');
       if (isNotMinted) throw new Error(`Token ${tokenId} not minted yet`);
+      console.warn(`⚠️ ownerOf failed but continuing: ${msg}`);
     }
 
     const tokenURI = await contract.tokenURI(tokenId);
     const metadataUrl = fixIpfs(tokenURI);
+    if (!metadataUrl) throw new Error('Empty tokenURI');
+
     const meta = await safeFetchJson(metadataUrl);
     if (meta?.image) {
-      const extracted = {
-        image: fixIpfs(meta.image),
-        attributes: extractTraits(meta)
-      };
-      console.log('🧬 [On-Chain] Extracted:', JSON.stringify(extracted, null, 2));
-      return extracted;
+      console.log('🧬 Raw metadata:', JSON.stringify(meta, null, 2));
+      return meta;
     }
   } catch (err) {
     console.warn(`⚠️ tokenURI fetch failed on ${chain}: ${err.message}`);
   }
 
-  // ✅ 3. Moralis fallback (ETH only)
+  // ✅ 3. Moralis fallback for ETH only
   if (chain === 'eth') {
     try {
       const res = await fetch(
@@ -103,12 +101,10 @@ async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
       const data = await res.json();
       const raw = data?.metadata ? JSON.parse(data.metadata) : {};
       if (raw?.image) {
-        const extracted = {
+        return {
           image: fixIpfs(raw.image),
-          attributes: extractTraits(raw)
+          attributes: raw.attributes || []
         };
-        console.log('🧬 [Moralis] Extracted:', JSON.stringify(extracted, null, 2));
-        return extracted;
       }
     } catch (err) {
       console.warn(`⚠️ Moralis fallback failed: ${err.message}`);
