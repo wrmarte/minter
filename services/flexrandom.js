@@ -89,7 +89,9 @@ module.exports = {
       const cacheKey = `${address}:${tokenId}:${chain}`;
       let metadata = metadataCache.get(cacheKey);
       if (!metadata) {
-        metadata = await fetchMetadata(address, tokenId, chain);
+      metadata = await fetchMetadata(address, tokenId, chain);
+console.log('🧬 Raw metadata:', JSON.stringify(metadata, null, 2));
+
         if (!metadata || !metadata.image) {
           return interaction.editReply('⚠️ Metadata not found for this token.');
         }
