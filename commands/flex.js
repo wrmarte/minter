@@ -62,22 +62,22 @@ module.exports = {
     const sub = interaction.options.getSubcommand();
 
     if (sub === 'random') {
-      const module = require('../services/flexRandom');
+      const module = require('../services/flexrandom');
       return module.execute(interaction);
     }
 
     if (sub === 'card') {
-      const module = require('../services/flexCard');
+      const module = require('../services/flexcard');
       return module.execute(interaction);
     }
 
     if (sub === 'plus') {
-      const module = require('../services/flexPlus');
+      const module = require('../services/flexplus');
       return module.execute(interaction);
     }
 
     if (sub === 'duo') {
-      const module = require('../services/flexDuo');
+      const module = require('../services/flexduo');
       return module.execute(interaction);
     }
   }
