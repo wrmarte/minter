@@ -14,13 +14,12 @@ async function generateFlexCard({
   owner,
   openseaUrl,
   rank,
-  score,
   mintedDate,
   network,
   totalSupply,
+  topTrait,
   mintPrice,
-  floorPrice,
-  topTrait
+  floorPrice
 }) {
   const width = 1124;
   const height = 1650;
@@ -52,7 +51,7 @@ async function generateFlexCard({
   ctx.lineWidth = 2;
   ctx.strokeRect(margin, margin, usableWidth, height - 2 * margin);
 
-  // Title bar
+  // Title
   ctx.fillStyle = forest;
   ctx.fillRect(margin, margin, usableWidth, titleHeight);
   ctx.strokeRect(margin, margin, usableWidth, titleHeight);
@@ -72,7 +71,7 @@ async function generateFlexCard({
   const nftImg = await loadImage(nftImageUrl);
   ctx.drawImage(nftImg, nftX, nftY, nftSize, nftSize);
 
-  // Owner section
+  // Owner bar (vertical)
   const ownerX = width - margin - ownerWidth;
   const ownerY = margin + titleHeight;
   const ownerHeight = height - ownerY - qrSize - footerHeight - 10;
@@ -88,7 +87,7 @@ async function generateFlexCard({
   ctx.fillText(`OWNER: ${owner || 'Unknown'}`, 0, 10);
   ctx.restore();
 
-  // Traits section
+  // Traits block
   const traitsHeaderY = nftY + nftSize + 40;
   ctx.fillStyle = forest;
   ctx.fillRect(margin, traitsHeaderY, usableWidth - ownerWidth, traitsHeaderHeight);
@@ -108,6 +107,7 @@ async function generateFlexCard({
   ctx.moveTo(margin + usableWidth - ownerWidth, traitsY);
   ctx.lineTo(margin + usableWidth - ownerWidth, traitsY + traitsHeight);
   ctx.stroke();
+
   ctx.fillStyle = 'white';
   ctx.font = '22px Exo2';
   let traitY = traitsY + 36;
@@ -116,7 +116,7 @@ async function generateFlexCard({
     traitY += 30;
   }
 
-  // Meta section
+  // Metadata block
   const metaY = traitsY + traitsHeight + 10;
   const metaX = margin;
   const metaWidth = usableWidth;
@@ -125,21 +125,15 @@ async function generateFlexCard({
   ctx.strokeStyle = 'white';
   ctx.strokeRect(metaX, metaY, metaWidth, metaHeight);
 
-  const mintedDisplay = (typeof mintedDate === 'string' && mintedDate.length >= 10)
-    ? mintedDate
-    : '❌ Not Found';
-
   const metaLines = [
     `• Rank: ${rank ?? 'N/A'}`,
-    `• Minted: ${mintedDisplay}`,
-    `• Network: ${network ?? 'Base'}`,
-    `• Total Supply: ${totalSupply ?? 'N/A'}`,
     `• Top Trait: ${topTrait ?? 'N/A'}`,
-    `• Mint Price: ${mintPrice ? `$${mintPrice}` : 'N/A'}`,
-    `• Floor Price: ${floorPrice ? `$${floorPrice}` : 'N/A'}`
+    `• Minted: ${mintedDate ?? '❌ Not Found'}`,
+    `• Network: ${network ?? 'Base'}`,
+    `• Supply: ${totalSupply ?? 'N/A'}`,
+    `• Mint Price: ${mintPrice ?? 'N/A'}`,
+    `• Floor Price: ${floorPrice ?? 'N/A'}`
   ];
-
-
 
   ctx.fillStyle = 'white';
   ctx.font = '22px Exo2';
@@ -150,13 +144,12 @@ async function generateFlexCard({
     ctx.fillText(metaLines[i], metaX + 20, metaStartY + i * 28);
   }
 
-  // QR block
+  // QR code block
   const qrX = width - margin - qrSize;
   const qrY = height - margin - footerHeight - qrSize;
   ctx.fillStyle = 'white';
   ctx.fillRect(qrX, qrY, qrSize, qrSize);
   ctx.strokeRect(qrX, qrY, qrSize, qrSize);
-
   const qrBuffer = await QRCode.toBuffer(openseaUrl, {
     width: qrSize - 2 * qrPadding,
     margin: 1
@@ -178,6 +171,7 @@ async function generateFlexCard({
 }
 
 module.exports = { generateFlexCard };
+
 
 
 
