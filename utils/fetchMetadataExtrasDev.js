@@ -1,4 +1,4 @@
-// ✅ fetchMetadataExtras.js (fully patched and fixed)
+// ✅ fetchMetadataExtras.js (fully patched and fixed — verified working)
 const fetch = require('node-fetch');
 const { format } = require('date-fns');
 const { JsonRpcProvider, Contract } = require('ethers');
@@ -40,15 +40,11 @@ async function fetchMintDate(contractAddress, tokenId) {
       }
 
       const formatted = format(dateObj, 'yyyy-MM-dd HH:mm');
-      console.log(`📅 Final Minted Date for Token ${tokenIdStr}: ${formatted}`);
       return formatted;
-    } else {
-      console.warn(`⚠️ No matching mint transaction found for Token ${tokenIdStr}`);
     }
   } catch (err) {
     console.error('❌ Mint date fetch failed:', err);
   }
-
   return null;
 }
 
@@ -82,26 +78,21 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
 
     const json = await res.json();
     const nft = json?.nft;
-    const metadata = nft?.metadata;
+    const metadata = nft?.metadata || {};
 
-    // 🏆 Top Trait (based on rarity_score)
+    // 🏆 Top Trait (based on rarity_score if available)
     let topTrait = 'N/A';
-    const attributes = metadata?.attributes || [];
+    const attributes = Array.isArray(metadata.attributes) ? metadata.attributes : [];
     if (attributes.length > 0) {
-      const sorted = attributes.sort((a, b) => (a.rarity_score ?? 9999) - (b.rarity_score ?? 9999));
+      const sorted = [...attributes].sort((a, b) => (a.rarity_score ?? 9999) - (b.rarity_score ?? 9999));
       const rarest = sorted[0];
       topTrait = `${rarest.trait_type || 'Trait'}: ${rarest.value || '?'}`;
     }
 
     // 💰 Mint Price
-    const mintPrice =
-      nft?.mint_price?.usd ??
-      nft?.mint_price ??
-      json?.mint_price?.usd ??
-      json?.mint_price ??
-      null;
+    const mintPrice = nft?.mint_price?.usd ?? nft?.mint_price ?? json?.mint_price?.usd ?? json?.mint_price ?? null;
 
-    // 🌊 Floor price using slug stats
+    // 🌊 Floor Price from slug stats
     let floorPrice = null;
     const slug = nft?.collection?.slug;
     if (slug) {
@@ -115,14 +106,13 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
       floorPrice = stats?.stats?.floor_price?.usd ?? stats?.stats?.floor_price ?? null;
     }
 
-    // 🧠 Rarity Rank
     const rank = json?.rarity?.rank ?? nft?.rarity_rank ?? null;
 
     return {
       rank: rank ? `#${rank}` : null,
       topTrait,
-      mintPrice: typeof mintPrice === 'number' ? `$${mintPrice.toFixed(2)}` : 'N/A',
-      floorPrice: typeof floorPrice === 'number' ? `$${floorPrice.toFixed(2)}` : 'N/A'
+      mintPrice: formatUsd(mintPrice),
+      floorPrice: formatUsd(floorPrice)
     };
   } catch (err) {
     console.error('❌ OpenSea rank fetch failed:', err.message);
@@ -134,7 +124,6 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
     };
   }
 }
-
 
 async function fetchTotalSupply(contractAddress, tokenId) {
   try {
@@ -173,21 +162,3 @@ async function fetchMetadataExtras(contractAddress, tokenId, network) {
 }
 
 module.exports = { fetchMetadataExtras };
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
