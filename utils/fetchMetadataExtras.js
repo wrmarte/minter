@@ -9,7 +9,6 @@ const OPENSEA_API_KEY = process.env.OPENSEA_API_KEY;
 const provider = new JsonRpcProvider('https://mainnet.base.org');
 const erc721Abi = ['function totalSupply() view returns (uint256)'];
 
-// ✅ Mint Date from Basescan
 async function fetchMintDate(contractAddress, tokenId) {
   try {
     const url = `https://api.basescan.org/api?module=account&action=tokennfttx&contractaddress=${contractAddress}&sort=asc&apikey=${BASESCAN_API}`;
@@ -49,7 +48,6 @@ async function fetchMintDate(contractAddress, tokenId) {
   return null;
 }
 
-// ✅ Reservoir rarity
 async function fetchRarityRankReservoir(contract, tokenId) {
   try {
     const url = `https://api.reservoir.tools/tokens/v5?tokens=${contract}:${tokenId}`;
@@ -65,10 +63,9 @@ async function fetchRarityRankReservoir(contract, tokenId) {
   } catch (err) {
     console.warn('❌ Reservoir rank fetch failed:', err.message);
   }
-  return 'N/A';
+  return null;
 }
 
-// ✅ OpenSea rarity
 async function fetchRarityRankOpenSea(contract, tokenId, network) {
   try {
     const url = `https://api.opensea.io/api/v2/chain/${network}/contract/${contract}/nfts/${tokenId}`;
@@ -103,8 +100,8 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
 
     if (rank || score) {
       return {
-        rank: rank ? `#${rank}` : 'N/A',
-        score: score && !isNaN(score) ? parseFloat(score).toFixed(2) : 'N/A'
+        rank: rank ? `#${rank}` : null,
+        score: score && !isNaN(score) ? parseFloat(score).toFixed(2) : null
       };
     } else {
       console.warn(`⚠️ No rank/score found in OpenSea response for ${tokenId}`);
@@ -114,33 +111,9 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
     console.error('❌ OpenSea rank fetch failed:', err.message);
   }
 
-  return { rank: 'N/A', score: 'N/A' };
+  return { rank: null, score: null };
 }
 
-// ✅ TraitSniper fallback
-async function fetchRarityRankTraitSniper(contract, tokenId) {
-  try {
-    const url = `https://api.traitsniper.com/collections/${contract}/tokens/${tokenId}`;
-    const res = await fetch(url);
-    const json = await res.json();
-
-    const rank = json?.rank;
-    const score = json?.rarity_score;
-
-    if (rank || score) {
-      return {
-        rank: rank ? `#${rank}` : 'N/A',
-        score: score ? parseFloat(score).toFixed(2) : 'N/A'
-      };
-    }
-  } catch (err) {
-    console.warn(`❌ TraitSniper fallback failed:`, err.message);
-  }
-
-  return { rank: 'N/A', score: 'N/A' };
-}
-
-// ✅ Total supply
 async function fetchTotalSupply(contractAddress, tokenId) {
   try {
     const contract = new Contract(contractAddress, erc721Abi, provider);
@@ -155,26 +128,16 @@ async function fetchTotalSupply(contractAddress, tokenId) {
   }
 }
 
-// ✅ Master aggregator
 async function fetchMetadataExtras(contractAddress, tokenId, network) {
-  const [mintedRaw, resRank, openseaData, tsData, totalSupply] = await Promise.all([
+  const [mintedRaw, resRank, openseaData, totalSupply] = await Promise.all([
     fetchMintDate(contractAddress, tokenId),
     fetchRarityRankReservoir(contractAddress, tokenId),
     fetchRarityRankOpenSea(contractAddress, tokenId, network),
-    fetchRarityRankTraitSniper(contractAddress, tokenId),
     fetchTotalSupply(contractAddress, tokenId)
   ]);
 
-  const finalRank =
-    resRank !== 'N/A' ? resRank :
-    openseaData.rank !== 'N/A' ? openseaData.rank :
-    tsData.rank;
-
-  const finalScore =
-    openseaData.score !== 'N/A' ? openseaData.score :
-    tsData.score !== 'N/A' ? tsData.score :
-    'N/A';
-
+  const finalRank = resRank || openseaData.rank || 'Unavailable';
+  const finalScore = openseaData.score || '—';
   const minted = mintedRaw || 'Unknown';
 
   return {
@@ -187,6 +150,7 @@ async function fetchMetadataExtras(contractAddress, tokenId, network) {
 }
 
 module.exports = { fetchMetadataExtras };
+
 
 
 
