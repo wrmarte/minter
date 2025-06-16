@@ -18,9 +18,16 @@ module.exports = {
     ),
 
   async execute(interaction) {
-    // Only the bot owner can run this command
-    if (interaction.user.id !== process.env.BOT_OWNER_ID) {
-      return await interaction.reply({ content: '🚫 This command is restricted to the bot owner.', ephemeral: true });
+    const isOwner = interaction.user.id === process.env.BOT_OWNER_ID;
+
+    if (!isOwner) {
+      if (interaction.deferred || interaction.replied) {
+        return;
+      }
+      return await interaction.reply({
+        content: '🚫 This command is restricted to the bot owner.',
+        ephemeral: true
+      });
     }
 
     const pg = interaction.client.pg;
@@ -46,15 +53,20 @@ module.exports = {
       const imageBuffer = await buildFlexCard(contractAddress, tokenId, collectionName);
 
       const attachment = new AttachmentBuilder(imageBuffer, { name: 'flexdev.png' });
-      await interaction.editReply({ files: [attachment] });
+      return await interaction.editReply({ files: [attachment] });
 
     } catch (err) {
       console.error('❌ FlexDev error:', err);
-      try {
-        await interaction.editReply('❌ Failed to generate FlexDev card.');
-      } catch (innerErr) {
-        console.warn('⚠️ Failed to send error reply:', innerErr.message);
+      if (!interaction.deferred && !interaction.replied) {
+        return await interaction.reply('❌ Failed to generate FlexDev card.');
+      } else {
+        try {
+          return await interaction.editReply('❌ Failed to generate FlexDev card.');
+        } catch (innerErr) {
+          console.warn('⚠️ Failed to send error reply:', innerErr.message);
+        }
       }
     }
   }
 };
+
