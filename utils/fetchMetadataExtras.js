@@ -1,3 +1,4 @@
+// ✅ fetchMetadataExtras.js (patched)
 const fetch = require('node-fetch');
 const { format } = require('date-fns');
 const { JsonRpcProvider, Contract } = require('ethers');
@@ -138,10 +139,10 @@ async function fetchMetadataExtras(contractAddress, tokenId, network) {
 
   const finalRank = resRank || openseaData.rank || 'Unavailable';
   const finalScore = openseaData.score || '—';
-  const minted = mintedRaw || 'Unknown';
+  const minted = (typeof mintedRaw === 'string' && mintedRaw.length >= 10) ? mintedRaw : '❌ Not Found';
 
   return {
-    minted,
+    mintedDate: minted,
     rank: finalRank,
     score: finalScore,
     network: network.toUpperCase(),
@@ -150,6 +151,7 @@ async function fetchMetadataExtras(contractAddress, tokenId, network) {
 }
 
 module.exports = { fetchMetadataExtras };
+
 
 
 
