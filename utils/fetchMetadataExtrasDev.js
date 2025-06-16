@@ -93,26 +93,35 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
       json?.nft?.stats?.rank ??
       null;
 
-    const topTrait = json?.nft?.traits?.[0]?.trait_type ?? null;
-    const mintPrice = json?.nft?.mint_price?.usd ?? null;
-    const floorPrice = json?.collection?.floor_price?.usd ?? null;
+    const score =
+      rarity?.score ??
+      json?.nft?.rarity_score ??
+      json?.nft?.stats?.score ??
+      null;
 
-    if (rank || mintPrice || floorPrice) {
-      return {
-        rank: rank ? `#${rank}` : null,
-        topTrait,
-        mintPrice,
-        floorPrice
-      };
-    } else {
-      console.warn(`⚠️ No rank/mint/floor data in OpenSea response for ${tokenId}`);
-      console.log('🧪 OpenSea JSON:', JSON.stringify(json, null, 2));
+    const traitsArray = json?.nft?.traits || [];
+    let topTrait = 'None';
+    if (Array.isArray(traitsArray) && traitsArray.length > 0) {
+      // Choose trait with lowest rarity percentile (if available)
+      traitsArray.sort((a, b) => (a.rarity_score ?? 1000) - (b.rarity_score ?? 1000));
+      topTrait = traitsArray[0]?.trait_type || 'Unknown';
     }
+
+    const mintPrice = json?.nft?.mint_price ?? null;
+    const floorPrice = json?.nft?.floor_price ?? json?.collection?.stats?.floor_price ?? null;
+
+    return {
+      rank: rank ? `#${rank}` : null,
+      score: score && !isNaN(score) ? parseFloat(score).toFixed(2) : null,
+      topTrait,
+      mintPrice,
+      floorPrice
+    };
   } catch (err) {
     console.error('❌ OpenSea rank fetch failed:', err.message);
   }
 
-  return { rank: null, topTrait: null, mintPrice: null, floorPrice: null };
+  return { rank: null, score: null, topTrait: 'None', mintPrice: null, floorPrice: null };
 }
 
 async function fetchTotalSupply(contractAddress, tokenId) {
@@ -152,6 +161,7 @@ async function fetchMetadataExtras(contractAddress, tokenId, network) {
 }
 
 module.exports = { fetchMetadataExtras };
+
 
 
 
