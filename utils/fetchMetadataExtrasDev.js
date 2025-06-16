@@ -1,4 +1,4 @@
-// ✅ fetchMetadataExtras.js (patched)
+// ✅ fetchMetadataExtras.js (fully patched)
 const fetch = require('node-fetch');
 const { format } = require('date-fns');
 const { JsonRpcProvider, Contract } = require('ethers');
@@ -9,6 +9,9 @@ const OPENSEA_API_KEY = process.env.OPENSEA_API_KEY;
 
 const provider = new JsonRpcProvider('https://mainnet.base.org');
 const erc721Abi = ['function totalSupply() view returns (uint256)'];
+
+const formatUsd = val =>
+  typeof val === 'number' && !isNaN(val) ? `$${val.toFixed(2)}` : 'N/A';
 
 async function fetchMintDate(contractAddress, tokenId) {
   try {
@@ -78,7 +81,6 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
     });
 
     const json = await res.json();
-
     const rarity =
       json?.rarity ||
       json?.nft?.rarity ||
@@ -99,29 +101,45 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
       json?.nft?.stats?.score ??
       null;
 
-    const traitsArray = json?.nft?.traits || [];
-    let topTrait = 'None';
-    if (Array.isArray(traitsArray) && traitsArray.length > 0) {
-      // Choose trait with lowest rarity percentile (if available)
-      traitsArray.sort((a, b) => (a.rarity_score ?? 1000) - (b.rarity_score ?? 1000));
-      topTrait = traitsArray[0]?.trait_type || 'Unknown';
+    const traits = json?.nft?.traits ?? [];
+    let topTrait = 'N/A';
+    if (traits.length > 0) {
+      const sorted = traits.sort((a, b) => (a.rarity_score || 9999) - (b.rarity_score || 9999));
+      topTrait = sorted[0]?.trait_type ?? 'N/A';
     }
 
-    const mintPrice = json?.nft?.mint_price ?? null;
-    const floorPrice = json?.nft?.floor_price ?? json?.collection?.stats?.floor_price ?? null;
+    let mintPrice =
+      json?.nft?.mint_price?.usd ||
+      json?.nft?.mint_price ||
+      json?.mint_price?.usd ||
+      json?.mint_price ||
+      null;
+
+    let floorPrice =
+      json?.collection?.floor_price?.usd ||
+      json?.collection?.floor_price ||
+      json?.floor_price?.usd ||
+      json?.floor_price ||
+      null;
 
     return {
       rank: rank ? `#${rank}` : null,
       score: score && !isNaN(score) ? parseFloat(score).toFixed(2) : null,
       topTrait,
-      mintPrice,
-      floorPrice
+      mintPrice: formatUsd(mintPrice),
+      floorPrice: formatUsd(floorPrice)
     };
   } catch (err) {
     console.error('❌ OpenSea rank fetch failed:', err.message);
   }
 
-  return { rank: null, score: null, topTrait: 'None', mintPrice: null, floorPrice: null };
+  return {
+    rank: null,
+    score: null,
+    topTrait: 'N/A',
+    mintPrice: 'N/A',
+    floorPrice: 'N/A'
+  };
 }
 
 async function fetchTotalSupply(contractAddress, tokenId) {
@@ -161,6 +179,7 @@ async function fetchMetadataExtras(contractAddress, tokenId, network) {
 }
 
 module.exports = { fetchMetadataExtras };
+
 
 
 
