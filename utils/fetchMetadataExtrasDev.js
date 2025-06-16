@@ -79,20 +79,29 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
     const json = await res.json();
     const nft = json?.nft;
     const metadata = nft?.metadata || {};
+    const attributes = Array.isArray(metadata.attributes) ? metadata.attributes : [];
 
     // 🏆 Top Trait (based on rarity_score if available)
     let topTrait = 'N/A';
-    const attributes = Array.isArray(metadata.attributes) ? metadata.attributes : [];
     if (attributes.length > 0) {
-      const sorted = [...attributes].sort((a, b) => (a.rarity_score ?? 9999) - (b.rarity_score ?? 9999));
-      const rarest = sorted[0];
-      topTrait = `${rarest.trait_type || 'Trait'}: ${rarest.value || '?'}`;
+      const withScore = attributes.filter(a => a.rarity_score !== undefined);
+      if (withScore.length > 0) {
+        const rarest = withScore.sort((a, b) => a.rarity_score - b.rarity_score)[0];
+        topTrait = `${rarest.trait_type || 'Trait'}: ${rarest.value || '?'}`;
+      } else {
+        const first = attributes[0];
+        topTrait = `${first.trait_type || 'Trait'}: ${first.value || '?'}`;
+      }
     }
 
     // 💰 Mint Price
-    const mintPrice = nft?.mint_price?.usd ?? nft?.mint_price ?? json?.mint_price?.usd ?? json?.mint_price ?? null;
+    let mintPrice = nft?.mint_price?.usd ?? nft?.mint_price ?? json?.mint_price?.usd ?? json?.mint_price ?? null;
+    if (!mintPrice) {
+      const mintTrait = attributes.find(attr => attr.trait_type?.toLowerCase().includes('mint'));
+      mintPrice = mintTrait?.value || null;
+    }
 
-    // 🌊 Floor Price from slug stats
+    // 🌊 Floor Price
     let floorPrice = null;
     const slug = nft?.collection?.slug;
     if (slug) {
@@ -111,8 +120,8 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
     return {
       rank: rank ? `#${rank}` : null,
       topTrait,
-      mintPrice: formatUsd(mintPrice),
-      floorPrice: formatUsd(floorPrice)
+      mintPrice: typeof mintPrice === 'number' ? `$${mintPrice.toFixed(2)}` : mintPrice || 'N/A',
+      floorPrice: typeof floorPrice === 'number' ? `$${floorPrice.toFixed(2)}` : floorPrice || 'N/A'
     };
   } catch (err) {
     console.error('❌ OpenSea rank fetch failed:', err.message);
@@ -162,3 +171,4 @@ async function fetchMetadataExtras(contractAddress, tokenId, network) {
 }
 
 module.exports = { fetchMetadataExtras };
+
