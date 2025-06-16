@@ -24,6 +24,7 @@ async function generateFlexCard({
   const canvas = createCanvas(width, height);
   const ctx = canvas.getContext('2d');
 
+  
   // Layout constants
   const margin = 40;
   const usableWidth = width - 2 * margin;
