@@ -1,4 +1,4 @@
-// ✅ fetchMetadataExtras.js (fully patched with direct fallback)
+// ✅ fetchMetadataExtras.js (fully patched and fixed)
 const fetch = require('node-fetch');
 const { format } = require('date-fns');
 const { JsonRpcProvider, Contract } = require('ethers');
@@ -8,10 +8,7 @@ const RESERVOIR_API_KEY = process.env.RESERVOIR_API_KEY;
 const OPENSEA_API_KEY = process.env.OPENSEA_API_KEY;
 
 const provider = new JsonRpcProvider('https://mainnet.base.org');
-const erc721Abi = [
-  'function totalSupply() view returns (uint256)',
-  'function tokenURI(uint256 tokenId) view returns (string)'
-];
+const erc721Abi = ['function totalSupply() view returns (uint256)'];
 
 const formatUsd = val =>
   typeof val === 'number' && !isNaN(val) ? `$${val.toFixed(2)}` : 'N/A';
@@ -85,21 +82,31 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
 
     const json = await res.json();
     const nft = json?.nft;
-    let topTrait = 'N/A';
-    let mintPrice = null;
-    let slug = null;
 
-    if (nft) {
-      const attributes = nft?.metadata?.attributes;
-      if (Array.isArray(attributes) && attributes.length > 0) {
-        const sorted = [...attributes].sort((a, b) => (a.rarity_score || 9999) - (b.rarity_score || 9999));
-        const top = sorted[0];
-        topTrait = `${top?.trait_type || 'Trait'}: ${top?.value || '?'}`;
+    // 🧠 Rarity Rank
+    const rank = json?.rarity?.rank ?? nft?.rarity_rank ?? null;
+
+    // 🏆 Top Trait from actual NFT attributes
+    let topTrait = 'N/A';
+    const attributes = nft?.metadata?.attributes || nft?.traits || [];
+    if (Array.isArray(attributes) && attributes.length > 0) {
+      const sorted = attributes.sort((a, b) => (a.rarity_score || 9999) - (b.rarity_score || 9999));
+      const top = sorted[0];
+      if (top?.trait_type && top?.value) {
+        topTrait = `${top.trait_type}: ${top.value}`;
       }
-      mintPrice = nft?.mint_price?.usd || nft?.mint_price || null;
-      slug = nft?.collection?.slug;
     }
 
+    // 💰 Mint Price
+    let mintPrice =
+      nft?.mint_price?.usd ||
+      nft?.mint_price ||
+      json?.mint_price?.usd ||
+      json?.mint_price ||
+      null;
+
+    // 🌊 Floor price from collection stats
+    const slug = nft?.collection?.slug;
     let floorPrice = null;
     if (slug) {
       const floorRes = await fetch(`https://api.opensea.io/api/v2/collections/${slug}/stats`, {
@@ -112,8 +119,6 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
       floorPrice = stats?.stats?.floor_price?.usd || stats?.stats?.floor_price || null;
     }
 
-    const rank = json?.rarity?.rank ?? nft?.rarity_rank ?? null;
-
     return {
       rank: rank ? `#${rank}` : null,
       topTrait,
@@ -122,31 +127,6 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
     };
   } catch (err) {
     console.error('❌ OpenSea rank fetch failed:', err.message);
-  }
-
-  // 🛑 Fallback to tokenURI
-  try {
-    const contract = new Contract(contract, erc721Abi, provider);
-    let tokenURI = await contract.tokenURI(tokenId);
-    if (tokenURI.startsWith('ipfs://')) tokenURI = tokenURI.replace('ipfs://', 'https://ipfs.io/ipfs/');
-    const res = await fetch(tokenURI);
-    const meta = await res.json();
-
-    let topTrait = 'N/A';
-    if (Array.isArray(meta?.attributes) && meta.attributes.length > 0) {
-      const sorted = [...meta.attributes].sort((a, b) => (a.rarity_score || 9999) - (b.rarity_score || 9999));
-      const top = sorted[0];
-      topTrait = `${top?.trait_type || 'Trait'}: ${top?.value || '?'}`;
-    }
-
-    return {
-      rank: null,
-      topTrait,
-      mintPrice: 'N/A',
-      floorPrice: 'N/A'
-    };
-  } catch (err) {
-    console.error('❌ tokenURI fallback failed:', err.message);
   }
 
   return {
@@ -194,6 +174,7 @@ async function fetchMetadataExtras(contractAddress, tokenId, network) {
 }
 
 module.exports = { fetchMetadataExtras };
+
 
 
 
