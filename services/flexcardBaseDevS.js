@@ -1,101 +1,78 @@
-const { JsonRpcProvider, Contract } = require('ethers');
+// Starting with the dev version, we'll add new metadata enhancements to `flexcardBaseDevS.js`
+
+const { Contract } = require('ethers');
 const fetch = require('node-fetch');
-const { fetchMetadataExtras } = require('../utils/fetchMetadataExtrasDev');
-const { generateFlexCard } = require('../utils/canvas/flexcardDevRenderer');
+const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
+const path = require('path');
+const QRCode = require('qrcode');
+const { getProvider } = require('./provider');
+const { fetchMetadataExtrasDev } = require('../utils/fetchMetadataExtrasDev');
 
+// Register font
+GlobalFonts.registerFromPath(path.join(__dirname, '../fonts/Exo2-Bold.ttf'), 'Exo2');
 
-const abi = [
-  'function tokenURI(uint256 tokenId) view returns (string)',
-  'function ownerOf(uint256 tokenId) view returns (address)'
-];
+async function buildFlexCard(contract, tokenId, name, network = 'base') {
+  const provider = getProvider(network);
+  const nftContract = new Contract(contract, ['function tokenURI(uint256) view returns (string)'], provider);
+  const tokenURI = await nftContract.tokenURI(tokenId);
+  const metadataUrl = tokenURI.replace('ipfs://', 'https://ipfs.io/ipfs/');
+  const meta = await (await fetch(metadataUrl)).json();
 
-const provider = new JsonRpcProvider('https://mainnet.base.org');
+  const imageUrl = meta.image?.startsWith('ipfs://') ? meta.image.replace('ipfs://', 'https://ipfs.io/ipfs/') : meta.image;
+  const traits = (meta.attributes || []).map(t => `${t.trait_type}: ${t.value}`);
 
-function shortenAddress(address) {
-  if (!address || address.length < 10) return address || 'Unknown';
-  return `${address.substring(0, 6)}...${address.substring(address.length - 4)}`;
-}
+  // ✅ Pull extra metadata
+  const extras = await fetchMetadataExtrasDev({ contract, tokenId, network });
+  const mintedDate = extras?.minted_date;
+  const rank = extras?.rank;
+  const score = extras?.score;
+  const floor = extras?.floor_price;
+  const mintPrice = extras?.mint_price;
+  const topTrait = extras?.top_trait;
 
-async function fetchMetadata(contractAddress, tokenId) {
-  try {
-    const contract = new Contract(contractAddress, abi, provider);
-    const tokenURI = await contract.tokenURI(tokenId);
-    const metadataUrl = tokenURI.startsWith('ipfs://')
-      ? tokenURI.replace('ipfs://', 'https://ipfs.io/ipfs/')
-      : tokenURI;
-    const res = await fetch(metadataUrl);
-    return await res.json();
-  } catch (err) {
-    console.error('❌ Metadata fetch failed:', err);
-    return {};
-  }
-}
+  // 🖼️ Canvas render
+  const canvas = createCanvas(1124, 1650);
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#2E3D2F';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-async function fetchOwner(contractAddress, tokenId) {
-  try {
-    const contract = new Contract(contractAddress, abi, provider);
-    return await contract.ownerOf(tokenId);
-  } catch (err) {
-    console.error('❌ Owner fetch failed:', err);
-    return '0x0000000000000000000000000000000000000000';
-  }
-}
+  // NFT image
+  const img = await loadImage(imageUrl);
+  ctx.drawImage(img, 100, 120, 800, 800);
 
-async function buildFlexCard(contractAddress, tokenId, collectionName) {
-  // ⛏️ Fetch metadata and owner info
-  const metadata = await fetchMetadata(contractAddress, tokenId);
-  const owner = await fetchOwner(contractAddress, tokenId);
-  const ownerDisplay = shortenAddress(owner);
+  // Title
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 42px Exo2';
+  ctx.fillText(name.toUpperCase(), 100, 60);
+  ctx.fillText(`#${tokenId}`, 900, 60);
 
-  // 🖼️ Normalize image URL
-  let nftImageUrl = metadata?.image || 'https://i.imgur.com/EVQFHhA.png';
-  if (nftImageUrl.startsWith('ipfs://')) {
-    nftImageUrl = nftImageUrl.replace('ipfs://', 'https://ipfs.io/ipfs/');
-  }
-
-  // 🧬 Parse traits
-  const traits = Array.isArray(metadata?.attributes) && metadata.attributes.length > 0
-    ? metadata.attributes.map(attr => `${attr.trait_type} / ${attr.value}`)
-    : ['No traits found'];
-
-  // 🔖 Fallback-safe collection name
-  const safeCollectionName = collectionName || metadata?.name || 'NFT';
-
-  // 🌊 Opensea URL
-  const openseaUrl = `https://opensea.io/assets/base/${contractAddress}/${tokenId}`;
-
-  // 🧠 Extra metadata: mint date, rarity, network, total supply
-  const extras = await fetchMetadataExtras(contractAddress, tokenId, 'base');
-
-  // ✅ Optional logging for debug
-  if (extras.rank === 'N/A' || extras.score === 'N/A') {
-    console.warn(`⚠️ Incomplete rarity data for Token ${tokenId} — Rank: ${extras.rank}, Score: ${extras.score}`);
-  }
-  if (extras.minted === 'Unknown') {
-    console.warn(`⚠️ Minted date not found for Token ${tokenId}`);
-  }
-
-  return await generateFlexCard({
-    nftImageUrl,
-    collectionName: safeCollectionName,
-    tokenId,
-    traits,
-    owner: ownerDisplay,
-    openseaUrl,
-    ...extras // Injects: minted, rank, score, network, totalSupply
+  // Traits
+  ctx.font = '24px Exo2';
+  traits.slice(0, 8).forEach((line, i) => {
+    ctx.fillText(`• ${line}`, 100, 970 + i * 30);
   });
+
+  // New Meta Block
+  const metaLines = [
+    `Rank: ${rank ?? 'N/A'}`,
+    `Score: ${score ?? 'N/A'}`,
+    `Top Trait: ${topTrait ?? 'N/A'}`,
+    `Minted: ${mintedDate ?? 'N/A'}`,
+    `Mint Price: ${mintPrice ?? 'N/A'}`,
+    `Floor Price: ${floor ?? 'N/A'}`,
+    `Network: ${network}`,
+  ];
+
+  metaLines.forEach((line, i) => {
+    ctx.fillText(line, 100, 1250 + i * 28);
+  });
+
+  // QR
+  const qrBuf = await QRCode.toBuffer(`https://opensea.io/assets/${network}/${contract}/${tokenId}`);
+  const qrImg = await loadImage(qrBuf);
+  ctx.drawImage(qrImg, 920, 1300, 180, 180);
+
+  return canvas.toBuffer('image/png');
 }
 
 module.exports = { buildFlexCard };
-
-
-
-
-
-
-
-
-
-
-
-
