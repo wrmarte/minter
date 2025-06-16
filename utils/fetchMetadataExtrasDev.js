@@ -95,12 +95,6 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
       json?.nft?.stats?.rank ??
       null;
 
-    const score =
-      rarity?.score ??
-      json?.nft?.rarity_score ??
-      json?.nft?.stats?.score ??
-      null;
-
     const traits = json?.nft?.traits ?? [];
     let topTrait = 'N/A';
     if (traits.length > 0) {
@@ -124,7 +118,6 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
 
     return {
       rank: rank ? `#${rank}` : null,
-      score: score && !isNaN(score) ? parseFloat(score).toFixed(2) : null,
       topTrait,
       mintPrice: formatUsd(mintPrice),
       floorPrice: formatUsd(floorPrice)
@@ -135,7 +128,6 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
 
   return {
     rank: null,
-    score: null,
     topTrait: 'N/A',
     mintPrice: 'N/A',
     floorPrice: 'N/A'
