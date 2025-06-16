@@ -89,8 +89,17 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
       json?.nft?.collection?.rarity ||
       null;
 
-    const rank = rarity?.rank ?? json?.nft?.rarity_rank ?? null;
-    const score = rarity?.score ?? json?.nft?.rarity_score ?? null;
+    const rank =
+      rarity?.rank ??
+      json?.nft?.rarity_rank ??
+      json?.nft?.stats?.rank ??
+      null;
+
+    const score =
+      rarity?.score ??
+      json?.nft?.rarity_score ??
+      json?.nft?.stats?.score ??
+      null;
 
     if (rank || score) {
       return {
@@ -99,6 +108,7 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
       };
     } else {
       console.warn(`⚠️ No rank/score found in OpenSea response for ${tokenId}`);
+      console.log('🧪 OpenSea JSON:', JSON.stringify(json, null, 2));
     }
   } catch (err) {
     console.error('❌ OpenSea rank fetch failed:', err.message);
