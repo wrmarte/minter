@@ -96,7 +96,7 @@ async function generateFlexCard({
   ctx.textAlign = 'left';
   ctx.fillText('TRAITS', margin + 20, traitsHeaderY + traitsHeaderHeight / 2 + 8);
 
-  // Traits block (no bottom border)
+  // Traits block
   const traitsY = traitsHeaderY + traitsHeaderHeight;
   ctx.fillStyle = olive;
   ctx.fillRect(margin, traitsY, usableWidth - ownerWidth, traitsHeight);
@@ -132,11 +132,14 @@ async function generateFlexCard({
   ctx.lineTo(metaX + metaWidth, metaY + metaHeight);
   ctx.stroke();
 
-  // ✅ Patched minted date display included here
+  const mintedDisplay = (mintedDate && typeof mintedDate === 'string')
+    ? mintedDate
+    : '❌ Not Found';
+
   const metaLines = [
     `• Rank: ${rank ?? 'N/A'}`,
     `• Score: ${score ?? 'N/A'}`,
-    `• Minted: ${mintedDate && mintedDate !== 'Unknown' ? mintedDate : '❌ Not Found'}`,
+    `• Minted: ${mintedDisplay}`,
     `• Network: ${network ?? 'Base'}`,
     `• Total Supply: ${totalSupply ?? 'N/A'}`
   ];
@@ -157,7 +160,10 @@ async function generateFlexCard({
   ctx.fillRect(qrX, qrY, qrSize, qrSize);
   ctx.strokeRect(qrX, qrY, qrSize, qrSize);
 
-  const qrBuffer = await QRCode.toBuffer(openseaUrl, { width: qrSize - 2 * qrPadding, margin: 1 });
+  const qrBuffer = await QRCode.toBuffer(openseaUrl, {
+    width: qrSize - 2 * qrPadding,
+    margin: 1
+  });
   const qrImg = await loadImage(qrBuffer);
   ctx.drawImage(qrImg, qrX + qrPadding, qrY + qrPadding, qrSize - 2 * qrPadding, qrSize - 2 * qrPadding);
 
