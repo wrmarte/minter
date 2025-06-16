@@ -1,4 +1,3 @@
-// flexcardBaseS.js
 const { JsonRpcProvider, Contract } = require('ethers');
 const fetch = require('node-fetch');
 const { generateFlexCard } = require('../utils/canvas/flexcardRenderer');
@@ -42,23 +41,29 @@ async function fetchOwner(contractAddress, tokenId) {
 }
 
 async function buildFlexCard(contractAddress, tokenId, collectionName) {
+  // ⛏️ Fetch metadata and owner info
   const metadata = await fetchMetadata(contractAddress, tokenId);
   const owner = await fetchOwner(contractAddress, tokenId);
   const ownerDisplay = shortenAddress(owner);
 
+  // 🖼️ Normalize image URL
   let nftImageUrl = metadata?.image || 'https://i.imgur.com/EVQFHhA.png';
   if (nftImageUrl.startsWith('ipfs://')) {
     nftImageUrl = nftImageUrl.replace('ipfs://', 'https://ipfs.io/ipfs/');
   }
 
+  // 🧬 Parse traits
   const traits = Array.isArray(metadata?.attributes) && metadata.attributes.length > 0
     ? metadata.attributes.map(attr => `${attr.trait_type} / ${attr.value}`)
     : ['No traits found'];
 
+  // 🔖 Fallback-safe collection name
   const safeCollectionName = collectionName || metadata?.name || 'NFT';
+
+  // 🌊 Opensea URL
   const openseaUrl = `https://opensea.io/assets/base/${contractAddress}/${tokenId}`;
 
-  // 🧠 Fetch extra data like minted date, rank, supply, and network
+  // 🧠 Extra metadata: mint date, rarity, network, total supply
   const extras = await fetchMetadataExtras(contractAddress, tokenId, 'base');
 
   return await generateFlexCard({
@@ -68,11 +73,12 @@ async function buildFlexCard(contractAddress, tokenId, collectionName) {
     traits,
     owner: ownerDisplay,
     openseaUrl,
-    ...extras // Injects: minted, rank, network, totalSupply
+    ...extras // Injects: minted, rank, score, network, totalSupply
   });
 }
 
-module.exports = { buildFlexCard }; // ✅ Ensure function is exported correctly
+module.exports = { buildFlexCard };
+
 
 
 
