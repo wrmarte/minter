@@ -99,10 +99,17 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
       json?.nft?.stats?.score ??
       null;
 
+    const topTrait = json?.nft?.traits?.[0]?.trait_type ?? null;
+    const mintPrice = json?.nft?.mint_price?.usd ?? null;
+    const floorPrice = json?.collection?.floor_price?.usd ?? null;
+
     if (rank || score) {
       return {
         rank: rank ? `#${rank}` : null,
-        score: score && !isNaN(score) ? parseFloat(score).toFixed(2) : null
+        score: score && !isNaN(score) ? parseFloat(score).toFixed(2) : null,
+        topTrait,
+        mintPrice,
+        floorPrice
       };
     } else {
       console.warn(`⚠️ No rank/score found in OpenSea response for ${tokenId}`);
@@ -112,7 +119,7 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
     console.error('❌ OpenSea rank fetch failed:', err.message);
   }
 
-  return { rank: null, score: null };
+  return { rank: null, score: null, topTrait: null, mintPrice: null, floorPrice: null };
 }
 
 async function fetchTotalSupply(contractAddress, tokenId) {
@@ -146,11 +153,15 @@ async function fetchMetadataExtras(contractAddress, tokenId, network) {
     rank: finalRank,
     score: finalScore,
     network: network.toUpperCase(),
-    totalSupply
+    totalSupply,
+    topTrait: openseaData.topTrait || 'N/A',
+    mintPrice: openseaData.mintPrice || 'N/A',
+    floorPrice: openseaData.floorPrice || 'N/A'
   };
 }
 
 module.exports = { fetchMetadataExtras };
+
 
 
 
