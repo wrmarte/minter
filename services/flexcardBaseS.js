@@ -66,6 +66,14 @@ async function buildFlexCard(contractAddress, tokenId, collectionName) {
   // 🧠 Extra metadata: mint date, rarity, network, total supply
   const extras = await fetchMetadataExtras(contractAddress, tokenId, 'base');
 
+  // ✅ Optional logging for debug
+  if (extras.rank === 'N/A' || extras.score === 'N/A') {
+    console.warn(`⚠️ Incomplete rarity data for Token ${tokenId} — Rank: ${extras.rank}, Score: ${extras.score}`);
+  }
+  if (extras.minted === 'Unknown') {
+    console.warn(`⚠️ Minted date not found for Token ${tokenId}`);
+  }
+
   return await generateFlexCard({
     nftImageUrl,
     collectionName: safeCollectionName,
@@ -78,6 +86,7 @@ async function buildFlexCard(contractAddress, tokenId, collectionName) {
 }
 
 module.exports = { buildFlexCard };
+
 
 
 
