@@ -59,11 +59,13 @@ async function fetchRarityRankReservoir(contract, tokenId) {
     });
     const json = await res.json();
     const rank = json?.tokens?.[0]?.token?.rarity?.rank;
-    return rank ? `#${rank}` : 'N/A';
+    if (rank) {
+      return `#${rank}`;
+    }
   } catch (err) {
-    console.error('❌ Reservoir rank fetch failed:', err);
-    return 'N/A';
+    console.warn('❌ Reservoir rank fetch failed or unavailable for Base:', err.message);
   }
+  return 'N/A';
 }
 
 async function fetchRarityRankOpenSea(contract, tokenId, network) {
@@ -75,19 +77,31 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
         'x-api-key': OPENSEA_API_KEY || ''
       }
     });
-    const json = await res.json();
-    const rarity = json?.rarity || json?.nft?.rarity;
-    const rank = rarity?.rank;
-    const score = rarity?.score;
 
-    if (rank) {
+    const json = await res.json();
+
+    // Deep fallback parsing for OpenSea rarity structure
+    const rarity =
+      json?.rarity ||
+      json?.nft?.rarity ||
+      json?.nft?.traits?.rarity ||
+      json?.nft?.stats?.rarity ||
+      json?.nft?.collection?.rarity ||
+      null;
+
+    const rank = rarity?.rank ?? json?.nft?.rarity_rank ?? null;
+    const score = rarity?.score ?? json?.nft?.rarity_score ?? null;
+
+    if (rank || score) {
       return {
-        rank: `#${rank}`,
+        rank: rank ? `#${rank}` : 'N/A',
         score: score && !isNaN(score) ? parseFloat(score).toFixed(2) : 'N/A'
       };
+    } else {
+      console.warn(`⚠️ No rank/score found in OpenSea response for ${tokenId}`);
     }
   } catch (err) {
-    console.error('❌ OpenSea rank fetch failed:', err);
+    console.error('❌ OpenSea rank fetch failed:', err.message);
   }
 
   return { rank: 'N/A', score: 'N/A' };
@@ -116,9 +130,10 @@ async function fetchMetadataExtras(contractAddress, tokenId, network) {
   ]);
 
   const finalRank = resRank !== 'N/A' ? resRank : openseaData.rank;
-  const finalScore = openseaData?.score && openseaData.score !== 'N/A'
-    ? openseaData.score
-    : 'N/A';
+  const finalScore =
+    openseaData?.score && openseaData.score !== 'N/A'
+      ? openseaData.score
+      : 'N/A';
 
   return {
     minted,
@@ -130,4 +145,5 @@ async function fetchMetadataExtras(contractAddress, tokenId, network) {
 }
 
 module.exports = { fetchMetadataExtras };
+
 
