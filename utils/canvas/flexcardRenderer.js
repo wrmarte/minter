@@ -24,7 +24,6 @@ async function generateFlexCard({
   const canvas = createCanvas(width, height);
   const ctx = canvas.getContext('2d');
 
-  
   // Layout constants
   const margin = 40;
   const usableWidth = width - 2 * margin;
@@ -133,18 +132,17 @@ async function generateFlexCard({
   ctx.lineTo(metaX + metaWidth, metaY + metaHeight);
   ctx.stroke();
 
-const mintedDisplay = (mintedDate && typeof mintedDate === 'string' && mintedDate !== 'Unknown')
-  ? mintedDate
-  : '❌ Not Found';
+  const mintedDisplay = (typeof mintedDate === 'string' && mintedDate.length >= 10)
+    ? mintedDate
+    : '❌ Not Found';
 
-const metaLines = [
-  `• Rank: ${rank ?? 'N/A'}`,
-  `• Score: ${score ?? 'N/A'}`,
-  `• Minted: ${mintedDisplay}`,
-  `• Network: ${network ?? 'Base'}`,
-  `• Total Supply: ${totalSupply ?? 'N/A'}`
-];
-
+  const metaLines = [
+    `• Rank: ${rank ?? 'N/A'}`,
+    `• Score: ${score ?? 'N/A'}`,
+    `• Minted: ${mintedDisplay}`,
+    `• Network: ${network ?? 'Base'}`,
+    `• Total Supply: ${totalSupply ?? 'N/A'}`
+  ];
 
   ctx.fillStyle = 'white';
   ctx.font = '22px Exo2';
@@ -183,6 +181,7 @@ const metaLines = [
 }
 
 module.exports = { generateFlexCard };
+
 
 
 
