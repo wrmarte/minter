@@ -132,6 +132,7 @@ async function generateFlexCard({
   ctx.lineTo(metaX + metaWidth, metaY + metaHeight);
   ctx.stroke();
 
+  // ✅ Patched minted date display included here
   const metaLines = [
     `• Rank: ${rank ?? 'N/A'}`,
     `• Score: ${score ?? 'N/A'}`,
