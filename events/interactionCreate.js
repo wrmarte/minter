@@ -18,73 +18,93 @@ module.exports = (client, pg) => {
       try {
         let rows = [];
 
-        // ✅ FLEXDUO AUTOCOMPLETE
-        if (commandName === 'flexduo' && focused.name === 'name') {
+        const sub = options._hoistedOptions?.[0];
+        const subcommand = sub?.name;
+
+        // ✅ FLEX DUO AUTOCOMPLETE: /flex duo name:...
+        if (
+          commandName === 'flex' &&
+          subcommand === 'duo' &&
+          focused.name === 'name'
+        ) {
           const res = await pg.query(`SELECT name FROM flex_duo WHERE guild_id = $1`, [guildId]);
-          rows = res.rows;
+
+          const duoNames = res.rows
+            .map(row => row.name)
+            .filter(Boolean)
+            .filter(name => name.toLowerCase().includes(focused.value.toLowerCase()))
+            .slice(0, 25)
+            .map(name => ({ name, value: name }));
+
+          return interaction.respond(duoNames);
         }
 
-        // ✅ FLEX FAMILY AUTOCOMPLETE (FLEX / FLEXPLUS / FLEXCARD / FLEXSPIN)
+        // ✅ FLEX FAMILY AUTOCOMPLETE (random, card, plus)
         if (
-          ['flex', 'flexplus', 'flexcard', 'flexspin'].includes(commandName) &&
+          commandName === 'flex' &&
+          ['random', 'card', 'plus'].includes(subcommand) &&
           focused.name === 'name'
         ) {
           const res = await pg.query(`SELECT name FROM flex_projects WHERE guild_id = $1`, [guildId]);
-          rows = res.rows;
+
+          const projectNames = res.rows
+            .map(row => row.name)
+            .filter(Boolean)
+            .filter(name => name.toLowerCase().includes(focused.value.toLowerCase()))
+            .slice(0, 25)
+            .map(name => ({ name, value: name }));
+
+          return interaction.respond(projectNames);
         }
 
         // ✅ FLEX RANDOM TOKENID AUTOCOMPLETE
-        if (commandName === 'flex') {
-          const sub = interaction.options._hoistedOptions?.[0];
+        if (commandName === 'flex' && subcommand === 'random' && focused.name === 'tokenid') {
+          const subOptions = sub.options || [];
+          const nameOpt = subOptions.find(opt => opt.name === 'name');
+          const projectName = nameOpt?.value;
+          if (!projectName) return;
 
-          if (sub?.name === 'random' && focused.name === 'tokenid') {
-            const subOptions = sub.options || [];
-            const nameOpt = subOptions.find(opt => opt.name === 'name');
-            const projectName = nameOpt?.value;
-            if (!projectName) return;
+          const res = await pg.query(
+            `SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`,
+            [guildId, projectName.toLowerCase()]
+          );
 
-            const res = await pg.query(
-              `SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`,
-              [guildId, projectName.toLowerCase()]
-            );
+          if (!res.rows.length) return;
 
-            if (!res.rows.length) return;
+          const { address, network } = res.rows[0];
+          const chain = (network || 'base').toLowerCase();
 
-            const { address, network } = res.rows[0];
-            const chain = (network || 'base').toLowerCase();
+          let tokenIds = [];
 
-            let tokenIds = [];
-
-            if (chain === 'eth') {
-              try {
-                const resv = await fetch(
-                  `https://api.reservoir.tools/tokens/v6?collection=${address}&limit=100&sortBy=floorAskPrice`,
-                  { headers: { 'x-api-key': process.env.RESERVOIR_API_KEY } }
-                );
-                const data = await resv.json();
-                tokenIds = data?.tokens?.map(t => t.token?.tokenId).filter(Boolean) || [];
-              } catch {
-                tokenIds = [];
-              }
-            } else {
-              try {
-                const provider = getProvider(chain);
-                const contract = new Contract(address, ['function totalSupply() view returns (uint256)'], provider);
-                const total = await contract.totalSupply();
-                const totalNum = parseInt(total);
-                tokenIds = Array.from({ length: Math.min(100, totalNum) }, (_, i) => (i + 1).toString());
-              } catch {
-                tokenIds = [];
-              }
+          if (chain === 'eth') {
+            try {
+              const resv = await fetch(
+                `https://api.reservoir.tools/tokens/v6?collection=${address}&limit=100&sortBy=floorAskPrice`,
+                { headers: { 'x-api-key': process.env.RESERVOIR_API_KEY } }
+              );
+              const data = await resv.json();
+              tokenIds = data?.tokens?.map(t => t.token?.tokenId).filter(Boolean) || [];
+            } catch {
+              tokenIds = [];
             }
-
-            const filtered = tokenIds
-              .filter(id => id.includes(focused.value))
-              .slice(0, 25)
-              .map(id => ({ name: `#${id}`, value: parseInt(id) }));
-
-            return interaction.respond(filtered);
+          } else {
+            try {
+              const provider = getProvider(chain);
+              const contract = new Contract(address, ['function totalSupply() view returns (uint256)'], provider);
+              const total = await contract.totalSupply();
+              const totalNum = parseInt(total);
+              tokenIds = Array.from({ length: Math.min(100, totalNum) }, (_, i) => (i + 1).toString());
+            } catch {
+              tokenIds = [];
+            }
           }
+
+          const filtered = tokenIds
+            .filter(id => id.includes(focused.value))
+            .slice(0, 25)
+            .map(id => ({ name: `#${id}`, value: parseInt(id) }));
+
+          return interaction.respond(filtered);
         }
 
         // ✅ EXP AUTOCOMPLETE
@@ -145,7 +165,7 @@ module.exports = (client, pg) => {
           }
         }
 
-        // ✅ DEFAULT AUTOCOMPLETE LOGIC
+        // ✅ FALLBACK DEFAULT
         const choices = rows.map(row => row.name).filter(Boolean);
         const filtered = choices
           .filter(name => name.toLowerCase().includes(focused.value.toLowerCase()))
@@ -199,4 +219,5 @@ module.exports = (client, pg) => {
     }
   });
 };
+
 
