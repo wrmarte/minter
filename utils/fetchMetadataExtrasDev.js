@@ -81,14 +81,17 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
     });
 
     const json = await res.json();
-    const nft = json?.nft;
-    const metadata = nft?.metadata;
+    const nft = json?.nft || {};
+    const metadata = nft?.metadata || {};
 
-    // 🏆 Top Trait (first one listed from metadata)
+    // 🏆 Top Trait (based on rarity_score or first trait)
     let topTrait = 'N/A';
-    if (metadata?.attributes?.length > 0) {
-      const firstAttr = metadata.attributes[0];
-      topTrait = `${firstAttr.trait_type || 'Trait'}: ${firstAttr.value || '?'}`;
+    if (Array.isArray(metadata.attributes) && metadata.attributes.length > 0) {
+      const sorted = [...metadata.attributes].sort((a, b) =>
+        (a.rarity_score || 9999) - (b.rarity_score || 9999)
+      );
+      const top = sorted[0];
+      topTrait = `${top.trait_type || 'Trait'}: ${top.value || '?'}`;
     }
 
     // 💰 Mint Price
@@ -99,10 +102,9 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
       json?.mint_price ||
       null;
 
-    // 🌊 Floor price requires a second fetch using slug
-    const slug = nft?.collection?.slug;
+    // 🌊 Floor price from collection slug
     let floorPrice = null;
-
+    const slug = nft?.collection?.slug;
     if (slug) {
       const floorRes = await fetch(`https://api.opensea.io/api/v2/collections/${slug}/stats`, {
         headers: {
@@ -111,7 +113,10 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
         }
       });
       const stats = await floorRes.json();
-      floorPrice = stats?.stats?.floor_price?.usd || stats?.stats?.floor_price || null;
+      floorPrice =
+        stats?.stats?.floor_price?.usd ||
+        stats?.stats?.floor_price ||
+        null;
     }
 
     // 🧠 Rarity Rank
@@ -125,14 +130,13 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
     };
   } catch (err) {
     console.error('❌ OpenSea rank fetch failed:', err.message);
+    return {
+      rank: null,
+      topTrait: 'N/A',
+      mintPrice: 'N/A',
+      floorPrice: 'N/A'
+    };
   }
-
-  return {
-    rank: null,
-    topTrait: 'N/A',
-    mintPrice: 'N/A',
-    floorPrice: 'N/A'
-  };
 }
 
 
