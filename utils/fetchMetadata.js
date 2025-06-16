@@ -75,10 +75,19 @@ async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
     console.warn(`⚠️ Reservoir failed: ${err.message}`);
   }
 
-  // 2. tokenURI fallback
+  // 2. tokenURI fallback with existence check
   try {
     const provider = await getProvider(chain);
     const contract = new Contract(contractAddress, abi, provider);
+
+    // ✅ Token existence check
+    try {
+      await contract.ownerOf(tokenId);
+    } catch {
+      console.warn(`❌ Token #${tokenId} does not exist on ${chain.toUpperCase()} (${contractAddress})`);
+      return {}; // skip non-existent token
+    }
+
     const tokenURI = await contract.tokenURI(tokenId);
     const metadataUrl = fixIpfs(tokenURI);
     const raw = await safeFetchJson(metadataUrl);
@@ -122,6 +131,7 @@ async function fetchMetadata(contractAddress, tokenId, chain = 'base') {
 }
 
 module.exports = { fetchMetadata };
+
 
 
 
