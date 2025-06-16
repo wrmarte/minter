@@ -131,12 +131,14 @@ async function generateFlexCard({
 
   const metaLines = [
     `• Rank: ${rank ?? 'N/A'}`,
-    `• Mint Price: ${mintPrice ?? 'N/A'}`,
-    `• Floor Price: ${floorPrice ?? 'N/A'}`,
     `• Minted: ${mintedDisplay}`,
     `• Network: ${network ?? 'Base'}`,
-    `• Total Supply: ${totalSupply ?? 'N/A'}`
+    `• Total Supply: ${totalSupply ?? 'N/A'}`,
+    `• Top Trait: ${topTrait ?? 'N/A'}`,
+    `• Mint Price: ${mintPrice ? `$${mintPrice}` : 'N/A'}`,
+    `• Floor Price: ${floorPrice ? `$${floorPrice}` : 'N/A'}`
   ];
+
 
 
   ctx.fillStyle = 'white';
