@@ -133,18 +133,18 @@ async function generateFlexCard({
   ctx.lineTo(metaX + metaWidth, metaY + metaHeight);
   ctx.stroke();
 
-const mintedDisplay = (mintedDate && typeof mintedDate === 'string')
-  ? new Date(mintedDate).toISOString().replace('T', ' ').split('.')[0]
+const mintedDisplay = (mintedDate && typeof mintedDate === 'string' && mintedDate !== 'Unknown')
+  ? mintedDate
   : '❌ Not Found';
 
+const metaLines = [
+  `• Rank: ${rank ?? 'N/A'}`,
+  `• Score: ${score ?? 'N/A'}`,
+  `• Minted: ${mintedDisplay}`,
+  `• Network: ${network ?? 'Base'}`,
+  `• Total Supply: ${totalSupply ?? 'N/A'}`
+];
 
-  const metaLines = [
-    `• Rank: ${rank ?? 'N/A'}`,
-    `• Score: ${score ?? 'N/A'}`,
-    `• Minted: ${mintedDisplay}`,
-    `• Network: ${network ?? 'Base'}`,
-    `• Total Supply: ${totalSupply ?? 'N/A'}`
-  ];
 
   ctx.fillStyle = 'white';
   ctx.font = '22px Exo2';
