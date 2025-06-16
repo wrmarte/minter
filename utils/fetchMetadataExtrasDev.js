@@ -93,33 +93,26 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
       json?.nft?.stats?.rank ??
       null;
 
-    const score =
-      rarity?.score ??
-      json?.nft?.rarity_score ??
-      json?.nft?.stats?.score ??
-      null;
-
     const topTrait = json?.nft?.traits?.[0]?.trait_type ?? null;
     const mintPrice = json?.nft?.mint_price?.usd ?? null;
     const floorPrice = json?.collection?.floor_price?.usd ?? null;
 
-    if (rank || score) {
+    if (rank || mintPrice || floorPrice) {
       return {
         rank: rank ? `#${rank}` : null,
-        score: score && !isNaN(score) ? parseFloat(score).toFixed(2) : null,
         topTrait,
         mintPrice,
         floorPrice
       };
     } else {
-      console.warn(`⚠️ No rank/score found in OpenSea response for ${tokenId}`);
+      console.warn(`⚠️ No rank/mint/floor data in OpenSea response for ${tokenId}`);
       console.log('🧪 OpenSea JSON:', JSON.stringify(json, null, 2));
     }
   } catch (err) {
     console.error('❌ OpenSea rank fetch failed:', err.message);
   }
 
-  return { rank: null, score: null, topTrait: null, mintPrice: null, floorPrice: null };
+  return { rank: null, topTrait: null, mintPrice: null, floorPrice: null };
 }
 
 async function fetchTotalSupply(contractAddress, tokenId) {
@@ -145,13 +138,11 @@ async function fetchMetadataExtras(contractAddress, tokenId, network) {
   ]);
 
   const finalRank = resRank || openseaData.rank || 'Unavailable';
-  const finalScore = openseaData.score || '—';
   const minted = (typeof mintedRaw === 'string' && mintedRaw.length >= 10) ? mintedRaw : '❌ Not Found';
 
   return {
     mintedDate: minted,
     rank: finalRank,
-    score: finalScore,
     network: network.toUpperCase(),
     totalSupply,
     topTrait: openseaData.topTrait || 'N/A',
@@ -161,6 +152,7 @@ async function fetchMetadataExtras(contractAddress, tokenId, network) {
 }
 
 module.exports = { fetchMetadataExtras };
+
 
 
 
