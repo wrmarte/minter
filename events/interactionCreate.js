@@ -99,6 +99,20 @@ module.exports = (client, pg) => {
 
           return interaction.respond(filtered);
         }
+// ✅ /flexdev name autocomplete
+if (
+  commandName === 'flexdev' &&
+  focused.name === 'name'
+) {
+  const res = await pg.query(`SELECT name FROM flex_projects WHERE guild_id = $1`, [guildId]);
+  const projectNames = res.rows
+    .map(row => row.name)
+    .filter(Boolean)
+    .filter(name => name.toLowerCase().includes(focused.value.toLowerCase()))
+    .slice(0, 25)
+    .map(name => ({ name, value: name }));
+  return interaction.respond(projectNames);
+}
 
         // ✅ /exp name
         if (commandName === 'exp' && focused.name === 'name') {
