@@ -1,4 +1,3 @@
-// fetchMetadataExtras.js
 const fetch = require('node-fetch');
 const { format } = require('date-fns');
 const { JsonRpcProvider, Contract } = require('ethers');
@@ -84,7 +83,7 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
     if (rank) {
       return {
         rank: `#${rank}`,
-        score: score ? parseFloat(score).toFixed(2) : 'N/A'
+        score: score && !isNaN(score) ? parseFloat(score).toFixed(2) : 'N/A'
       };
     }
   } catch (err) {
@@ -100,7 +99,6 @@ async function fetchTotalSupply(contractAddress, tokenId) {
     const supply = await contract.totalSupply();
     const current = parseInt(tokenId);
     const total = parseInt(supply.toString());
-
     const stillMinting = current < total;
     return `${total} (On-Chain${stillMinting ? ' — Still Minting' : ''})`;
   } catch (err) {
@@ -118,7 +116,9 @@ async function fetchMetadataExtras(contractAddress, tokenId, network) {
   ]);
 
   const finalRank = resRank !== 'N/A' ? resRank : openseaData.rank;
-  const finalScore = openseaData?.score || 'N/A';
+  const finalScore = openseaData?.score && openseaData.score !== 'N/A'
+    ? openseaData.score
+    : 'N/A';
 
   return {
     minted,
