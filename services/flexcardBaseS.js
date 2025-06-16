@@ -15,46 +15,20 @@ function shortenAddress(address) {
   return `${address.substring(0, 6)}...${address.substring(address.length - 4)}`;
 }
 
-const { Contract } = require('ethers');
-const fetch = require('node-fetch');
-const { getProvider } = require('./provider'); // or however you load your provider
-
-const abi = [
-  'function tokenURI(uint256 tokenId) view returns (string)'
-];
-
 async function fetchMetadata(contractAddress, tokenId) {
   try {
-    const provider = getProvider('base');
     const contract = new Contract(contractAddress, abi, provider);
     const tokenURI = await contract.tokenURI(tokenId);
-
     const metadataUrl = tokenURI.startsWith('ipfs://')
       ? tokenURI.replace('ipfs://', 'https://ipfs.io/ipfs/')
       : tokenURI;
-
-    const res = await fetch(metadataUrl, { timeout: 7000 });
-
-    const contentType = res.headers.get('content-type') || '';
-    if (!contentType.includes('application/json')) {
-      console.warn(`⚠️ Invalid metadata content-type (${contentType}) at ${metadataUrl}`);
-      const text = await res.text();
-      console.warn('Returned text:', text.slice(0, 100));
-      return null;
-    }
-
-    const json = await res.json();
-    if (!json || !json.image) {
-      console.warn(`⚠️ Metadata missing expected fields for token ${tokenId}`);
-    }
-
-    return json;
+    const res = await fetch(metadataUrl);
+    return await res.json();
   } catch (err) {
-    console.error('❌ Metadata fetch failed:', err.message);
-    return null;
+    console.error('❌ Metadata fetch failed:', err);
+    return {};
   }
 }
-
 
 async function fetchOwner(contractAddress, tokenId) {
   try {
@@ -112,6 +86,12 @@ async function buildFlexCard(contractAddress, tokenId, collectionName) {
 }
 
 module.exports = { buildFlexCard };
+
+
+
+
+
+
 
 
 
