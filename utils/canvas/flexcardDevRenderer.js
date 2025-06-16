@@ -17,7 +17,10 @@ async function generateFlexCard({
   score,
   mintedDate,
   network,
-  totalSupply
+  totalSupply,
+  mintPrice,
+  floorPrice,
+  topTrait
 }) {
   const width = 1124;
   const height = 1650;
@@ -66,11 +69,10 @@ async function generateFlexCard({
   ctx.fillStyle = olive;
   ctx.fillRect(nftX, nftY, nftSize, nftSize);
   ctx.strokeRect(nftX, nftY, nftSize, nftSize);
-
   const nftImg = await loadImage(nftImageUrl);
   ctx.drawImage(nftImg, nftX, nftY, nftSize, nftSize);
 
-  // Owner vertical section
+  // Owner section
   const ownerX = width - margin - ownerWidth;
   const ownerY = margin + titleHeight;
   const ownerHeight = height - ownerY - qrSize - footerHeight - 10;
@@ -86,7 +88,7 @@ async function generateFlexCard({
   ctx.fillText(`OWNER: ${owner || 'Unknown'}`, 0, 10);
   ctx.restore();
 
-  // Traits header
+  // Traits section
   const traitsHeaderY = nftY + nftSize + 40;
   ctx.fillStyle = forest;
   ctx.fillRect(margin, traitsHeaderY, usableWidth - ownerWidth, traitsHeaderHeight);
@@ -96,7 +98,6 @@ async function generateFlexCard({
   ctx.textAlign = 'left';
   ctx.fillText('TRAITS', margin + 20, traitsHeaderY + traitsHeaderHeight / 2 + 8);
 
-  // Traits block
   const traitsY = traitsHeaderY + traitsHeaderHeight;
   ctx.fillStyle = olive;
   ctx.fillRect(margin, traitsY, usableWidth - ownerWidth, traitsHeight);
@@ -107,7 +108,6 @@ async function generateFlexCard({
   ctx.moveTo(margin + usableWidth - ownerWidth, traitsY);
   ctx.lineTo(margin + usableWidth - ownerWidth, traitsY + traitsHeight);
   ctx.stroke();
-
   ctx.fillStyle = 'white';
   ctx.font = '22px Exo2';
   let traitY = traitsY + 36;
@@ -116,21 +116,14 @@ async function generateFlexCard({
     traitY += 30;
   }
 
-  // Metadata block
+  // Meta section
   const metaY = traitsY + traitsHeight + 10;
   const metaX = margin;
   const metaWidth = usableWidth;
   ctx.fillStyle = olive;
   ctx.fillRect(metaX, metaY, metaWidth, metaHeight);
   ctx.strokeStyle = 'white';
-  ctx.beginPath();
-  ctx.moveTo(metaX, metaY);
-  ctx.lineTo(metaX + metaWidth, metaY);
-  ctx.moveTo(metaX, metaY);
-  ctx.lineTo(metaX, metaY + metaHeight);
-  ctx.moveTo(metaX + metaWidth, metaY);
-  ctx.lineTo(metaX + metaWidth, metaY + metaHeight);
-  ctx.stroke();
+  ctx.strokeRect(metaX, metaY, metaWidth, metaHeight);
 
   const mintedDisplay = (typeof mintedDate === 'string' && mintedDate.length >= 10)
     ? mintedDate
@@ -140,6 +133,9 @@ async function generateFlexCard({
     `• Rank: ${rank ?? 'N/A'}`,
     `• Score: ${score ?? 'N/A'}`,
     `• Minted: ${mintedDisplay}`,
+    `• Mint Price: ${mintPrice ?? 'N/A'}`,
+    `• Floor Price: ${floorPrice ?? 'N/A'}`,
+    `• Top Trait: ${topTrait ?? 'N/A'}`,
     `• Network: ${network ?? 'Base'}`,
     `• Total Supply: ${totalSupply ?? 'N/A'}`
   ];
@@ -153,7 +149,7 @@ async function generateFlexCard({
     ctx.fillText(metaLines[i], metaX + 20, metaStartY + i * 28);
   }
 
-  // QR code block
+  // QR block
   const qrX = width - margin - qrSize;
   const qrY = height - margin - footerHeight - qrSize;
   ctx.fillStyle = 'white';
@@ -181,6 +177,7 @@ async function generateFlexCard({
 }
 
 module.exports = { generateFlexCard };
+
 
 
 
