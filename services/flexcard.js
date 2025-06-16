@@ -38,11 +38,9 @@ module.exports = {
     const ultraRequested = interaction.options.getBoolean('ultra') || false;
     const userIsOwner = interaction.user.id === process.env.BOT_OWNER_ID;
 
-    let hasDeferred = false;
-
     try {
-      await interaction.deferReply({ fetchReply: false });
-      hasDeferred = true;
+      // ⏳ Respond quickly to avoid interaction timeout
+      await interaction.deferReply(); // No fetchReply, now compliant
 
       const result = await pg.query(
         `SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`,
@@ -50,10 +48,7 @@ module.exports = {
       );
 
       if (!result.rows.length) {
-        if (hasDeferred) {
-          return await interaction.editReply('❌ Project not found. Use `/addflex` first.');
-        }
-        return;
+        return await interaction.editReply('❌ Project not found. Use `/addflex` first.');
       }
 
       const { address, display_name, name: storedName, network } = result.rows[0];
@@ -78,15 +73,11 @@ module.exports = {
 
     } catch (err) {
       console.error('❌ FlexCard error:', err);
-
       try {
-        if (hasDeferred) {
-          await interaction.editReply('❌ Failed to generate FlexCard.');
-        }
-      } catch (errorAfterDefer) {
-        console.warn('⚠️ Could not send error message:', errorAfterDefer.message);
+        await interaction.editReply('❌ Failed to generate FlexCard.');
+      } catch (err2) {
+        console.warn('⚠️ Could not send error message:', err2.message);
       }
     }
   }
 };
-
