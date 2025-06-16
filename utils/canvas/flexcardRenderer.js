@@ -132,8 +132,8 @@ async function generateFlexCard({
   ctx.lineTo(metaX + metaWidth, metaY + metaHeight);
   ctx.stroke();
 
-  const mintedDisplay = (mintedDate && typeof mintedDate === 'string')
-    ? new Date(mintedDate).toISOString().replace('T', ' ').split('.')[0]
+  const mintedDisplay = (typeof mintedDate === 'string' && mintedDate.length >= 10)
+    ? mintedDate
     : '❌ Not Found';
 
   const metaLines = [
@@ -181,6 +181,10 @@ async function generateFlexCard({
 }
 
 module.exports = { generateFlexCard };
+
+
+
+
 
 
 
