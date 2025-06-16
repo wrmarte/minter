@@ -39,9 +39,10 @@ module.exports = {
     const userIsOwner = interaction.user.id === process.env.BOT_OWNER_ID;
 
     try {
-      // ⏳ Respond quickly to avoid interaction timeout
-      await interaction.deferReply(); // No fetchReply, now compliant
+      // ✅ Respond quickly to avoid unknown interaction
+      await interaction.deferReply(); // DO THIS FIRST
 
+      // 🔍 Validate project
       const result = await pg.query(
         `SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`,
         [interaction.guild.id, name]
@@ -60,11 +61,13 @@ module.exports = {
         return await interaction.editReply('🚫 Only the bot owner can use Ultra mode for now.');
       }
 
+      // 📸 Generate FlexCard (NFT image, traits, etc.)
       const { buildFlexCard } = getFlexService(chain);
       const imageBuffer = ultraRequested
         ? await buildUltraFlexCard(contractAddress, tokenId, collectionName, chain)
         : await buildFlexCard(contractAddress, tokenId, collectionName, chain);
 
+      // 📎 Send image
       const attachment = new AttachmentBuilder(imageBuffer, {
         name: ultraRequested ? 'ultraflexcard.png' : 'flexcard.png'
       });
@@ -81,3 +84,4 @@ module.exports = {
     }
   }
 };
+
