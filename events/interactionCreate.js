@@ -7,6 +7,7 @@ module.exports = (client, pg) => {
   const guildNameCache = new Map();
 
   client.on('interactionCreate', async interaction => {
+    // ✅ AUTOCOMPLETE HANDLING
     if (interaction.isAutocomplete()) {
       const { commandName, options } = interaction;
       const focused = options.getFocused(true);
@@ -21,14 +22,36 @@ module.exports = (client, pg) => {
 
         if (commandName === 'flex' && subcommand === 'duo' && focused.name === 'name') {
           const res = await pg.query(`SELECT name FROM flex_duo WHERE guild_id = $1`, [guildId]);
-          const duoNames = res.rows.map(row => row.name).filter(Boolean).filter(name => name.toLowerCase().includes(focused.value.toLowerCase())).slice(0, 25).map(name => ({ name, value: name }));
-          return interaction.respond(duoNames);
+          const duoNames = res.rows
+            .map(row => row.name)
+            .filter(Boolean)
+            .filter(name => name.toLowerCase().includes(focused.value.toLowerCase()))
+            .slice(0, 25)
+            .map(name => ({ name, value: name }));
+          try {
+            return await interaction.respond(duoNames);
+          } catch (err) {
+            if (err.code === 10062) console.warn('⚠️ Autocomplete expired: interaction dropped');
+            else console.error('❌ Autocomplete respond error:', err);
+            return;
+          }
         }
 
         if (commandName === 'flex' && ['random', 'card', 'plus'].includes(subcommand) && focused.name === 'name') {
           const res = await pg.query(`SELECT name FROM flex_projects WHERE guild_id = $1`, [guildId]);
-          const projectNames = res.rows.map(row => row.name).filter(Boolean).filter(name => name.toLowerCase().includes(focused.value.toLowerCase())).slice(0, 25).map(name => ({ name, value: name }));
-          return interaction.respond(projectNames);
+          const projectNames = res.rows
+            .map(row => row.name)
+            .filter(Boolean)
+            .filter(name => name.toLowerCase().includes(focused.value.toLowerCase()))
+            .slice(0, 25)
+            .map(name => ({ name, value: name }));
+          try {
+            return await interaction.respond(projectNames);
+          } catch (err) {
+            if (err.code === 10062) console.warn('⚠️ Autocomplete expired: interaction dropped');
+            else console.error('❌ Autocomplete respond error:', err);
+            return;
+          }
         }
 
         if (commandName === 'flex' && subcommand === 'random' && focused.name === 'tokenid') {
@@ -45,7 +68,9 @@ module.exports = (client, pg) => {
 
           if (chain === 'eth') {
             try {
-              const resv = await fetch(`https://api.reservoir.tools/tokens/v6?collection=${address}&limit=100&sortBy=floorAskPrice`, { headers: { 'x-api-key': process.env.RESERVOIR_API_KEY } });
+              const resv = await fetch(`https://api.reservoir.tools/tokens/v6?collection=${address}&limit=100&sortBy=floorAskPrice`, {
+                headers: { 'x-api-key': process.env.RESERVOIR_API_KEY }
+              });
               const data = await resv.json();
               tokenIds = data?.tokens?.map(t => t.token?.tokenId).filter(Boolean) || [];
             } catch {
@@ -63,20 +88,44 @@ module.exports = (client, pg) => {
             }
           }
 
-          const filtered = tokenIds.filter(id => id.includes(focused.value)).slice(0, 25).map(id => ({ name: `#${id}`, value: parseInt(id) }));
-          return interaction.respond(filtered);
+          const filtered = tokenIds
+            .filter(id => id.includes(focused.value))
+            .slice(0, 25)
+            .map(id => ({ name: `#${id}`, value: parseInt(id) }));
+
+          try {
+            return await interaction.respond(filtered);
+          } catch (err) {
+            if (err.code === 10062) console.warn('⚠️ Autocomplete expired: interaction dropped');
+            else console.error('❌ Autocomplete respond error:', err);
+            return;
+          }
         }
 
         if (commandName === 'flexdev' && focused.name === 'name') {
           const res = await pg.query(`SELECT name FROM flex_projects WHERE guild_id = $1`, [guildId]);
-          const projectNames = res.rows.map(row => row.name).filter(Boolean).filter(name => name.toLowerCase().includes(focused.value.toLowerCase())).slice(0, 25).map(name => ({ name, value: name }));
-          return interaction.respond(projectNames);
+          const projectNames = res.rows
+            .map(row => row.name)
+            .filter(Boolean)
+            .filter(name => name.toLowerCase().includes(focused.value.toLowerCase()))
+            .slice(0, 25)
+            .map(name => ({ name, value: name }));
+          try {
+            return await interaction.respond(projectNames);
+          } catch (err) {
+            if (err.code === 10062) console.warn('⚠️ Autocomplete expired: interaction dropped');
+            else console.error('❌ Autocomplete respond error:', err);
+            return;
+          }
         }
 
         if (commandName === 'exp' && focused.name === 'name') {
-          const builtInChoices = Object.keys(flavorMap).map(name => ({ name: `🔥 ${name} (Built-in)`, value: name }));
-          let query, params;
+          const builtInChoices = Object.keys(flavorMap).map(name => ({
+            name: `🔥 ${name} (Built-in)`,
+            value: name
+          }));
 
+          let query, params;
           if (isOwner) {
             query = `SELECT DISTINCT name, guild_id FROM expressions`;
             params = [];
@@ -112,32 +161,20 @@ module.exports = (client, pg) => {
           try {
             return await interaction.respond(filtered);
           } catch (err) {
-            if (err.code === 10062) console.warn('⚠️ Autocomplete timeout: interaction expired.');
+            if (err.code === 10062) console.warn('⚠️ Autocomplete expired: interaction dropped');
             else console.error('❌ Autocomplete respond error:', err);
             return;
           }
         }
-
-        const choices = rows.map(row => row.name).filter(Boolean);
-        const filtered = choices.filter(name => name.toLowerCase().includes(focused.value.toLowerCase())).slice(0, 25);
-
-        console.log(`🔁 Default Autocomplete for /${commandName}:`, filtered);
-        try {
-          return await interaction.respond(filtered.map(name => ({ name, value: name })));
-        } catch (err) {
-          if (err.code === 10062) console.warn('⚠️ Autocomplete timeout: interaction expired.');
-          else console.error('❌ Autocomplete respond error:', err);
-          return;
-        }
-
       } catch (err) {
         console.error('❌ Autocomplete error:', err);
       }
     }
 
+    // ✅ SLASH COMMAND EXECUTION
     if (!interaction.isChatInputCommand()) return;
-
     console.log(`🎯 Received slash command: /${interaction.commandName}`);
+
     const command = client.commands.get(interaction.commandName);
     if (!command) {
       console.warn(`❌ No command found for: /${interaction.commandName}`);
@@ -165,7 +202,3 @@ module.exports = (client, pg) => {
     }
   });
 };
-
-
-
-
