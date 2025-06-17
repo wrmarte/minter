@@ -52,6 +52,7 @@ async function generateFlexCard({
   // Title bar
   ctx.fillStyle = forest;
   ctx.fillRect(margin, margin, usableWidth, titleHeight);
+  ctx.strokeStyle = 'white';
   ctx.strokeRect(margin, margin, usableWidth, titleHeight);
   ctx.fillStyle = 'white';
   ctx.font = 'bold 38px Exo2';
@@ -65,6 +66,7 @@ async function generateFlexCard({
   const nftY = margin + titleHeight + 40;
   ctx.fillStyle = olive;
   ctx.fillRect(nftX, nftY, nftSize, nftSize);
+  ctx.strokeStyle = 'white';
   ctx.strokeRect(nftX, nftY, nftSize, nftSize);
 
   const nftImg = await loadImage(nftImageUrl);
@@ -76,6 +78,7 @@ async function generateFlexCard({
   const ownerHeight = height - ownerY - qrSize - footerHeight - 10;
   ctx.fillStyle = forest;
   ctx.fillRect(ownerX, ownerY, ownerWidth, ownerHeight);
+  ctx.strokeStyle = 'white';
   ctx.strokeRect(ownerX, ownerY, ownerWidth, ownerHeight);
   ctx.save();
   ctx.translate(ownerX + ownerWidth / 2, ownerY + ownerHeight / 2);
@@ -90,6 +93,7 @@ async function generateFlexCard({
   const traitsHeaderY = nftY + nftSize + 40;
   ctx.fillStyle = forest;
   ctx.fillRect(margin, traitsHeaderY, usableWidth - ownerWidth, traitsHeaderHeight);
+  ctx.strokeStyle = 'white';
   ctx.strokeRect(margin, traitsHeaderY, usableWidth - ownerWidth, traitsHeaderHeight);
   ctx.fillStyle = 'white';
   ctx.font = 'bold 28px Exo2';
@@ -101,12 +105,7 @@ async function generateFlexCard({
   ctx.fillStyle = olive;
   ctx.fillRect(margin, traitsY, usableWidth - ownerWidth, traitsHeight);
   ctx.strokeStyle = 'white';
-  ctx.beginPath();
-  ctx.moveTo(margin, traitsY);
-  ctx.lineTo(margin, traitsY + traitsHeight);
-  ctx.moveTo(margin + usableWidth - ownerWidth, traitsY);
-  ctx.lineTo(margin + usableWidth - ownerWidth, traitsY + traitsHeight);
-  ctx.stroke();
+  ctx.strokeRect(margin, traitsY, usableWidth - ownerWidth, traitsHeight);
 
   ctx.fillStyle = 'white';
   ctx.font = '22px Exo2';
@@ -116,21 +115,26 @@ async function generateFlexCard({
     traitY += 30;
   }
 
-  // Metadata block
+  // Metadata header
   const metaY = traitsY + traitsHeight + 10;
   const metaX = margin;
-  const metaWidth = usableWidth;
-  ctx.fillStyle = olive;
-  ctx.fillRect(metaX, metaY, metaWidth, metaHeight);
+  const metaWidth = usableWidth - qrSize - 20;
+  const metaHeaderHeight = 40;
+  ctx.fillStyle = forest;
+  ctx.fillRect(metaX, metaY, metaWidth, metaHeaderHeight);
   ctx.strokeStyle = 'white';
-  ctx.beginPath();
-  ctx.moveTo(metaX, metaY);
-  ctx.lineTo(metaX + metaWidth, metaY);
-  ctx.moveTo(metaX, metaY);
-  ctx.lineTo(metaX, metaY + metaHeight);
-  ctx.moveTo(metaX + metaWidth, metaY);
-  ctx.lineTo(metaX + metaWidth, metaY + metaHeight);
-  ctx.stroke();
+  ctx.strokeRect(metaX, metaY, metaWidth, metaHeaderHeight);
+  ctx.fillStyle = 'white';
+  ctx.font = 'bold 26px Exo2';
+  ctx.fillText('META', metaX + 20, metaY + 28);
+
+  // Metadata block
+  const metaContentY = metaY + metaHeaderHeight;
+  const metaHeight = qrSize - 10 - metaHeaderHeight;
+  ctx.fillStyle = olive;
+  ctx.fillRect(metaX, metaContentY, metaWidth, metaHeight);
+  ctx.strokeStyle = 'white';
+  ctx.strokeRect(metaX, metaContentY, metaWidth, metaHeight);
 
   const mintedDisplay = (typeof mintedDate === 'string' && mintedDate.length >= 10)
     ? mintedDate
@@ -148,7 +152,7 @@ async function generateFlexCard({
   ctx.font = '22px Exo2';
   ctx.textAlign = 'left';
   const metaBlockHeight = metaLines.length * 28;
-  const metaStartY = metaY + (metaHeight - metaBlockHeight) / 2 + 8;
+  const metaStartY = metaContentY + (metaHeight - metaBlockHeight) / 2 + 8;
   for (let i = 0; i < metaLines.length; i++) {
     ctx.fillText(metaLines[i], metaX + 20, metaStartY + i * 28);
   }
@@ -158,6 +162,7 @@ async function generateFlexCard({
   const qrY = height - margin - footerHeight - qrSize;
   ctx.fillStyle = 'white';
   ctx.fillRect(qrX, qrY, qrSize, qrSize);
+  ctx.strokeStyle = 'white';
   ctx.strokeRect(qrX, qrY, qrSize, qrSize);
 
   const qrBuffer = await QRCode.toBuffer(openseaUrl, {
@@ -171,6 +176,7 @@ async function generateFlexCard({
   const footerY = height - margin - footerHeight;
   ctx.fillStyle = forest;
   ctx.fillRect(margin, footerY, usableWidth, footerHeight);
+  ctx.strokeStyle = 'white';
   ctx.strokeRect(margin, footerY, usableWidth, footerHeight);
   ctx.fillStyle = 'white';
   ctx.font = 'bold 24px Exo2';
