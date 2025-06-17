@@ -35,7 +35,8 @@ async function generateFlexCard({
   const qrPadding = 20;
   const nftSize = 680;
   const traitsHeight = 340;
-  const metaHeight = qrSize - 10;
+  const metaHeaderHeight = 40;
+  const metaHeight = qrSize - 10 - metaHeaderHeight;
 
   const olive = '#4e7442';
   const forest = '#294f30';
@@ -52,7 +53,6 @@ async function generateFlexCard({
   // Title bar
   ctx.fillStyle = forest;
   ctx.fillRect(margin, margin, usableWidth, titleHeight);
-  ctx.strokeStyle = 'white';
   ctx.strokeRect(margin, margin, usableWidth, titleHeight);
   ctx.fillStyle = 'white';
   ctx.font = 'bold 38px Exo2';
@@ -105,7 +105,12 @@ async function generateFlexCard({
   ctx.fillStyle = olive;
   ctx.fillRect(margin, traitsY, usableWidth - ownerWidth, traitsHeight);
   ctx.strokeStyle = 'white';
-  ctx.strokeRect(margin, traitsY, usableWidth - ownerWidth, traitsHeight);
+  ctx.beginPath();
+  ctx.moveTo(margin, traitsY);
+  ctx.lineTo(margin, traitsY + traitsHeight);
+  ctx.moveTo(margin + usableWidth - ownerWidth, traitsY);
+  ctx.lineTo(margin + usableWidth - ownerWidth, traitsY + traitsHeight);
+  ctx.stroke();
 
   ctx.fillStyle = 'white';
   ctx.font = '22px Exo2';
@@ -115,26 +120,25 @@ async function generateFlexCard({
     traitY += 30;
   }
 
-  // Metadata header
-  const metaY = traitsY + traitsHeight + 10;
-  const metaX = margin;
-  const metaWidth = usableWidth - qrSize - 20;
-  const metaHeaderHeight = 40;
+  // Metadata Header
+  const metaHeaderY = traitsY + traitsHeight + 10;
   ctx.fillStyle = forest;
-  ctx.fillRect(metaX, metaY, metaWidth, metaHeaderHeight);
+  ctx.fillRect(margin, metaHeaderY, usableWidth, metaHeaderHeight);
   ctx.strokeStyle = 'white';
-  ctx.strokeRect(metaX, metaY, metaWidth, metaHeaderHeight);
+  ctx.strokeRect(margin, metaHeaderY, usableWidth, metaHeaderHeight);
   ctx.fillStyle = 'white';
-  ctx.font = 'bold 26px Exo2';
-  ctx.fillText('META', metaX + 20, metaY + 28);
+  ctx.font = 'bold 28px Exo2';
+  ctx.textAlign = 'left';
+  ctx.fillText('METADATA', margin + 20, metaHeaderY + metaHeaderHeight / 2 + 8);
 
-  // Metadata block
-  const metaContentY = metaY + metaHeaderHeight;
-  const metaHeight = qrSize - 10 - metaHeaderHeight;
+  // Metadata Info Block
+  const metaY = metaHeaderY + metaHeaderHeight;
+  const metaX = margin;
+  const metaWidth = usableWidth;
   ctx.fillStyle = olive;
-  ctx.fillRect(metaX, metaContentY, metaWidth, metaHeight);
+  ctx.fillRect(metaX, metaY, metaWidth, metaHeight);
   ctx.strokeStyle = 'white';
-  ctx.strokeRect(metaX, metaContentY, metaWidth, metaHeight);
+  ctx.strokeRect(metaX, metaY, metaWidth, metaHeight);
 
   const mintedDisplay = (typeof mintedDate === 'string' && mintedDate.length >= 10)
     ? mintedDate
@@ -152,17 +156,16 @@ async function generateFlexCard({
   ctx.font = '22px Exo2';
   ctx.textAlign = 'left';
   const metaBlockHeight = metaLines.length * 28;
-  const metaStartY = metaContentY + (metaHeight - metaBlockHeight) / 2 + 8;
+  const metaStartY = metaY + (metaHeight - metaBlockHeight) / 2 + 8;
   for (let i = 0; i < metaLines.length; i++) {
     ctx.fillText(metaLines[i], metaX + 20, metaStartY + i * 28);
   }
 
-  // QR code block
+  // QR Code block
   const qrX = width - margin - qrSize;
   const qrY = height - margin - footerHeight - qrSize;
   ctx.fillStyle = 'white';
   ctx.fillRect(qrX, qrY, qrSize, qrSize);
-  ctx.strokeStyle = 'white';
   ctx.strokeRect(qrX, qrY, qrSize, qrSize);
 
   const qrBuffer = await QRCode.toBuffer(openseaUrl, {
@@ -187,7 +190,6 @@ async function generateFlexCard({
 }
 
 module.exports = { generateFlexCard };
-
 
 
 
