@@ -28,14 +28,14 @@ async function generateFlexCard({
   const margin = 40;
   const usableWidth = width - 2 * margin;
   const titleHeight = 120;
-  const footerHeight = 40;
+  const footerHeight = 50;
   const ownerWidth = 140;
   const traitsHeaderHeight = 60;
   const qrSize = 300;
   const qrPadding = 20;
   const nftSize = 680;
   const traitsHeight = 340;
-  const metaHeaderHeight = 50;
+  const metaHeaderHeight = 60;
   const metaHeight = qrSize - 10 - metaHeaderHeight;
 
   const olive = '#4e7442';
