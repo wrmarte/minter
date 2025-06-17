@@ -1,10 +1,12 @@
 const { SlashCommandBuilder } = require('discord.js');
 
 // Optional timeout helper
-async function withTimeout(promise, ms = 15000) {
+async function withTimeout(promise, ms = 20000) {
   return Promise.race([
     promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error('⏱️ Timeout')), ms))
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('⏱️ Timeout')), ms)
+    )
   ]);
 }
 
@@ -76,8 +78,11 @@ module.exports = {
     let replied = false;
 
     try {
-      await interaction.deferReply({ ephemeral: false });
-      replied = true;
+      // ✅ Defer early
+      if (!interaction.deferred && !interaction.replied) {
+        await interaction.deferReply({ ephemeral: false });
+        replied = true;
+      }
 
       const moduleMap = {
         random: '../services/flexrandom',
@@ -90,7 +95,7 @@ module.exports = {
       if (!modulePath) throw new Error(`❌ Unknown subcommand: ${sub}`);
 
       const handler = require(modulePath);
-      return await withTimeout(handler.execute(interaction), 15000);
+      return await withTimeout(handler.execute(interaction), 20000);
 
     } catch (err) {
       console.error(`❌ Flex ${sub} error:`, err);
