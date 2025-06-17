@@ -2,7 +2,6 @@ const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const QRCode = require('qrcode');
 const path = require('path');
 
-// Register font
 const fontPath = path.join(__dirname, '../../fonts/Exo2-Bold.ttf');
 GlobalFonts.registerFromPath(fontPath, 'Exo2');
 
@@ -24,19 +23,18 @@ async function generateFlexCard({
   const canvas = createCanvas(width, height);
   const ctx = canvas.getContext('2d');
 
-  // Layout constants
   const margin = 40;
   const usableWidth = width - 2 * margin;
   const titleHeight = 120;
   const footerHeight = 50;
   const ownerWidth = 140;
   const traitsHeaderHeight = 60;
-  const qrSize = 300;
-  const qrPadding = 20;
+  const qrSize = 240;
+  const qrPadding = 16;
   const nftSize = 680;
   const traitsHeight = 340;
   const metaHeaderHeight = 60;
-  const metaHeight = qrSize - 10 - metaHeaderHeight + 60;
+  const metaHeight = 140;
 
   const olive = '#4e7442';
   const forest = '#294f30';
@@ -61,20 +59,21 @@ async function generateFlexCard({
   ctx.textAlign = 'right';
   ctx.fillText(`#${tokenId}`, margin + usableWidth - 20, margin + 70);
 
-  // NFT image centered
+  // NFT image
   const nftX = margin + (usableWidth - ownerWidth - nftSize) / 2;
   const nftY = margin + titleHeight + 40;
   ctx.fillStyle = olive;
   ctx.fillRect(nftX, nftY, nftSize, nftSize);
   ctx.strokeStyle = 'white';
   ctx.strokeRect(nftX, nftY, nftSize, nftSize);
+
   const nftImg = await loadImage(nftImageUrl);
   ctx.drawImage(nftImg, nftX, nftY, nftSize, nftSize);
 
   // Owner vertical section
   const ownerX = width - margin - ownerWidth;
   const ownerY = margin + titleHeight;
-  const ownerHeight = height - ownerY - qrSize - footerHeight - 10;
+  const ownerHeight = height - ownerY - footerHeight;
   ctx.fillStyle = forest;
   ctx.fillRect(ownerX, ownerY, ownerWidth, ownerHeight);
   ctx.strokeStyle = 'white';
@@ -92,7 +91,6 @@ async function generateFlexCard({
   const traitsHeaderY = nftY + nftSize + 40;
   ctx.fillStyle = forest;
   ctx.fillRect(margin, traitsHeaderY, usableWidth - ownerWidth, traitsHeaderHeight);
-  ctx.strokeStyle = 'white';
   ctx.strokeRect(margin, traitsHeaderY, usableWidth - ownerWidth, traitsHeaderHeight);
   ctx.fillStyle = 'white';
   ctx.font = 'bold 28px Exo2';
@@ -103,47 +101,38 @@ async function generateFlexCard({
   const traitsY = traitsHeaderY + traitsHeaderHeight;
   ctx.fillStyle = olive;
   ctx.fillRect(margin, traitsY, usableWidth - ownerWidth, traitsHeight);
-  ctx.strokeStyle = 'white';
-  ctx.beginPath();
-  ctx.moveTo(margin, traitsY);
-  ctx.lineTo(margin, traitsY + traitsHeight);
-  ctx.moveTo(margin + usableWidth - ownerWidth, traitsY);
-  ctx.lineTo(margin + usableWidth - ownerWidth, traitsY + traitsHeight);
-  ctx.stroke();
-
+  ctx.strokeRect(margin, traitsY, usableWidth - ownerWidth, traitsHeight);
   ctx.fillStyle = 'white';
   ctx.font = '22px Exo2';
+  ctx.textAlign = 'left';
+
   let traitY = traitsY + 36;
   for (const trait of traits.slice(0, 12)) {
     ctx.fillText(`• ${trait}`, margin + 20, traitY);
     traitY += 30;
   }
 
-  // Trait count badge
-  const traitCount = traits.length;
-  ctx.font = 'bold 52px Exo2';
+  // Trait count display
+  ctx.font = 'bold 44px Exo2';
   ctx.textAlign = 'right';
-  ctx.fillText(`${traitCount}`, margin + usableWidth - ownerWidth - 20, traitsY + traitsHeight - 30);
+  ctx.fillText(`${traits.length}`, margin + usableWidth - ownerWidth - 20, traitsY + traitsHeight - 24);
 
   // Metadata Header
   const metaHeaderY = traitsY + traitsHeight + 10;
   ctx.fillStyle = forest;
   ctx.fillRect(margin, metaHeaderY, usableWidth, metaHeaderHeight);
-  ctx.strokeStyle = 'white';
   ctx.strokeRect(margin, metaHeaderY, usableWidth, metaHeaderHeight);
   ctx.fillStyle = 'white';
   ctx.font = 'bold 28px Exo2';
   ctx.textAlign = 'left';
   ctx.fillText('METADATA', margin + 20, metaHeaderY + metaHeaderHeight / 2 + 8);
 
-  // Metadata Info Block
+  // Metadata Info
   const metaY = metaHeaderY + metaHeaderHeight;
-  const metaX = margin;
-  const metaWidth = usableWidth;
+  const metaWidth = usableWidth - qrSize - 20;
   ctx.fillStyle = olive;
-  ctx.fillRect(metaX, metaY, metaWidth, metaHeight);
-  ctx.strokeStyle = 'white';
-  ctx.strokeRect(metaX, metaY, metaWidth, metaHeight);
+  ctx.fillRect(margin, metaY, usableWidth, metaHeight);
+  ctx.strokeRect(margin, metaY, usableWidth, metaHeight);
 
   const mintedDisplay = (typeof mintedDate === 'string' && mintedDate.length >= 10)
     ? mintedDate
@@ -159,19 +148,18 @@ async function generateFlexCard({
 
   ctx.fillStyle = 'white';
   ctx.font = '22px Exo2';
-  ctx.textAlign = 'left';
-  const metaBlockHeight = metaLines.length * 28;
-  const metaStartY = metaY + 40;
-  for (let i = 0; i < metaLines.length; i++) {
-    ctx.fillText(metaLines[i], metaX + 20, metaStartY + i * 28);
-  }
+  const metaStartY = metaY + 36;
+  metaLines.forEach((line, i) => {
+    ctx.fillText(line, margin + 20, metaStartY + i * 28);
+  });
 
-  // QR Code block
+  // QR Code
   const qrX = width - margin - qrSize;
-  const qrY = height - margin - qrSize;
+  const qrY = height - margin - qrSize + 12;
   ctx.fillStyle = 'white';
   ctx.fillRect(qrX, qrY, qrSize, qrSize);
   ctx.strokeRect(qrX, qrY, qrSize, qrSize);
+
   const qrBuffer = await QRCode.toBuffer(openseaUrl, {
     width: qrSize - 2 * qrPadding,
     margin: 1
@@ -183,17 +171,17 @@ async function generateFlexCard({
   const footerY = height - margin - footerHeight;
   ctx.fillStyle = forest;
   ctx.fillRect(margin, footerY, usableWidth, footerHeight);
-  ctx.strokeStyle = 'white';
   ctx.strokeRect(margin, footerY, usableWidth, footerHeight);
   ctx.fillStyle = 'white';
   ctx.font = 'bold 24px Exo2';
   ctx.textAlign = 'center';
-  ctx.fillText('Powered by PimpsDev 🚀', width / 2, footerY + 28);
+  ctx.fillText('Powered by PimpsDev 🚀', width / 2, footerY + 32);
 
   return canvas.toBuffer('image/png');
 }
 
 module.exports = { generateFlexCard };
+
 
 
 
