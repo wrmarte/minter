@@ -121,7 +121,7 @@ async function generateFlexCard({
   }
 
   // Metadata Header
-  const metaHeaderY = traitsY + traitsHeight + 10;
+  const metaHeaderY = traitsY + traitsHeight + 20;
   ctx.fillStyle = forest;
   ctx.fillRect(margin, metaHeaderY, usableWidth, metaHeaderHeight);
   ctx.strokeStyle = 'white';
