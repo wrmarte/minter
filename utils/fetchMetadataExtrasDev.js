@@ -70,19 +70,34 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
     const metadata = nft?.metadata || {};
     const attributes = Array.isArray(metadata.attributes) ? metadata.attributes : [];
 
-    // 🏆 Top Trait
+    console.log('📦 Traits Used:', attributes);
+
+    // 🏆 Top Trait (based on rarity_score if available)
     let topTrait = 'N/A';
     if (attributes.length > 0) {
-      const first = attributes[0];
-      topTrait = `${first.trait_type || 'Trait'}: ${first.value || '?'}`;
+      const withScore = attributes.filter(a => a.rarity_score !== undefined);
+      if (withScore.length > 0) {
+        const rarest = withScore.sort((a, b) => a.rarity_score - b.rarity_score)[0];
+        topTrait = `${rarest.trait_type || 'Trait'}: ${rarest.value || '?'}`;
+      } else {
+        const first = attributes[0];
+        topTrait = `${first.trait_type || 'Trait'}: ${first.value || '?'}`;
+      }
     }
 
-    // 💰 Mint Price
+    // 💰 Mint Price (try trait-based inference)
     let mintPrice = nft?.mint_price?.usd ?? nft?.mint_price ?? json?.mint_price?.usd ?? json?.mint_price ?? null;
+    if (!mintPrice) {
+      const mintTrait = attributes.find(attr =>
+        attr.trait_type?.toLowerCase().includes('mint') ||
+        attr.trait_type?.toLowerCase().includes('price')
+      );
+      mintPrice = mintTrait?.value ?? null;
+    }
 
-    // 🌊 Floor Price (from collection slug)
+    // 🌊 Floor Price from slug
     let floorPrice = null;
-    const slug = nft?.collection?.slug;
+    const slug = nft?.collection;
     if (slug) {
       try {
         const floorRes = await fetch(`https://api.opensea.io/api/v2/collections/${slug}/stats`, {
@@ -93,38 +108,29 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
         });
         const stats = await floorRes.json();
         floorPrice = stats?.stats?.floor_price?.usd ?? stats?.stats?.floor_price ?? null;
-      } catch (err) {
-        console.warn('❌ Floor price fetch failed:', err.message);
+      } catch (e) {
+        console.warn('⚠️ Failed to fetch floor stats for slug:', slug, e.message);
       }
+    } else {
+      console.warn('⚠️ No collection slug found for floor price');
     }
 
-    // Fallback: Try fetching from Bueno metadata_url
-    let buenoMeta = {};
-    if (nft?.metadata_url) {
-      try {
-        const metaRes = await fetch(nft.metadata_url);
-        buenoMeta = await metaRes.json();
-        console.log('📦 Bueno Meta:', buenoMeta);
-      } catch (err) {
-        console.warn('❌ Failed to fetch Bueno metadata:', err.message);
-      }
-    }
+    // Rarity rank is not available via OpenSea for this NFT
+    const rank = json?.rarity?.rank ?? nft?.rarity_rank ?? null;
 
-    const rank = json?.rarity?.rank ?? nft?.rarity_rank ?? buenoMeta?.rarity_rank ?? null;
-    if (!mintPrice) mintPrice = buenoMeta?.mint_price ?? null;
-    if (!floorPrice) floorPrice = buenoMeta?.floor_price ?? null;
+    console.log('📦 Reservoir Rank:', rank);
+    console.log('📦 OpenSea NFT response:', JSON.stringify(nft, null, 2));
 
     return {
-      rank: rank ? `#${rank}` : 'Unavailable',
+      rank: rank ? `#${rank}` : null,
       topTrait,
       mintPrice: typeof mintPrice === 'number' ? `$${mintPrice.toFixed(2)}` : mintPrice || 'N/A',
       floorPrice: typeof floorPrice === 'number' ? `$${floorPrice.toFixed(2)}` : floorPrice || 'N/A'
     };
-
   } catch (err) {
     console.error('❌ OpenSea rank fetch failed:', err.message);
     return {
-      rank: 'Unavailable',
+      rank: null,
       topTrait: 'N/A',
       mintPrice: 'N/A',
       floorPrice: 'N/A'
