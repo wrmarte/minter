@@ -1,4 +1,4 @@
-// ✅ fetchMetadataExtras.js (fully patched and fixed — verified working)
+// ✅ fetchMetadataExtras.js (with debugging logs)
 const fetch = require('node-fetch');
 const { format } = require('date-fns');
 const { JsonRpcProvider, Contract } = require('ethers');
@@ -24,7 +24,6 @@ async function fetchMintDate(contractAddress, tokenId) {
       return null;
     }
 
-    const tokenIdStr = tokenId.toString();
     const mintTx = json.result.find(tx =>
       `${tx.tokenID}` === `${tokenId}` &&
       tx.from?.toLowerCase() === '0x0000000000000000000000000000000000000000'
@@ -39,8 +38,7 @@ async function fetchMintDate(contractAddress, tokenId) {
         return null;
       }
 
-      const formatted = format(dateObj, 'yyyy-MM-dd HH:mm');
-      return formatted;
+      return format(dateObj, 'yyyy-MM-dd HH:mm');
     }
   } catch (err) {
     console.error('❌ Mint date fetch failed:', err);
@@ -59,6 +57,7 @@ async function fetchRarityRankReservoir(contract, tokenId) {
     });
     const json = await res.json();
     const rank = json?.tokens?.[0]?.token?.rarity?.rank;
+    console.log(`📦 Reservoir Rank:`, rank);
     if (rank) return `#${rank}`;
   } catch (err) {
     console.warn('❌ Reservoir rank fetch failed:', err.message);
@@ -77,11 +76,13 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
     });
 
     const json = await res.json();
+    console.log(`📦 OpenSea NFT response:`, JSON.stringify(json, null, 2));
+
     const nft = json?.nft;
     const metadata = nft?.metadata || {};
     const attributes = Array.isArray(metadata.attributes) ? metadata.attributes : [];
 
-    // 🏆 Top Trait (based on rarity_score if available)
+    // 🏆 Top Trait
     let topTrait = 'N/A';
     if (attributes.length > 0) {
       const withScore = attributes.filter(a => a.rarity_score !== undefined);
@@ -97,7 +98,10 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
     // 💰 Mint Price
     let mintPrice = nft?.mint_price?.usd ?? nft?.mint_price ?? json?.mint_price?.usd ?? json?.mint_price ?? null;
     if (!mintPrice) {
-      const mintTrait = attributes.find(attr => attr.trait_type?.toLowerCase().includes('mint'));
+      const mintTrait = attributes.find(attr =>
+        attr.trait_type?.toLowerCase().includes('mint') ||
+        attr.trait_type?.toLowerCase().includes('price')
+      );
       mintPrice = mintTrait?.value || null;
     }
 
@@ -112,6 +116,7 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
         }
       });
       const stats = await floorRes.json();
+      console.log(`📉 OpenSea Floor Stats:`, stats);
       floorPrice = stats?.stats?.floor_price?.usd ?? stats?.stats?.floor_price ?? null;
     }
 
@@ -158,6 +163,16 @@ async function fetchMetadataExtras(contractAddress, tokenId, network) {
 
   const finalRank = resRank || openseaData.rank || 'Unavailable';
   const minted = (typeof mintedRaw === 'string' && mintedRaw.length >= 10) ? mintedRaw : '❌ Not Found';
+
+  console.log(`✅ Final Metadata Extras for ${tokenId}:`, {
+    mintedDate: minted,
+    rank: finalRank,
+    network: network.toUpperCase(),
+    totalSupply,
+    topTrait: openseaData.topTrait,
+    mintPrice: openseaData.mintPrice,
+    floorPrice: openseaData.floorPrice
+  });
 
   return {
     mintedDate: minted,
