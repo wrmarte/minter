@@ -38,7 +38,11 @@ module.exports = {
     const ultraRequested = interaction.options.getBoolean('ultra') || false;
     const userIsOwner = interaction.user.id === process.env.BOT_OWNER_ID;
 
+    let deferred = false;
+
     try {
+      await interaction.deferReply();
+      deferred = true;
 
       // 🔍 Validate project
       const result = await pg.query(
@@ -73,13 +77,19 @@ module.exports = {
       return await interaction.editReply({ files: [attachment] });
 
     } catch (err) {
-      console.error('❌ FlexCard error:', err);
+      console.warn('⚠️ FlexCard Error:', err.message);
+
       try {
-        await interaction.editReply('❌ Failed to generate FlexCard.');
-      } catch (err2) {
-        console.warn('⚠️ Could not send error message:', err2.message);
+        if (deferred || interaction.deferred || interaction.replied) {
+          await interaction.editReply('❌ Failed to generate FlexCard.');
+        } else {
+          await interaction.reply({ content: '❌ FlexCard error occurred.', ephemeral: true });
+        }
+      } catch (fallbackErr) {
+        console.warn('⚠️ Silent fail: Could not reply to interaction.', fallbackErr.message);
       }
     }
   }
 };
+
 
