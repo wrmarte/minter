@@ -74,7 +74,8 @@ module.exports = {
   async execute(interaction) {
     const sub = interaction.options.getSubcommand();
     try {
-      await interaction.deferReply();
+      // Always defer early to avoid 10062
+      await interaction.deferReply({ ephemeral: false }).catch(() => {});
 
       const moduleMap = {
         random: '../services/flexrandom',
@@ -87,21 +88,29 @@ module.exports = {
       if (!modulePath) throw new Error(`❌ Unknown subcommand: ${sub}`);
 
       const handler = require(modulePath);
-      return await withTimeout(handler.execute(interaction));
+      return await withTimeout(handler.execute(interaction), 15000); // optional timeout safety
 
     } catch (err) {
-      console.error(`❌ Flex ${interaction.options.getSubcommand()} error:`, err);
+      console.error(`❌ Flex ${sub} error:`, err);
 
-      if (!interaction.deferred && !interaction.replied) {
+      // Only reply if not already done
+      if (!interaction.replied && !interaction.deferred) {
         try {
           await interaction.reply({ content: '❌ Something went wrong while flexing.', ephemeral: true });
         } catch (e) {
           console.warn('⚠️ Could not send error reply:', e.message);
         }
+      } else {
+        try {
+          await interaction.editReply({ content: '❌ Something went wrong while flexing.' });
+        } catch (e) {
+          console.warn('⚠️ Could not edit reply:', e.message);
+        }
       }
     }
   }
 };
+
 
 
 
