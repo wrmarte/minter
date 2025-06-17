@@ -7,7 +7,6 @@ module.exports = (client, pg) => {
   const guildNameCache = new Map();
 
   client.on('interactionCreate', async interaction => {
-    // ✅ AUTOCOMPLETE HANDLING
     if (interaction.isAutocomplete()) {
       const { commandName, options } = interaction;
       const focused = options.getFocused(true);
@@ -18,50 +17,25 @@ module.exports = (client, pg) => {
 
       try {
         let rows = [];
-        const subcommand = interaction.options.getSubcommand(false); // safest way to access sub
+        const subcommand = interaction.options.getSubcommand(false);
 
-        // ✅ /flex duo name
-        if (
-          commandName === 'flex' &&
-          subcommand === 'duo' &&
-          focused.name === 'name'
-        ) {
+        if (commandName === 'flex' && subcommand === 'duo' && focused.name === 'name') {
           const res = await pg.query(`SELECT name FROM flex_duo WHERE guild_id = $1`, [guildId]);
-          const duoNames = res.rows
-            .map(row => row.name)
-            .filter(Boolean)
-            .filter(name => name.toLowerCase().includes(focused.value.toLowerCase()))
-            .slice(0, 25)
-            .map(name => ({ name, value: name }));
+          const duoNames = res.rows.map(row => row.name).filter(Boolean).filter(name => name.toLowerCase().includes(focused.value.toLowerCase())).slice(0, 25).map(name => ({ name, value: name }));
           return interaction.respond(duoNames);
         }
 
-        // ✅ /flex random, card, plus → name field
-        if (
-          commandName === 'flex' &&
-          ['random', 'card', 'plus'].includes(subcommand) &&
-          focused.name === 'name'
-        ) {
+        if (commandName === 'flex' && ['random', 'card', 'plus'].includes(subcommand) && focused.name === 'name') {
           const res = await pg.query(`SELECT name FROM flex_projects WHERE guild_id = $1`, [guildId]);
-          const projectNames = res.rows
-            .map(row => row.name)
-            .filter(Boolean)
-            .filter(name => name.toLowerCase().includes(focused.value.toLowerCase()))
-            .slice(0, 25)
-            .map(name => ({ name, value: name }));
+          const projectNames = res.rows.map(row => row.name).filter(Boolean).filter(name => name.toLowerCase().includes(focused.value.toLowerCase())).slice(0, 25).map(name => ({ name, value: name }));
           return interaction.respond(projectNames);
         }
 
-        // ✅ /flex random tokenid
         if (commandName === 'flex' && subcommand === 'random' && focused.name === 'tokenid') {
           const nameOpt = options.get('name')?.value;
           if (!nameOpt) return;
 
-          const res = await pg.query(
-            `SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`,
-            [guildId, nameOpt.toLowerCase()]
-          );
-
+          const res = await pg.query(`SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`, [guildId, nameOpt.toLowerCase()]);
           if (!res.rows.length) return;
 
           const { address, network } = res.rows[0];
@@ -71,10 +45,7 @@ module.exports = (client, pg) => {
 
           if (chain === 'eth') {
             try {
-              const resv = await fetch(
-                `https://api.reservoir.tools/tokens/v6?collection=${address}&limit=100&sortBy=floorAskPrice`,
-                { headers: { 'x-api-key': process.env.RESERVOIR_API_KEY } }
-              );
+              const resv = await fetch(`https://api.reservoir.tools/tokens/v6?collection=${address}&limit=100&sortBy=floorAskPrice`, { headers: { 'x-api-key': process.env.RESERVOIR_API_KEY } });
               const data = await resv.json();
               tokenIds = data?.tokens?.map(t => t.token?.tokenId).filter(Boolean) || [];
             } catch {
@@ -92,35 +63,18 @@ module.exports = (client, pg) => {
             }
           }
 
-          const filtered = tokenIds
-            .filter(id => id.includes(focused.value))
-            .slice(0, 25)
-            .map(id => ({ name: `#${id}`, value: parseInt(id) }));
-
+          const filtered = tokenIds.filter(id => id.includes(focused.value)).slice(0, 25).map(id => ({ name: `#${id}`, value: parseInt(id) }));
           return interaction.respond(filtered);
         }
-// ✅ /flexdev name autocomplete
-if (
-  commandName === 'flexdev' &&
-  focused.name === 'name'
-) {
-  const res = await pg.query(`SELECT name FROM flex_projects WHERE guild_id = $1`, [guildId]);
-  const projectNames = res.rows
-    .map(row => row.name)
-    .filter(Boolean)
-    .filter(name => name.toLowerCase().includes(focused.value.toLowerCase()))
-    .slice(0, 25)
-    .map(name => ({ name, value: name }));
-  return interaction.respond(projectNames);
-}
 
-        // ✅ /exp name
+        if (commandName === 'flexdev' && focused.name === 'name') {
+          const res = await pg.query(`SELECT name FROM flex_projects WHERE guild_id = $1`, [guildId]);
+          const projectNames = res.rows.map(row => row.name).filter(Boolean).filter(name => name.toLowerCase().includes(focused.value.toLowerCase())).slice(0, 25).map(name => ({ name, value: name }));
+          return interaction.respond(projectNames);
+        }
+
         if (commandName === 'exp' && focused.name === 'name') {
-          const builtInChoices = Object.keys(flavorMap).map(name => ({
-            name: `🔥 ${name} (Built-in)`,
-            value: name
-          }));
-
+          const builtInChoices = Object.keys(flavorMap).map(name => ({ name: `🔥 ${name} (Built-in)`, value: name }));
           let query, params;
 
           if (isOwner) {
@@ -132,14 +86,10 @@ if (
           }
 
           const res = await pg.query(query, params);
-
-          const thisServer = [];
-          const global = [];
-          const otherServers = [];
+          const thisServer = [], global = [], otherServers = [];
 
           for (const row of res.rows) {
             if (!row.name) continue;
-
             if (row.guild_id === null) {
               global.push({ name: `🌐 ${row.name} (Global)`, value: row.name });
             } else if (row.guild_id === guildId) {
@@ -156,13 +106,9 @@ if (
           }
 
           const combined = [...builtInChoices, ...thisServer, ...global, ...otherServers];
-
-          const filtered = combined
-            .filter(c => c.name.toLowerCase().includes(focused.value.toLowerCase()))
-            .slice(0, 25);
+          const filtered = combined.filter(c => c.name.toLowerCase().includes(focused.value.toLowerCase())).slice(0, 25);
 
           console.log(`🔁 Optimized Autocomplete for /exp:`, filtered);
-
           try {
             return await interaction.respond(filtered);
           } catch (err) {
@@ -172,14 +118,10 @@ if (
           }
         }
 
-        // ✅ DEFAULT AUTOCOMPLETE HANDLER
         const choices = rows.map(row => row.name).filter(Boolean);
-        const filtered = choices
-          .filter(name => name.toLowerCase().includes(focused.value.toLowerCase()))
-          .slice(0, 25);
+        const filtered = choices.filter(name => name.toLowerCase().includes(focused.value.toLowerCase())).slice(0, 25);
 
         console.log(`🔁 Default Autocomplete for /${commandName}:`, filtered);
-
         try {
           return await interaction.respond(filtered.map(name => ({ name, value: name })));
         } catch (err) {
@@ -193,11 +135,9 @@ if (
       }
     }
 
-    // ✅ SLASH COMMAND EXECUTION
     if (!interaction.isChatInputCommand()) return;
 
     console.log(`🎯 Received slash command: /${interaction.commandName}`);
-
     const command = client.commands.get(interaction.commandName);
     if (!command) {
       console.warn(`❌ No command found for: /${interaction.commandName}`);
@@ -213,7 +153,6 @@ if (
       }
     } catch (error) {
       console.error(`❌ Error executing /${interaction.commandName}:`, error);
-
       try {
         if (interaction.deferred || interaction.replied) {
           await interaction.editReply({ content: '⚠️ Something went wrong.' });
@@ -226,6 +165,7 @@ if (
     }
   });
 };
+
 
 
 
