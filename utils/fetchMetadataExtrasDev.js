@@ -1,4 +1,4 @@
-// ✅ fetchMetadataExtras.js (with debugging logs)
+// ✅ fetchMetadataExtras.js (fully patched — supports OpenSea traits + accurate prices)
 const fetch = require('node-fetch');
 const { format } = require('date-fns');
 const { JsonRpcProvider, Contract } = require('ethers');
@@ -10,8 +10,7 @@ const OPENSEA_API_KEY = process.env.OPENSEA_API_KEY;
 const provider = new JsonRpcProvider('https://mainnet.base.org');
 const erc721Abi = ['function totalSupply() view returns (uint256)'];
 
-const formatUsd = val =>
-  typeof val === 'number' && !isNaN(val) ? `$${val.toFixed(2)}` : 'N/A';
+const formatUsd = val => typeof val === 'number' && !isNaN(val) ? `$${val.toFixed(2)}` : 'N/A';
 
 async function fetchMintDate(contractAddress, tokenId) {
   try {
@@ -19,10 +18,7 @@ async function fetchMintDate(contractAddress, tokenId) {
     const res = await fetch(url);
     const json = await res.json();
 
-    if (!Array.isArray(json.result)) {
-      console.warn('⚠️ Unexpected result format:', json.result);
-      return null;
-    }
+    if (!Array.isArray(json.result)) return null;
 
     const mintTx = json.result.find(tx =>
       `${tx.tokenID}` === `${tokenId}` &&
@@ -32,12 +28,6 @@ async function fetchMintDate(contractAddress, tokenId) {
     if (mintTx?.timeStamp) {
       const timestampMs = parseInt(mintTx.timeStamp) * 1000;
       const dateObj = new Date(timestampMs);
-
-      if (isNaN(dateObj.getTime())) {
-        console.error(`❌ Invalid date parsed from timestamp: ${mintTx.timeStamp}`);
-        return null;
-      }
-
       return format(dateObj, 'yyyy-MM-dd HH:mm');
     }
   } catch (err) {
@@ -57,12 +47,12 @@ async function fetchRarityRankReservoir(contract, tokenId) {
     });
     const json = await res.json();
     const rank = json?.tokens?.[0]?.token?.rarity?.rank;
-    console.log(`📦 Reservoir Rank:`, rank);
-    if (rank) return `#${rank}`;
+    console.log('📦 Reservoir Rank:', rank);
+    return rank ? `#${rank}` : null;
   } catch (err) {
     console.warn('❌ Reservoir rank fetch failed:', err.message);
+    return null;
   }
-  return null;
 }
 
 async function fetchRarityRankOpenSea(contract, tokenId, network) {
@@ -76,36 +66,36 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
     });
 
     const json = await res.json();
-    console.log(`📦 OpenSea NFT response:`, JSON.stringify(json, null, 2));
-
     const nft = json?.nft;
     const metadata = nft?.metadata || {};
     const attributes = Array.isArray(metadata.attributes) ? metadata.attributes : [];
+    const traits = Array.isArray(nft?.traits) ? nft.traits : [];
 
-    // 🏆 Top Trait
+    console.log('📦 OpenSea NFT response:', JSON.stringify(nft, null, 2));
+
+    // Combine attributes + traits (OpenSea sometimes uses one or the other)
+    const combinedTraits = [...attributes, ...traits].filter(t => t && t.trait_type && t.value);
+
+    // 🏆 Top Trait logic
     let topTrait = 'N/A';
-    if (attributes.length > 0) {
-      const withScore = attributes.filter(a => a.rarity_score !== undefined);
-      if (withScore.length > 0) {
-        const rarest = withScore.sort((a, b) => a.rarity_score - b.rarity_score)[0];
-        topTrait = `${rarest.trait_type || 'Trait'}: ${rarest.value || '?'}`;
-      } else {
-        const first = attributes[0];
-        topTrait = `${first.trait_type || 'Trait'}: ${first.value || '?'}`;
-      }
+    if (combinedTraits.length > 0) {
+      const sorted = combinedTraits.sort((a, b) =>
+        (a.rarity_score ?? 9999) - (b.rarity_score ?? 9999)
+      );
+      const rarest = sorted[0];
+      topTrait = `${rarest.trait_type}: ${rarest.value}`;
     }
 
     // 💰 Mint Price
     let mintPrice = nft?.mint_price?.usd ?? nft?.mint_price ?? json?.mint_price?.usd ?? json?.mint_price ?? null;
     if (!mintPrice) {
-      const mintTrait = attributes.find(attr =>
-        attr.trait_type?.toLowerCase().includes('mint') ||
-        attr.trait_type?.toLowerCase().includes('price')
+      const mintTrait = combinedTraits.find(attr =>
+        attr.trait_type?.toLowerCase().includes('mint')
       );
       mintPrice = mintTrait?.value || null;
     }
 
-    // 🌊 Floor Price
+    // 🌊 Floor Price via slug
     let floorPrice = null;
     const slug = nft?.collection?.slug;
     if (slug) {
@@ -116,7 +106,6 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
         }
       });
       const stats = await floorRes.json();
-      console.log(`📉 OpenSea Floor Stats:`, stats);
       floorPrice = stats?.stats?.floor_price?.usd ?? stats?.stats?.floor_price ?? null;
     }
 
@@ -143,8 +132,8 @@ async function fetchTotalSupply(contractAddress, tokenId) {
   try {
     const contract = new Contract(contractAddress, erc721Abi, provider);
     const supply = await contract.totalSupply();
-    const current = parseInt(tokenId);
     const total = parseInt(supply.toString());
+    const current = parseInt(tokenId);
     const stillMinting = current < total;
     return `${total} (On-Chain${stillMinting ? ' — Still Minting' : ''})`;
   } catch (err) {
@@ -164,16 +153,6 @@ async function fetchMetadataExtras(contractAddress, tokenId, network) {
   const finalRank = resRank || openseaData.rank || 'Unavailable';
   const minted = (typeof mintedRaw === 'string' && mintedRaw.length >= 10) ? mintedRaw : '❌ Not Found';
 
-  console.log(`✅ Final Metadata Extras for ${tokenId}:`, {
-    mintedDate: minted,
-    rank: finalRank,
-    network: network.toUpperCase(),
-    totalSupply,
-    topTrait: openseaData.topTrait,
-    mintPrice: openseaData.mintPrice,
-    floorPrice: openseaData.floorPrice
-  });
-
   return {
     mintedDate: minted,
     rank: finalRank,
@@ -186,4 +165,5 @@ async function fetchMetadataExtras(contractAddress, tokenId, network) {
 }
 
 module.exports = { fetchMetadataExtras };
+
 
