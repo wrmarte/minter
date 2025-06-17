@@ -18,9 +18,12 @@ module.exports = (client, pg) => {
 
       const safeRespond = async (choices) => {
         try {
-          return await interaction.respond(choices);
+          if (!interaction.responded) {
+            await interaction.respond(choices);
+          }
         } catch (err) {
           if (err.code === 10062) console.warn('⚠️ Autocomplete expired: interaction dropped');
+          else if (err.code === 40060) console.warn('⚠️ Autocomplete already acknowledged');
           else console.error('❌ Autocomplete respond error:', err);
         }
       };
@@ -189,4 +192,5 @@ module.exports = (client, pg) => {
     }
   });
 };
+
 
