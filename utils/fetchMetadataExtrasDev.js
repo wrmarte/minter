@@ -67,50 +67,38 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
 
     const json = await res.json();
     const nft = json?.nft;
-    if (!nft) throw new Error('NFT data not found in OpenSea response.');
+    if (!nft) throw new Error('NFT not found');
 
-    // ✅ Extract traits
     const metadata = nft?.metadata || {};
-    let attributes = [];
-
-    if (Array.isArray(metadata.attributes)) {
-      attributes = metadata.attributes;
-    } else if (Array.isArray(nft.traits)) {
-      attributes = nft.traits;
-    }
+    let attributes = Array.isArray(metadata.attributes)
+      ? metadata.attributes
+      : Array.isArray(nft.traits)
+        ? nft.traits
+        : [];
 
     console.log('📦 Traits Used:', attributes);
 
-    // 🏆 Top Trait
+    // 🏆 Top Trait fallback logic
     let topTrait = 'N/A';
     if (attributes.length > 0) {
-      const withScore = attributes.filter(attr => typeof attr.rarity_score === 'number');
-      if (withScore.length > 0) {
-        const rarest = withScore.sort((a, b) => a.rarity_score - b.rarity_score)[0];
-        topTrait = `${rarest.trait_type || 'Trait'}: ${rarest.value || '?'}`;
-      } else {
-        const rarest = attributes[0];
-        topTrait = `${rarest.trait_type || 'Trait'}: ${rarest.value || '?'}`;
-      }
+      const first = attributes.find(attr => attr?.trait_type && attr?.value);
+      if (first) topTrait = `${first.trait_type}: ${first.value}`;
     }
 
-    // 💰 Mint Price (try direct or from trait)
-    let mintPrice = nft?.mint_price?.usd ?? nft?.mint_price ?? json?.mint_price?.usd ?? json?.mint_price ?? null;
-    if (!mintPrice) {
-      const mintTrait = attributes.find(attr =>
-        attr.trait_type?.toLowerCase().includes('mint') &&
-        typeof attr.value === 'string' &&
-        attr.value.toLowerCase().includes('eth')
-      );
-      mintPrice = mintTrait?.value || null;
-    }
+    // 💰 Mint price (attempt text match from trait)
+    let mintPrice = null;
+    const mintTrait = attributes.find(attr =>
+      attr.trait_type?.toLowerCase().includes('mint') ||
+      attr.value?.toLowerCase().includes('eth') ||
+      attr.trait_type?.toLowerCase().includes('price')
+    );
+    if (mintTrait) mintPrice = mintTrait.value;
 
-    console.log('📦 Mint Price Raw:', mintPrice);
+    console.log('📦 Mint Price Raw:', mintPrice || 'Not found');
 
-    // 🌊 Floor Price (via slug stats)
+    // 🌊 Floor price via slug
     let floorPrice = null;
     const slug = nft?.collection?.slug;
-    console.log('📦 Slug:', slug);
     if (slug) {
       const floorRes = await fetch(`https://api.opensea.io/api/v2/collections/${slug}/stats`, {
         headers: {
@@ -119,26 +107,25 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
         }
       });
       const stats = await floorRes.json();
-      floorPrice = stats?.stats?.floor_price?.usd ?? stats?.stats?.floor_price ?? null;
+      floorPrice = stats?.stats?.floor_price?.usd ?? stats?.stats?.floor_price;
     }
 
-    console.log('📦 Floor Price Raw:', floorPrice);
+    console.log('📦 Floor Price Raw:', floorPrice || 'Not found');
 
     // 🥇 Rank fallback
     const rank = json?.rarity?.rank ?? nft?.rarity_rank ?? null;
     console.log('📦 Rank from OpenSea:', rank);
 
     return {
-      rank: rank ? `#${rank}` : null,
+      rank: rank ? `#${rank}` : 'Unavailable',
       topTrait,
       mintPrice: typeof mintPrice === 'number' ? `$${mintPrice.toFixed(2)}` : mintPrice || 'N/A',
       floorPrice: typeof floorPrice === 'number' ? `$${floorPrice.toFixed(2)}` : floorPrice || 'N/A'
     };
-
   } catch (err) {
-    console.error('❌ OpenSea rank fetch failed:', err.message);
+    console.error('❌ OpenSea fallback failed:', err.message);
     return {
-      rank: null,
+      rank: 'Unavailable',
       topTrait: 'N/A',
       mintPrice: 'N/A',
       floorPrice: 'N/A'
