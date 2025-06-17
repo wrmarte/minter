@@ -1,7 +1,7 @@
 const { SlashCommandBuilder } = require('discord.js');
 
 // Optional timeout helper
-async function withTimeout(promise, ms = 10000) {
+async function withTimeout(promise, ms = 15000) {
   return Promise.race([
     promise,
     new Promise((_, reject) => setTimeout(() => reject(new Error('⏱️ Timeout')), ms))
@@ -73,9 +73,11 @@ module.exports = {
 
   async execute(interaction) {
     const sub = interaction.options.getSubcommand();
+    let replied = false;
+
     try {
-      // Always defer early to avoid 10062
-      await interaction.deferReply({ ephemeral: false }).catch(() => {});
+      await interaction.deferReply({ ephemeral: false });
+      replied = true;
 
       const moduleMap = {
         random: '../services/flexrandom',
@@ -88,28 +90,24 @@ module.exports = {
       if (!modulePath) throw new Error(`❌ Unknown subcommand: ${sub}`);
 
       const handler = require(modulePath);
-      return await withTimeout(handler.execute(interaction), 15000); // optional timeout safety
+      return await withTimeout(handler.execute(interaction), 15000);
 
     } catch (err) {
       console.error(`❌ Flex ${sub} error:`, err);
 
-      // Only reply if not already done
-      if (!interaction.replied && !interaction.deferred) {
-        try {
-          await interaction.reply({ content: '❌ Something went wrong while flexing.', ephemeral: true });
-        } catch (e) {
-          console.warn('⚠️ Could not send error reply:', e.message);
-        }
-      } else {
-        try {
+      try {
+        if (replied || interaction.deferred || interaction.replied) {
           await interaction.editReply({ content: '❌ Something went wrong while flexing.' });
-        } catch (e) {
-          console.warn('⚠️ Could not edit reply:', e.message);
+        } else {
+          await interaction.reply({ content: '❌ Something went wrong while flexing.', ephemeral: true });
         }
+      } catch (fail) {
+        console.warn('⚠️ Could not respond to interaction:', fail.message);
       }
     }
   }
 };
+
 
 
 
