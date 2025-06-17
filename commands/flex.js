@@ -1,5 +1,13 @@
 const { SlashCommandBuilder } = require('discord.js');
 
+// Optional timeout helper
+async function withTimeout(promise, ms = 10000) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('⏱️ Timeout')), ms))
+  ]);
+}
+
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('flex')
@@ -16,7 +24,7 @@ module.exports = {
         .addIntegerOption(opt =>
           opt.setName('tokenid')
             .setDescription('Token ID to flex (optional)')
-            .setAutocomplete(true) // ✅ ADDED AUTOCOMPLETE
+            .setAutocomplete(true)
         )
     )
     .addSubcommand(sub =>
@@ -65,25 +73,32 @@ module.exports = {
 
   async execute(interaction) {
     const sub = interaction.options.getSubcommand();
+    try {
+      await interaction.deferReply();
 
-    if (sub === 'random') {
-      const module = require('../services/flexrandom');
-      return module.execute(interaction);
-    }
+      const moduleMap = {
+        random: '../services/flexrandom',
+        card: '../services/flexcard',
+        plus: '../services/flexplus',
+        duo: '../services/flexduo'
+      };
 
-    if (sub === 'card') {
-      const module = require('../services/flexcard');
-      return module.execute(interaction);
-    }
+      const modulePath = moduleMap[sub];
+      if (!modulePath) throw new Error(`❌ Unknown subcommand: ${sub}`);
 
-    if (sub === 'plus') {
-      const module = require('../services/flexplus');
-      return module.execute(interaction);
-    }
+      const handler = require(modulePath);
+      return await withTimeout(handler.execute(interaction));
 
-    if (sub === 'duo') {
-      const module = require('../services/flexduo');
-      return module.execute(interaction);
+    } catch (err) {
+      console.error(`❌ Flex ${interaction.options.getSubcommand()} error:`, err);
+
+      if (!interaction.deferred && !interaction.replied) {
+        try {
+          await interaction.reply({ content: '❌ Something went wrong while flexing.', ephemeral: true });
+        } catch (e) {
+          console.warn('⚠️ Could not send error reply:', e.message);
+        }
+      }
     }
   }
 };
