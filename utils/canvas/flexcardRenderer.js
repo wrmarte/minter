@@ -150,7 +150,7 @@ async function generateFlexCard({
     `• Score: ${score ?? '—'}`,
     `• Minted: ${mintedDisplay}`,
     `• Network: ${network ?? 'Base'}`,
-    `• Total Supply: ${totalSupply ?? 'N/A'} (On-Chain — Still Minting)`
+    `• Total Supply: ${totalSupply ?? 'N/A'} `
   ];
 
   ctx.fillStyle = 'white';
@@ -185,7 +185,7 @@ async function generateFlexCard({
   ctx.fillStyle = 'white';
   ctx.font = 'bold 24px Exo2';
   ctx.textAlign = 'center';
-  ctx.fillText('Powered by PimpsDev 🚀', width / 2, footerY + 28);
+  ctx.fillText('Powered by PimpsDev ', width / 2, footerY + 28);
 
   return canvas.toBuffer('image/png');
 }
