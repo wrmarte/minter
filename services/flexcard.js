@@ -1,8 +1,6 @@
 const { SlashCommandBuilder, AttachmentBuilder } = require('discord.js');
 const { buildUltraFlexCard } = require('../services/ultraFlexService');
 
-// Dynamic import per chain
-
 function getFlexService(chain) {
   switch (chain) {
     case 'base': return require('../services/flexcardBaseS');
@@ -39,20 +37,19 @@ module.exports = {
     const ultraRequested = interaction.options.getBoolean('ultra') || false;
     const userIsOwner = interaction.user.id === process.env.BOT_OWNER_ID;
 
-    let deferred = false;
-
     try {
-      await interaction.deferReply();
-      deferred = true;
+      await interaction.deferReply({ ephemeral: false }).catch(() => {});
 
-      // 🔍 Validate project
       const result = await pg.query(
         `SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`,
         [interaction.guild.id, name]
       );
 
       if (!result.rows.length) {
-        return await interaction.editReply('❌ Project not found. Use `/addflex` first.');
+        if (!interaction.replied) {
+          return await interaction.editReply('❌ Project not found. Use `/addflex` first.');
+        }
+        return;
       }
 
       const { address, display_name, name: storedName, network } = result.rows[0];
@@ -64,13 +61,11 @@ module.exports = {
         return await interaction.editReply('🚫 Only the bot owner can use Ultra mode for now.');
       }
 
-      // 📸 Generate FlexCard (NFT image, traits, etc.)
       const { buildFlexCard } = getFlexService(chain);
       const imageBuffer = ultraRequested
         ? await buildUltraFlexCard(contractAddress, tokenId, collectionName, chain)
         : await buildFlexCard(contractAddress, tokenId, collectionName, chain);
 
-      // 📎 Send image
       const attachment = new AttachmentBuilder(imageBuffer, {
         name: ultraRequested ? 'ultraflexcard.png' : 'flexcard.png'
       });
@@ -78,19 +73,20 @@ module.exports = {
       return await interaction.editReply({ files: [attachment] });
 
     } catch (err) {
-      console.warn('⚠️ FlexCard Error:', err.message);
+      console.error('❌ FlexCard error:', err);
 
       try {
-        if (deferred || interaction.deferred || interaction.replied) {
-          await interaction.editReply('❌ Failed to generate FlexCard.');
+        if (!interaction.replied && !interaction.deferred) {
+          await interaction.reply({ content: '❌ Failed to generate FlexCard.', ephemeral: true });
         } else {
-          await interaction.reply({ content: '❌ FlexCard error occurred.', ephemeral: true });
+          await interaction.editReply({ content: '❌ Failed to generate FlexCard.' });
         }
-      } catch (fallbackErr) {
-        console.warn('⚠️ Silent fail: Could not reply to interaction.', fallbackErr.message);
+      } catch (e) {
+        console.warn('⚠️ Could not send error message:', e.message);
       }
     }
   }
 };
+
 
 
