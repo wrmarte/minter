@@ -15,27 +15,33 @@ module.exports = {
         .setDescription('Token ID')
         .setRequired(true)
     ),
-  async execute(interaction) {
-    try {
-      await interaction.deferReply({ ephemeral: true }); // ✅ defer early
+async execute(interaction) {
+  let replied = false;
+  try {
+    await interaction.deferReply({ ephemeral: true }); // ✅ Defer early
+    replied = true;
 
-      const name = interaction.options.getString('name');
-      const tokenId = interaction.options.getInteger('tokenid');
+    const name = interaction.options.getString('name');
+    const tokenId = interaction.options.getInteger('tokenid');
 
-      // your logic...
-      const extras = await fetchMetadataExtras(contractAddress, tokenId, network);
-      console.log('📦 MetadataExtras:', extras);
+    // 🔍 Simulate fetchExtras
+    const extras = await fetchMetadataExtras('0xc38e2ae060440c9269cceb8c0ea8019a66ce8927', tokenId, 'base');
 
-      await interaction.editReply({ content: `✅ Metadata fetched: \`\`\`${JSON.stringify(extras, null, 2)}\`\`\`` });
-    } catch (err) {
-      console.error('❌ FlexDev error:', err);
-      if (!interaction.replied && !interaction.deferred) {
-        try {
-          await interaction.reply({ content: '❌ Unexpected error occurred.', ephemeral: true });
-        } catch (e) {
-          console.warn('⚠️ Failed to send fallback reply:', e.message);
-        }
+    console.log('📦 MetadataExtras:', extras);
+
+    await interaction.editReply({
+      content: `✅ Metadata fetched for #${tokenId}:\n\`\`\`json\n${JSON.stringify(extras, null, 2)}\n\`\`\``
+    });
+  } catch (err) {
+    console.error('❌ FlexDev error:', err);
+
+    // 🔁 Fallback reply if not already replied
+    if (!replied && !interaction.replied && !interaction.deferred) {
+      try {
+        await interaction.reply({ content: '❌ Unexpected error occurred during /flexdev.', ephemeral: true });
+      } catch (fallbackErr) {
+        console.warn('⚠️ Failed to send fallback reply:', fallbackErr.message);
       }
     }
   }
-};
+}
