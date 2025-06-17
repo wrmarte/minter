@@ -35,7 +35,7 @@ async function generateFlexCard({
   const qrPadding = 20;
   const nftSize = 680;
   const traitsHeight = 340;
-  const metaHeaderHeight = 40;
+  const metaHeaderHeight = 50;
   const metaHeight = qrSize - 10 - metaHeaderHeight;
 
   const olive = '#4e7442';
@@ -121,7 +121,7 @@ async function generateFlexCard({
   }
 
   // Metadata Header
-  const metaHeaderY = traitsY + traitsHeight + 20;
+  const metaHeaderY = traitsY + traitsHeight + 10;
   ctx.fillStyle = forest;
   ctx.fillRect(margin, metaHeaderY, usableWidth, metaHeaderHeight);
   ctx.strokeStyle = 'white';
