@@ -36,7 +36,7 @@ async function generateFlexCard({
   const nftSize = 680;
   const traitsHeight = 340;
   const metaHeaderHeight = 60;
-  const metaHeight = qrSize - 10 - metaHeaderHeight;
+  const metaHeight = qrSize - 10 - metaHeaderHeight + 60;
 
   const olive = '#4e7442';
   const forest = '#294f30';
@@ -61,14 +61,13 @@ async function generateFlexCard({
   ctx.textAlign = 'right';
   ctx.fillText(`#${tokenId}`, margin + usableWidth - 20, margin + 70);
 
-  // NFT image
+  // NFT image centered
   const nftX = margin + (usableWidth - ownerWidth - nftSize) / 2;
   const nftY = margin + titleHeight + 40;
   ctx.fillStyle = olive;
   ctx.fillRect(nftX, nftY, nftSize, nftSize);
   ctx.strokeStyle = 'white';
   ctx.strokeRect(nftX, nftY, nftSize, nftSize);
-
   const nftImg = await loadImage(nftImageUrl);
   ctx.drawImage(nftImg, nftX, nftY, nftSize, nftSize);
 
@@ -120,6 +119,12 @@ async function generateFlexCard({
     traitY += 30;
   }
 
+  // Trait count badge
+  const traitCount = traits.length;
+  ctx.font = 'bold 52px Exo2';
+  ctx.textAlign = 'right';
+  ctx.fillText(`${traitCount}`, margin + usableWidth - ownerWidth - 20, traitsY + traitsHeight - 30);
+
   // Metadata Header
   const metaHeaderY = traitsY + traitsHeight + 10;
   ctx.fillStyle = forest;
@@ -146,9 +151,9 @@ async function generateFlexCard({
 
   const metaLines = [
     `• Rank: ${rank ?? 'N/A'}`,
-    `• Score: ${score ?? 'N/A'}`,
+    `• Score: ${score ?? '—'}`,
     `• Minted: ${mintedDisplay}`,
-    `• Network: ${network ?? 'Base'}`,
+    `• Network: ${network?.toUpperCase() ?? 'BASE'}`,
     `• Total Supply: ${totalSupply ?? 'N/A'}`
   ];
 
@@ -156,18 +161,17 @@ async function generateFlexCard({
   ctx.font = '22px Exo2';
   ctx.textAlign = 'left';
   const metaBlockHeight = metaLines.length * 28;
-  const metaStartY = metaY + (metaHeight - metaBlockHeight) / 2 + 8;
+  const metaStartY = metaY + 40;
   for (let i = 0; i < metaLines.length; i++) {
     ctx.fillText(metaLines[i], metaX + 20, metaStartY + i * 28);
   }
 
   // QR Code block
   const qrX = width - margin - qrSize;
-  const qrY = height - margin - footerHeight - qrSize;
+  const qrY = height - margin - qrSize;
   ctx.fillStyle = 'white';
   ctx.fillRect(qrX, qrY, qrSize, qrSize);
   ctx.strokeRect(qrX, qrY, qrSize, qrSize);
-
   const qrBuffer = await QRCode.toBuffer(openseaUrl, {
     width: qrSize - 2 * qrPadding,
     margin: 1
@@ -190,6 +194,7 @@ async function generateFlexCard({
 }
 
 module.exports = { generateFlexCard };
+
 
 
 
