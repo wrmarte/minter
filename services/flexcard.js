@@ -39,8 +39,6 @@ module.exports = {
     const userIsOwner = interaction.user.id === process.env.BOT_OWNER_ID;
 
     try {
-      // ✅ Respond quickly to avoid unknown interaction
-      await interaction.deferReply(); // DO THIS FIRST
 
       // 🔍 Validate project
       const result = await pg.query(
