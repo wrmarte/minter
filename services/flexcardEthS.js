@@ -1,11 +1,12 @@
-const { JsonRpcProvider, Contract, Interface } = require('ethers');
+// services/cardEthS.js
+const { JsonRpcProvider, Contract } = require('ethers');
 const fetch = require('node-fetch');
 const { generateFlexCard } = require('../utils/canvas/flexcardRenderer');
+const { fetchMetadataExtras } = require('../utils/fetchMetadataExtras');
 
 const abi = [
   'function tokenURI(uint256 tokenId) view returns (string)',
-  'function ownerOf(uint256 tokenId) view returns (address)',
-  'function totalSupply() view returns (uint256)'
+  'function ownerOf(uint256 tokenId) view returns (address)'
 ];
 
 const provider = new JsonRpcProvider('https://eth.llamarpc.com');
@@ -27,8 +28,7 @@ async function fetchMetadata(contractAddress, tokenId) {
 
     const res = await fetch(metadataUrl);
     if (!res.ok) throw new Error(`Metadata fetch failed: ${res.statusText}`);
-    const data = await res.json();
-    return data || {};
+    return await res.json();
   } catch (err) {
     console.error('❌ Metadata fetch failed (ETH):', err);
     return {};
@@ -45,78 +45,6 @@ async function fetchOwner(contractAddress, tokenId) {
   }
 }
 
-async function fetchRarity(contractAddress, tokenId) {
-  try {
-    const url = `https://api.opensea.io/api/v2/chain/ethereum/contract/${contractAddress}/nfts/${tokenId}`;
-    const res = await fetch(url, {
-      headers: {
-        'Accept': 'application/json',
-        'X-API-KEY': process.env.OPENSEA_API_KEY || ''
-      }
-    });
-
-    if (!res.ok) {
-      const errText = await res.text();
-      throw new Error(`OpenSea error ${res.status}: ${errText}`);
-    }
-
-    const json = await res.json();
-    const rarity = json?.nft?.rarity;
-
-    return {
-      rank: rarity?.rank ? `#${rarity.rank}` : 'N/A',
-      score: rarity?.score?.toFixed(2) ?? 'N/A'
-    };
-  } catch (err) {
-    console.warn('⚠️ OpenSea rarity fetch failed:', err.message);
-    return { rank: 'N/A', score: 'N/A' };
-  }
-}
-async function fetchMintedDate(contractAddress, tokenId) {
-  const MORALIS_API_KEY = process.env.MORALIS_API_KEY;
-
-  if (!MORALIS_API_KEY) {
-    console.warn('❌ No Moralis API key set — minted date unavailable.');
-    return null;
-  }
-
-  try {
-    const url = `https://deep-index.moralis.io/api/v2.2/nft/${contractAddress}/transfers?chain=eth&format=decimal&limit=50&token_id=${tokenId}`;
-    const res = await fetch(url, {
-      headers: {
-        'X-API-Key': MORALIS_API_KEY,
-        'Accept': 'application/json'
-      }
-    });
-
-    const json = await res.json();
-    const transfers = json?.result || [];
-
-    for (const tx of transfers) {
-      if (tx.from_address === '0x0000000000000000000000000000000000000000') {
-        const timestamp = tx.block_timestamp;
-        return timestamp?.split('T')[0] || null; // yyyy-mm-dd
-      }
-    }
-
-    return null;
-  } catch (err) {
-    console.warn('⚠️ Moralis fetch failed:', err.message);
-    return null;
-  }
-}
-
-
-async function fetchTotalSupply(contractAddress) {
-  try {
-    const contract = new Contract(contractAddress, abi, provider);
-    return (await contract.totalSupply())?.toString();
-  } catch (err) {
-    console.warn('⚠️ Total supply fetch failed:', err.message);
-    return 'N/A';
-  }
-}
-
 async function buildFlexCard(contractAddress, tokenId, collectionName) {
   const metadata = await fetchMetadata(contractAddress, tokenId);
   const owner = await fetchOwner(contractAddress, tokenId);
@@ -129,12 +57,16 @@ async function buildFlexCard(contractAddress, tokenId, collectionName) {
     ? rawTraits.map(attr => `${attr.trait_type || attr.trait} / ${attr.value}`)
     : ['No traits found'];
 
-  const { rank, score } = await fetchRarity(contractAddress, tokenId);
-  const totalSupply = await fetchTotalSupply(contractAddress);
-  const mintedDate = await fetchMintedDate(contractAddress, tokenId);
-
   const safeCollectionName = collectionName || metadata?.name || 'NFT';
   const openseaUrl = `https://opensea.io/assets/ethereum/${contractAddress}/${tokenId}`;
+
+  // 💡 New: Extras from unified metadata fetcher
+  const extras = await fetchMetadataExtras(contractAddress, tokenId, 'ethereum');
+
+  // ✅ Optional logs
+  if (extras.rank === 'Unavailable' || extras.score === '—') {
+    console.warn(`⚠️ Incomplete rarity for Token ${tokenId} — Rank: ${extras.rank}, Score: ${extras.score}`);
+  }
 
   return await generateFlexCard({
     nftImageUrl,
@@ -143,11 +75,7 @@ async function buildFlexCard(contractAddress, tokenId, collectionName) {
     traits,
     owner: ownerDisplay,
     openseaUrl,
-    rank,
-    score,
-    mintedDate,
-    network: 'Ethereum',
-    totalSupply
+    ...extras // Injects: mintedDate, rank, score, network, totalSupply
   });
 }
 
