@@ -1,15 +1,5 @@
 const { SlashCommandBuilder } = require('discord.js');
 
-// Optional timeout helper
-async function withTimeout(promise, ms = 20000) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error('⏱️ Timeout')), ms)
-    )
-  ]);
-}
-
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('flex')
@@ -83,28 +73,24 @@ module.exports = {
     };
 
     try {
-      // Defer immediately
+      // 🕒 Immediately defer to prevent Discord 3-second timeout
       await interaction.deferReply({ ephemeral: false });
 
       const modulePath = moduleMap[sub];
       if (!modulePath) throw new Error(`❌ Unknown subcommand: ${sub}`);
 
       const handler = require(modulePath);
-      await withTimeout(handler.execute(interaction), 25000); // 25s safety cap
+      await handler.execute(interaction); // ❌ Do NOT wrap this in withTimeout
 
     } catch (err) {
       console.error(`❌ Flex ${sub} error:`, err);
 
       try {
+        const msg = { content: '❌ Something went wrong while flexing.' };
         if (interaction.deferred || interaction.replied) {
-          await interaction.editReply({
-            content: '❌ Something went wrong while flexing.'
-          });
+          await interaction.editReply(msg);
         } else {
-          await interaction.reply({
-            content: '❌ Flex failed before it could even start.',
-            ephemeral: true
-          });
+          await interaction.reply({ ...msg, ephemeral: true });
         }
       } catch (fail) {
         console.warn('⚠️ Could not respond to interaction:', fail.message);
