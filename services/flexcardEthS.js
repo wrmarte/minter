@@ -21,8 +21,10 @@ async function fetchMetadata(contractAddress, tokenId) {
     const metadataUrl = tokenURI.startsWith('ipfs://')
       ? tokenURI.replace('ipfs://', 'https://ipfs.io/ipfs/')
       : tokenURI;
+
     const res = await fetch(metadataUrl);
-    return await res.json();
+    const data = await res.json();
+    return data || {};
   } catch (err) {
     console.error('❌ Metadata fetch failed (ETH):', err);
     return {};
@@ -44,16 +46,25 @@ async function buildFlexCard(contractAddress, tokenId, collectionName) {
   const owner = await fetchOwner(contractAddress, tokenId);
   const ownerDisplay = shortenAddress(owner);
 
+  // Fallback for image
   let nftImageUrl = metadata?.image || 'https://i.imgur.com/EVQFHhA.png';
   if (nftImageUrl.startsWith('ipfs://')) {
     nftImageUrl = nftImageUrl.replace('ipfs://', 'https://ipfs.io/ipfs/');
   }
 
-  const traits = Array.isArray(metadata?.attributes) && metadata.attributes.length > 0
-    ? metadata.attributes.map(attr => `${attr.trait_type} / ${attr.value}`)
+  // Trait extraction with fallback
+  let rawTraits = metadata?.attributes || metadata?.traits || [];
+  const traits = Array.isArray(rawTraits) && rawTraits.length > 0
+    ? rawTraits.map(attr => `${attr.trait_type || attr.trait} / ${attr.value}`)
     : ['No traits found'];
 
+  const rank = metadata?.rank ?? metadata?.rarity_rank ?? 'N/A';
+  const score = metadata?.score ?? metadata?.rarity_score ?? 'N/A';
+
+  const mintedDate = metadata?.minted_date ?? null;
+  const totalSupply = metadata?.total_supply ?? 'N/A';
   const safeCollectionName = collectionName || metadata?.name || 'NFT';
+
   const openseaUrl = `https://opensea.io/assets/ethereum/${contractAddress}/${tokenId}`;
 
   return await generateFlexCard({
@@ -62,8 +73,14 @@ async function buildFlexCard(contractAddress, tokenId, collectionName) {
     tokenId,
     traits,
     owner: ownerDisplay,
-    openseaUrl
+    openseaUrl,
+    rank,
+    score,
+    mintedDate,
+    network: 'Ethereum',
+    totalSupply
   });
 }
 
 module.exports = { buildFlexCard };
+
