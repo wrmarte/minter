@@ -45,11 +45,22 @@ async function fetchMintDate(contract, tokenId, network) {
       });
       const json = await res.json();
 
-      const mintTx = json.result?.find(tx => tx.from_address === '0x0000000000000000000000000000000000000000');
+      if (!Array.isArray(json.result)) {
+        console.warn(`⚠️ Unexpected Moralis response for ${tokenId}:`, JSON.stringify(json, null, 2));
+        return null;
+      }
+
+      const mintTx = json.result.find(tx =>
+        tx.from_address?.toLowerCase() === '0x0000000000000000000000000000000000000000'
+      );
 
       if (mintTx?.block_timestamp) {
         const dateObj = new Date(mintTx.block_timestamp);
-        return format(dateObj, 'yyyy-MM-dd HH:mm');
+        const formatted = format(dateObj, 'yyyy-MM-dd HH:mm');
+        console.log(`📅 ETH Minted Date for Token ${tokenId}: ${formatted}`);
+        return formatted;
+      } else {
+        console.warn(`⚠️ No ETH mint transfer found for ${contract} Token ${tokenId}`);
       }
     }
   } catch (err) {
@@ -57,6 +68,7 @@ async function fetchMintDate(contract, tokenId, network) {
   }
   return null;
 }
+
 
 async function fetchRarityRankReservoir(contract, tokenId) {
   try {
