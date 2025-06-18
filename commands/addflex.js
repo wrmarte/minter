@@ -33,7 +33,12 @@ module.exports = {
     const network = interaction.options.getString('network');
     const guildId = interaction.guild.id;
 
+    let replied = false;
+
     try {
+      await interaction.deferReply({ ephemeral: true });
+      replied = true;
+
       // ✅ Ensure table exists
       await pg.query(`
         CREATE TABLE IF NOT EXISTS flex_projects (
@@ -78,16 +83,24 @@ module.exports = {
           network = EXCLUDED.network
       `, [guildId, name, address, network]);
 
-      return interaction.reply(`✅ Project **${name}** added for flexing on **${network.toUpperCase()}**.`);
+      return interaction.editReply(`✅ Project **${name}** added for flexing on **${network.toUpperCase()}**.`);
     } catch (err) {
       console.error('❌ Error in /addflex:', err);
-      return interaction.reply({
+
+      const message = {
         content: `❌ Error while saving project:\n\`\`\`${err.message || err.toString()}\`\`\``,
         ephemeral: true
-      });
+      };
+
+      if (replied || interaction.deferred || interaction.replied) {
+        return interaction.editReply(message);
+      } else {
+        return interaction.reply(message);
+      }
     }
   }
 };
+
 
 
 
