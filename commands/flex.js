@@ -75,38 +75,36 @@ module.exports = {
 
   async execute(interaction) {
     const sub = interaction.options.getSubcommand();
-    let replied = false;
+    const moduleMap = {
+      random: '../services/flexrandom',
+      card: '../services/flexcard',
+      plus: '../services/flexplus',
+      duo: '../services/flexduo'
+    };
 
     try {
-      // 🕒 Defer reply if not yet replied
-      if (!interaction.deferred && !interaction.replied) {
-        await interaction.deferReply({ ephemeral: false });
-        replied = true;
-      }
-
-      const moduleMap = {
-        random: '../services/flexrandom',
-        card: '../services/flexcard',
-        plus: '../services/flexplus',
-        duo: '../services/flexduo'
-      };
+      // Defer immediately
+      await interaction.deferReply({ ephemeral: false });
 
       const modulePath = moduleMap[sub];
       if (!modulePath) throw new Error(`❌ Unknown subcommand: ${sub}`);
 
       const handler = require(modulePath);
-      return await withTimeout(handler.execute(interaction), 20000);
+      await withTimeout(handler.execute(interaction), 25000); // 25s safety cap
 
     } catch (err) {
       console.error(`❌ Flex ${sub} error:`, err);
 
       try {
-        const errorMsg = { content: '❌ Something went wrong while flexing.' };
-
-        if (replied || interaction.deferred || interaction.replied) {
-          await interaction.editReply(errorMsg);
+        if (interaction.deferred || interaction.replied) {
+          await interaction.editReply({
+            content: '❌ Something went wrong while flexing.'
+          });
         } else {
-          await interaction.reply({ ...errorMsg, ephemeral: true });
+          await interaction.reply({
+            content: '❌ Flex failed before it could even start.',
+            ephemeral: true
+          });
         }
       } catch (fail) {
         console.warn('⚠️ Could not respond to interaction:', fail.message);
@@ -114,11 +112,3 @@ module.exports = {
     }
   }
 };
-
-
-
-
-
-
-
-
