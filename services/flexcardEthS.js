@@ -77,17 +77,15 @@ async function fetchMintedDate(contractAddress, tokenId) {
     const iface = new Interface([
       'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)'
     ]);
-    const zeroAddress = '0x0000000000000000000000000000000000000000';
+
     const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+    const fromTopic = '0x0000000000000000000000000000000000000000000000000000000000000000'; // 32-byte padded
 
     const logs = await provider.getLogs({
       address: contractAddress,
-      fromBlock: 0,
+      fromBlock: '0x0',
       toBlock: 'latest',
-      topics: [
-        TRANSFER_TOPIC,
-        `0x${zeroAddress.slice(2).padStart(64, '0')}`
-      ]
+      topics: [TRANSFER_TOPIC, fromTopic]
     });
 
     for (const log of logs) {
