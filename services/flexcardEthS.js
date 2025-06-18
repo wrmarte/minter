@@ -46,17 +46,43 @@ async function fetchOwner(contractAddress, tokenId) {
 }
 
 async function fetchRarity(contractAddress, tokenId) {
+  const lowerAddr = contractAddress.toLowerCase();
+
+  // Try TraitSniper first
   try {
-    const url = `https://api.traitsniper.com/v1/collections/${contractAddress.toLowerCase()}/tokens/${tokenId}`;
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`TraitSniper response not ok: ${res.statusText}`);
-    const json = await res.json();
+    const tsUrl = `https://api.traitsniper.com/v1/collections/${lowerAddr}/tokens/${tokenId}`;
+    const tsRes = await fetch(tsUrl);
+    if (tsRes.ok) {
+      const json = await tsRes.json();
+      return {
+        rank: json?.rank || 'N/A',
+        score: json?.score || 'N/A'
+      };
+    }
+  } catch (e) {
+    console.warn('⚠️ TraitSniper error:', e.message);
+  }
+
+  // Fallback to Reservoir
+  try {
+    const resUrl = `https://api.reservoir.tools/tokens/v6?tokens=ethereum:${lowerAddr}:${tokenId}`;
+    const resRes = await fetch(resUrl, {
+      headers: {
+        'Accept': '*/*',
+        'x-api-key': process.env.RESERVOIR_API_KEY || '' // optional
+      }
+    });
+
+    if (!resRes.ok) throw new Error('Reservoir error');
+    const json = await resRes.json();
+
+    const token = json?.tokens?.[0]?.token;
     return {
-      rank: json?.rank || 'N/A',
-      score: json?.score || 'N/A'
+      rank: token?.rarityRank?.toString() || 'N/A',
+      score: token?.rarityScore?.toFixed(2) || 'N/A'
     };
   } catch (e) {
-    console.warn('⚠️ TraitSniper fallback:', e.message);
+    console.warn('⚠️ Reservoir rarity fallback failed:', e.message);
     return { rank: 'N/A', score: 'N/A' };
   }
 }
