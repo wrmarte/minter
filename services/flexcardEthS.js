@@ -10,8 +10,6 @@ const abi = [
 
 const provider = new JsonRpcProvider('https://eth.llamarpc.com');
 
-
-
 function shortenAddress(address) {
   if (!address || address.length < 10) return address || 'Unknown';
   return `${address.substring(0, 6)}...${address.substring(address.length - 4)}`;
@@ -94,6 +92,7 @@ async function fetchMintedDate(contractAddress, tokenId) {
     });
 
     for (const log of logs) {
+      console.log(`🔍 Checking mint log for token ${tokenId}:`, log);
       const decoded = iface.parseLog(log);
       if (decoded?.args?.tokenId?.toString() === tokenId.toString()) {
         const block = await provider.getBlock(log.blockNumber);
@@ -151,8 +150,8 @@ async function buildFlexCard(contractAddress, tokenId, collectionName) {
     totalSupply
   });
 }
-console.log(`Checking mint log for token ${tokenId}:`, log);
 
 module.exports = { buildFlexCard };
+
 
 
