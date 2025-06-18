@@ -5,7 +5,7 @@ const { generateFlexCard } = require('../utils/canvas/flexcardRenderer');
 const abi = [
   'function tokenURI(uint256 tokenId) view returns (string)',
   'function ownerOf(uint256 tokenId) view returns (address)',
-  'function totalSupply() view returns (uint256)' // optional, used if public
+  'function totalSupply() view returns (uint256)'
 ];
 
 const provider = new JsonRpcProvider('https://eth.llamarpc.com');
@@ -61,13 +61,28 @@ async function fetchRarity(contractAddress, tokenId) {
   }
 }
 
-async function fetchTotalSupply(contractAddress) {
+async function fetchMintedDate(contractAddress, tokenId) {
   try {
-    const contract = new Contract(contractAddress, abi, provider);
-    return (await contract.totalSupply())?.toString();
+    const topic = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'; // Transfer
+    const zeroAddress = '0x0000000000000000000000000000000000000000';
+    const tokenHex = '0x' + BigInt(tokenId).toString(16).padStart(64, '0');
+
+    const logs = await provider.getLogs({
+      address: contractAddress,
+      fromBlock: 0,
+      toBlock: 'latest',
+      topics: [topic, `0x${zeroAddress.slice(2).padStart(64, '0')}`, null, tokenHex]
+    });
+
+    if (logs.length > 0) {
+      const block = await provider.getBlock(logs[0].blockNumber);
+      return new Date(block.timestamp * 1000).toISOString().split('T')[0]; // YYYY-MM-DD
+    }
+
+    return null;
   } catch (err) {
-    console.warn('⚠️ Total supply fetch failed:', err.message);
-    return 'N/A';
+    console.warn('⚠️ Minted date fetch failed:', err.message);
+    return null;
   }
 }
 
@@ -85,8 +100,8 @@ async function buildFlexCard(contractAddress, tokenId, collectionName) {
 
   const { rank, score } = await fetchRarity(contractAddress, tokenId);
   const totalSupply = await fetchTotalSupply(contractAddress);
+  const mintedDate = await fetchMintedDate(contractAddress, tokenId);
 
-  const mintedDate = metadata?.minted_date ?? null; // Placeholder only, true date requires Transfer event lookup
   const safeCollectionName = collectionName || metadata?.name || 'NFT';
   const openseaUrl = `https://opensea.io/assets/ethereum/${contractAddress}/${tokenId}`;
 
@@ -105,5 +120,16 @@ async function buildFlexCard(contractAddress, tokenId, collectionName) {
   });
 }
 
+async function fetchTotalSupply(contractAddress) {
+  try {
+    const contract = new Contract(contractAddress, abi, provider);
+    return (await contract.totalSupply())?.toString();
+  } catch (err) {
+    console.warn('⚠️ Total supply fetch failed:', err.message);
+    return 'N/A';
+  }
+}
+
 module.exports = { buildFlexCard };
+
 
