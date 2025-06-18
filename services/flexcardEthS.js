@@ -1,4 +1,4 @@
-const { JsonRpcProvider, Contract } = require('ethers');
+const { JsonRpcProvider, Contract, utils } = require('ethers');
 const fetch = require('node-fetch');
 const { generateFlexCard } = require('../utils/canvas/flexcardRenderer');
 
@@ -46,69 +46,73 @@ async function fetchOwner(contractAddress, tokenId) {
 }
 
 async function fetchRarity(contractAddress, tokenId) {
-  const lowerAddr = contractAddress.toLowerCase();
-
-  // Try TraitSniper first
   try {
-    const tsUrl = `https://api.traitsniper.com/v1/collections/${lowerAddr}/tokens/${tokenId}`;
-    const tsRes = await fetch(tsUrl);
-    if (tsRes.ok) {
-      const json = await tsRes.json();
-      return {
-        rank: json?.rank || 'N/A',
-        score: json?.score || 'N/A'
-      };
-    }
-  } catch (e) {
-    console.warn('⚠️ TraitSniper error:', e.message);
-  }
-
-  // Fallback to Reservoir
-  try {
-    const resUrl = `https://api.reservoir.tools/tokens/v6?tokens=ethereum:${lowerAddr}:${tokenId}`;
-    const resRes = await fetch(resUrl, {
+    const url = `https://api.opensea.io/api/v2/chain/ethereum/contract/${contractAddress}/nfts/${tokenId}`;
+    const res = await fetch(url, {
       headers: {
-        'Accept': '*/*',
-        'x-api-key': process.env.RESERVOIR_API_KEY || '' // optional
+        'Accept': 'application/json',
+        'X-API-KEY': process.env.OPENSEA_API_KEY || ''
       }
     });
 
-    if (!resRes.ok) throw new Error('Reservoir error');
-    const json = await resRes.json();
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`OpenSea error ${res.status}: ${errText}`);
+    }
 
-    const token = json?.tokens?.[0]?.token;
+    const json = await res.json();
+    const rarity = json?.nft?.rarity;
+
     return {
-      rank: token?.rarityRank?.toString() || 'N/A',
-      score: token?.rarityScore?.toFixed(2) || 'N/A'
+      rank: rarity?.rank ? `#${rarity.rank}` : 'N/A',
+      score: rarity?.score?.toFixed(2) ?? 'N/A'
     };
-  } catch (e) {
-    console.warn('⚠️ Reservoir rarity fallback failed:', e.message);
+  } catch (err) {
+    console.warn('⚠️ OpenSea rarity fetch failed:', err.message);
     return { rank: 'N/A', score: 'N/A' };
   }
 }
 
 async function fetchMintedDate(contractAddress, tokenId) {
   try {
-    const topic = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'; // Transfer
+    const iface = new utils.Interface([
+      'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)'
+    ]);
+    const topic = iface.getEventTopic('Transfer');
     const zeroAddress = '0x0000000000000000000000000000000000000000';
-    const tokenHex = '0x' + BigInt(tokenId).toString(16).padStart(64, '0');
 
     const logs = await provider.getLogs({
       address: contractAddress,
       fromBlock: 0,
       toBlock: 'latest',
-      topics: [topic, `0x${zeroAddress.slice(2).padStart(64, '0')}`, null, tokenHex]
+      topics: [
+        topic,
+        `0x${zeroAddress.slice(2).padStart(64, '0')}` // from = 0x0
+      ]
     });
 
-    if (logs.length > 0) {
-      const block = await provider.getBlock(logs[0].blockNumber);
-      return new Date(block.timestamp * 1000).toISOString().split('T')[0]; // YYYY-MM-DD
+    for (const log of logs) {
+      const decoded = iface.parseLog(log);
+      if (decoded?.args?.tokenId?.toString() === tokenId.toString()) {
+        const block = await provider.getBlock(log.blockNumber);
+        return new Date(block.timestamp * 1000).toISOString().split('T')[0];
+      }
     }
 
     return null;
   } catch (err) {
     console.warn('⚠️ Minted date fetch failed:', err.message);
     return null;
+  }
+}
+
+async function fetchTotalSupply(contractAddress) {
+  try {
+    const contract = new Contract(contractAddress, abi, provider);
+    return (await contract.totalSupply())?.toString();
+  } catch (err) {
+    console.warn('⚠️ Total supply fetch failed:', err.message);
+    return 'N/A';
   }
 }
 
@@ -144,16 +148,6 @@ async function buildFlexCard(contractAddress, tokenId, collectionName) {
     network: 'Ethereum',
     totalSupply
   });
-}
-
-async function fetchTotalSupply(contractAddress) {
-  try {
-    const contract = new Contract(contractAddress, abi, provider);
-    return (await contract.totalSupply())?.toString();
-  } catch (err) {
-    console.warn('⚠️ Total supply fetch failed:', err.message);
-    return 'N/A';
-  }
 }
 
 module.exports = { buildFlexCard };
