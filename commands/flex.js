@@ -78,7 +78,7 @@ module.exports = {
     let replied = false;
 
     try {
-      // ✅ Defer early
+      // 🕒 Defer reply if not yet replied
       if (!interaction.deferred && !interaction.replied) {
         await interaction.deferReply({ ephemeral: false });
         replied = true;
@@ -101,10 +101,12 @@ module.exports = {
       console.error(`❌ Flex ${sub} error:`, err);
 
       try {
+        const errorMsg = { content: '❌ Something went wrong while flexing.' };
+
         if (replied || interaction.deferred || interaction.replied) {
-          await interaction.editReply({ content: '❌ Something went wrong while flexing.' });
+          await interaction.editReply(errorMsg);
         } else {
-          await interaction.reply({ content: '❌ Something went wrong while flexing.', ephemeral: true });
+          await interaction.reply({ ...errorMsg, ephemeral: true });
         }
       } catch (fail) {
         console.warn('⚠️ Could not respond to interaction:', fail.message);
@@ -112,6 +114,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
