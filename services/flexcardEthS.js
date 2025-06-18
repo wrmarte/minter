@@ -60,7 +60,6 @@ async function buildFlexCard(contractAddress, tokenId, collectionName) {
 
   const rank = metadata?.rank ?? metadata?.rarity_rank ?? 'N/A';
   const score = metadata?.score ?? metadata?.rarity_score ?? 'N/A';
-
   const mintedDate = metadata?.minted_date ?? null;
   const totalSupply = metadata?.total_supply ?? 'N/A';
   const safeCollectionName = collectionName || metadata?.name || 'NFT';
