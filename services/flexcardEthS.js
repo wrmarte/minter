@@ -1,4 +1,4 @@
-const { JsonRpcProvider, Contract, utils } = require('ethers');
+const { JsonRpcProvider, Contract, Interface } = require('ethers');
 const fetch = require('node-fetch');
 const { generateFlexCard } = require('../utils/canvas/flexcardRenderer');
 
@@ -75,7 +75,7 @@ async function fetchRarity(contractAddress, tokenId) {
 
 async function fetchMintedDate(contractAddress, tokenId) {
   try {
-    const iface = new utils.Interface([
+    const iface = new Interface([
       'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)'
     ]);
     const topic = iface.getEventTopic('Transfer');
@@ -87,7 +87,7 @@ async function fetchMintedDate(contractAddress, tokenId) {
       toBlock: 'latest',
       topics: [
         topic,
-        `0x${zeroAddress.slice(2).padStart(64, '0')}` // from = 0x0
+        `0x${zeroAddress.slice(2).padStart(64, '0')}`
       ]
     });
 
@@ -152,6 +152,7 @@ async function buildFlexCard(contractAddress, tokenId, collectionName) {
 }
 
 module.exports = { buildFlexCard };
+
 
 
 
