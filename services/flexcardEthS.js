@@ -72,29 +72,27 @@ async function fetchRarity(contractAddress, tokenId) {
     return { rank: 'N/A', score: 'N/A' };
   }
 }
-
 async function fetchMintedDate(contractAddress, tokenId) {
   try {
     const iface = new Interface([
       'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)'
     ]);
-    const topic = iface.getEventTopic('Transfer');
     const zeroAddress = '0x0000000000000000000000000000000000000000';
+    const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 
     const logs = await provider.getLogs({
       address: contractAddress,
       fromBlock: 0,
       toBlock: 'latest',
       topics: [
-        topic,
+        TRANSFER_TOPIC,
         `0x${zeroAddress.slice(2).padStart(64, '0')}`
       ]
     });
 
     for (const log of logs) {
-      console.log(`🔍 Checking mint log for token ${tokenId}:`, log);
-      const decoded = iface.parseLog(log);
-      if (decoded?.args?.tokenId?.toString() === tokenId.toString()) {
+      const decoded = iface.decodeEventLog('Transfer', log.data, log.topics);
+      if (decoded?.tokenId?.toString() === tokenId.toString()) {
         const block = await provider.getBlock(log.blockNumber);
         return new Date(block.timestamp * 1000).toISOString().split('T')[0];
       }
