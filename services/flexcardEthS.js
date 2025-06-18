@@ -79,18 +79,19 @@ async function fetchMintedDate(contractAddress, tokenId) {
     ]);
 
     const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
-    const fromTopic = '0x0000000000000000000000000000000000000000000000000000000000000000'; // 32-byte padded
 
     const logs = await provider.getLogs({
       address: contractAddress,
       fromBlock: '0x0',
       toBlock: 'latest',
-      topics: [TRANSFER_TOPIC, fromTopic]
+      topics: [TRANSFER_TOPIC] // 🛡 only topic[0], no topic[1] = fix
     });
 
     for (const log of logs) {
       const decoded = iface.decodeEventLog('Transfer', log.data, log.topics);
-      if (decoded?.tokenId?.toString() === tokenId.toString()) {
+      const from = decoded?.from?.toLowerCase();
+      const id = decoded?.tokenId?.toString();
+      if (from === '0x0000000000000000000000000000000000000000' && id === tokenId.toString()) {
         const block = await provider.getBlock(log.blockNumber);
         return new Date(block.timestamp * 1000).toISOString().split('T')[0];
       }
@@ -102,6 +103,7 @@ async function fetchMintedDate(contractAddress, tokenId) {
     return null;
   }
 }
+
 
 async function fetchTotalSupply(contractAddress) {
   try {
