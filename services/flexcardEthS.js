@@ -73,37 +73,67 @@ async function fetchRarity(contractAddress, tokenId) {
   }
 }
 async function fetchMintedDate(contractAddress, tokenId) {
-  try {
-    const iface = new Interface([
-      'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)'
-    ]);
+  const MORALIS_API_KEY = process.env.MORALIS_API_KEY;
+  const iface = new Interface([
+    'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)'
+  ]);
+  const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 
-    const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+  try {
+    // Limit to last ~500k blocks to avoid RPC rejection
+    const latest = await provider.getBlockNumber();
+    const fromBlock = latest - 500_000;
 
     const logs = await provider.getLogs({
       address: contractAddress,
-      fromBlock: '0x0',
+      fromBlock,
       toBlock: 'latest',
-      topics: [TRANSFER_TOPIC] // 🛡 only topic[0], no topic[1] = fix
+      topics: [TRANSFER_TOPIC]
     });
 
     for (const log of logs) {
       const decoded = iface.decodeEventLog('Transfer', log.data, log.topics);
-      const from = decoded?.from?.toLowerCase();
-      const id = decoded?.tokenId?.toString();
-      if (from === '0x0000000000000000000000000000000000000000' && id === tokenId.toString()) {
+      if (
+        decoded?.from?.toLowerCase() === '0x0000000000000000000000000000000000000000' &&
+        decoded?.tokenId?.toString() === tokenId.toString()
+      ) {
         const block = await provider.getBlock(log.blockNumber);
         return new Date(block.timestamp * 1000).toISOString().split('T')[0];
       }
     }
 
-    return null;
+    console.log('🔁 RPC fallback failed, switching to Moralis...');
   } catch (err) {
-    console.warn('⚠️ Minted date fetch failed:', err.message);
-    return null;
+    console.warn('⚠️ RPC log scan failed:', err.message);
   }
-}
 
+  // ✅ Moralis fallback
+  if (MORALIS_API_KEY) {
+    try {
+      const url = `https://deep-index.moralis.io/api/v2.2/nft/${contractAddress}/transfers?chain=eth&format=decimal&limit=50&token_id=${tokenId}`;
+      const res = await fetch(url, {
+        headers: {
+          'X-API-Key': MORALIS_API_KEY,
+          'Accept': 'application/json'
+        }
+      });
+
+      const json = await res.json();
+      const transfers = json?.result || [];
+
+      for (const tx of transfers) {
+        if (tx.from_address === '0x0000000000000000000000000000000000000000') {
+          const timestamp = tx.block_timestamp;
+          return timestamp?.split('T')[0] || null; // yyyy-mm-dd
+        }
+      }
+    } catch (err) {
+      console.warn('⚠️ Moralis fetch failed:', err.message);
+    }
+  }
+
+  return null;
+}
 
 async function fetchTotalSupply(contractAddress) {
   try {
