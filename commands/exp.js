@@ -47,9 +47,9 @@ module.exports = {
     if (!res.rows.length && !flavorMap[name]) {
       await interaction.deferReply();
       try {
-        let aiResponse = await getGroqAI(name, userMention);
+        let aiResponse = await smartAIResponse(name, userMention);
         const embed = new EmbedBuilder()
-          .setDescription(aiResponse)
+          .setDescription(`💬 ${aiResponse}`)
           .setColor(getRandomColor());
         return await interaction.editReply({ embeds: [embed] });
       } catch (err) {
@@ -133,7 +133,21 @@ module.exports = {
   }
 };
 
-// 🔧 Groq AI with mention-safe system
+// 🧠 AI Stack with fallback to multiple providers
+async function smartAIResponse(keyword, userMention) {
+  try {
+    return await getGroqAI(keyword, userMention);
+  } catch (e1) {
+    console.warn('❌ Groq failed, trying OpenAI');
+    try {
+      return await getOpenAI(keyword, userMention);
+    } catch (e2) {
+      console.warn('❌ OpenAI failed');
+      return `🧠 ${userMention} tried to flex "${keyword}" but confused every AI out there.`;
+    }
+  }
+}
+
 async function getGroqAI(keyword, userMention) {
   const url = 'https://api.groq.com/openai/v1/chat/completions';
   const apiKey = process.env.GROQ_API_KEY;
@@ -168,9 +182,40 @@ async function getGroqAI(keyword, userMention) {
   return cleanQuotes(replaced);
 }
 
+async function getOpenAI(keyword, userMention) {
+  const res = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      model: 'gpt-3.5-turbo',
+      messages: [
+        {
+          role: 'system',
+          content: 'You are a witty and sarcastic Discord bot that talks like a Web3 degenerate.'
+        },
+        {
+          role: 'user',
+          content: `Make a short sharp comment for someone expressing "${keyword}". Mention {user}.`
+        }
+      ],
+      max_tokens: 60,
+      temperature: 1.1
+    })
+  });
+
+  const json = await res.json();
+  const rawReply = json?.choices?.[0]?.message?.content;
+  if (!rawReply) throw new Error('OpenAI gave no response');
+  return cleanQuotes(rawReply).replace(/{user}/gi, userMention);
+}
+
 function cleanQuotes(text) {
   return text.replace(/^"(.*)"$/, '$1').trim();
 }
+
 
 
 
