@@ -7,7 +7,9 @@ module.exports = {
     .addStringOption(opt =>
       opt.setName('name')
         .setDescription('Contract name to stop tracking')
-        .setRequired(true))
+        .setRequired(true)
+        .setAutocomplete(true)
+    )
     .addStringOption(opt =>
       opt.setName('chain')
         .setDescription('Which chain to stop tracking?')
@@ -16,7 +18,30 @@ module.exports = {
           { name: 'Base', value: 'base' },
           { name: 'Ethereum', value: 'eth' },
           { name: 'ApeChain', value: 'ape' }
-        )),
+        )
+    ),
+
+  async autocomplete(interaction) {
+    const pg = interaction.client.pg;
+    const focused = interaction.options.getFocused();
+    const chain = interaction.options.getString('chain');
+
+    try {
+      const query = chain
+        ? `SELECT name FROM contract_watchlist WHERE chain = $1`
+        : `SELECT name FROM contract_watchlist`;
+      const values = chain ? [chain] : [];
+
+      const res = await pg.query(query, values);
+      const names = res.rows.map(r => r.name);
+      const filtered = names.filter(n => n.toLowerCase().includes(focused.toLowerCase())).slice(0, 25);
+
+      await interaction.respond(filtered.map(name => ({ name, value: name })));
+    } catch (err) {
+      console.warn('❌ Autocomplete error in untrackmintplus:', err);
+      await interaction.respond([]);
+    }
+  },
 
   async execute(interaction) {
     const pg = interaction.client.pg;
