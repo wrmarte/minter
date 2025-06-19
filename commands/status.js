@@ -2,9 +2,8 @@ const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 const { getProvider } = require('../services/provider');
 const contractListeners = require('../services/mintProcessor').contractListeners;
 const { statSync } = require('fs');
-const fetch = require('node-fetch');
 const version = require('../package.json').version;
-
+const { buildUltraFlexCard } = require('../services/ultraFlexService'); // ✅ Actual test
 let mintProcessorStartTime = Date.now();
 
 module.exports = {
@@ -22,9 +21,7 @@ module.exports = {
     try {
       await pg.query('SELECT 1');
       dbStatus = '🟢 Connected';
-    } catch {
-      dbStatus = '🔴 Failed';
-    }
+    } catch {}
 
     let rpcStatus = '🔴 Failed';
     let blockNum = 'N/A';
@@ -32,9 +29,7 @@ module.exports = {
       const block = await getProvider().getBlockNumber();
       rpcStatus = '🟢 Live';
       blockNum = `#${block}`;
-    } catch {
-      rpcStatus = '🔴 Failed';
-    }
+    } catch {}
 
     const discordStatus = client.ws.status === 0 ? '🟢 Connected' : '🔴 Disconnected';
 
@@ -43,17 +38,13 @@ module.exports = {
     try {
       activeListeners = Object.keys(contractListeners || {}).length;
       mintStatus = activeListeners > 0 ? `🟢 ${activeListeners} Active` : '🟠 No listeners';
-    } catch {
-      mintStatus = '🔴 Error';
-    }
+    } catch {}
 
     let commandCount = 0;
     try {
       const appCmds = await client.application.commands.fetch();
       commandCount = appCmds.size;
-    } catch {
-      commandCount = 0;
-    }
+    } catch {}
 
     const totalGuilds = client.guilds.cache.size;
 
@@ -61,35 +52,25 @@ module.exports = {
     try {
       const flexRes = await pg.query('SELECT COUNT(*) FROM flex_projects');
       flexProjects = parseInt(flexRes.rows[0].count);
-    } catch {
-      flexProjects = 0;
-    }
+    } catch {}
 
     let nftContracts = 0;
     try {
       const nftRes = await pg.query('SELECT COUNT(*) FROM contract_watchlist');
       nftContracts = parseInt(nftRes.rows[0].count);
-    } catch {
-      nftContracts = 0;
-    }
+    } catch {}
 
     let tokensTracked = 0;
     try {
       const tokenRes = await pg.query('SELECT COUNT(*) FROM tracked_tokens');
       tokensTracked = parseInt(tokenRes.rows[0].count);
-    } catch {
-      tokensTracked = 0;
-    }
+    } catch {}
 
     const uptimeMs = process.uptime() * 1000;
-    const uptimeHours = Math.floor(uptimeMs / 3600000);
-    const uptimeMinutes = Math.floor((uptimeMs % 3600000) / 60000);
-    const uptime = `${uptimeHours}h ${uptimeMinutes}m`;
+    const uptime = `${Math.floor(uptimeMs / 3600000)}h ${Math.floor((uptimeMs % 3600000) / 60000)}m`;
 
     const mintUptimeMs = Date.now() - mintProcessorStartTime;
-    const mintUptimeHours = Math.floor(mintUptimeMs / 3600000);
-    const mintUptimeMinutes = Math.floor((mintUptimeMs % 3600000) / 60000);
-    const mintUptime = `${mintUptimeHours}h ${mintUptimeMinutes}m`;
+    const mintUptime = `${Math.floor(mintUptimeMs / 3600000)}h ${Math.floor((mintUptimeMs % 3600000) / 60000)}m`;
 
     const memoryUsage = `${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1)} MB`;
 
@@ -99,11 +80,28 @@ module.exports = {
       lastEventTime = `<t:${Math.floor(seenStats.mtimeMs / 1000)}:R>`;
     } catch {}
 
+    // ✅ FlexCard Generator Check (real renderer test)
     let flexcardStatus = '🟠 Unknown';
     try {
-      const flexPing = await fetch('https://api.flexcard.healthcheck'); // optional real health check
-      flexcardStatus = flexPing.ok ? '🟢 OK' : '🔴 Error';
-    } catch {
+      const testCard = await buildUltraFlexCard({
+        name: 'test',
+        image: 'https://via.placeholder.com/400x400.png?text=Test',
+        traits: [],
+        tokenId: '0',
+        owner: '0x0',
+        rank: 'N/A',
+        score: 'N/A',
+        mintedAt: 'N/A',
+        supply: 'N/A',
+        mintPrice: 'N/A',
+        floorPrice: 'N/A',
+        topTrait: 'N/A',
+        chain: 'base'
+      });
+      if (!testCard) throw new Error('Renderer returned null');
+      flexcardStatus = '🟢 OK';
+    } catch (e) {
+      console.warn('❌ FlexCard Generator error:', e.message);
       flexcardStatus = '🔴 Error';
     }
 
@@ -135,6 +133,7 @@ module.exports = {
     await interaction.editReply({ embeds: [embed] });
   }
 };
+
 
 
 
