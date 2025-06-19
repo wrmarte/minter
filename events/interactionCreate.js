@@ -160,6 +160,29 @@ module.exports = (client, pg) => {
       }
     }
 
+    // 🔁 AUTOCOMPLETE: /untrackmintplus
+if (commandName === 'untrackmintplus' && focused.name === 'name') {
+  const chain = interaction.options.getString('chain'); // may be null if not selected yet
+  const query = chain
+    ? `SELECT name FROM contract_watchlist WHERE chain = $1`
+    : `SELECT name FROM contract_watchlist`;
+  const params = chain ? [chain] : [];
+
+  try {
+    const res = await pg.query(query, params);
+    const names = res.rows
+      .map(r => r.name)
+      .filter(Boolean)
+      .filter(name => name.toLowerCase().includes(focused.value.toLowerCase()))
+      .slice(0, 25)
+      .map(name => ({ name, value: name }));
+    return await safeRespond(names);
+  } catch (err) {
+    console.warn('⚠️ Error fetching autocomplete for /untrackmintplus:', err.message);
+    return await safeRespond([]);
+  }
+}
+
     // ✅ SLASH COMMAND EXECUTION
     if (!interaction.isChatInputCommand()) return;
 
