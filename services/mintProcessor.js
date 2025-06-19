@@ -5,7 +5,6 @@ const { shortWalletLink, loadJson, saveJson, seenPath, seenSalesPath } = require
 const { getProvider } = require('./providerM');
 const delay = ms => new Promise(res => setTimeout(res, ms));
 
-
 const TOKEN_NAME_TO_ADDRESS = {
   'ADRIAN': '0x7e99075ce287f1cf8cbcaaa6a1c7894e404fd7ea'
 };
@@ -17,90 +16,87 @@ async function trackAllContracts(client) {
   const res = await pg.query('SELECT * FROM contract_watchlist');
   const contracts = res.rows;
 
-  for (const contractRow of contracts) {
-    const addressKey = contractRow.address.toLowerCase();
-    if (!contractListeners[addressKey]) {
-      contractListeners[addressKey] = [];
-    }
-    contractListeners[addressKey].push(contractRow);
+  // Group contracts by chain
+  const contractsByChain = {};
+  for (const row of contracts) {
+    const chain = row.chain || 'base';
+    if (!contractsByChain[chain]) contractsByChain[chain] = [];
+    contractsByChain[chain].push(row);
+
+    const addressKey = row.address.toLowerCase();
+    if (!contractListeners[addressKey]) contractListeners[addressKey] = [];
+    contractListeners[addressKey].push(row);
   }
 
-  for (const addressKey of Object.keys(contractListeners)) {
-    launchContractListener(client, addressKey, contractListeners[addressKey]);
+  // Launch 1 block listener per chain
+  for (const chain of Object.keys(contractsByChain)) {
+    setupChainBlockListener(client, chain, contractsByChain[chain]);
   }
 }
 
-function launchContractListener(client, addressKey, contractRows) {
-  const firstRow = contractRows[0];
-  const { name, address } = firstRow;
+function setupChainBlockListener(client, chain, contractRows) {
+  const provider = getProvider(chain);
+  if (provider[`_global_block_listener_${chain}`]) return;
+  provider[`_global_block_listener_${chain}`] = true;
 
-  const abi = [
+  const iface = new Interface([
     'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
     'function tokenURI(uint256 tokenId) view returns (string)'
-  ];
-  const iface = new Interface(abi);
-  const contract = new Contract(address, abi, getProvider(firstRow.chain || 'base'));
+  ]);
 
-  let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
-  let seenSales = new Set(loadJson(seenSalesPath(name)) || []);
+  provider.on('block', async (blockNumber) => {
+    const fromBlock = Math.max(blockNumber - 5, 0);
+    const toBlock = blockNumber;
 
-  const listenerKey = `${addressKey}_mint_listener`;
-  if (getProvider()[listenerKey]) {
-    console.log(`[${name}] Listener already active — skipping duplicate`);
-    return;
-  }
-  getProvider()[listenerKey] = true;
+    for (const row of contractRows) {
+      try {
+        const name = row.name;
+        const address = row.address.toLowerCase();
+        const filter = {
+          address,
+          topics: [id('Transfer(address,address,uint256)')],
+          fromBlock,
+          toBlock
+        };
 
-  getProvider().on('block', async (blockNumber) => {
-    try {
-      const fromBlock = Math.max(blockNumber - 5, 0);
-      const toBlock = blockNumber;
+        await delay(150); // 🧠 throttle each getLogs to avoid batch cap
+        const logs = await provider.getLogs(filter);
+        const contract = new Contract(address, iface.fragments, provider);
 
-      const filter = {
-        address,
-        topics: [id('Transfer(address,address,uint256)')],
-        fromBlock,
-        toBlock
-      };
+        let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
+        let seenSales = new Set(loadJson(seenSalesPath(name)) || []);
 
-      // ✅ THROTTLE TO AVOID "10 calls in 1 batch" ERROR
-      await delay(150);
-      const logs = await getProvider().getLogs(filter);
+        for (const log of logs) {
+          let parsed;
+          try { parsed = iface.parseLog(log); } catch { continue; }
+          const { from, to, tokenId } = parsed.args;
+          const tokenIdStr = tokenId.toString();
 
-      for (const log of logs) {
-        let parsed;
-        try { parsed = iface.parseLog(log); } catch { continue; }
-        const { from, to, tokenId } = parsed.args;
-        const tokenIdStr = tokenId.toString();
+          const allChannelIds = [...new Set([...(row.channel_ids || [])])];
 
-        if (from === ZeroAddress) {
-          if (seenTokenIds.has(tokenIdStr)) continue;
-          seenTokenIds.add(tokenIdStr);
-
-          const allChannelIds = [
-            ...new Set(contractRows.flatMap(row => [row.channel_ids].flat()))
-          ];
-          await handleMint(client, firstRow, contract, tokenId, to, allChannelIds);
-        } else {
-          if (seenSales.has(tokenIdStr)) continue;
-          seenSales.add(tokenIdStr);
-
-          const allChannelIds = [
-            ...new Set(contractRows.flatMap(row => [row.channel_ids].flat()))
-          ];
-          await handleSale(client, firstRow, contract, tokenId, from, to, log.transactionHash, allChannelIds);
+          if (from === ZeroAddress) {
+            if (seenTokenIds.has(tokenIdStr)) continue;
+            seenTokenIds.add(tokenIdStr);
+            await handleMint(client, row, contract, tokenId, to, allChannelIds);
+          } else {
+            if (seenSales.has(tokenIdStr)) continue;
+            seenSales.add(tokenIdStr);
+            await handleSale(client, row, contract, tokenId, from, to, log.transactionHash, allChannelIds);
+          }
         }
-      }
 
-      if (blockNumber % 10 === 0) {
-        saveJson(seenPath(name), [...seenTokenIds]);
-        saveJson(seenSalesPath(name), [...seenSales]);
+        if (blockNumber % 10 === 0) {
+          saveJson(seenPath(name), [...seenTokenIds]);
+          saveJson(seenSalesPath(name), [...seenSales]);
+        }
+      } catch (err) {
+        console.warn(`[${row.name}] Block processing error: ${err.message}`);
       }
-    } catch (err) {
-      console.warn(`[${name}] Block processing error: ${err.message}`);
     }
   });
 }
+
+// (unchanged handleMint / handleSale functions below)
 
 async function handleMint(client, contractRow, contract, tokenId, to, channel_ids) {
   const { name, mint_price, mint_token, mint_token_symbol } = contractRow;
@@ -116,9 +112,9 @@ async function handleMint(client, contractRow, contract, tokenId, to, channel_id
   } catch {}
 
   const total = Number(mint_price);
-  let tokenAddr = mint_token.toLowerCase();
-  if (TOKEN_NAME_TO_ADDRESS[mint_token_symbol.toUpperCase()]) {
-    tokenAddr = TOKEN_NAME_TO_ADDRESS[mint_token_symbol.toUpperCase()].toLowerCase();
+  let tokenAddr = mint_token?.toLowerCase?.() || '';
+  if (TOKEN_NAME_TO_ADDRESS[mint_token_symbol?.toUpperCase?.()]) {
+    tokenAddr = TOKEN_NAME_TO_ADDRESS[mint_token_symbol.toUpperCase()];
   }
 
   let ethValue = await getRealDexPriceForToken(total, tokenAddr);
@@ -224,7 +220,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
 
 module.exports = {
   trackAllContracts,
-  contractListeners // <-- EXPORT LISTENERS FOR STATUS MONITOR
+  contractListeners
 };
 
 
