@@ -151,48 +151,41 @@ module.exports = (client, pg) => {
             .filter(c => c.name.toLowerCase().includes(focused.value.toLowerCase()))
             .slice(0, 25);
 
-          console.log(`🔁 Optimized Autocomplete for /exp:`, filtered);
           return await safeRespond(filtered);
         }
 
+        // 🔁 AUTOCOMPLETE: /untrackmintplus
+        if (commandName === 'untrackmintplus' && focused.name === 'name') {
+          const chainOpt = options.get('chain')?.value;
+          const query = chainOpt
+            ? `SELECT name FROM contract_watchlist WHERE chain = $1`
+            : `SELECT name FROM contract_watchlist`;
+          const params = chainOpt ? [chainOpt] : [];
+
+          try {
+            const res = await pg.query(query, params);
+            const names = res.rows
+              .map(r => r.name)
+              .filter(Boolean)
+              .filter(name => name.toLowerCase().includes(focused.value.toLowerCase()))
+              .slice(0, 25)
+              .map(name => ({ name, value: name }));
+            return await safeRespond(names);
+          } catch (err) {
+            console.warn('⚠️ Error fetching autocomplete for /untrackmintplus:', err.message);
+            return await safeRespond([]);
+          }
+        }
       } catch (err) {
         console.error('❌ Autocomplete error:', err);
       }
     }
 
-    // 🔁 AUTOCOMPLETE: /untrackmintplus
-if (commandName === 'untrackmintplus' && focused.name === 'name') {
-  const chain = interaction.options.getString('chain'); // may be null if not selected yet
-  const query = chain
-    ? `SELECT name FROM contract_watchlist WHERE chain = $1`
-    : `SELECT name FROM contract_watchlist`;
-  const params = chain ? [chain] : [];
-
-  try {
-    const res = await pg.query(query, params);
-    const names = res.rows
-      .map(r => r.name)
-      .filter(Boolean)
-      .filter(name => name.toLowerCase().includes(focused.value.toLowerCase()))
-      .slice(0, 25)
-      .map(name => ({ name, value: name }));
-    return await safeRespond(names);
-  } catch (err) {
-    console.warn('⚠️ Error fetching autocomplete for /untrackmintplus:', err.message);
-    return await safeRespond([]);
-  }
-}
-
     // ✅ SLASH COMMAND EXECUTION
     if (!interaction.isChatInputCommand()) return;
 
-    console.log(`🎯 Received slash command: /${interaction.commandName}`);
-
     const command = client.commands.get(interaction.commandName);
-    if (!command) {
-      console.warn(`❌ No command found for: /${interaction.commandName}`);
-      return;
-    }
+    if (!command) return;
 
     try {
       const needsPg = command.execute.length > 1;
@@ -215,5 +208,3 @@ if (commandName === 'untrackmintplus' && focused.name === 'name') {
     }
   });
 };
-
-
