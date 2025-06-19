@@ -37,7 +37,7 @@ function launchContractListener(client, addressKey, contractRows) {
     'function tokenURI(uint256 tokenId) view returns (string)'
   ];
   const iface = new Interface(abi);
-  const contract = new Contract(address, abi, getProvider());
+  const contract = new Contract(address, abi, getProvider(firstRow.chain || 'base'));
 
   let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
   let seenSales = new Set(loadJson(seenSalesPath(name)) || []);
@@ -61,6 +61,8 @@ function launchContractListener(client, addressKey, contractRows) {
         toBlock
       };
 
+      // ✅ THROTTLE TO AVOID "10 calls in 1 batch" ERROR
+      await delay(150);
       const logs = await getProvider().getLogs(filter);
 
       for (const log of logs) {
@@ -73,7 +75,6 @@ function launchContractListener(client, addressKey, contractRows) {
           if (seenTokenIds.has(tokenIdStr)) continue;
           seenTokenIds.add(tokenIdStr);
 
-          // ✅ Deduplicate all channel_ids across all contractRows BEFORE calling handleMint
           const allChannelIds = [
             ...new Set(contractRows.flatMap(row => [row.channel_ids].flat()))
           ];
