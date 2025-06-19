@@ -81,30 +81,31 @@ module.exports = {
     } catch {}
 
     // ✅ FlexCard Generator Check (real renderer test)
-    let flexcardStatus = '🟠 Unknown';
-    try {
-const testCard = await buildUltraFlexCard({
-  name: 'test',
-  image: 'https://via.placeholder.com/400x400.png?text=Test',
-  traits: [],
-  tokenId: '0',
-  owner: '0x000000000000000000000000000000000000dead', // valid dummy
-  rank: 'N/A',
-  score: 'N/A',
-  mintedAt: 'N/A',
-  supply: 'N/A',
-  mintPrice: 'N/A',
-  floorPrice: 'N/A',
-  topTrait: 'N/A',
-  chain: 'base'
-});
-
-      if (!testCard) throw new Error('Renderer returned null');
-      flexcardStatus = '🟢 OK';
-    } catch (e) {
-      console.warn('❌ FlexCard Generator error:', e.message);
-      flexcardStatus = '🔴 Error';
-    }
+let flexcardStatus = '🟠 Unknown';
+try {
+  const testCard = await Promise.race([
+    buildUltraFlexCard({
+      name: 'test',
+      image: 'https://via.placeholder.com/400x400.png?text=Test',
+      traits: [],
+      tokenId: '0',
+      owner: '0x000000000000000000000000000000000000dead',
+      rank: 'N/A',
+      score: 'N/A',
+      mintedAt: 'N/A',
+      supply: 'N/A',
+      mintPrice: 'N/A',
+      floorPrice: 'N/A',
+      topTrait: 'N/A',
+      chain: 'base'
+    }),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000))
+  ]);
+  flexcardStatus = '🟢 OK';
+} catch (e) {
+  console.warn('❌ FlexCard test failed:', e.message);
+  flexcardStatus = '🔴 Error';
+}
 
     const ping = Date.now() - interaction.createdTimestamp;
 
