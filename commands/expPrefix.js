@@ -83,7 +83,7 @@ async function getGroqAI(keyword, userMention, groqApiKey) {
       },
       {
         role: 'user',
-        content: `Someone typed "${keyword}". Generate a super short savage one-liner. Insert {user} where you want to mention the user. Use Discord/Web3 slang. Max 1 sentence.`
+        content: `Someone typed "${keyword}". Generate a savage one-liner. Insert {user} where you want to mention the user. Use Discord/Web3 slang. Max 1 sentence. Add 1 fitting emoji at the end.`
       }
     ],
     max_tokens: 50,
@@ -112,11 +112,6 @@ async function getGroqAI(keyword, userMention, groqApiKey) {
   const replaced = rawReply.replace(/{user}/gi, userMention);
   return replaced;
 }
-
-function cleanQuotes(text) {
-  return text.replace(/^"(.*)"$/, '$1').trim();
-}
-
 
 
 
