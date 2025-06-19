@@ -43,26 +43,47 @@ module.exports = {
 
     await interaction.deferReply({ ephemeral: true });
 
-    // ✅ Auto-migrate SQL columns if needed
+    // ✅ Auto-migrate table structure (chain + nullables)
     try {
       await pg.query(`
         DO $$
         BEGIN
-          IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'contract_watchlist' AND column_name = 'chain') THEN
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'contract_watchlist' AND column_name = 'chain'
+          ) THEN
             ALTER TABLE contract_watchlist ADD COLUMN chain TEXT DEFAULT 'base';
           END IF;
-          IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'contract_watchlist' AND column_name = 'channel_ids') THEN
+
+          BEGIN
+            ALTER TABLE contract_watchlist ALTER COLUMN mint_price DROP NOT NULL;
+          EXCEPTION WHEN others THEN END;
+
+          BEGIN
+            ALTER TABLE contract_watchlist ALTER COLUMN mint_token DROP NOT NULL;
+          EXCEPTION WHEN others THEN END;
+
+          BEGIN
+            ALTER TABLE contract_watchlist ALTER COLUMN mint_token_symbol DROP NOT NULL;
+          EXCEPTION WHEN others THEN END;
+
+          IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'contract_watchlist' AND column_name = 'channel_ids'
+          ) THEN
             ALTER TABLE contract_watchlist ADD COLUMN channel_ids TEXT[];
           END IF;
-        END
-        $$;
+        END$$;
       `);
     } catch (migrateErr) {
       console.warn('⚠️ Migration failed:', migrateErr.message);
     }
 
     try {
-      const res = await pg.query(`SELECT * FROM contract_watchlist WHERE name = $1 AND chain = $2`, [name, chain]);
+      const res = await pg.query(
+        `SELECT * FROM contract_watchlist WHERE name = $1 AND chain = $2`,
+        [name, chain]
+      );
 
       if (res.rows.length > 0) {
         const existing = res.rows[0].channel_ids || [];
@@ -73,7 +94,11 @@ module.exports = {
           [channel_ids, name, chain]
         );
 
-        const updated = await pg.query(`SELECT * FROM contract_watchlist WHERE name = $1 AND chain = $2`, [name, chain]);
+        const updated = await pg.query(
+          `SELECT * FROM contract_watchlist WHERE name = $1 AND chain = $2`,
+          [name, chain]
+        );
+
         await trackAllContracts(interaction.client, updated.rows[0]);
 
         return interaction.editReply(`✅ Updated tracking for **${name}** on \`${chain}\` and added this channel.`);
@@ -99,7 +124,9 @@ module.exports = {
 
       await trackAllContracts(interaction.client, newRow);
 
-      return interaction.editReply(`✅ Now tracking **${name}** on \`${chain}\` for ${mint_price ? 'minting and sales' : 'sales only'}${mint_price ? ` using token \`${resolvedSymbol}\`` : ''}.`);
+      return interaction.editReply(`✅ Now tracking **${name}** on \`${chain}\` for ${
+        mint_price ? 'minting and sales' : 'sales only'
+      }${mint_price ? ` using token \`${resolvedSymbol}\`` : ''}.`);
     } catch (err) {
       console.error('❌ Error in /trackmintplus:', err);
       return interaction.editReply('⚠️ Something went wrong while executing `/trackmintplus`.');
