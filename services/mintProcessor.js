@@ -16,7 +16,6 @@ async function trackAllContracts(client) {
   const res = await pg.query('SELECT * FROM contract_watchlist');
   const contracts = res.rows;
 
-  // Group contracts by chain
   const contractsByChain = {};
   for (const row of contracts) {
     const chain = row.chain || 'base';
@@ -28,7 +27,6 @@ async function trackAllContracts(client) {
     contractListeners[addressKey].push(row);
   }
 
-  // Launch 1 block listener per chain
   for (const chain of Object.keys(contractsByChain)) {
     setupChainBlockListener(client, chain, contractsByChain[chain]);
   }
@@ -59,10 +57,16 @@ function setupChainBlockListener(client, chain, contractRows) {
           toBlock
         };
 
-        await delay(150); // 🧠 throttle each getLogs to avoid batch cap
-        const logs = await provider.getLogs(filter);
-        const contract = new Contract(address, iface.fragments, provider);
+        await delay(150);
+        let logs;
+        try {
+          logs = await provider.getLogs(filter);
+        } catch (err) {
+          if (err.message.includes('maximum 10 calls in 1 batch')) return;
+          throw err;
+        }
 
+        const contract = new Contract(address, iface.fragments, provider);
         let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
         let seenSales = new Set(loadJson(seenSalesPath(name)) || []);
 
@@ -95,6 +99,7 @@ function setupChainBlockListener(client, chain, contractRows) {
     }
   });
 }
+
 
 async function handleMint(client, contractRow, contract, tokenId, to, channel_ids) {
   const { name, mint_price, mint_token, mint_token_symbol } = contractRow;
