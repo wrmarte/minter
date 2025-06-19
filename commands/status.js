@@ -2,7 +2,6 @@ const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 const { getProvider } = require('../services/provider');
 const { contractListeners } = require('../services/mintProcessor');
 const { statSync } = require('fs');
-const fetch = require('node-fetch');
 const version = require('../package.json').version;
 
 let mintProcessorStartTime = Date.now();
@@ -81,38 +80,6 @@ module.exports = {
       lastEventTime = `<t:${Math.floor(seenStats.mtimeMs / 1000)}:R>`;
     } catch {}
 
-    let flexcardStatus = '🟠 Unknown';
-    try {
-      const { buildUltraFlexCard } = require('../services/ultraFlexService');
-
-      const dummyData = {
-        name: 'TestNFT',
-        image: 'https://via.placeholder.com/400x400.png?text=Test',
-        traits: [],
-        tokenId: '1',
-        owner: '0x0000000000000000000000000000000000000000',
-        rank: 'N/A',
-        score: 'N/A',
-        mintedAt: 'N/A',
-        supply: 'N/A',
-        mintPrice: 'N/A',
-        floorPrice: 'N/A',
-        topTrait: 'N/A',
-        chain: 'base'
-      };
-
-      // timeout safety
-      await Promise.race([
-        buildUltraFlexCard(dummyData),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 4000))
-      ]);
-
-      flexcardStatus = '🟢 OK';
-    } catch (e) {
-      console.warn('❌ FlexCard test failed:', e.message);
-      flexcardStatus = '🔴 Error';
-    }
-
     const ping = Date.now() - interaction.createdTimestamp;
 
     const embed = new EmbedBuilder()
@@ -121,7 +88,6 @@ module.exports = {
       .setDescription([
         `🗄️ **Database** — ${dbStatus}`,
         `📡 **RPC Provider** — ${rpcStatus} (${blockNum})`,
-        `🎨 **FlexCard Generator** — ${flexcardStatus}`,
         `📶 **Bot Ping** — ${ping}ms`,
         `🤖 **Discord Gateway** — ${discordStatus}`,
         `🧱 **Mint Processor** — ${mintStatus} *(Uptime: ${mintUptime})*`,
@@ -141,6 +107,7 @@ module.exports = {
     await interaction.editReply({ embeds: [embed] });
   }
 };
+
 
 
 
