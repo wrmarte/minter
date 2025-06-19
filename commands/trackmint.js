@@ -43,6 +43,24 @@ module.exports = {
 
     await interaction.deferReply({ ephemeral: true });
 
+    // ✅ Auto-migrate SQL columns if needed
+    try {
+      await pg.query(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'contract_watchlist' AND column_name = 'chain') THEN
+            ALTER TABLE contract_watchlist ADD COLUMN chain TEXT DEFAULT 'base';
+          END IF;
+          IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'contract_watchlist' AND column_name = 'channel_ids') THEN
+            ALTER TABLE contract_watchlist ADD COLUMN channel_ids TEXT[];
+          END IF;
+        END
+        $$;
+      `);
+    } catch (migrateErr) {
+      console.warn('⚠️ Migration failed:', migrateErr.message);
+    }
+
     try {
       const res = await pg.query(`SELECT * FROM contract_watchlist WHERE name = $1 AND chain = $2`, [name, chain]);
 
