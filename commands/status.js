@@ -83,21 +83,22 @@ module.exports = {
     // ✅ FlexCard Generator Check (real renderer test)
     let flexcardStatus = '🟠 Unknown';
     try {
-      const testCard = await buildUltraFlexCard({
-        name: 'test',
-        image: 'https://via.placeholder.com/400x400.png?text=Test',
-        traits: [],
-        tokenId: '0',
-        owner: '0x0',
-        rank: 'N/A',
-        score: 'N/A',
-        mintedAt: 'N/A',
-        supply: 'N/A',
-        mintPrice: 'N/A',
-        floorPrice: 'N/A',
-        topTrait: 'N/A',
-        chain: 'base'
-      });
+const testCard = await buildUltraFlexCard({
+  name: 'test',
+  image: 'https://via.placeholder.com/400x400.png?text=Test',
+  traits: [],
+  tokenId: '0',
+  owner: '0x000000000000000000000000000000000000dead', // valid dummy
+  rank: 'N/A',
+  score: 'N/A',
+  mintedAt: 'N/A',
+  supply: 'N/A',
+  mintPrice: 'N/A',
+  floorPrice: 'N/A',
+  topTrait: 'N/A',
+  chain: 'base'
+});
+
       if (!testCard) throw new Error('Renderer returned null');
       flexcardStatus = '🟢 OK';
     } catch (e) {
