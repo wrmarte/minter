@@ -1,8 +1,11 @@
 const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 const { getProvider } = require('../services/provider');
 const contractListeners = require('../services/mintProcessor').contractListeners;
+const { statSync } = require('fs');
+const fetch = require('node-fetch');
+const version = require('../package.json').version;
 
-let mintProcessorStartTime = Date.now();  // ✅ Capture when bot starts
+let mintProcessorStartTime = Date.now();
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -15,7 +18,6 @@ module.exports = {
 
     await interaction.deferReply();
 
-    // Database Check
     let dbStatus = '🔴 Failed';
     try {
       await pg.query('SELECT 1');
@@ -24,7 +26,6 @@ module.exports = {
       dbStatus = '🔴 Failed';
     }
 
-    // RPC Check
     let rpcStatus = '🔴 Failed';
     let blockNum = 'N/A';
     try {
@@ -35,10 +36,8 @@ module.exports = {
       rpcStatus = '🔴 Failed';
     }
 
-    // Discord Gateway Check
-    let discordStatus = client.ws.status === 0 ? '🟢 Connected' : '🔴 Disconnected';
+    const discordStatus = client.ws.status === 0 ? '🟢 Connected' : '🔴 Disconnected';
 
-    // Mint Processor Check (active listeners)
     let mintStatus = '🔴 Inactive';
     let activeListeners = 0;
     try {
@@ -48,7 +47,6 @@ module.exports = {
       mintStatus = '🔴 Error';
     }
 
-    // Slash Commands Registered (live fetch)
     let commandCount = 0;
     try {
       const appCmds = await client.application.commands.fetch();
@@ -57,10 +55,8 @@ module.exports = {
       commandCount = 0;
     }
 
-    // Total servers
     const totalGuilds = client.guilds.cache.size;
 
-    // Flex Projects Count
     let flexProjects = 0;
     try {
       const flexRes = await pg.query('SELECT COUNT(*) FROM flex_projects');
@@ -69,7 +65,6 @@ module.exports = {
       flexProjects = 0;
     }
 
-    // NFT Contracts Tracked (from contract_watchlist)
     let nftContracts = 0;
     try {
       const nftRes = await pg.query('SELECT COUNT(*) FROM contract_watchlist');
@@ -78,7 +73,6 @@ module.exports = {
       nftContracts = 0;
     }
 
-    // Tokens Tracked
     let tokensTracked = 0;
     try {
       const tokenRes = await pg.query('SELECT COUNT(*) FROM tracked_tokens');
@@ -87,20 +81,33 @@ module.exports = {
       tokensTracked = 0;
     }
 
-    // Uptime - total bot uptime
     const uptimeMs = process.uptime() * 1000;
     const uptimeHours = Math.floor(uptimeMs / 3600000);
     const uptimeMinutes = Math.floor((uptimeMs % 3600000) / 60000);
     const uptime = `${uptimeHours}h ${uptimeMinutes}m`;
 
-    // Mint Processor Uptime
     const mintUptimeMs = Date.now() - mintProcessorStartTime;
     const mintUptimeHours = Math.floor(mintUptimeMs / 3600000);
     const mintUptimeMinutes = Math.floor((mintUptimeMs % 3600000) / 60000);
     const mintUptime = `${mintUptimeHours}h ${mintUptimeMinutes}m`;
 
-    // Node.js Memory Usage
     const memoryUsage = `${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1)} MB`;
+
+    let lastEventTime = 'N/A';
+    try {
+      const seenStats = statSync('./data/seen.json');
+      lastEventTime = `<t:${Math.floor(seenStats.mtimeMs / 1000)}:R>`;
+    } catch {}
+
+    let flexcardStatus = '🟠 Unknown';
+    try {
+      const flexPing = await fetch('https://api.flexcard.healthcheck'); // optional real health check
+      flexcardStatus = flexPing.ok ? '🟢 OK' : '🔴 Error';
+    } catch {
+      flexcardStatus = '🔴 Error';
+    }
+
+    const ping = Date.now() - interaction.createdTimestamp;
 
     const embed = new EmbedBuilder()
       .setTitle('📊 Full System Status')
@@ -108,6 +115,8 @@ module.exports = {
       .setDescription([
         `🗄️ **Database** — ${dbStatus}`,
         `📡 **RPC Provider** — ${rpcStatus} (Block ${blockNum})`,
+        `🎨 **FlexCard Generator** — ${flexcardStatus}`,
+        `📶 **Bot Ping** — ${ping}ms`,
         `🤖 **Discord Gateway** — ${discordStatus}`,
         `🧱 **Mint Processor** — ${mintStatus} *(Uptime: ${mintUptime})*`,
         `🌐 **Servers** — ${totalGuilds} Guilds`,
@@ -115,7 +124,9 @@ module.exports = {
         `📦 **NFT Contracts Tracked** — ${nftContracts}`,
         `💰 **Tokens Tracked** — ${tokensTracked}`,
         `🎯 **Flex Projects** — ${flexProjects}`,
+        `⏱️ **Last Event** — ${lastEventTime}`,
         `🧮 **Memory Usage** — ${memoryUsage}`,
+        `🧪 **Bot Version** — v${version}`,
         `⏱️ **Total Uptime** — ${uptime}`
       ].join('\n'))
       .setFooter({ text: 'Powered by PimpsDev 🧪' })
