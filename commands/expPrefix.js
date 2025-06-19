@@ -57,7 +57,7 @@ module.exports = {
       return message.reply({ embeds: [embed] });
     }
 
-    // ✅ AI fallback (Groq with patched safe mention logic)
+    // ✅ AI fallback (Groq with patched mention-safe logic)
     try {
       let aiResponse = await getGroqAI(name, userMention, groqApiKey);
       aiResponse = cleanQuotes(aiResponse);
@@ -113,10 +113,10 @@ async function getGroqAI(keyword, userMention, groqApiKey) {
   return replaced;
 }
 
-// Clean quotes from AI
 function cleanQuotes(text) {
   return text.replace(/^"(.*)"$/, '$1').trim();
 }
+
 
 
 
