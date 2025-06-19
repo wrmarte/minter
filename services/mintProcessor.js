@@ -96,8 +96,6 @@ function setupChainBlockListener(client, chain, contractRows) {
   });
 }
 
-// (unchanged handleMint / handleSale functions below)
-
 async function handleMint(client, contractRow, contract, tokenId, to, channel_ids) {
   const { name, mint_price, mint_token, mint_token_symbol } = contractRow;
 
@@ -222,6 +220,7 @@ module.exports = {
   trackAllContracts,
   contractListeners
 };
+
 
 
 
