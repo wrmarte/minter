@@ -1,9 +1,10 @@
 const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 const { getProvider } = require('../services/provider');
-const contractListeners = require('../services/mintProcessor').contractListeners;
+const { contractListeners } = require('../services/mintProcessor');
 const { statSync } = require('fs');
+const fetch = require('node-fetch');
 const version = require('../package.json').version;
-const { buildUltraFlexCard } = require('../services/ultraFlexService'); // ✅ Actual test
+
 let mintProcessorStartTime = Date.now();
 
 module.exports = {
@@ -80,32 +81,37 @@ module.exports = {
       lastEventTime = `<t:${Math.floor(seenStats.mtimeMs / 1000)}:R>`;
     } catch {}
 
-    // ✅ FlexCard Generator Check (real renderer test)
-let flexcardStatus = '🟠 Unknown';
-try {
-  const testCard = await Promise.race([
-    buildUltraFlexCard({
-      name: 'test',
-      image: 'https://via.placeholder.com/400x400.png?text=Test',
-      traits: [],
-      tokenId: '0',
-      owner: '0x000000000000000000000000000000000000dead',
-      rank: 'N/A',
-      score: 'N/A',
-      mintedAt: 'N/A',
-      supply: 'N/A',
-      mintPrice: 'N/A',
-      floorPrice: 'N/A',
-      topTrait: 'N/A',
-      chain: 'base'
-    }),
-    new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000))
-  ]);
-  flexcardStatus = '🟢 OK';
-} catch (e) {
-  console.warn('❌ FlexCard test failed:', e.message);
-  flexcardStatus = '🔴 Error';
-}
+    let flexcardStatus = '🟠 Unknown';
+    try {
+      const { buildUltraFlexCard } = require('../services/ultraFlexService');
+
+      const dummyData = {
+        name: 'TestNFT',
+        image: 'https://via.placeholder.com/400x400.png?text=Test',
+        traits: [],
+        tokenId: '1',
+        owner: '0x0000000000000000000000000000000000000000',
+        rank: 'N/A',
+        score: 'N/A',
+        mintedAt: 'N/A',
+        supply: 'N/A',
+        mintPrice: 'N/A',
+        floorPrice: 'N/A',
+        topTrait: 'N/A',
+        chain: 'base'
+      };
+
+      // timeout safety
+      await Promise.race([
+        buildUltraFlexCard(dummyData),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 4000))
+      ]);
+
+      flexcardStatus = '🟢 OK';
+    } catch (e) {
+      console.warn('❌ FlexCard test failed:', e.message);
+      flexcardStatus = '🔴 Error';
+    }
 
     const ping = Date.now() - interaction.createdTimestamp;
 
@@ -114,7 +120,7 @@ try {
       .setColor(0x2ecc71)
       .setDescription([
         `🗄️ **Database** — ${dbStatus}`,
-        `📡 **RPC Provider** — ${rpcStatus} (Block ${blockNum})`,
+        `📡 **RPC Provider** — ${rpcStatus} (${blockNum})`,
         `🎨 **FlexCard Generator** — ${flexcardStatus}`,
         `📶 **Bot Ping** — ${ping}ms`,
         `🤖 **Discord Gateway** — ${discordStatus}`,
