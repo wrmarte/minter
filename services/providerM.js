@@ -1,44 +1,76 @@
 const { JsonRpcProvider } = require('ethers');
 
-// ✅ Full list of Base RPC endpoints for rotation
-const rpcList = [
-  'https://mainnet.base.org',
-  'https://base.publicnode.com',
-  'https://1rpc.io/base',
-  'https://base.llamarpc.com',
-  'https://base.meowrpc.com'
-];
+// ✅ RPC lists per chain
+const RPCS = {
+  base: [
+    'https://mainnet.base.org',
+    'https://base.publicnode.com',
+    'https://1rpc.io/base',
+    'https://base.llamarpc.com',
+    'https://base.meowrpc.com'
+  ],
+  eth: [
+    'https://eth.llamarpc.com',
+    'https://1rpc.io/eth',
+    'https://rpc.ankr.com/eth'
+  ],
+  ape: [
+    'https://apechain.drpc.org',
+    'https://rpc.ankr.com/http/ape',
+    'https://1rpc.io/ape' // if supported
+  ]
+};
 
-// ✅ Provider state
-let currentIndex = 0;
-let provider = new JsonRpcProvider(rpcList[currentIndex]);
+// ✅ Track current index per chain
+const providerIndex = {};
+const providers = {};
 
-// ✅ Expose active provider
-function getProvider() {
-  return provider;
+// ✅ Initialize first provider for each chain
+for (const chain in RPCS) {
+  providerIndex[chain] = 0;
+  providers[chain] = new JsonRpcProvider(RPCS[chain][0]);
 }
 
-// ✅ Rotate RPC if failure happens
-function rotateProvider() {
-  currentIndex = (currentIndex + 1) % rpcList.length;
-  provider = new JsonRpcProvider(rpcList[currentIndex]);
-  console.warn(`⚠️ RPC rotated → Now using: ${rpcList[currentIndex]}`);
+// ✅ Get current provider for a chain
+function getProvider(chain = 'base') {
+  const key = chain.toLowerCase();
+  if (!providers[key]) {
+    console.warn(`⚠️ Unknown chain "${key}" — defaulting to Base`);
+    return providers['base'];
+  }
+  return providers[key];
 }
 
-// ✅ Automatic failover wrapper
-async function safeRpcCall(callFn, retries = rpcList.length) {
-  for (let attempt = 0; attempt < retries; attempt++) {
+// ✅ Rotate to next provider on error
+function rotateProvider(chain = 'base') {
+  const key = chain.toLowerCase();
+  if (!RPCS[key]) return;
+
+  providerIndex[key] = (providerIndex[key] + 1) % RPCS[key].length;
+  providers[key] = new JsonRpcProvider(RPCS[key][providerIndex[key]]);
+  console.warn(`🔁 Rotated RPC for ${key}: ${RPCS[key][providerIndex[key]]}`);
+}
+
+// ✅ Failover-safe RPC call for a chain
+async function safeRpcCall(chain, callFn, retries = 3) {
+  const key = chain.toLowerCase();
+  for (let i = 0; i < retries; i++) {
     try {
+      const provider = getProvider(key);
       return await callFn(provider);
     } catch (err) {
-      console.warn(`⚠️ RPC error: ${err.code || err.message}`);
-      rotateProvider();
+      console.warn(`⚠️ [${key}] RPC Error: ${err.message || err.code}`);
+      rotateProvider(key);
     }
   }
-  throw new Error('❌ All RPC endpoints failed.');
+  throw new Error(`❌ All RPCs failed for ${key}`);
 }
 
-module.exports = { getProvider, rotateProvider, safeRpcCall };
+module.exports = {
+  getProvider,
+  rotateProvider,
+  safeRpcCall
+};
 
 
 
