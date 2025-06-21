@@ -70,7 +70,14 @@ function setupBaseBlockListener(client, contractRows) {
           const tokenIdStr = tokenId.toString();
           const txHash = log.transactionHash.toLowerCase();
           const allChannelIds = [...new Set([...(row.channel_ids || [])])];
-          const allGuildIds = [...new Set([...(row.guild_ids || [])])];
+const allGuildIds = [];
+for (const id of row.channel_ids || []) {
+  try {
+    const ch = await client.channels.fetch(id);
+    if (ch.guildId) allGuildIds.push(ch.guildId);
+  } catch {}
+}
+
           const saleKey = `${address}-${txHash}`;
 
           if (from === ZeroAddress) {
