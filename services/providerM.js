@@ -17,7 +17,7 @@ const RPCS = {
   ape: [
     'https://apechain.drpc.org',
     'https://rpc.ankr.com/http/ape',
-    'https://1rpc.io/ape' // if supported
+    'https://1rpc.io/ape'
   ]
 };
 
@@ -59,18 +59,33 @@ async function safeRpcCall(chain, callFn, retries = 3) {
       const provider = getProvider(key);
       return await callFn(provider);
     } catch (err) {
+      const msg = err?.info?.responseBody || err?.message || '';
+      const isApeBatchLimit = key === 'ape' && msg.includes('Batch of more than 3 requests');
       console.warn(`⚠️ [${key}] RPC Error: ${err.message || err.code}`);
+
+      if (isApeBatchLimit) {
+        console.warn('⛔ ApeChain DRPC free tier batch limit hit — reduce batch or rotate');
+      }
+
       rotateProvider(key);
+      await new Promise(res => setTimeout(res, 500)); // optional delay
     }
   }
   throw new Error(`❌ All RPCs failed for ${key}`);
 }
 
+// ✅ Batch size helper
+function getMaxBatchSize(chain = 'base') {
+  return chain.toLowerCase() === 'ape' ? 3 : 10;
+}
+
 module.exports = {
   getProvider,
   rotateProvider,
-  safeRpcCall
+  safeRpcCall,
+  getMaxBatchSize
 };
+
 
 
 
