@@ -2,7 +2,7 @@ const { Interface, Contract, id, ZeroAddress, ethers } = require('ethers');
 const fetch = require('node-fetch');
 const { getRealDexPriceForToken, getEthPriceFromToken } = require('./price');
 const { shortWalletLink, loadJson, saveJson, seenPath, seenSalesPath } = require('../utils/helpers');
-const { getProvider, getMaxBatchSize } = require('./providerM');
+const { getProvider } = require('./providerM');
 const delay = ms => new Promise(res => setTimeout(res, ms));
 
 const TOKEN_NAME_TO_ADDRESS = {
@@ -28,12 +28,11 @@ function setupBaseBlockListener(client, contractRows) {
     'function tokenURI(uint256 tokenId) view returns (string)'
   ]);
 
+  const globalSeenSales = new Set();
+
   provider.on('block', async (blockNumber) => {
     const fromBlock = Math.max(blockNumber - 5, 0);
     const toBlock = blockNumber;
-
-    const blockSeenSales = new Set();
-    const seenServerSales = new Set();
 
     for (const row of contractRows) {
       try {
@@ -70,14 +69,6 @@ function setupBaseBlockListener(client, contractRows) {
           const tokenIdStr = tokenId.toString();
           const txHash = log.transactionHash.toLowerCase();
           const allChannelIds = [...new Set([...(row.channel_ids || [])])];
-const allGuildIds = [];
-for (const id of row.channel_ids || []) {
-  try {
-    const ch = await client.channels.fetch(id);
-    if (ch.guildId) allGuildIds.push(ch.guildId);
-  } catch {}
-}
-
           const saleKey = `${address}-${txHash}`;
 
           if (from === ZeroAddress) {
@@ -85,20 +76,9 @@ for (const id of row.channel_ids || []) {
             seenTokenIds.add(tokenIdStr);
             await handleMint(client, row, contract, tokenId, to, allChannelIds);
           } else {
-            if (seenSales.has(saleKey) || blockSeenSales.has(saleKey)) continue;
-
-            let shouldSend = false;
-            for (const gid of allGuildIds) {
-              const serverKey = `${gid}-${txHash}`;
-              if (seenServerSales.has(serverKey)) continue;
-              seenServerSales.add(serverKey);
-              shouldSend = true;
-            }
-
-            if (!shouldSend) continue;
-
+            if (seenSales.has(saleKey) || globalSeenSales.has(saleKey)) continue;
             seenSales.add(saleKey);
-            blockSeenSales.add(saleKey);
+            globalSeenSales.add(saleKey);
             await handleSale(client, row, contract, tokenId, from, to, txHash, allChannelIds);
           }
         }
@@ -182,7 +162,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
   if (tx.value && tx.value > 0n) {
     tokenAmount = parseFloat(ethers.formatEther(tx.value));
     ethValue = tokenAmount;
-    methodUsed = '🟦 ETH';
+    methodUsed = '🔦 ETH';
   }
 
   if (!ethValue) {
@@ -201,7 +181,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
               const fallback = await getEthPriceFromToken(tokenContract);
               ethValue = fallback ? tokenAmount * fallback : null;
             }
-            methodUsed = `🟨 ${mint_token_symbol}`;
+            methodUsed = `🔨 ${mint_token_symbol}`;
             break;
           }
         } catch {}
@@ -231,7 +211,6 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
   for (const id of channel_ids) {
     if (sentChannels.has(id)) continue;
     sentChannels.add(id);
-
     const ch = await client.channels.fetch(id).catch(() => null);
     if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
   }
@@ -241,6 +220,7 @@ module.exports = {
   trackBaseContracts,
   contractListeners
 };
+
 
 
 
