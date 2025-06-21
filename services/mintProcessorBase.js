@@ -32,8 +32,8 @@ function setupBaseBlockListener(client, contractRows) {
     const fromBlock = Math.max(blockNumber - 5, 0);
     const toBlock = blockNumber;
 
-    // ✅ Track processed sales in this block across contracts
     const blockSeenSales = new Set();
+    const seenServerSales = new Set();
 
     for (const row of contractRows) {
       try {
@@ -70,6 +70,7 @@ function setupBaseBlockListener(client, contractRows) {
           const tokenIdStr = tokenId.toString();
           const txHash = log.transactionHash.toLowerCase();
           const allChannelIds = [...new Set([...(row.channel_ids || [])])];
+          const allGuildIds = [...new Set([...(row.guild_ids || [])])];
           const saleKey = `${address}-${txHash}`;
 
           if (from === ZeroAddress) {
@@ -78,6 +79,17 @@ function setupBaseBlockListener(client, contractRows) {
             await handleMint(client, row, contract, tokenId, to, allChannelIds);
           } else {
             if (seenSales.has(saleKey) || blockSeenSales.has(saleKey)) continue;
+
+            let shouldSend = false;
+            for (const gid of allGuildIds) {
+              const serverKey = `${gid}-${txHash}`;
+              if (seenServerSales.has(serverKey)) continue;
+              seenServerSales.add(serverKey);
+              shouldSend = true;
+            }
+
+            if (!shouldSend) continue;
+
             seenSales.add(saleKey);
             blockSeenSales.add(saleKey);
             await handleSale(client, row, contract, tokenId, from, to, txHash, allChannelIds);
@@ -132,7 +144,7 @@ async function handleMint(client, contractRow, contract, tokenId, to, channel_id
     timestamp: new Date().toISOString()
   };
 
-  for (const id of channel_ids) {
+  for (const id of [...new Set(channel_ids)]) {
     const ch = await client.channels.fetch(id).catch(() => null);
     if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
   }
@@ -208,9 +220,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     timestamp: new Date().toISOString()
   };
 
-  // ✅ Deduplicate channels
   const sentChannels = new Set();
-
   for (const id of channel_ids) {
     if (sentChannels.has(id)) continue;
     sentChannels.add(id);
@@ -219,7 +229,6 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
   }
 }
-
 
 module.exports = {
   trackBaseContracts,
