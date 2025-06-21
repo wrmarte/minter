@@ -2,7 +2,7 @@ const { Interface, Contract, id, ZeroAddress, ethers } = require('ethers');
 const fetch = require('node-fetch');
 const { getRealDexPriceForToken, getEthPriceFromToken } = require('./price');
 const { shortWalletLink, loadJson, saveJson, seenPath, seenSalesPath } = require('../utils/helpers');
-const { getProvider } = require('./providerM');
+const { getProvider, rotateProvider } = require('./providerM');
 const delay = ms => new Promise(res => setTimeout(res, ms));
 
 const TOKEN_NAME_TO_ADDRESS = {
@@ -58,10 +58,18 @@ function setupChainBlockListener(client, chain, contractRows) {
         };
 
         await delay(150);
+
         let logs;
         try {
           logs = await provider.getLogs(filter);
         } catch (err) {
+          const msg = err?.info?.responseBody || '';
+          const apeLimit = chain === 'ape' && msg.includes('Batch of more than 3 requests');
+          if (apeLimit) {
+            console.warn(`[${name}] ApeChain DRPC batch limit hit — rotating provider`);
+            rotateProvider(chain);
+            return;
+          }
           if (err.message.includes('maximum 10 calls in 1 batch')) return;
           throw err;
         }
@@ -99,7 +107,6 @@ function setupChainBlockListener(client, chain, contractRows) {
     }
   });
 }
-
 
 async function handleMint(client, contractRow, contract, tokenId, to, channel_ids) {
   const { name, mint_price, mint_token, mint_token_symbol } = contractRow;
@@ -225,6 +232,7 @@ module.exports = {
   trackAllContracts,
   contractListeners
 };
+
 
 
 
