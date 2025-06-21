@@ -75,11 +75,15 @@ function setupChainBlockListener(client, chain, contractRows) {
         } catch (err) {
           const msg = err?.info?.responseBody || '';
           const apeLimit = chain === 'ape' && msg.includes('Batch of more than 3 requests');
-          if (apeLimit) {
-            console.warn(`[${name}] ApeChain DRPC batch limit hit — SKIPPING block.`);
-            lastSkippedBlock[chain] = blockNumber;
-            return;
-          }
+if (apeLimit) {
+  if (!hasWarnedBatchLimit) {
+    console.warn(`[${name}] ApeChain DRPC batch limit hit — temporarily skipping blocks.`);
+    hasWarnedBatchLimit = true;
+  }
+  lastSkippedBlock[chain] = blockNumber;
+  return;
+}
+
           if (err.message.includes('maximum 10 calls in 1 batch')) return;
           throw err;
         }
