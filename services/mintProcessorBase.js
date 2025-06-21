@@ -71,6 +71,7 @@ function setupBaseBlockListener(client, contractRows) {
           const tokenIdStr = tokenId.toString();
           const txHash = log.transactionHash.toLowerCase();
           const allChannelIds = [...new Set([...(row.channel_ids || [])])];
+
           const allGuildIds = [];
           for (const id of row.channel_ids || []) {
             try {
@@ -84,15 +85,13 @@ function setupBaseBlockListener(client, contractRows) {
           if (from === ZeroAddress) {
             let shouldSend = false;
             for (const gid of allGuildIds) {
-              const serverKey = `${gid}-${tokenIdStr}`;
-              if (seenServerMints.has(serverKey)) continue;
-              seenServerMints.add(serverKey);
+              const mintKey = `${gid}-${tokenIdStr}`;
+              if (seenServerMints.has(mintKey)) continue;
+              seenServerMints.add(mintKey);
               shouldSend = true;
             }
 
-            if (!shouldSend) continue;
-
-            if (seenTokenIds.has(tokenIdStr)) continue;
+            if (!shouldSend || seenTokenIds.has(tokenIdStr)) continue;
             seenTokenIds.add(tokenIdStr);
             await handleMint(client, row, contract, tokenId, to, allChannelIds);
           } else {
@@ -252,6 +251,7 @@ module.exports = {
   trackBaseContracts,
   contractListeners
 };
+
 
 
 
