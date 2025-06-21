@@ -1,11 +1,14 @@
-// Central router for multi-network mint/sale processors
-
 const { trackBaseContracts } = require('./mintProcessorBase');
-// const { trackEthContracts } = require('./mintProcessorETH');
-// const { trackApeContracts } = require('./mintProcessorApe');
+const { trackEthContracts } = require('./mintProcessorEth');
+const { trackEthContracts } = require('./mintProcessorApe');
+// (In future, add more networks like Ape here)
+
+function trackAllContracts(client) {
+  trackBaseContracts(client);
+  trackEthContracts(client);
+  // future: trackApeContracts(client);
+}
 
 module.exports = {
-  trackBaseContracts,
-  // trackEthContracts,
-  // trackApeContracts
+  trackAllContracts
 };
