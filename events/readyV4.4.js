@@ -1,12 +1,13 @@
-const { trackAllContracts } = require('../services/mintProcessor');
+// Modular import for future network support
+const { trackBaseContracts } = require('../mintProcessorBase');
+// const { trackEthContracts } = require('../mintProcessorETH');
+// const { trackApeContracts } = require('../mintProcessorApe');
 
 module.exports = async (client, pg) => {
   console.log('✅ Bot is fully ready!');
 
-  // Kickstart the live NFT mint/sale tracking when bot is fully ready
-  trackAllContracts(client);
+  // Kickstart live NFT mint/sale tracking per network
+  trackBaseContracts(client);
+  // trackEthContracts(client);
+  // trackApeContracts(client);
 };
-
-
-
-
