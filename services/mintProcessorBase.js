@@ -2,7 +2,7 @@ const { Interface, Contract, id, ZeroAddress, ethers } = require('ethers');
 const fetch = require('node-fetch');
 const { getRealDexPriceForToken, getEthPriceFromToken } = require('./price');
 const { shortWalletLink, loadJson, saveJson, seenPath, seenSalesPath } = require('../utils/helpers');
-const { getProvider, getMaxBatchSize } = require('./providerM');
+const { getProvider } = require('./providerM');
 const delay = ms => new Promise(res => setTimeout(res, ms));
 
 const TOKEN_NAME_TO_ADDRESS = {
@@ -28,97 +28,96 @@ function setupBaseBlockListener(client, contractRows) {
     'function tokenURI(uint256 tokenId) view returns (string)'
   ]);
 
+  const contractMap = {};
+  for (const row of contractRows) {
+    const addr = row.address.toLowerCase();
+    if (!contractMap[addr]) contractMap[addr] = [];
+    contractMap[addr].push(row);
+  }
+
   provider.on('block', async (blockNumber) => {
     const fromBlock = Math.max(blockNumber - 5, 0);
     const toBlock = blockNumber;
 
-    const blockSeenSales = new Set();
-    const guildTxSeen = new Set();
+    const seenGuildSales = new Set();
+    const seenGuildMints = new Set();
 
-    for (const row of contractRows) {
+    for (const address in contractMap) {
+      const rowGroup = contractMap[address];
+      const name = rowGroup[0].name;
+
+      const filter = {
+        address,
+        topics: [id('Transfer(address,address,uint256)')],
+        fromBlock,
+        toBlock
+      };
+
+      await delay(150);
+
+      let logs;
       try {
-        const name = row.name;
-        const address = row.address.toLowerCase();
-        const filter = {
-          address,
-          topics: [id('Transfer(address,address,uint256)')],
-          fromBlock,
-          toBlock
-        };
+        logs = await provider.getLogs(filter);
+      } catch (err) {
+        if (err.message.includes('maximum 10 calls in 1 batch')) return;
+        console.warn(`[${name}] Log fetch error: ${err.message}`);
+        return;
+      }
 
-        await delay(150);
+      const contract = new Contract(address, iface.fragments, provider);
+      const seenTokenIds = new Set(loadJson(seenPath(name)) || []);
+      const seenSales = new Set(
+        (loadJson(seenSalesPath(name)) || []).map(v => `${address}-${v.toLowerCase()}`)
+      );
 
-        let logs;
-        try {
-          logs = await provider.getLogs(filter);
-        } catch (err) {
-          if (err.message.includes('maximum 10 calls in 1 batch')) return;
-          console.warn(`[${name}] Log fetch error: ${err.message}`);
-          return;
-        }
+      for (const log of logs) {
+        let parsed;
+        try { parsed = iface.parseLog(log); } catch { continue; }
+        const { from, to, tokenId } = parsed.args;
+        const tokenIdStr = tokenId.toString();
+        const txHash = log.transactionHash.toLowerCase();
 
-        const contract = new Contract(address, iface.fragments, provider);
-        let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
-        let seenSales = new Set(
-          (loadJson(seenSalesPath(name)) || []).map(v => `${address}-${v.toLowerCase()}`)
-        );
-
-        for (const log of logs) {
-          let parsed;
-          try { parsed = iface.parseLog(log); } catch { continue; }
-          const { from, to, tokenId } = parsed.args;
-          const tokenIdStr = tokenId.toString();
-          const txHash = log.transactionHash.toLowerCase();
-
+        for (const row of rowGroup) {
           const allChannelIds = [...new Set([...(row.channel_ids || [])])];
-          const channelGuildMap = new Map();
-
+          const guildIds = [];
           for (const id of row.channel_ids || []) {
             try {
               const ch = await client.channels.fetch(id);
-              if (ch.guildId) channelGuildMap.set(id, ch.guildId);
+              if (ch.guildId) guildIds.push(ch.guildId);
             } catch {}
           }
 
           const saleKey = `${address}-${txHash}`;
 
           if (from === ZeroAddress) {
-            if (seenTokenIds.has(tokenIdStr)) continue;
-            seenTokenIds.add(tokenIdStr);
-            await handleMint(client, row, contract, tokenId, to, allChannelIds);
-          } else {
-            if (seenSales.has(saleKey) || blockSeenSales.has(saleKey)) continue;
-
-            const dedupedChannelIds = [];
-            for (const [chId, gid] of channelGuildMap.entries()) {
-              const key = `${gid}-${txHash}`;
-              if (guildTxSeen.has(key)) continue;
-              guildTxSeen.add(key);
-              dedupedChannelIds.push(chId);
+            for (const gid of guildIds) {
+              const mintKey = `${gid}-${tokenIdStr}`;
+              if (seenGuildMints.has(mintKey)) continue;
+              seenGuildMints.add(mintKey);
+              await handleMint(client, row, contract, tokenId, to, allChannelIds);
             }
-
-            if (dedupedChannelIds.length === 0) continue;
-
-            seenSales.add(saleKey);
-            blockSeenSales.add(saleKey);
-            await handleSale(client, row, contract, tokenId, from, to, txHash, dedupedChannelIds);
+            seenTokenIds.add(tokenIdStr);
+          } else {
+            for (const gid of guildIds) {
+              const saleGuildKey = `${gid}-${txHash}`;
+              if (seenGuildSales.has(saleGuildKey)) continue;
+              seenGuildSales.add(saleGuildKey);
+              seenSales.add(saleKey);
+              await handleSale(client, row, contract, tokenId, from, to, txHash, allChannelIds);
+            }
           }
         }
 
         saveJson(seenPath(name), [...seenTokenIds]);
         const txOnlyHashes = [...seenSales].map(key => key.split('-')[1]);
         saveJson(seenSalesPath(name), txOnlyHashes);
-      } catch (err) {
-        console.warn(`[${row.name}] Block processing error: ${err.message}`);
       }
     }
   });
 }
 
-
 async function handleMint(client, contractRow, contract, tokenId, to, channel_ids) {
   const { name, mint_price, mint_token, mint_token_symbol } = contractRow;
-
   let imageUrl = 'https://via.placeholder.com/400x400.png?text=NFT';
   try {
     let uri = await contract.tokenURI(tokenId);
@@ -244,10 +243,3 @@ module.exports = {
   trackBaseContracts,
   contractListeners
 };
-
-
-
-
-
-
-
