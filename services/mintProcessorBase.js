@@ -11,53 +11,28 @@ const TOKEN_NAME_TO_ADDRESS = {
 
 const contractListeners = {};
 
-async function trackAllContracts(client) {
+async function trackBaseContracts(client) {
   const pg = client.pg;
-  const res = await pg.query('SELECT * FROM contract_watchlist');
+  const res = await pg.query("SELECT * FROM contract_watchlist WHERE chain = 'base'");
   const contracts = res.rows;
-
-  const contractsByChain = {};
-  for (const row of contracts) {
-    const chain = row.chain || 'base';
-    if (!contractsByChain[chain]) contractsByChain[chain] = [];
-    contractsByChain[chain].push(row);
-
-    const addressKey = row.address.toLowerCase();
-    if (!contractListeners[addressKey]) contractListeners[addressKey] = [];
-    contractListeners[addressKey].push(row);
-  }
-
-  for (const chain of Object.keys(contractsByChain)) {
-    setupChainBlockListener(client, chain, contractsByChain[chain]);
-  }
+  setupBaseBlockListener(client, contracts);
 }
 
-function setupChainBlockListener(client, chain, contractRows) {
-  const provider = getProvider(chain);
-  if (provider[`_global_block_listener_${chain}`]) return;
-  provider[`_global_block_listener_${chain}`] = true;
+function setupBaseBlockListener(client, contractRows) {
+  const provider = getProvider('base');
+  if (provider._global_block_listener_base) return;
+  provider._global_block_listener_base = true;
 
   const iface = new Interface([
     'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
     'function tokenURI(uint256 tokenId) view returns (string)'
   ]);
 
-  const lastSkippedBlock = {};
-  let hasWarnedBatchLimit = false;
-
   provider.on('block', async (blockNumber) => {
     const fromBlock = Math.max(blockNumber - 5, 0);
     const toBlock = blockNumber;
 
-    if (chain === 'ape') {
-      if (lastSkippedBlock[chain] === blockNumber) return;
-      await delay(500); // Throttle for ApeChain
-    }
-
-    const maxBatch = getMaxBatchSize(chain);
-    const contractsToProcess = chain === 'ape' ? contractRows.slice(0, maxBatch) : contractRows;
-
-    for (const row of contractsToProcess) {
+    for (const row of contractRows) {
       try {
         const name = row.name;
         const address = row.address.toLowerCase();
@@ -74,30 +49,21 @@ function setupChainBlockListener(client, chain, contractRows) {
         try {
           logs = await provider.getLogs(filter);
         } catch (err) {
-          const msg = err?.info?.responseBody || '';
-          const apeLimit = chain === 'ape' && msg.includes('Batch of more than 3 requests');
-          if (apeLimit) {
-            if (!hasWarnedBatchLimit) {
-              console.warn(`[${name}] ApeChain DRPC batch limit hit — temporarily skipping blocks.`);
-              hasWarnedBatchLimit = true;
-            }
-            lastSkippedBlock[chain] = blockNumber;
-            return;
-          }
           if (err.message.includes('maximum 10 calls in 1 batch')) return;
-          throw err;
+          console.warn(`[${name}] Log fetch error: ${err.message}`);
+          return;
         }
 
         const contract = new Contract(address, iface.fragments, provider);
         let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
-        let seenSales = new Set(loadJson(seenSalesPath(name)) || []);
+        let seenSales = new Set((loadJson(seenSalesPath(name)) || []).map(v => v.toLowerCase()));
 
         for (const log of logs) {
           let parsed;
           try { parsed = iface.parseLog(log); } catch { continue; }
           const { from, to, tokenId } = parsed.args;
           const tokenIdStr = tokenId.toString();
-
+          const txHash = log.transactionHash.toLowerCase();
           const allChannelIds = [...new Set([...(row.channel_ids || [])])];
 
           if (from === ZeroAddress) {
@@ -105,16 +71,14 @@ function setupChainBlockListener(client, chain, contractRows) {
             seenTokenIds.add(tokenIdStr);
             await handleMint(client, row, contract, tokenId, to, allChannelIds);
           } else {
-            if (seenSales.has(tokenIdStr)) continue;
-            seenSales.add(tokenIdStr);
-            await handleSale(client, row, contract, tokenId, from, to, log.transactionHash, allChannelIds);
+            if (seenSales.has(txHash)) continue;
+            seenSales.add(txHash);
+            await handleSale(client, row, contract, tokenId, from, to, txHash, allChannelIds);
           }
         }
 
-        if (blockNumber % 10 === 0) {
-          saveJson(seenPath(name), [...seenTokenIds]);
-          saveJson(seenSalesPath(name), [...seenSales]);
-        }
+        saveJson(seenPath(name), [...seenTokenIds]);
+        saveJson(seenSalesPath(name), [...seenSales]);
       } catch (err) {
         console.warn(`[${row.name}] Block processing error: ${err.message}`);
       }
@@ -181,8 +145,8 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
 
   let receipt, tx;
   try {
-    receipt = await getProvider().getTransactionReceipt(txHash);
-    tx = await getProvider().getTransaction(txHash);
+    receipt = await getProvider('base').getTransactionReceipt(txHash);
+    tx = await getProvider('base').getTransaction(txHash);
     if (!receipt || !tx) return;
   } catch { return; }
 
@@ -243,8 +207,9 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
 }
 
 module.exports = {
-  trackAllContracts,
+  trackBaseContracts,
   contractListeners
 };
+
 
 
