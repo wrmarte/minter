@@ -1,6 +1,6 @@
 const { SlashCommandBuilder, PermissionsBitField } = require('discord.js');
 const { TOKEN_NAME_TO_ADDRESS } = require('../constants') || {};
-const { trackAllContracts } = require('../services/mintProcessor');
+const { trackBaseContracts } = require('../services/mintRouter');
 
 module.exports = {
   data: new SlashCommandBuilder()
