@@ -1,5 +1,6 @@
 // Modular import for future network support
-const { trackBaseContracts } = require('../mintProcessorBase');
+const { trackBaseContracts } = require('../services/mintProcessorBase');
+
 // const { trackEthContracts } = require('../mintProcessorETH');
 // const { trackApeContracts } = require('../mintProcessorApe');
 
