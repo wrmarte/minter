@@ -28,8 +28,8 @@ function setupBaseBlockListener(client, contractRows) {
     'function tokenURI(uint256 tokenId) view returns (string)'
   ]);
 
-  // 🧠 Track dedupes across contract names (global sale → guild map)
   const globalSeenSales = new Set();
+  const globalSeenMints = new Set();
 
   provider.on('block', async (blockNumber) => {
     const fromBlock = Math.max(blockNumber - 5, 0);
@@ -68,7 +68,6 @@ function setupBaseBlockListener(client, contractRows) {
           const tokenIdStr = tokenId.toString();
           const txHash = log.transactionHash.toLowerCase();
 
-          // 🔄 Resolve all channelIds + guildIds
           const allChannelIds = [...new Set([...(row.channel_ids || [])])];
           const allGuildIds = [];
 
@@ -79,14 +78,21 @@ function setupBaseBlockListener(client, contractRows) {
             } catch {}
           }
 
+          const mintKey = `${address}-${tokenIdStr}`;
           const saleKey = `${address}-${txHash}`;
 
           if (from === ZeroAddress) {
-            if (seenTokenIds.has(tokenIdStr)) continue;
+            let shouldSend = false;
+            for (const gid of allGuildIds) {
+              const dedupeKey = `${gid}-${mintKey}`;
+              if (globalSeenMints.has(dedupeKey)) continue;
+              globalSeenMints.add(dedupeKey);
+              shouldSend = true;
+            }
+            if (!shouldSend || seenTokenIds.has(tokenIdStr)) continue;
             seenTokenIds.add(tokenIdStr);
             await handleMint(client, row, contract, tokenId, to, allChannelIds);
           } else {
-            // 🧠 If we've already seen this tx+guild combo in global map, skip
             let shouldSend = false;
             for (const gid of allGuildIds) {
               const dedupeKey = `${gid}-${txHash}`;
@@ -94,9 +100,7 @@ function setupBaseBlockListener(client, contractRows) {
               globalSeenSales.add(dedupeKey);
               shouldSend = true;
             }
-
             if (!shouldSend || seenSales.has(txHash)) continue;
-
             seenSales.add(txHash);
             await handleSale(client, row, contract, tokenId, from, to, txHash, allChannelIds);
           }
