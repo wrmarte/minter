@@ -100,7 +100,9 @@ for (const file of eventFiles) {
 // ✅ Load processors:
 
 const processUnifiedBlock = require('./services/globalProcessor');
-const { trackAllContracts } = require('./services/mintProcessor');
+const { trackBaseContracts } = require('./mintProcessorBase');
+trackBaseContracts(client);
+
 const { getProvider } = require('./services/providerM');
 
 // Start token global scanner (token buys/sales)
