@@ -43,6 +43,7 @@ function setupChainBlockListener(client, chain, contractRows) {
   ]);
 
   const lastSkippedBlock = {};
+  let hasWarnedBatchLimit = false;
 
   provider.on('block', async (blockNumber) => {
     const fromBlock = Math.max(blockNumber - 5, 0);
@@ -50,7 +51,7 @@ function setupChainBlockListener(client, chain, contractRows) {
 
     if (chain === 'ape') {
       if (lastSkippedBlock[chain] === blockNumber) return;
-      await delay(500); // ⏳ throttle ApeChain block load
+      await delay(500); // Throttle for ApeChain
     }
 
     const maxBatch = getMaxBatchSize(chain);
@@ -75,15 +76,14 @@ function setupChainBlockListener(client, chain, contractRows) {
         } catch (err) {
           const msg = err?.info?.responseBody || '';
           const apeLimit = chain === 'ape' && msg.includes('Batch of more than 3 requests');
-if (apeLimit) {
-  if (!hasWarnedBatchLimit) {
-    console.warn(`[${name}] ApeChain DRPC batch limit hit — temporarily skipping blocks.`);
-    hasWarnedBatchLimit = true;
-  }
-  lastSkippedBlock[chain] = blockNumber;
-  return;
-}
-
+          if (apeLimit) {
+            if (!hasWarnedBatchLimit) {
+              console.warn(`[${name}] ApeChain DRPC batch limit hit — temporarily skipping blocks.`);
+              hasWarnedBatchLimit = true;
+            }
+            lastSkippedBlock[chain] = blockNumber;
+            return;
+          }
           if (err.message.includes('maximum 10 calls in 1 batch')) return;
           throw err;
         }
@@ -246,4 +246,5 @@ module.exports = {
   trackAllContracts,
   contractListeners
 };
+
 
