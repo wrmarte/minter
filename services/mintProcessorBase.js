@@ -32,6 +32,9 @@ function setupBaseBlockListener(client, contractRows) {
     const fromBlock = Math.max(blockNumber - 5, 0);
     const toBlock = blockNumber;
 
+    // ✅ Track processed sales in this block across contracts
+    const blockSeenSales = new Set();
+
     for (const row of contractRows) {
       try {
         const name = row.name;
@@ -56,8 +59,6 @@ function setupBaseBlockListener(client, contractRows) {
 
         const contract = new Contract(address, iface.fragments, provider);
         let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
-
-        // ✅ Composite key: address + txHash
         let seenSales = new Set(
           (loadJson(seenSalesPath(name)) || []).map(v => `${address}-${v.toLowerCase()}`)
         );
@@ -76,15 +77,14 @@ function setupBaseBlockListener(client, contractRows) {
             seenTokenIds.add(tokenIdStr);
             await handleMint(client, row, contract, tokenId, to, allChannelIds);
           } else {
-            if (seenSales.has(saleKey)) continue;
+            if (seenSales.has(saleKey) || blockSeenSales.has(saleKey)) continue;
             seenSales.add(saleKey);
+            blockSeenSales.add(saleKey);
             await handleSale(client, row, contract, tokenId, from, to, txHash, allChannelIds);
           }
         }
 
         saveJson(seenPath(name), [...seenTokenIds]);
-
-        // ✅ Save only txHash portion to disk
         const txOnlyHashes = [...seenSales].map(key => key.split('-')[1]);
         saveJson(seenSalesPath(name), txOnlyHashes);
       } catch (err) {
@@ -218,6 +218,7 @@ module.exports = {
   trackBaseContracts,
   contractListeners
 };
+
 
 
 
