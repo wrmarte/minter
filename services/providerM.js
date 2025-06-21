@@ -15,9 +15,8 @@ const RPCS = {
     'https://rpc.ankr.com/eth'
   ],
   ape: [
-    'https://apechain.drpc.org',
-    'https://rpc.ankr.com/http/ape',
-    'https://1rpc.io/ape'
+    // ✅ Only 1 safe RPC for ApeChain (DRPC official with known limits)
+    'https://apechain.drpc.org'
   ]
 };
 
@@ -41,19 +40,24 @@ function getProvider(chain = 'base') {
   return providers[key];
 }
 
-// ✅ Rotate to next provider on error
+// ✅ Rotate to next provider (only for chains with multiple options)
 function rotateProvider(chain = 'base') {
   const key = chain.toLowerCase();
-  if (!RPCS[key]) return;
+
+  if (!RPCS[key] || RPCS[key].length <= 1) {
+    console.warn(`⛔ No rotation available for ${key} (using static RPC)`);
+    return;
+  }
 
   providerIndex[key] = (providerIndex[key] + 1) % RPCS[key].length;
   providers[key] = new JsonRpcProvider(RPCS[key][providerIndex[key]]);
   console.warn(`🔁 Rotated RPC for ${key}: ${RPCS[key][providerIndex[key]]}`);
 }
 
-// ✅ Failover-safe RPC call for a chain
+// ✅ Failover-safe RPC call with ApeChain batch limit check
 async function safeRpcCall(chain, callFn, retries = 3) {
   const key = chain.toLowerCase();
+
   for (let i = 0; i < retries; i++) {
     try {
       const provider = getProvider(key);
@@ -64,17 +68,19 @@ async function safeRpcCall(chain, callFn, retries = 3) {
       console.warn(`⚠️ [${key}] RPC Error: ${err.message || err.code}`);
 
       if (isApeBatchLimit) {
-        console.warn('⛔ ApeChain DRPC free tier batch limit hit — reduce batch or rotate');
+        console.warn('⛔ ApeChain batch limit hit — avoid rotating, respect max 3 batch size');
+        return null; // skip instead of retrying
       }
 
       rotateProvider(key);
-      await new Promise(res => setTimeout(res, 500)); // optional delay
+      await new Promise(res => setTimeout(res, 500));
     }
   }
+
   throw new Error(`❌ All RPCs failed for ${key}`);
 }
 
-// ✅ Batch size helper
+// ✅ Max batch size per chain
 function getMaxBatchSize(chain = 'base') {
   return chain.toLowerCase() === 'ape' ? 3 : 10;
 }
@@ -85,6 +91,7 @@ module.exports = {
   safeRpcCall,
   getMaxBatchSize
 };
+
 
 
 
