@@ -208,11 +208,18 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     timestamp: new Date().toISOString()
   };
 
+  // ✅ Deduplicate channels
+  const sentChannels = new Set();
+
   for (const id of channel_ids) {
+    if (sentChannels.has(id)) continue;
+    sentChannels.add(id);
+
     const ch = await client.channels.fetch(id).catch(() => null);
     if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
   }
 }
+
 
 module.exports = {
   trackBaseContracts,
