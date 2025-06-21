@@ -28,6 +28,7 @@ function setupBaseBlockListener(client, contractRows) {
     'function tokenURI(uint256 tokenId) view returns (string)'
   ]);
 
+  // 🧠 Track dedupes across contract names (global sale → guild map)
   const globalSeenSales = new Set();
 
   provider.on('block', async (blockNumber) => {
@@ -58,9 +59,7 @@ function setupBaseBlockListener(client, contractRows) {
 
         const contract = new Contract(address, iface.fragments, provider);
         let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
-        let seenSales = new Set(
-          (loadJson(seenSalesPath(name)) || []).map(v => `${address}-${v.toLowerCase()}`)
-        );
+        let seenSales = new Set((loadJson(seenSalesPath(name)) || []).map(tx => tx.toLowerCase()));
 
         for (const log of logs) {
           let parsed;
@@ -68,7 +67,18 @@ function setupBaseBlockListener(client, contractRows) {
           const { from, to, tokenId } = parsed.args;
           const tokenIdStr = tokenId.toString();
           const txHash = log.transactionHash.toLowerCase();
+
+          // 🔄 Resolve all channelIds + guildIds
           const allChannelIds = [...new Set([...(row.channel_ids || [])])];
+          const allGuildIds = [];
+
+          for (const id of allChannelIds) {
+            try {
+              const ch = await client.channels.fetch(id);
+              if (ch.guildId) allGuildIds.push(ch.guildId);
+            } catch {}
+          }
+
           const saleKey = `${address}-${txHash}`;
 
           if (from === ZeroAddress) {
@@ -76,22 +86,31 @@ function setupBaseBlockListener(client, contractRows) {
             seenTokenIds.add(tokenIdStr);
             await handleMint(client, row, contract, tokenId, to, allChannelIds);
           } else {
-            if (seenSales.has(saleKey) || globalSeenSales.has(saleKey)) continue;
-            seenSales.add(saleKey);
-            globalSeenSales.add(saleKey);
+            // 🧠 If we've already seen this tx+guild combo in global map, skip
+            let shouldSend = false;
+            for (const gid of allGuildIds) {
+              const dedupeKey = `${gid}-${txHash}`;
+              if (globalSeenSales.has(dedupeKey)) continue;
+              globalSeenSales.add(dedupeKey);
+              shouldSend = true;
+            }
+
+            if (!shouldSend || seenSales.has(txHash)) continue;
+
+            seenSales.add(txHash);
             await handleSale(client, row, contract, tokenId, from, to, txHash, allChannelIds);
           }
         }
 
         saveJson(seenPath(name), [...seenTokenIds]);
-        const txOnlyHashes = [...seenSales].map(key => key.split('-')[1]);
-        saveJson(seenSalesPath(name), txOnlyHashes);
+        saveJson(seenSalesPath(name), [...seenSales]);
       } catch (err) {
         console.warn(`[${row.name}] Block processing error: ${err.message}`);
       }
     }
   });
 }
+
 
 async function handleMint(client, contractRow, contract, tokenId, to, channel_ids) {
   const { name, mint_price, mint_token, mint_token_symbol } = contractRow;
