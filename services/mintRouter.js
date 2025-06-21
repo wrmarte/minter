@@ -1,12 +1,11 @@
 const { trackBaseContracts } = require('./mintProcessorBase');
 const { trackEthContracts } = require('./mintProcessorEth');
 const { trackEthContracts } = require('./mintProcessorApe');
-// (In future, add more networks like Ape here)
+// Add more networks here later
 
 function trackAllContracts(client) {
   trackBaseContracts(client);
   trackEthContracts(client);
-  // future: trackApeContracts(client);
 }
 
 module.exports = {
