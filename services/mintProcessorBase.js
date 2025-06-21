@@ -56,7 +56,11 @@ function setupBaseBlockListener(client, contractRows) {
 
         const contract = new Contract(address, iface.fragments, provider);
         let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
-        let seenSales = new Set((loadJson(seenSalesPath(name)) || []).map(v => v.toLowerCase()));
+
+        // ✅ Composite key: address + txHash
+        let seenSales = new Set(
+          (loadJson(seenSalesPath(name)) || []).map(v => `${address}-${v.toLowerCase()}`)
+        );
 
         for (const log of logs) {
           let parsed;
@@ -65,20 +69,24 @@ function setupBaseBlockListener(client, contractRows) {
           const tokenIdStr = tokenId.toString();
           const txHash = log.transactionHash.toLowerCase();
           const allChannelIds = [...new Set([...(row.channel_ids || [])])];
+          const saleKey = `${address}-${txHash}`;
 
           if (from === ZeroAddress) {
             if (seenTokenIds.has(tokenIdStr)) continue;
             seenTokenIds.add(tokenIdStr);
             await handleMint(client, row, contract, tokenId, to, allChannelIds);
           } else {
-            if (seenSales.has(txHash)) continue;
-            seenSales.add(txHash);
+            if (seenSales.has(saleKey)) continue;
+            seenSales.add(saleKey);
             await handleSale(client, row, contract, tokenId, from, to, txHash, allChannelIds);
           }
         }
 
         saveJson(seenPath(name), [...seenTokenIds]);
-        saveJson(seenSalesPath(name), [...seenSales]);
+
+        // ✅ Save only txHash portion to disk
+        const txOnlyHashes = [...seenSales].map(key => key.split('-')[1]);
+        saveJson(seenSalesPath(name), txOnlyHashes);
       } catch (err) {
         console.warn(`[${row.name}] Block processing error: ${err.message}`);
       }
@@ -210,6 +218,7 @@ module.exports = {
   trackBaseContracts,
   contractListeners
 };
+
 
 
 
