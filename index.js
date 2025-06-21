@@ -99,13 +99,9 @@ for (const file of eventFiles) {
 }
 
 // ✅ Mint/Sale Trackers (Modular)
-const { trackBaseContracts } = require('./services/mintProcessorBase');
-// const { trackEthContracts } = require('./mintProcessorETH'); // Later
-// const { trackApeContracts } = require('./mintProcessorApe'); // Later
+const { trackAllContracts } = require('./services/mintRouter');
+trackAllContracts(client);
 
-trackBaseContracts(client);
-// trackEthContracts(client);
-// trackApeContracts(client);
 
 // Global token buy/sell scanner
 const processUnifiedBlock = require('./services/globalProcessor');
