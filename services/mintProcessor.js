@@ -65,11 +65,13 @@ function setupChainBlockListener(client, chain, contractRows) {
         } catch (err) {
           const msg = err?.info?.responseBody || '';
           const apeLimit = chain === 'ape' && msg.includes('Batch of more than 3 requests');
-          if (apeLimit) {
-            console.warn(`[${name}] ApeChain DRPC batch limit hit — rotating provider`);
-            rotateProvider(chain);
-            return;
-          }
+         if (apeLimit) {
+  console.warn(`[${name}] ApeChain DRPC batch limit hit — delaying + rotating RPC`);
+  await delay(1000); // wait 1 sec before rotating to avoid hammering
+  rotateProvider(chain);
+  return; // skip this block, try again on next block tick
+}
+
           if (err.message.includes('maximum 10 calls in 1 batch')) return;
           throw err;
         }
