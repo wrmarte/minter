@@ -1,6 +1,6 @@
 const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 const { getProvider } = require('../services/provider');
-const { contractListeners } = require('../services/mintProcessor');
+const { contractListeners } = require('../services/mintProcessorBase');
 const { statSync } = require('fs');
 const version = require('../package.json').version;
 
