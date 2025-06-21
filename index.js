@@ -10,12 +10,12 @@ require('./services/logScanner');
 
 console.log("👀 Booting from:", __dirname);
 
-// Create Discord client.
+// Create Discord client
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent 
+    GatewayIntentBits.MessageContent
   ]
 });
 
@@ -27,14 +27,15 @@ const pg = new PgClient({
 pg.connect();
 client.pg = pg;
 
-// Initialize database tables if not exists
+// Initialize DB tables
 pg.query(`CREATE TABLE IF NOT EXISTS contract_watchlist (
   name TEXT PRIMARY KEY,
   address TEXT NOT NULL,
   mint_price NUMERIC NOT NULL,
   mint_token TEXT DEFAULT 'ETH',
   mint_token_symbol TEXT DEFAULT 'ETH',
-  channel_ids TEXT[]
+  channel_ids TEXT[],
+  chain TEXT DEFAULT 'base'
 )`);
 
 pg.query(`CREATE TABLE IF NOT EXISTS tracked_tokens (
@@ -97,15 +98,19 @@ for (const file of eventFiles) {
   }
 }
 
-// ✅ Load processors:
-
-const processUnifiedBlock = require('./services/globalProcessor');
+// ✅ Mint/Sale Trackers (Modular)
 const { trackBaseContracts } = require('./mintProcessorBase');
-trackBaseContracts(client);
+// const { trackEthContracts } = require('./mintProcessorETH'); // Later
+// const { trackApeContracts } = require('./mintProcessorApe'); // Later
 
+trackBaseContracts(client);
+// trackEthContracts(client);
+// trackApeContracts(client);
+
+// Global token buy/sell scanner
+const processUnifiedBlock = require('./services/globalProcessor');
 const { getProvider } = require('./services/providerM');
 
-// Start token global scanner (token buys/sales)
 setInterval(async () => {
   try {
     const latestBlock = await getProvider().getBlockNumber();
@@ -113,15 +118,13 @@ setInterval(async () => {
   } catch (err) {
     console.error("Global scanner error:", err);
   }
-}, 15000);  // scan every 15 sec
-
-// Start NFT mint + sale live listeners (per contract)
-trackAllContracts(client);
+}, 15000);  // every 15 sec
 
 // Login to Discord
 client.login(process.env.DISCORD_BOT_TOKEN)
   .then(() => console.log(`✅ Logged in as ${client.user.tag}`))
   .catch(err => console.error('❌ Discord login failed:', err));
+
 
 
 
