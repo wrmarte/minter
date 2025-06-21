@@ -33,8 +33,7 @@ function setupBaseBlockListener(client, contractRows) {
     const toBlock = blockNumber;
 
     const blockSeenSales = new Set();
-    const seenServerSales = new Set();
-    const seenServerMints = new Set();
+    const guildTxSeen = new Set();
 
     for (const row of contractRows) {
       try {
@@ -70,46 +69,39 @@ function setupBaseBlockListener(client, contractRows) {
           const { from, to, tokenId } = parsed.args;
           const tokenIdStr = tokenId.toString();
           const txHash = log.transactionHash.toLowerCase();
-          const allChannelIds = [...new Set([...(row.channel_ids || [])])];
 
-          const allGuildIds = [];
+          const allChannelIds = [...new Set([...(row.channel_ids || [])])];
+          const channelGuildMap = new Map();
+
           for (const id of row.channel_ids || []) {
             try {
               const ch = await client.channels.fetch(id);
-              if (ch.guildId) allGuildIds.push(ch.guildId);
+              if (ch.guildId) channelGuildMap.set(id, ch.guildId);
             } catch {}
           }
 
           const saleKey = `${address}-${txHash}`;
 
           if (from === ZeroAddress) {
-            let shouldSend = false;
-            for (const gid of allGuildIds) {
-              const mintKey = `${gid}-${tokenIdStr}`;
-              if (seenServerMints.has(mintKey)) continue;
-              seenServerMints.add(mintKey);
-              shouldSend = true;
-            }
-
-            if (!shouldSend || seenTokenIds.has(tokenIdStr)) continue;
+            if (seenTokenIds.has(tokenIdStr)) continue;
             seenTokenIds.add(tokenIdStr);
             await handleMint(client, row, contract, tokenId, to, allChannelIds);
           } else {
             if (seenSales.has(saleKey) || blockSeenSales.has(saleKey)) continue;
 
-            let shouldSend = false;
-            for (const gid of allGuildIds) {
-              const serverKey = `${gid}-${txHash}`;
-              if (seenServerSales.has(serverKey)) continue;
-              seenServerSales.add(serverKey);
-              shouldSend = true;
+            const dedupedChannelIds = [];
+            for (const [chId, gid] of channelGuildMap.entries()) {
+              const key = `${gid}-${txHash}`;
+              if (guildTxSeen.has(key)) continue;
+              guildTxSeen.add(key);
+              dedupedChannelIds.push(chId);
             }
 
-            if (!shouldSend) continue;
+            if (dedupedChannelIds.length === 0) continue;
 
             seenSales.add(saleKey);
             blockSeenSales.add(saleKey);
-            await handleSale(client, row, contract, tokenId, from, to, txHash, allChannelIds);
+            await handleSale(client, row, contract, tokenId, from, to, txHash, dedupedChannelIds);
           }
         }
 
@@ -122,6 +114,7 @@ function setupBaseBlockListener(client, contractRows) {
     }
   });
 }
+
 
 async function handleMint(client, contractRow, contract, tokenId, to, channel_ids) {
   const { name, mint_price, mint_token, mint_token_symbol } = contractRow;
