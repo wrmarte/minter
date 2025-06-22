@@ -45,7 +45,7 @@ function setupEthBlockListener(client, contractRows) {
           toBlock
         };
 
-        await delay(200); // slight delay to avoid batching issues
+        await delay(200);
 
         let logs;
         try {
@@ -73,7 +73,7 @@ function setupEthBlockListener(client, contractRows) {
           for (const id of allChannelIds) {
             try {
               const ch = await client.channels.fetch(id);
-              if (ch.guildId) allGuildIds.push(ch.guildId);
+              if (ch?.guildId) allGuildIds.push(ch.guildId);
             } catch {}
           }
 
@@ -243,3 +243,4 @@ module.exports = {
   trackEthContracts,
   contractListeners
 };
+
