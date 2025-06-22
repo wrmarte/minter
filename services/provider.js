@@ -25,6 +25,13 @@ const rpcIndex = {
   ape: 0
 };
 
+// Persistent providers per chain
+let providers = {
+  eth: new JsonRpcProvider(RPCS.eth[0]),
+  base: new JsonRpcProvider(RPCS.base[0]),
+  ape: new JsonRpcProvider(RPCS.ape[0], { name: 'apechain', chainId: 33139 })
+};
+
 function getProvider(chain = 'base') {
   chain = chain.toLowerCase();
 
@@ -33,22 +40,31 @@ function getProvider(chain = 'base') {
     chain = 'base';
   }
 
-  const urls = RPCS[chain];
-  if (!urls || urls.length === 0) {
-    throw new Error(`🚫 No RPC URLs defined for chain: ${chain}`);
-  }
-
-  const url = urls[rpcIndex[chain]];
-  rpcIndex[chain] = (rpcIndex[chain] + 1) % urls.length;
-
-  // ✅ Required for Ethers v6 compatibility
-  return new JsonRpcProvider(url, chain === 'ape'
-    ? { name: 'apechain', chainId: 33139 }
-    : undefined
-  );
+  return providers[chain];
 }
 
-module.exports = { getProvider };
+function rotateProvider(chain = 'base') {
+  chain = chain.toLowerCase();
+
+  if (!RPCS.hasOwnProperty(chain)) return;
+
+  const urls = RPCS[chain];
+  rpcIndex[chain] = (rpcIndex[chain] + 1) % urls.length;
+  const nextUrl = urls[rpcIndex[chain]];
+
+  providers[chain] = new JsonRpcProvider(
+    nextUrl,
+    chain === 'ape' ? { name: 'apechain', chainId: 33139 } : undefined
+  );
+
+  console.warn(`🔁 Rotated ${chain.toUpperCase()} RPC → ${nextUrl}`);
+}
+
+module.exports = {
+  getProvider,
+  rotateProvider
+};
+
 
 
 
