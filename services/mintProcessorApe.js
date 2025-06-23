@@ -181,6 +181,7 @@ function setupApeBlockListener(client, contractRows) {
   }, 12000);
 }
 
+
 // handleMint and handleSale remain unchanged
 
 
