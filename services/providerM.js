@@ -15,8 +15,9 @@ const RPCS = {
     'https://rpc.ankr.com/eth'
   ],
   ape: [
-    // ✅ Only 1 safe RPC for ApeChain (DRPC official with known limits)
-    'https://apechain.drpc.org'
+    'https://apechain.drpc.org',
+    'https://rpc.ankr.com/ape', // ✅ Public fallback 1
+    'https://apechain-mainnet.public.blastapi.io' // ✅ Public fallback 2
   ]
 };
 
@@ -80,16 +81,22 @@ async function safeRpcCall(chain, callFn, retries = 4) {
         msg.includes('timeout') ||
         msg.includes('ENOTFOUND') ||
         msg.includes('could not coalesce') ||
-        msg.includes('exceeded') ||
         msg.includes('invalid block range') ||
-        msg.includes('failed to fetch')
+        msg.includes('failed to fetch') ||
+        msg.includes('504') ||
+        msg.includes('503') ||
+        msg.includes('Bad Gateway') ||
+        msg.includes('Gateway Time-out')
       ) {
         if (key !== 'ape') {
           rotateProvider(key);
         } else if (isApeBatchLimit) {
           console.warn('⛔ ApeChain batch limit hit — skip batch, no retry');
           return null;
+        } else {
+          rotateProvider(key);
         }
+
         await new Promise(res => setTimeout(res, 500));
         continue;
       }
