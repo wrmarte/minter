@@ -96,13 +96,51 @@ function setupApeBlockListener(client, contractRows) {
           }
         } else {
           let tx;
+          let tokenPayment = null;
           try {
             tx = await safeRpcCall('ape', p => p.getTransaction(txHash));
             const toAddr = tx?.to?.toLowerCase?.();
-            const isSale = ROUTERS.includes(toAddr);
+            const isNativeSale = ROUTERS.includes(toAddr);
 
-            if (!isSale) {
-              console.log(`[${name}] Skipped non-sale transfer to ${toAddr}: ${txHash}`);
+            let isTokenSale = false;
+
+            if (!isNativeSale) {
+              const receipt = await safeRpcCall('ape', p => p.getTransactionReceipt(txHash));
+              for (const log of receipt.logs) {
+                try {
+                  const parsedLog = new Interface([
+                    'event Transfer(address indexed from, address indexed to, uint256 value)'
+                  ]).parseLog(log);
+
+                  const fromLog = parsedLog.args.from?.toLowerCase?.();
+                  const toLog = parsedLog.args.to?.toLowerCase?.();
+
+                  if (fromLog === from.toLowerCase() && ROUTERS.includes(toLog)) {
+                    isTokenSale = true;
+
+                    try {
+                      const tokenContract = new Contract(log.address, [
+                        'function symbol() view returns (string)',
+                        'function decimals() view returns (uint8)'
+                      ], provider);
+
+                      const symbol = await tokenContract.symbol();
+                      const decimals = await tokenContract.decimals();
+                      const amount = parseFloat(parsedLog.args.value.toString()) / 10 ** decimals;
+                      tokenPayment = `${amount.toFixed(4)} ${symbol}`;
+                    } catch {
+                      const amount = parseFloat(parsedLog.args.value.toString()) / 1e18;
+                      tokenPayment = `${amount.toFixed(4)} TOKEN`;
+                    }
+
+                    break;
+                  }
+                } catch {}
+              }
+            }
+
+            if (!isNativeSale && !tokenPayment) {
+              console.log(`[${name}] Skipped non-sale tx: ${txHash}`);
               continue;
             }
           } catch (err) {
@@ -121,7 +159,7 @@ function setupApeBlockListener(client, contractRows) {
           if (!shouldSend || seenSales.has(txHash)) continue;
           seenSales.add(txHash);
 
-          await handleSale(client, row, contract, tokenId, from, to, txHash, allChannelIds);
+          await handleSale(client, row, contract, tokenId, from, to, txHash, allChannelIds, tokenPayment);
         }
       }
 
@@ -161,12 +199,11 @@ async function handleMint(client, contractRow, contract, tokenId, to, channel_id
   }
 }
 
-async function handleSale(client, contractRow, contract, tokenId, from, to, txHash, channel_ids) {
+async function handleSale(client, contractRow, contract, tokenId, from, to, txHash, channel_ids, tokenPayment = null) {
   const { name, address } = contractRow;
   let imageUrl = 'https://via.placeholder.com/400x400.png?text=SOLD';
   const magicEdenUrl = `https://magiceden.us/item-details/apechain/${address}/${tokenId}`;
 
-  // Get metadata image
   try {
     let uri = await contract.tokenURI(tokenId);
     if (uri.startsWith('ipfs://')) uri = uri.replace('ipfs://', 'https://ipfs.io/ipfs/');
@@ -176,16 +213,17 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     }
   } catch {}
 
-  // Fetch price paid (native APE)
-  let pricePaid = 'N/A';
-  try {
-    const tx = await safeRpcCall('ape', p => p.getTransaction(txHash));
-    const paidEth = parseFloat(tx.value.toString()) / 1e18;
-    if (paidEth > 0) {
-      pricePaid = `${paidEth.toFixed(4)} APE`;
+  let pricePaid = tokenPayment || 'N/A';
+  if (!tokenPayment) {
+    try {
+      const tx = await safeRpcCall('ape', p => p.getTransaction(txHash));
+      const paidEth = parseFloat(tx.value.toString()) / 1e18;
+      if (paidEth > 0) {
+        pricePaid = `${paidEth.toFixed(4)} APE`;
+      }
+    } catch (err) {
+      console.warn(`⚠️ Could not fetch tx value for ${txHash}: ${err.message}`);
     }
-  } catch (err) {
-    console.warn(`⚠️ Could not fetch tx value for ${txHash}: ${err.message}`);
   }
 
   const embed = {
@@ -209,7 +247,6 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
   }
 }
-
 
 module.exports = {
   trackApeContracts,
