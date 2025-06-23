@@ -60,8 +60,8 @@ function rotateProvider(chain = 'base') {
   console.warn(`🔁 Rotated RPC for ${key}: ${RPCS[key][providerIndex[key]]}`);
 }
 
-// ✅ Failover-safe RPC call with ApeChain batch limit check
-async function safeRpcCall(chain, callFn, retries = 3) {
+// ✅ Failover-safe RPC call with smart retry and ApeChain rules
+async function safeRpcCall(chain, callFn, retries = 4) {
   const key = chain.toLowerCase();
 
   for (let i = 0; i < retries; i++) {
@@ -71,15 +71,30 @@ async function safeRpcCall(chain, callFn, retries = 3) {
     } catch (err) {
       const msg = err?.info?.responseBody || err?.message || '';
       const isApeBatchLimit = key === 'ape' && msg.includes('Batch of more than 3 requests');
-      console.warn(`⚠️ [${key}] RPC Error: ${err.message || err.code}`);
 
-      if (isApeBatchLimit) {
-        console.warn('⛔ ApeChain batch limit hit — avoid rotating, respect max 3 batch size');
-        return null; // skip instead of retrying
+      console.warn(`⚠️ [${key}] RPC Error: ${err.message || err.code || 'unknown'}`);
+
+      if (
+        msg.includes('no response') ||
+        msg.includes('429') ||
+        msg.includes('timeout') ||
+        msg.includes('ENOTFOUND') ||
+        msg.includes('could not coalesce') ||
+        msg.includes('exceeded') ||
+        msg.includes('invalid block range') ||
+        msg.includes('failed to fetch')
+      ) {
+        if (key !== 'ape') {
+          rotateProvider(key);
+        } else if (isApeBatchLimit) {
+          console.warn('⛔ ApeChain batch limit hit — skip batch, no retry');
+          return null;
+        }
+        await new Promise(res => setTimeout(res, 500));
+        continue;
       }
 
-      rotateProvider(key);
-      await new Promise(res => setTimeout(res, 500));
+      throw err;
     }
   }
 
@@ -97,6 +112,7 @@ module.exports = {
   safeRpcCall,
   getMaxBatchSize
 };
+
 
 
 
