@@ -111,46 +111,41 @@ function setupApeBlockListener(client, contractRows) {
             console.log(`[${name}] TX ${txHash} → ${toAddr} | Native sale? ${isNativeSale}`);
 
             let isTokenSale = false;
+            const receipt = await safeRpcCall('ape', p => p.getTransactionReceipt(txHash));
+            console.log(`[${name}] Scanning ${receipt.logs.length} logs for token payments...`);
 
-            if (!isNativeSale) {
-              const receipt = await safeRpcCall('ape', p => p.getTransactionReceipt(txHash));
-              console.log(`[${name}] Scanning ${receipt.logs.length} logs for token payments...`);
+            for (const log of receipt.logs) {
+              try {
+                const parsedLog = new Interface([
+                  'event Transfer(address indexed from, address indexed to, uint256 value)'
+                ]).parseLog(log);
 
-              for (const log of receipt.logs) {
-                try {
-                  const parsedLog = new Interface([
-                    'event Transfer(address indexed from, address indexed to, uint256 value)'
-                  ]).parseLog(log);
+                const fromLog = parsedLog.args.from?.toLowerCase?.();
+                const toLog = parsedLog.args.to?.toLowerCase?.();
 
-                  const fromLog = parsedLog.args.from?.toLowerCase?.();
-                  const toLog = parsedLog.args.to?.toLowerCase?.();
+                if (toLog === from.toLowerCase()) {
+                  isTokenSale = true;
 
-                  console.log(`[${name}] Log: ${log.address} — from ${fromLog} → ${toLog}`);
+                  try {
+                    const tokenContract = new Contract(log.address, [
+                      'function symbol() view returns (string)',
+                      'function decimals() view returns (uint8)'
+                    ], provider);
 
-                  if (ROUTERS.includes(toLog)) {
-                    isTokenSale = true;
-
-                    try {
-                      const tokenContract = new Contract(log.address, [
-                        'function symbol() view returns (string)',
-                        'function decimals() view returns (uint8)'
-                      ], provider);
-
-                      const symbol = await tokenContract.symbol();
-                      const decimals = await tokenContract.decimals();
-                      const amount = parseFloat(parsedLog.args.value.toString()) / 10 ** decimals;
-                      tokenPayment = `${amount.toFixed(4)} ${symbol}`;
-                      console.log(`[${name}] ✅ Token sale detected: ${tokenPayment}`);
-                    } catch {
-                      const amount = parseFloat(parsedLog.args.value.toString()) / 1e18;
-                      tokenPayment = `${amount.toFixed(4)} TOKEN`;
-                      console.log(`[${name}] ✅ Token fallback sale detected: ${tokenPayment}`);
-                    }
-
-                    break;
+                    const symbol = await tokenContract.symbol();
+                    const decimals = await tokenContract.decimals();
+                    const amount = parseFloat(parsedLog.args.value.toString()) / 10 ** decimals;
+                    tokenPayment = `${amount.toFixed(4)} ${symbol}`;
+                    console.log(`[${name}] ✅ Token sale detected: ${tokenPayment}`);
+                  } catch {
+                    const amount = parseFloat(parsedLog.args.value.toString()) / 1e18;
+                    tokenPayment = `${amount.toFixed(4)} TOKEN`;
+                    console.log(`[${name}] ✅ Token fallback sale detected: ${tokenPayment}`);
                   }
-                } catch {}
-              }
+
+                  break;
+                }
+              } catch {}
             }
 
             if (!isNativeSale && !tokenPayment) {
@@ -185,6 +180,10 @@ function setupApeBlockListener(client, contractRows) {
     }
   }, 12000);
 }
+
+// handleMint and handleSale remain unchanged
+
+
 
 async function handleMint(client, contractRow, contract, tokenId, to, channel_ids) {
   const { name, address } = contractRow;
