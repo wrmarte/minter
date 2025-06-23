@@ -4,6 +4,10 @@ const { safeRpcCall } = require('../services/providerM');
 const { shortWalletLink, loadJson, saveJson, seenPath, seenSalesPath } = require('../utils/helpers');
 const delay = ms => new Promise(res => setTimeout(res, ms));
 
+const ROUTERS = [
+  '0x420dd381b31aef6683e2c581f93b119eee7e3f4d' // ✅ Magic Eden Router (ApeChain)
+];
+
 const contractListeners = {};
 
 async function trackApeContracts(client) {
@@ -94,8 +98,11 @@ function setupApeBlockListener(client, contractRows) {
           let tx;
           try {
             tx = await safeRpcCall('ape', p => p.getTransaction(txHash));
-            if (!tx || tx.value?.isZero?.()) {
-              console.log(`[${name}] Skipped transfer-only tx: ${txHash}`);
+            const toAddr = tx?.to?.toLowerCase?.();
+            const isSale = ROUTERS.includes(toAddr);
+
+            if (!isSale) {
+              console.log(`[${name}] Skipped non-sale transfer to ${toAddr}: ${txHash}`);
               continue;
             }
           } catch (err) {
@@ -194,3 +201,4 @@ module.exports = {
   trackApeContracts,
   contractListeners
 };
+
