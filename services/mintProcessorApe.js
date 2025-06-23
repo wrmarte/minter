@@ -106,7 +106,17 @@ function setupApeBlockListener(client, contractRows) {
           try {
             tx = await safeRpcCall('ape', p => p.getTransaction(txHash));
             const toAddr = tx?.to?.toLowerCase?.();
-            const isNativeSale = ROUTERS.includes(toAddr);
+            let isNativeSale = ROUTERS.includes(toAddr);
+
+            // ✅ Direct APE to seller (no router)
+            if (!isNativeSale && toAddr === from.toLowerCase()) {
+              const value = parseFloat(tx.value.toString()) / 1e18;
+              if (value > 0.001) {
+                isNativeSale = true;
+                tokenPayment = `${value.toFixed(4)} APE`;
+                console.log(`[${name}] ✅ Direct native APE sale detected: ${tokenPayment}`);
+              }
+            }
 
             console.log(`[${name}] TX ${txHash} → ${toAddr} | Native sale? ${isNativeSale}`);
 
