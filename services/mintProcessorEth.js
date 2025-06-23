@@ -214,13 +214,14 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
 
   if (!tokenAmount || !ethValue) return;
 
-  const currentEthUsd = await getEthPriceFromToken('eth'); // ✅ fetch ETH→USD
-  const usdValue = currentEthUsd ? (ethValue * currentEthUsd).toFixed(2) : 'N/A';
+  const currentEthUsd = await getEthPriceFromToken('eth');
+  const usdValue = currentEthUsd && ethValue ? (ethValue * currentEthUsd).toFixed(2) : 'N/A';
 
   const osUrl = `https://opensea.io/assets/ethereum/${address}/${tokenId}`;
 
   const embed = {
-    title: `💸 [${name} #${tokenId} SOLD](<${osUrl}>)`,
+    title: `💸 ${name} #${tokenId} SOLD`,
+    url: osUrl, // ✅ image click redirects to OpenSea
     description: `Token \`#${tokenId}\` just sold!`,
     fields: [
       { name: '👤 Seller', value: shortWalletLink(from), inline: true },
@@ -229,7 +230,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
       { name: `⇄ ETH Value`, value: `${ethValue.toFixed(4)} ETH`, inline: true },
       { name: `💳 Method`, value: methodUsed || 'Unknown', inline: true }
     ],
-    thumbnail: { url: imageUrl },
+    image: { url: imageUrl },
     color: 0x66cc66,
     footer: { text: 'Powered by PimpsDev' },
     timestamp: new Date().toISOString()
@@ -243,6 +244,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
   }
 }
+
 
 module.exports = {
   trackEthContracts,
