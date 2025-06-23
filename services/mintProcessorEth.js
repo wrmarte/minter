@@ -169,9 +169,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     if (uri.startsWith('ipfs://')) uri = uri.replace('ipfs://', 'https://ipfs.io/ipfs/');
     const meta = await fetch(uri).then(res => res.json());
     if (meta?.image) {
-      imageUrl = meta.image.startsWith('ipfs://')
-        ? meta.image.replace('ipfs://', 'https://ipfs.io/ipfs/')
-        : meta.image;
+      imageUrl = meta.image.startsWith('ipfs://') ? meta.image.replace('ipfs://', 'https://ipfs.io/ipfs/') : meta.image;
     }
   } catch {}
 
@@ -220,7 +218,6 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
 
   if (!tokenAmount || !ethValue) return;
 
-  // ✅ Fetch live ETH→USD conversion rate
   let usdValue = 'N/A';
   try {
     const cg = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd').then(r => r.json());
@@ -237,11 +234,11 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     fields: [
       { name: '👤 Seller', value: shortWalletLink(from), inline: true },
       { name: '🧑‍💻 Buyer', value: shortWalletLink(to), inline: true },
-      { name: `💰 Paid`, value: `$${usdValue} / ${tokenAmount.toFixed(4)}`, inline: true },
+      { name: `💰 Paid`, value: `$${usdValue}`, inline: true },
       { name: `⇄ ETH Value`, value: `${ethValue.toFixed(4)} ETH`, inline: true },
       { name: `💳 Method`, value: methodUsed || 'Unknown', inline: true }
     ],
-    thumbnail: { url: imageUrl }, // ✅ NFT image top-right thumbnail
+    thumbnail: { url: imageUrl },
     color: 0x66cc66,
     footer: { text: 'Powered by PimpsDev' },
     timestamp: new Date().toISOString()
@@ -256,9 +253,9 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
   }
 }
 
-
 module.exports = {
   trackEthContracts,
   contractListeners
 };
+
 
