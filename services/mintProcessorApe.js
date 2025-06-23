@@ -2,7 +2,6 @@ const { Interface, Contract, id, ZeroAddress, ethers } = require('ethers');
 const fetch = require('node-fetch');
 const { getProvider } = require('./providerM');
 const { shortWalletLink, loadJson, saveJson, seenPath, seenSalesPath } = require('../utils/helpers');
-const { fetchLogs } = require('./logScanner'); // ✅ REQUIRED FOR PATCH
 const delay = ms => new Promise(res => setTimeout(res, ms));
 
 const contractListeners = {};
@@ -27,44 +26,48 @@ function setupApeBlockListener(client, contractRows) {
   const globalSeenSales = new Set();
 
   provider.on('block', async (blockNumber) => {
-    const fromBlock = Math.max(blockNumber - 3, 0); // <= Keep within DRPC free limits
+    const fromBlock = Math.max(blockNumber - 1, 0); // ⚠️ Smaller window for DRPC free tier
     const toBlock = blockNumber;
-
-    const addresses = contractRows.map(row => row.address.toLowerCase());
-
-    let logs = [];
-    try {
-      logs = await fetchLogs(addresses, fromBlock, toBlock, 'ape'); // ✅ PATCHED
-    } catch (err) {
-      console.warn(`[Brotherh00d] Ape log fetch error: ${err.message}`);
-      return;
-    }
 
     for (const row of contractRows) {
       try {
         const name = row.name;
         const address = row.address.toLowerCase();
-        const contractLogs = logs.filter(l => l.address.toLowerCase() === address);
+        const allChannelIds = [...new Set([...(row.channel_ids || [])])];
+        const allGuildIds = [];
+
+        for (const id of allChannelIds) {
+          try {
+            const ch = await client.channels.fetch(id);
+            if (ch?.guildId) allGuildIds.push(ch.guildId);
+          } catch {}
+        }
+
+        const logs = [];
+        const topics = [id('Transfer(address,address,uint256)')];
+
+        for (const topic of topics) {
+          try {
+            const filter = { address, topics: [topic], fromBlock, toBlock };
+            const theseLogs = await provider.getLogs(filter);
+            logs.push(...theseLogs);
+            await delay(300); // DRPC pacing delay
+          } catch (err) {
+            console.warn(`🛑 DRPC batch limit hit — ape logs skipped: ${fromBlock}–${toBlock}`);
+            continue;
+          }
+        }
+
         const contract = new Contract(address, iface.fragments, provider);
         let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
         let seenSales = new Set((loadJson(seenSalesPath(name)) || []).map(tx => tx.toLowerCase()));
 
-        for (const log of contractLogs) {
+        for (const log of logs) {
           let parsed;
           try { parsed = iface.parseLog(log); } catch { continue; }
           const { from, to, tokenId } = parsed.args;
           const tokenIdStr = tokenId.toString();
           const txHash = log.transactionHash.toLowerCase();
-
-          const allChannelIds = [...new Set([...(row.channel_ids || [])])];
-          const allGuildIds = [];
-
-          for (const id of allChannelIds) {
-            try {
-              const ch = await client.channels.fetch(id);
-              if (ch?.guildId) allGuildIds.push(ch.guildId);
-            } catch {}
-          }
 
           if (from === ZeroAddress) {
             if (seenTokenIds.has(tokenIdStr)) continue;
@@ -172,3 +175,4 @@ module.exports = {
   trackApeContracts,
   contractListeners
 };
+
