@@ -166,6 +166,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
   let imageUrl = 'https://via.placeholder.com/400x400.png?text=SOLD';
   const magicEdenUrl = `https://magiceden.us/item-details/apechain/${address}/${tokenId}`;
 
+  // Get metadata image
   try {
     let uri = await contract.tokenURI(tokenId);
     if (uri.startsWith('ipfs://')) uri = uri.replace('ipfs://', 'https://ipfs.io/ipfs/');
@@ -175,6 +176,18 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     }
   } catch {}
 
+  // Fetch price paid (native APE)
+  let pricePaid = 'N/A';
+  try {
+    const tx = await safeRpcCall('ape', p => p.getTransaction(txHash));
+    const paidEth = parseFloat(tx.value.toString()) / 1e18;
+    if (paidEth > 0) {
+      pricePaid = `${paidEth.toFixed(4)} APE`;
+    }
+  } catch (err) {
+    console.warn(`⚠️ Could not fetch tx value for ${txHash}: ${err.message}`);
+  }
+
   const embed = {
     title: `💸 ${name} #${tokenId} SOLD`,
     description: `Token \`#${tokenId}\` just sold!`,
@@ -182,7 +195,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     fields: [
       { name: '👤 Seller', value: shortWalletLink(from), inline: true },
       { name: '🧑‍💻 Buyer', value: shortWalletLink(to), inline: true },
-      { name: `💰 Paid`, value: `N/A`, inline: true },
+      { name: `💰 Paid`, value: pricePaid, inline: true },
       { name: `💳 Method`, value: 'ApeChain', inline: true }
     ],
     thumbnail: { url: imageUrl },
@@ -196,6 +209,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
   }
 }
+
 
 module.exports = {
   trackApeContracts,
