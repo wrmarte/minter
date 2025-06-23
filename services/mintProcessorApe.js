@@ -103,27 +103,26 @@ function setupApeBlockListener(client, contractRows) {
         if (!isMint || isDeadTransfer) {
           let tx;
           let tokenPayment = null;
+          let isNativeSale = false;
+
           try {
             tx = await safeRpcCall('ape', p => p.getTransaction(txHash));
             const toAddr = tx?.to?.toLowerCase?.();
-            let isNativeSale = ROUTERS.includes(toAddr);
 
-            // ✅ Direct APE to seller (no router)
-            if (!isNativeSale && toAddr === from.toLowerCase()) {
+            if (ROUTERS.includes(toAddr)) {
+              isNativeSale = true;
               const value = parseFloat(tx.value.toString()) / 1e18;
               if (value > 0.001) {
-                isNativeSale = true;
                 tokenPayment = `${value.toFixed(4)} APE`;
-                console.log(`[${name}] ✅ Direct native APE sale detected: ${tokenPayment}`);
               }
+            } else if (toAddr === from.toLowerCase() && tx.value > 0) {
+              isNativeSale = true;
+              const value = parseFloat(tx.value.toString()) / 1e18;
+              tokenPayment = `${value.toFixed(4)} APE`;
+              console.log(`[${name}] ✅ Direct APE sale to seller detected: ${tokenPayment}`);
             }
 
-            console.log(`[${name}] TX ${txHash} → ${toAddr} | Native sale? ${isNativeSale}`);
-
-            let isTokenSale = false;
             const receipt = await safeRpcCall('ape', p => p.getTransactionReceipt(txHash));
-            console.log(`[${name}] Scanning ${receipt.logs.length} logs for token payments...`);
-
             for (const log of receipt.logs) {
               try {
                 const parsedLog = new Interface([
@@ -134,8 +133,6 @@ function setupApeBlockListener(client, contractRows) {
                 const toLog = parsedLog.args.to?.toLowerCase?.();
 
                 if (toLog === from.toLowerCase()) {
-                  isTokenSale = true;
-
                   try {
                     const tokenContract = new Contract(log.address, [
                       'function symbol() view returns (string)',
@@ -147,12 +144,13 @@ function setupApeBlockListener(client, contractRows) {
                     const amount = parseFloat(parsedLog.args.value.toString()) / 10 ** decimals;
                     tokenPayment = `${amount.toFixed(4)} ${symbol}`;
                     console.log(`[${name}] ✅ Token sale detected: ${tokenPayment}`);
+                    isNativeSale = true;
                   } catch {
                     const amount = parseFloat(parsedLog.args.value.toString()) / 1e18;
                     tokenPayment = `${amount.toFixed(4)} TOKEN`;
                     console.log(`[${name}] ✅ Token fallback sale detected: ${tokenPayment}`);
+                    isNativeSale = true;
                   }
-
                   break;
                 }
               } catch {}
@@ -190,11 +188,6 @@ function setupApeBlockListener(client, contractRows) {
     }
   }, 12000);
 }
-
-
-// handleMint and handleSale remain unchanged
-
-
 
 async function handleMint(client, contractRow, contract, tokenId, to, channel_ids) {
   const { name, address } = contractRow;
@@ -279,6 +272,5 @@ module.exports = {
   trackApeContracts,
   contractListeners
 };
-
 
 
