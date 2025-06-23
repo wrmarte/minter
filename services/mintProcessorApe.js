@@ -9,7 +9,6 @@ const ROUTERS = [
 ];
 
 const DEAD_ADDRESS = '0x000000000000000000000000000000000000dead';
-
 const contractListeners = {};
 
 async function trackApeContracts(client) {
@@ -150,9 +149,7 @@ function setupApeBlockListener(client, contractRows) {
 
                     break;
                   }
-                } catch (e) {
-                  // not a valid Transfer log
-                }
+                } catch {}
               }
             }
 
@@ -173,9 +170,12 @@ function setupApeBlockListener(client, contractRows) {
             shouldSend = true;
           }
 
-          if (!shouldSend || seenSales.has(txHash)) continue;
-          seenSales.add(txHash);
+          if (!shouldSend || seenSales.has(txHash)) {
+            console.log(`[${name}] Skipped sale emit (seen or deduped): ${txHash}`);
+            continue;
+          }
 
+          seenSales.add(txHash);
           await handleSale(client, row, contract, tokenId, from, to, txHash, allChannelIds, tokenPayment);
         }
       }
