@@ -100,53 +100,56 @@ function setupApeBlockListener(client, contractRows) {
           }
         }
 
-        if (!isMint || isDeadTransfer) {
-          let tx;
-          let tokenPayment = null;
+       if (!isMint || isDeadTransfer) {
+  let tx;
+  let tokenPayment = null;
+  try {
+    tx = await safeRpcCall('ape', p => p.getTransaction(txHash));
+    const receipt = await safeRpcCall('ape', p => p.getTransactionReceipt(txHash));
+    const toAddr = tx?.to?.toLowerCase?.();
+    const isNativeSale = ROUTERS.includes(toAddr);
+    let isTokenSale = false;
+
+    for (const log of receipt.logs) {
+      try {
+        const parsedLog = new Interface([
+          'event Transfer(address indexed from, address indexed to, uint256 value)'
+        ]).parseLog(log);
+
+        const fromLog = parsedLog.args.from?.toLowerCase?.();
+        const toLog = parsedLog.args.to?.toLowerCase?.();
+
+        if (
+          ROUTERS.includes(toLog) ||
+          toLog === from.toLowerCase() ||
+          toLog === toAddr
+        ) {
+          isTokenSale = true;
+
           try {
-            tx = await safeRpcCall('ape', p => p.getTransaction(txHash));
-            const receipt = await safeRpcCall('ape', p => p.getTransactionReceipt(txHash));
-            const toAddr = tx?.to?.toLowerCase?.();
-            const isNativeSale = ROUTERS.includes(toAddr);
-            let isTokenSale = false;
+            const tokenContract = new Contract(log.address, [
+              'function symbol() view returns (string)',
+              'function decimals() view returns (uint8)'
+            ], provider);
 
-            for (const log of receipt.logs) {
-              try {
-                const parsedLog = new Interface([
-                  'event Transfer(address indexed from, address indexed to, uint256 value)'
-                ]).parseLog(log);
+            const symbol = await tokenContract.symbol();
+            const decimals = await tokenContract.decimals();
+            const amount = parseFloat(parsedLog.args.value.toString()) / 10 ** decimals;
+            tokenPayment = `${amount.toFixed(4)} ${symbol}`;
+            console.log(`[${name}] ✅ Token sale detected: ${tokenPayment}`);
+          } catch {
+            const amount = parseFloat(parsedLog.args.value.toString()) / 1e18;
+            const tokenAddr = log.address.toLowerCase();
+            const fallbackLabel = tokenAddr === '0x3429c4973be6eb5f3c1223f53d7bda78d302d2f3' ? 'WAPE' : 'TOKEN';
+            tokenPayment = `${amount.toFixed(4)} ${fallbackLabel}`;
+            console.log(`[${name}] ✅ Token fallback sale detected: ${tokenPayment}`);
+          }
 
-                const fromLog = parsedLog.args.from?.toLowerCase?.();
-                const toLog = parsedLog.args.to?.toLowerCase?.();
+          break;
+        }
+      } catch {}
+    }
 
-                if (
-                  ROUTERS.includes(toLog) ||
-                  toLog === from.toLowerCase() ||
-                  toLog === toAddr
-                ) {
-                  isTokenSale = true;
-
-                  try {
-                    const tokenContract = new Contract(log.address, [
-                      'function symbol() view returns (string)',
-                      'function decimals() view returns (uint8)'
-                    ], provider);
-
-                    const symbol = await tokenContract.symbol();
-                    const decimals = await tokenContract.decimals();
-                    const amount = parseFloat(parsedLog.args.value.toString()) / 10 ** decimals;
-                    tokenPayment = `${amount.toFixed(4)} ${symbol}`;
-                    console.log(`[${name}] ✅ Token sale detected: ${tokenPayment}`);
-                  } catch {
-                    const amount = parseFloat(parsedLog.args.value.toString()) / 1e18;
-                    tokenPayment = `${amount.toFixed(4)} TOKEN`;
-                    console.log(`[${name}] ✅ Token fallback sale detected: ${tokenPayment}`);
-                  }
-
-                  break;
-                }
-              } catch {}
-            }
 
             if (!isNativeSale && !tokenPayment && tx.value > 0) {
               tokenPayment = `${(parseFloat(tx.value.toString()) / 1e18).toFixed(4)} APE`;
