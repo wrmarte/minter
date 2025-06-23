@@ -102,10 +102,14 @@ function setupApeBlockListener(client, contractRows) {
             const toAddr = tx?.to?.toLowerCase?.();
             const isNativeSale = ROUTERS.includes(toAddr);
 
+            console.log(`[${name}] TX ${txHash} → ${toAddr} | Native sale? ${isNativeSale}`);
+
             let isTokenSale = false;
 
             if (!isNativeSale) {
               const receipt = await safeRpcCall('ape', p => p.getTransactionReceipt(txHash));
+              console.log(`[${name}] Scanning ${receipt.logs.length} logs for token payments...`);
+
               for (const log of receipt.logs) {
                 try {
                   const parsedLog = new Interface([
@@ -115,7 +119,9 @@ function setupApeBlockListener(client, contractRows) {
                   const fromLog = parsedLog.args.from?.toLowerCase?.();
                   const toLog = parsedLog.args.to?.toLowerCase?.();
 
-                  if (fromLog === from.toLowerCase() && ROUTERS.includes(toLog)) {
+                  console.log(`[${name}] Log: ${log.address} — from ${fromLog} → ${toLog}`);
+
+                  if (ROUTERS.includes(toLog)) {
                     isTokenSale = true;
 
                     try {
@@ -128,19 +134,23 @@ function setupApeBlockListener(client, contractRows) {
                       const decimals = await tokenContract.decimals();
                       const amount = parseFloat(parsedLog.args.value.toString()) / 10 ** decimals;
                       tokenPayment = `${amount.toFixed(4)} ${symbol}`;
+                      console.log(`[${name}] ✅ Token sale detected: ${tokenPayment}`);
                     } catch {
                       const amount = parseFloat(parsedLog.args.value.toString()) / 1e18;
                       tokenPayment = `${amount.toFixed(4)} TOKEN`;
+                      console.log(`[${name}] ✅ Token fallback sale detected: ${tokenPayment}`);
                     }
 
                     break;
                   }
-                } catch {}
+                } catch (e) {
+                  // not a valid Transfer log
+                }
               }
             }
 
             if (!isNativeSale && !tokenPayment) {
-              console.log(`[${name}] Skipped non-sale tx: ${txHash}`);
+              console.log(`[${name}] ❌ Skipped non-sale tx: ${txHash}`);
               continue;
             }
           } catch (err) {
@@ -252,4 +262,5 @@ module.exports = {
   trackApeContracts,
   contractListeners
 };
+
 
