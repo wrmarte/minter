@@ -26,34 +26,29 @@ function setupApeBlockListener(client, contractRows) {
   const globalSeenSales = new Set();
 
   provider.on('block', async (blockNumber) => {
-    const fromBlock = Math.max(blockNumber - 1, 0); // ⚠️ Smaller window for DRPC free tier
+    const fromBlock = Math.max(blockNumber - 5, 0);
     const toBlock = blockNumber;
 
     for (const row of contractRows) {
       try {
         const name = row.name;
         const address = row.address.toLowerCase();
-        const allChannelIds = [...new Set([...(row.channel_ids || [])])];
-        const allGuildIds = [];
 
-        for (const id of allChannelIds) {
-          try {
-            const ch = await client.channels.fetch(id);
-            if (ch?.guildId) allGuildIds.push(ch.guildId);
-          } catch {}
-        }
-
-        const logs = [];
-        const topics = [id('Transfer(address,address,uint256)')];
-
-        for (const topic of topics) {
-          try {
-            const filter = { address, topics: [topic], fromBlock, toBlock };
-            const theseLogs = await provider.getLogs(filter);
-            logs.push(...theseLogs);
-            await delay(300); // DRPC pacing delay
-          } catch (err) {
+        let logs;
+        try {
+          const filter = {
+            address,
+            topics: [id('Transfer(address,address,uint256)')],
+            fromBlock,
+            toBlock
+          };
+          logs = await provider.getLogs(filter);
+        } catch (err) {
+          if (err.message.includes('batch') || err.message.includes('429')) {
             console.warn(`🛑 DRPC batch limit hit — ape logs skipped: ${fromBlock}–${toBlock}`);
+            logs = await fetchMagicEdenFallback(address);
+          } else {
+            console.warn(`[${name}] Ape log fetch error: ${err.message}`);
             continue;
           }
         }
@@ -68,6 +63,16 @@ function setupApeBlockListener(client, contractRows) {
           const { from, to, tokenId } = parsed.args;
           const tokenIdStr = tokenId.toString();
           const txHash = log.transactionHash.toLowerCase();
+
+          const allChannelIds = [...new Set([...(row.channel_ids || [])])];
+          const allGuildIds = [];
+
+          for (const id of allChannelIds) {
+            try {
+              const ch = await client.channels.fetch(id);
+              if (ch?.guildId) allGuildIds.push(ch.guildId);
+            } catch {}
+          }
 
           if (from === ZeroAddress) {
             if (seenTokenIds.has(tokenIdStr)) continue;
@@ -106,9 +111,36 @@ function setupApeBlockListener(client, contractRows) {
   });
 }
 
+async function fetchMagicEdenFallback(contractAddress) {
+  try {
+    const url = `https://api-mainnet.magiceden.io/v2/apechain/tokens/${contractAddress}/activities?limit=3&type=buyNow`;
+    const res = await fetch(url);
+    const data = await res.json();
+    const logs = [];
+
+    for (const tx of data || []) {
+      logs.push({
+        transactionHash: tx.txId,
+        address: contractAddress,
+        topics: [id('Transfer(address,address,uint256)')],
+        data: '',
+        blockNumber: parseInt(tx.blockHeight),
+        args: {
+          from: tx.seller,
+          to: tx.buyer,
+          tokenId: ethers.BigNumber.from(tx.tokenId)
+        }
+      });
+    }
+    return logs;
+  } catch (err) {
+    console.warn(`❌ Magic Eden fallback failed: ${err.message}`);
+    return [];
+  }
+}
+
 async function handleMint(client, contractRow, contract, tokenId, to, channel_ids) {
   const { name } = contractRow;
-
   let imageUrl = 'https://via.placeholder.com/400x400.png?text=NFT';
   try {
     let uri = await contract.tokenURI(tokenId);
