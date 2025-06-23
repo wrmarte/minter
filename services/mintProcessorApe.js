@@ -8,6 +8,8 @@ const ROUTERS = [
   '0x420dd381b31aef6683e2c581f93b119eee7e3f4d' // ✅ Magic Eden Router (ApeChain)
 ];
 
+const DEAD_ADDRESS = '0x000000000000000000000000000000000000dead';
+
 const contractListeners = {};
 
 async function trackApeContracts(client) {
@@ -82,7 +84,10 @@ function setupApeBlockListener(client, contractRows) {
           } catch {}
         }
 
-        if (from === ZeroAddress) {
+        const isMint = from === ZeroAddress;
+        const isDeadTransfer = from.toLowerCase() === DEAD_ADDRESS;
+
+        if (isMint) {
           if (seenTokenIds.has(tokenIdStr)) continue;
           seenTokenIds.add(tokenIdStr);
 
@@ -94,7 +99,9 @@ function setupApeBlockListener(client, contractRows) {
             await handleMint(client, row, contract, tokenId, to, allChannelIds);
             break;
           }
-        } else {
+        }
+
+        if (!isMint || isDeadTransfer) {
           let tx;
           let tokenPayment = null;
           try {
@@ -262,5 +269,6 @@ module.exports = {
   trackApeContracts,
   contractListeners
 };
+
 
 
