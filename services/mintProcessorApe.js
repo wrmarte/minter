@@ -108,8 +108,9 @@ function setupApeBlockListener(client, contractRows) {
 }
 
 async function handleMint(client, contractRow, contract, tokenId, to, channel_ids) {
-  const { name } = contractRow;
+  const { name, address } = contractRow;
   let imageUrl = 'https://via.placeholder.com/400x400.png?text=NFT';
+  const magicEdenUrl = `https://magiceden.us/item-details/apechain/${address}/${tokenId}`;
 
   try {
     let uri = await contract.tokenURI(tokenId);
@@ -126,7 +127,8 @@ async function handleMint(client, contractRow, contract, tokenId, to, channel_id
     thumbnail: { url: imageUrl },
     color: 0x9966ff,
     footer: { text: 'Live on ApeChain • Powered by PimpsDev' },
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    url: magicEdenUrl
   };
 
   for (const id of [...new Set(channel_ids)]) {
@@ -138,6 +140,7 @@ async function handleMint(client, contractRow, contract, tokenId, to, channel_id
 async function handleSale(client, contractRow, contract, tokenId, from, to, txHash, channel_ids) {
   const { name, address } = contractRow;
   let imageUrl = 'https://via.placeholder.com/400x400.png?text=SOLD';
+  const magicEdenUrl = `https://magiceden.us/item-details/apechain/${address}/${tokenId}`;
 
   try {
     let uri = await contract.tokenURI(tokenId);
@@ -151,6 +154,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
   const embed = {
     title: `💸 ${name} #${tokenId} SOLD`,
     description: `Token \`#${tokenId}\` just sold!`,
+    url: magicEdenUrl,
     fields: [
       { name: '👤 Seller', value: shortWalletLink(from), inline: true },
       { name: '🧑‍💻 Buyer', value: shortWalletLink(to), inline: true },
@@ -173,6 +177,7 @@ module.exports = {
   trackApeContracts,
   contractListeners
 };
+
 
 
 
