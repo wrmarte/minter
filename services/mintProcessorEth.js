@@ -161,7 +161,7 @@ async function handleMint(client, contractRow, contract, tokenId, to, channel_id
 }
 
 async function handleSale(client, contractRow, contract, tokenId, from, to, txHash, channel_ids) {
-  const { name, mint_token, mint_token_symbol } = contractRow;
+  const { name, mint_token, mint_token_symbol, address } = contractRow;
 
   let imageUrl = 'https://via.placeholder.com/400x400.png?text=SOLD';
   try {
@@ -214,13 +214,18 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
 
   if (!tokenAmount || !ethValue) return;
 
+  const currentEthUsd = await getEthPriceFromToken('eth'); // ✅ fetch ETH→USD
+  const usdValue = currentEthUsd ? (ethValue * currentEthUsd).toFixed(2) : 'N/A';
+
+  const osUrl = `https://opensea.io/assets/ethereum/${address}/${tokenId}`;
+
   const embed = {
-    title: `💸 NFT SOLD – ${name} #${tokenId}`,
+    title: `💸 [${name} #${tokenId} SOLD](<${osUrl}>)`,
     description: `Token \`#${tokenId}\` just sold!`,
     fields: [
       { name: '👤 Seller', value: shortWalletLink(from), inline: true },
       { name: '🧑‍💻 Buyer', value: shortWalletLink(to), inline: true },
-      { name: `💰 Paid`, value: `${tokenAmount.toFixed(4)}`, inline: true },
+      { name: `💰 Paid`, value: `$${usdValue} / ${tokenAmount.toFixed(4)}`, inline: true },
       { name: `⇄ ETH Value`, value: `${ethValue.toFixed(4)} ETH`, inline: true },
       { name: `💳 Method`, value: methodUsed || 'Unknown', inline: true }
     ],
