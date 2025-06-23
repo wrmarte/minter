@@ -1,4 +1,4 @@
-const { Interface, Contract, id, ZeroAddress, ethers } = require('ethers');
+const { Interface, Contract, id, ZeroAddress } = require('ethers');
 const fetch = require('node-fetch');
 const { getProvider } = require('./providerM');
 const { shortWalletLink, loadJson, saveJson, seenPath, seenSalesPath } = require('../utils/helpers');
@@ -23,10 +23,8 @@ function setupApeBlockListener(client, contractRows) {
     'function tokenURI(uint256 tokenId) view returns (string)'
   ]);
 
-  const globalSeenSales = new Set();
-
   provider.on('block', async (blockNumber) => {
-    const fromBlock = Math.max(blockNumber - 5, 0);
+    const fromBlock = Math.max(blockNumber - 3, 0);
     const toBlock = blockNumber;
 
     for (const row of contractRows) {
@@ -34,7 +32,8 @@ function setupApeBlockListener(client, contractRows) {
         const name = row.name;
         const address = row.address.toLowerCase();
 
-        let logs;
+        let logs = [];
+
         try {
           const filter = {
             address,
@@ -44,29 +43,47 @@ function setupApeBlockListener(client, contractRows) {
           };
           logs = await provider.getLogs(filter);
         } catch (err) {
-          if (err.message.includes('batch') || err.message.includes('429')) {
-            console.warn(`🛑 DRPC batch limit hit — ape logs skipped: ${fromBlock}–${toBlock}`);
-            logs = await fetchMagicEdenFallback(address);
-          } else {
-            console.warn(`[${name}] Ape log fetch error: ${err.message}`);
-            continue;
-          }
+          const msg = err?.info?.responseBody || '';
+          const isBatchLimit = msg.includes('Batch of more than 3 requests');
+          if (!isBatchLimit) throw err;
+
+          const magicUrl = `https://api-mainnet.magiceden.io/ape-marketplace/collections/${address}/activities?limit=10&type=sale`;
+          const res = await fetch(magicUrl);
+          const json = await res.json();
+          const recentSales = (json || []).filter(x => x.tokenMint && x.signature).slice(0, 5);
+
+          logs = recentSales.map(sale => ({
+            address,
+            transactionHash: sale.signature,
+            blockNumber,
+            data: '0x',
+            topics: [],
+            _meta: {
+              fallback: true,
+              tokenId: sale.tokenMint.split(':').pop(),
+              from: sale.buyer,
+              to: sale.seller
+            }
+          }));
         }
 
         const contract = new Contract(address, iface.fragments, provider);
         let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
         let seenSales = new Set((loadJson(seenSalesPath(name)) || []).map(tx => tx.toLowerCase()));
+        const globalSeenSales = new Set();
 
         for (const log of logs) {
-          let parsed;
-          try { parsed = iface.parseLog(log); } catch { continue; }
-          const { from, to, tokenId } = parsed.args;
-          const tokenIdStr = tokenId.toString();
-          const txHash = log.transactionHash.toLowerCase();
+          const txHash = log.transactionHash?.toLowerCase();
+          const tokenId = log._meta?.tokenId ?? (() => {
+            try { return iface.parseLog(log).args.tokenId.toString(); } catch { return null; }
+          })();
+          const from = log._meta?.from ?? iface.parseLog(log).args.from;
+          const to = log._meta?.to ?? iface.parseLog(log).args.to;
+
+          if (!tokenId || !txHash) continue;
 
           const allChannelIds = [...new Set([...(row.channel_ids || [])])];
           const allGuildIds = [];
-
           for (const id of allChannelIds) {
             try {
               const ch = await client.channels.fetch(id);
@@ -75,17 +92,9 @@ function setupApeBlockListener(client, contractRows) {
           }
 
           if (from === ZeroAddress) {
-            if (seenTokenIds.has(tokenIdStr)) continue;
-            seenTokenIds.add(tokenIdStr);
-
-            const dedupeMints = new Set();
-            for (const gid of allGuildIds) {
-              const mintKey = `${gid}-${tokenIdStr}`;
-              if (dedupeMints.has(mintKey)) continue;
-              dedupeMints.add(mintKey);
-              await handleMint(client, row, contract, tokenId, to, allChannelIds);
-              break;
-            }
+            if (seenTokenIds.has(tokenId)) continue;
+            seenTokenIds.add(tokenId);
+            await handleMint(client, row, contract, tokenId, to, allChannelIds);
           } else {
             let shouldSend = false;
             for (const gid of allGuildIds) {
@@ -94,10 +103,8 @@ function setupApeBlockListener(client, contractRows) {
               globalSeenSales.add(dedupeKey);
               shouldSend = true;
             }
-
             if (!shouldSend || seenSales.has(txHash)) continue;
             seenSales.add(txHash);
-
             await handleSale(client, row, contract, tokenId, from, to, txHash, allChannelIds);
           }
         }
@@ -105,38 +112,10 @@ function setupApeBlockListener(client, contractRows) {
         saveJson(seenPath(name), [...seenTokenIds]);
         saveJson(seenSalesPath(name), [...seenSales]);
       } catch (err) {
-        console.warn(`[${row.name}] Ape block error: ${err.message}`);
+        console.warn(`[${row.name}] Ape hybrid fetch error: ${err.message}`);
       }
     }
   });
-}
-
-async function fetchMagicEdenFallback(contractAddress) {
-  try {
-    const url = `https://api-mainnet.magiceden.io/v2/apechain/tokens/${contractAddress}/activities?limit=3&type=buyNow`;
-    const res = await fetch(url);
-    const data = await res.json();
-    const logs = [];
-
-    for (const tx of data || []) {
-      logs.push({
-        transactionHash: tx.txId,
-        address: contractAddress,
-        topics: [id('Transfer(address,address,uint256)')],
-        data: '',
-        blockNumber: parseInt(tx.blockHeight),
-        args: {
-          from: tx.seller,
-          to: tx.buyer,
-          tokenId: ethers.BigNumber.from(tx.tokenId)
-        }
-      });
-    }
-    return logs;
-  } catch (err) {
-    console.warn(`❌ Magic Eden fallback failed: ${err.message}`);
-    return [];
-  }
 }
 
 async function handleMint(client, contractRow, contract, tokenId, to, channel_ids) {
@@ -168,7 +147,6 @@ async function handleMint(client, contractRow, contract, tokenId, to, channel_id
 
 async function handleSale(client, contractRow, contract, tokenId, from, to, txHash, channel_ids) {
   const { name, address } = contractRow;
-
   let imageUrl = 'https://via.placeholder.com/400x400.png?text=SOLD';
   try {
     let uri = await contract.tokenURI(tokenId);
@@ -180,7 +158,6 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
   } catch {}
 
   const magicEdenUrl = `https://magiceden.io/item-details/apechain:${address}:${tokenId}`;
-
   const embed = {
     title: `💸 ${name} #${tokenId} SOLD`,
     url: magicEdenUrl,
@@ -207,4 +184,5 @@ module.exports = {
   trackApeContracts,
   contractListeners
 };
+
 
