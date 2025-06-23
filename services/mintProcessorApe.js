@@ -58,7 +58,12 @@ function setupApeBlockListener(client, contractRows) {
 
       for (const log of logs) {
         let parsed;
-        try { parsed = iface.parseLog(log); } catch { continue; }
+        try {
+          parsed = iface.parseLog(log);
+        } catch {
+          continue;
+        }
+
         const { from, to, tokenId } = parsed.args;
         const tokenIdStr = tokenId.toString();
         const txHash = log.transactionHash.toLowerCase();
@@ -86,6 +91,18 @@ function setupApeBlockListener(client, contractRows) {
             break;
           }
         } else {
+          let tx;
+          try {
+            tx = await safeRpcCall('ape', p => p.getTransaction(txHash));
+            if (!tx || tx.value?.isZero?.()) {
+              console.log(`[${name}] Skipped transfer-only tx: ${txHash}`);
+              continue;
+            }
+          } catch (err) {
+            console.warn(`[${name}] Tx fetch failed for ${txHash}: ${err.message}`);
+            continue;
+          }
+
           let shouldSend = false;
           for (const gid of allGuildIds) {
             const dedupeKey = `${gid}-${txHash}`;
@@ -177,8 +194,3 @@ module.exports = {
   trackApeContracts,
   contractListeners
 };
-
-
-
-
-
