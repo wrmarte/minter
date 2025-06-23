@@ -2,6 +2,7 @@ const { Interface, Contract, id, ZeroAddress, ethers } = require('ethers');
 const fetch = require('node-fetch');
 const { getProvider } = require('./providerM');
 const { shortWalletLink, loadJson, saveJson, seenPath, seenSalesPath } = require('../utils/helpers');
+const { fetchLogs } = require('./logScanner'); // ✅ REQUIRED FOR PATCH
 const delay = ms => new Promise(res => setTimeout(res, ms));
 
 const contractListeners = {};
@@ -26,36 +27,29 @@ function setupApeBlockListener(client, contractRows) {
   const globalSeenSales = new Set();
 
   provider.on('block', async (blockNumber) => {
-    const fromBlock = Math.max(blockNumber - 5, 0);
+    const fromBlock = Math.max(blockNumber - 3, 0); // <= Keep within DRPC free limits
     const toBlock = blockNumber;
+
+    const addresses = contractRows.map(row => row.address.toLowerCase());
+
+    let logs = [];
+    try {
+      logs = await fetchLogs(addresses, fromBlock, toBlock, 'ape'); // ✅ PATCHED
+    } catch (err) {
+      console.warn(`[Brotherh00d] Ape log fetch error: ${err.message}`);
+      return;
+    }
 
     for (const row of contractRows) {
       try {
         const name = row.name;
         const address = row.address.toLowerCase();
-        const filter = {
-          address,
-          topics: [id('Transfer(address,address,uint256)')],
-          fromBlock,
-          toBlock
-        };
-
-        await delay(200);
-
-        let logs;
-        try {
-          logs = await provider.getLogs(filter);
-        } catch (err) {
-          if (err.message.includes('batch') || err.message.includes('429')) return;
-          console.warn(`[${name}] Ape log fetch error: ${err.message}`);
-          return;
-        }
-
+        const contractLogs = logs.filter(l => l.address.toLowerCase() === address);
         const contract = new Contract(address, iface.fragments, provider);
         let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
         let seenSales = new Set((loadJson(seenSalesPath(name)) || []).map(tx => tx.toLowerCase()));
 
-        for (const log of logs) {
+        for (const log of contractLogs) {
           let parsed;
           try { parsed = iface.parseLog(log); } catch { continue; }
           const { from, to, tokenId } = parsed.args;
