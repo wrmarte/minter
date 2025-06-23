@@ -9,7 +9,7 @@ async function fetchLogs(addresses, fromBlock, toBlock, chain = 'base') {
 
   const logs = [];
   const provider = getProvider(chain);
-  const maxBlockSpan = getMaxBatchSize(chain);
+  const maxBlockSpan = getMaxBatchSize(chain); // 3 for ape, 10 for base/eth
 
   for (const address of addresses) {
     for (const topic of topics) {
@@ -25,22 +25,26 @@ async function fetchLogs(addresses, fromBlock, toBlock, chain = 'base') {
         };
 
         try {
-          const theseLogs = await provider.getLogs(filter); // SERIAL only
+          const theseLogs = await provider.getLogs(filter);
           logs.push(...theseLogs);
         } catch (err) {
           const msg = err?.info?.responseBody || err?.message || '';
-          const isApeBatchLimit = chain === 'ape' && msg.includes('more than 3 requests');
+          const isApeBatchLimit =
+            chain === 'ape' &&
+            msg.includes('more than 3 requests');
 
           if (isApeBatchLimit) {
-            console.warn(`🚫 Ape batch limit hit (serial enforced): ${start}–${end}`);
-            return []; // hard fail to avoid spamming free tier
+            console.warn(`🛑 DRPC batch limit hit — ${chain} logs skipped: ${start}–${end}`);
+            return []; // Stop here instead of retrying
           }
 
-          console.warn(`⚠️ [${chain}] Error fetching logs for ${address} (${start}–${end}): ${err.message}`);
+          console.warn(`⚠️ [${chain}] Error fetching logs for ${address} ${start}–${end}: ${err.message}`);
         }
 
         start = end + 1;
-        await new Promise(res => setTimeout(res, 350)); // ⏳ throttle to stay under DRPC rate limit
+
+        // Throttle delay to avoid rate limit
+        await new Promise(res => setTimeout(res, chain === 'ape' ? 400 : 100));
       }
     }
   }
