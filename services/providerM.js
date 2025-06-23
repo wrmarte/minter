@@ -27,7 +27,10 @@ const providers = {};
 // ✅ Initialize first provider for each chain
 for (const chain in RPCS) {
   providerIndex[chain] = 0;
-  providers[chain] = new JsonRpcProvider(RPCS[chain][0]);
+  providers[chain] = new JsonRpcProvider(
+    RPCS[chain][0],
+    chain === 'ape' ? { name: 'apechain', chainId: 33139 } : undefined
+  );
 }
 
 // ✅ Get current provider for a chain
@@ -50,7 +53,10 @@ function rotateProvider(chain = 'base') {
   }
 
   providerIndex[key] = (providerIndex[key] + 1) % RPCS[key].length;
-  providers[key] = new JsonRpcProvider(RPCS[key][providerIndex[key]]);
+  providers[key] = new JsonRpcProvider(
+    RPCS[key][providerIndex[key]],
+    key === 'ape' ? { name: 'apechain', chainId: 33139 } : undefined
+  );
   console.warn(`🔁 Rotated RPC for ${key}: ${RPCS[key][providerIndex[key]]}`);
 }
 
@@ -91,6 +97,7 @@ module.exports = {
   safeRpcCall,
   getMaxBatchSize
 };
+
 
 
 
