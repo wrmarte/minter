@@ -169,7 +169,9 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     if (uri.startsWith('ipfs://')) uri = uri.replace('ipfs://', 'https://ipfs.io/ipfs/');
     const meta = await fetch(uri).then(res => res.json());
     if (meta?.image) {
-      imageUrl = meta.image.startsWith('ipfs://') ? meta.image.replace('ipfs://', 'https://ipfs.io/ipfs/') : meta.image;
+      imageUrl = meta.image.startsWith('ipfs://')
+        ? meta.image.replace('ipfs://', 'https://ipfs.io/ipfs/')
+        : meta.image;
     }
   } catch {}
 
@@ -193,7 +195,11 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     const seller = ethers.getAddress(from);
 
     for (const log of receipt.logs) {
-      if (log.topics[0] === transferTopic && log.topics.length === 3 && log.address !== contract.address) {
+      if (
+        log.topics[0] === transferTopic &&
+        log.topics.length === 3 &&
+        log.address !== contract.address
+      ) {
         try {
           const toAddr = ethers.getAddress('0x' + log.topics[2].slice(26));
           if (toAddr.toLowerCase() === seller.toLowerCase()) {
@@ -214,14 +220,19 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
 
   if (!tokenAmount || !ethValue) return;
 
-  const currentEthUsd = await getEthPriceFromToken('eth');
-  const usdValue = currentEthUsd && ethValue ? (ethValue * currentEthUsd).toFixed(2) : 'N/A';
+  // ✅ Fetch live ETH→USD conversion rate
+  let usdValue = 'N/A';
+  try {
+    const cg = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd').then(r => r.json());
+    const ethUsd = cg?.ethereum?.usd;
+    if (ethUsd) usdValue = (ethValue * ethUsd).toFixed(2);
+  } catch {}
 
   const osUrl = `https://opensea.io/assets/ethereum/${address}/${tokenId}`;
 
   const embed = {
     title: `💸 ${name} #${tokenId} SOLD`,
-    url: osUrl, // ✅ image click redirects to OpenSea
+    url: osUrl,
     description: `Token \`#${tokenId}\` just sold!`,
     fields: [
       { name: '👤 Seller', value: shortWalletLink(from), inline: true },
@@ -230,7 +241,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
       { name: `⇄ ETH Value`, value: `${ethValue.toFixed(4)} ETH`, inline: true },
       { name: `💳 Method`, value: methodUsed || 'Unknown', inline: true }
     ],
-    image: { url: imageUrl },
+    thumbnail: { url: imageUrl }, // ✅ NFT image top-right thumbnail
     color: 0x66cc66,
     footer: { text: 'Powered by PimpsDev' },
     timestamp: new Date().toISOString()
