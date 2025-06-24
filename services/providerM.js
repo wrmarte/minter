@@ -15,9 +15,9 @@ const RPCS = {
     'https://rpc.ankr.com/eth'
   ],
   ape: [
+    'https://apechain-mainnet.public.blastapi.io', // ✅ Most stable first
     'https://apechain.drpc.org',
-    'https://rpc.apeiron.io',
-    'https://apechain-mainnet.public.blastapi.io' // ✅ Public fallback
+    'https://rpc.apeiron.io'
   ]
 };
 
@@ -28,10 +28,14 @@ const providers = {};
 // ✅ Initialize first provider for each chain
 for (const chain in RPCS) {
   providerIndex[chain] = 0;
-  providers[chain] = new JsonRpcProvider(
-    RPCS[chain][0],
-    chain === 'ape' ? { name: 'apechain', chainId: 33139 } : undefined
-  );
+  try {
+    providers[chain] = new JsonRpcProvider(
+      RPCS[chain][0],
+      chain === 'ape' ? { name: 'apechain', chainId: 33139 } : undefined
+    );
+  } catch (e) {
+    console.warn(`❌ Failed to init provider for ${chain}: ${e.message}`);
+  }
 }
 
 // ✅ Get current provider for a chain
@@ -54,11 +58,16 @@ function rotateProvider(chain = 'base') {
   }
 
   providerIndex[key] = (providerIndex[key] + 1) % RPCS[key].length;
-  providers[key] = new JsonRpcProvider(
-    RPCS[key][providerIndex[key]],
-    key === 'ape' ? { name: 'apechain', chainId: 33139 } : undefined
-  );
-  console.warn(`🔁 Rotated RPC for ${key}: ${RPCS[key][providerIndex[key]]}`);
+
+  try {
+    providers[key] = new JsonRpcProvider(
+      RPCS[key][providerIndex[key]],
+      key === 'ape' ? { name: 'apechain', chainId: 33139 } : undefined
+    );
+    console.warn(`🔁 Rotated RPC for ${key}: ${RPCS[key][providerIndex[key]]}`);
+  } catch (e) {
+    console.warn(`❌ Failed to rotate provider for ${key}: ${e.message}`);
+  }
 }
 
 // ✅ Failover-safe RPC call with smart retry and ApeChain rules
@@ -81,6 +90,9 @@ async function safeRpcCall(chain, callFn, retries = 4) {
         msg.includes('429') ||
         msg.includes('timeout') ||
         msg.includes('ENOTFOUND') ||
+        msg.includes('EHOSTUNREACH') ||
+        msg.includes('ECONNREFUSED') ||
+        msg.includes('network error') ||
         msg.includes('could not coalesce') ||
         msg.includes('invalid block range') ||
         msg.includes('failed to fetch') ||
@@ -121,3 +133,4 @@ module.exports = {
   safeRpcCall,
   getMaxBatchSize
 };
+
