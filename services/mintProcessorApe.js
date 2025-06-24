@@ -75,32 +75,22 @@ function setupApeBlockListener(client, contractRows) {
         const txHash = log.transactionHash.toLowerCase();
 
         const allChannelIds = [...new Set([...(row.channel_ids || [])])];
-        const allGuildIds = [];
-
-        for (const id of allChannelIds) {
-          try {
-            const ch = await client.channels.fetch(id);
-            if (ch?.guildId && !allGuildIds.includes(ch.guildId)) allGuildIds.push(ch.guildId);
-          } catch {}
-        }
-
         const isMint = from === ZeroAddress;
         const isDeadTransfer = from.toLowerCase() === DEAD_ADDRESS;
 
-if (isMint) {
-  let shouldSend = false;
-  for (const gid of allGuildIds) {
-    const dedupeKey = `${gid}-${address}-${tokenIdStr}`;
-    if (globalSeenMints.has(dedupeKey)) continue;
-    globalSeenMints.add(dedupeKey);
-    shouldSend = true;
-  }
+        if (isMint) {
+          let shouldSend = false;
+          for (const cid of allChannelIds) {
+            const dedupeKey = `${cid}-${address}-${tokenIdStr}`;
+            if (globalSeenMints.has(dedupeKey)) continue;
+            globalSeenMints.add(dedupeKey);
+            shouldSend = true;
+          }
 
-  if (!shouldSend || seenTokenIds.has(tokenIdStr)) continue;
-  seenTokenIds.add(tokenIdStr);
-  await handleMint(client, row, contract, tokenId, to, allChannelIds);
-}
-
+          if (!shouldSend || seenTokenIds.has(tokenIdStr)) continue;
+          seenTokenIds.add(tokenIdStr);
+          await handleMint(client, row, contract, tokenId, to, allChannelIds);
+        }
 
         if (!isMint || isDeadTransfer) {
           let tx;
@@ -154,34 +144,32 @@ if (isMint) {
               } catch {}
             }
 
-if (!isNativeSale && !tokenPayment && tx.value > 0) {
-  tokenPayment = `${(parseFloat(tx.value.toString()) / 1e18).toFixed(4)} APE`;
-  console.log(`[${name}] ✅ Native APE fallback sale: ${tokenPayment}`);
-}
+            if (!isNativeSale && !tokenPayment && tx.value > 0) {
+              tokenPayment = `${(parseFloat(tx.value.toString()) / 1e18).toFixed(4)} APE`;
+              console.log(`[${name}] ✅ Native APE fallback sale: ${tokenPayment}`);
+            }
 
-if (!isNativeSale && !tokenPayment) {
-  console.log(`[${name}] ❌ Skipped non-sale tx: ${txHash}`);
-  continue;
-}
-
+            if (!isNativeSale && !tokenPayment) {
+              console.log(`[${name}] ❌ Skipped non-sale tx: ${txHash}`);
+              continue;
+            }
           } catch (err) {
             console.warn(`[${name}] Tx fetch failed for ${txHash}: ${err.message}`);
             continue;
           }
 
-         let shouldSend = false;
-for (const gid of allGuildIds) {
-  const dedupeKey = `${gid}-${txHash}`;
-  if (globalSeenSales.has(dedupeKey)) continue;
-  globalSeenSales.add(dedupeKey);
-  shouldSend = true;
-}
+          let shouldSend = false;
+          for (const cid of allChannelIds) {
+            const dedupeKey = `${cid}-${txHash}`;
+            if (globalSeenSales.has(dedupeKey)) continue;
+            globalSeenSales.add(dedupeKey);
+            shouldSend = true;
+          }
 
-if (!shouldSend || seenSales.has(txHash)) {
-  console.log(`[${name}] Skipped sale emit (seen or deduped): ${txHash}`);
-  continue;
-}
-
+          if (!shouldSend || seenSales.has(txHash)) {
+            console.log(`[${name}] Skipped sale emit (seen or deduped): ${txHash}`);
+            continue;
+          }
 
           seenSales.add(txHash);
           await handleSale(client, row, contract, tokenId, from, to, txHash, allChannelIds, tokenPayment);
@@ -218,18 +206,11 @@ async function handleMint(client, contractRow, contract, tokenId, to, channel_id
     url: magicEdenUrl
   };
 
-  const sentChannels = new Set();
-
   for (const id of [...new Set(channel_ids)]) {
-    const dedupeKey = `${id}-${tokenId}`;
-    if (sentChannels.has(dedupeKey)) continue;
-    sentChannels.add(dedupeKey);
-
     const ch = await client.channels.fetch(id).catch(() => null);
     if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
   }
 }
-
 
 async function handleSale(client, contractRow, contract, tokenId, from, to, txHash, channel_ids, tokenPayment = null) {
   const { name, address } = contractRow;
@@ -274,22 +255,16 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     timestamp: new Date().toISOString()
   };
 
-  const sentChannels = new Set();
-
   for (const id of [...new Set(channel_ids)]) {
-    const dedupeKey = `${id}-${txHash}`;
-    if (sentChannels.has(dedupeKey)) continue;
-    sentChannels.add(dedupeKey);
-
     const ch = await client.channels.fetch(id).catch(() => null);
     if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
   }
 }
 
-
 module.exports = {
   trackApeContracts,
   contractListeners
 };
+
 
 
