@@ -100,14 +100,15 @@ function setupApeBlockListener(client, contractRows) {
           }
         }
 
-       if (!isMint || isDeadTransfer) {
+    if (!isMint || isDeadTransfer) {
   let tx;
   let tokenPayment = null;
   try {
     tx = await safeRpcCall('ape', p => p.getTransaction(txHash));
     const receipt = await safeRpcCall('ape', p => p.getTransactionReceipt(txHash));
     const toAddr = tx?.to?.toLowerCase?.();
-    const isNativeSale = ROUTERS.includes(toAddr);
+    const isTransferToRouter = ROUTERS.includes(to.toLowerCase());
+    const isNativeSale = ROUTERS.includes(toAddr) || isTransferToRouter;
     let isTokenSale = false;
 
     for (const log of receipt.logs) {
@@ -150,37 +151,36 @@ function setupApeBlockListener(client, contractRows) {
       } catch {}
     }
 
+    if (!isNativeSale && !tokenPayment && tx.value > 0) {
+      tokenPayment = `${(parseFloat(tx.value.toString()) / 1e18).toFixed(4)} APE`;
+      console.log(`[${name}] ✅ Native APE transfer detected: ${tokenPayment}`);
+    }
 
-            if (!isNativeSale && !tokenPayment && tx.value > 0) {
-              tokenPayment = `${(parseFloat(tx.value.toString()) / 1e18).toFixed(4)} APE`;
-              console.log(`[${name}] ✅ Native APE transfer detected: ${tokenPayment}`);
-            }
+    if (!isNativeSale && !tokenPayment) {
+      console.log(`[${name}] ❌ Skipped non-sale tx: ${txHash}`);
+      continue;
+    }
+  } catch (err) {
+    console.warn(`[${name}] Tx fetch failed for ${txHash}: ${err.message}`);
+    continue;
+  }
 
-            if (!isNativeSale && !tokenPayment) {
-              console.log(`[${name}] ❌ Skipped non-sale tx: ${txHash}`);
-              continue;
-            }
-          } catch (err) {
-            console.warn(`[${name}] Tx fetch failed for ${txHash}: ${err.message}`);
-            continue;
-          }
+  let shouldSend = false;
+  for (const gid of allGuildIds) {
+    const dedupeKey = `${gid}-${txHash}`;
+    if (globalSeenSales.has(dedupeKey)) continue;
+    globalSeenSales.add(dedupeKey);
+    shouldSend = true;
+  }
 
-          let shouldSend = false;
-          for (const gid of allGuildIds) {
-            const dedupeKey = `${gid}-${txHash}`;
-            if (globalSeenSales.has(dedupeKey)) continue;
-            globalSeenSales.add(dedupeKey);
-            shouldSend = true;
-          }
+  if (!shouldSend || seenSales.has(txHash)) {
+    console.log(`[${name}] Skipped sale emit (seen or deduped): ${txHash}`);
+    continue;
+  }
 
-          if (!shouldSend || seenSales.has(txHash)) {
-            console.log(`[${name}] Skipped sale emit (seen or deduped): ${txHash}`);
-            continue;
-          }
-
-          seenSales.add(txHash);
-          await handleSale(client, row, contract, tokenId, from, to, txHash, allChannelIds, tokenPayment);
-        }
+  seenSales.add(txHash);
+  await handleSale(client, row, contract, tokenId, from, to, txHash, allChannelIds, tokenPayment);
+}
       }
 
       saveJson(seenPath(name), [...seenTokenIds]);
