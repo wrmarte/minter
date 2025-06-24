@@ -6,7 +6,8 @@ const { getProvider } = require('./providerM');
 const delay = ms => new Promise(res => setTimeout(res, ms));
 
 const TOKEN_NAME_TO_ADDRESS = {
-  'ADRIAN': '0x7e99075ce287f1cf8cbcaaa6a1c7894e404fd7ea'
+  'ADRIAN': '0x7e99075ce287f1cf8cbcaaa6a1c7894e404fd7ea',
+  'WETH': '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2'
 };
 
 const contractListeners = {};
@@ -208,7 +209,8 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
               const fallback = await getEthPriceFromToken(tokenContract);
               ethValue = fallback ? tokenAmount * fallback : null;
             }
-            methodUsed = `🟨 ${mint_token_symbol}`;
+            const symbol = tokenContract.toLowerCase() === TOKEN_NAME_TO_ADDRESS['WETH'].toLowerCase() ? 'WETH' : mint_token_symbol;
+            methodUsed = `🟨 ${symbol}`;
             break;
           }
         } catch {}
@@ -257,5 +259,6 @@ module.exports = {
   trackEthContracts,
   contractListeners
 };
+
 
 
