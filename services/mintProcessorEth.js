@@ -176,44 +176,56 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
 
   let receipt, tx;
   try {
-    receipt = await getProvider('eth').getTransactionReceipt(txHash);
-    tx = await getProvider('eth').getTransaction(txHash);
+    const provider = getProvider('eth');
+    receipt = await provider.getTransactionReceipt(txHash);
+    tx = await provider.getTransaction(txHash);
     if (!receipt || !tx) return;
-  } catch { return; }
+  } catch {
+    return;
+  }
 
   let tokenAmount = null, ethValue = null, methodUsed = null;
 
+  // 🔹 Direct ETH sale
   if (tx.value && tx.value > 0n) {
     tokenAmount = parseFloat(ethers.formatEther(tx.value));
     ethValue = tokenAmount;
     methodUsed = '🟦 ETH';
   }
 
+  // 🔸 ERC20 (WETH) sale
   if (!ethValue) {
-    const transferTopic = id('Transfer(address,address,uint256)');
+    const erc20Transfer = id('Transfer(address,address,uint256)');
     const seller = ethers.getAddress(from);
 
     for (const log of receipt.logs) {
-      if (
-        log.topics[0] === transferTopic &&
-        log.topics.length === 3 &&
-        log.address !== contract.address
-      ) {
+      const isERC20 = log.topics[0] === erc20Transfer && log.topics.length === 3 && log.data;
+      const isNotNftContract = log.address.toLowerCase() !== address.toLowerCase();
+
+      if (isERC20 && isNotNftContract) {
         try {
+          const fromAddr = ethers.getAddress('0x' + log.topics[1].slice(26));
           const toAddr = ethers.getAddress('0x' + log.topics[2].slice(26));
+
           if (toAddr.toLowerCase() === seller.toLowerCase()) {
             const tokenContract = log.address;
+            const symbol = tokenContract.toLowerCase() === TOKEN_NAME_TO_ADDRESS['WETH'].toLowerCase()
+              ? 'WETH'
+              : mint_token_symbol || 'TOKEN';
+
             tokenAmount = parseFloat(ethers.formatUnits(log.data, 18));
             ethValue = await getRealDexPriceForToken(tokenAmount, tokenContract);
             if (!ethValue) {
               const fallback = await getEthPriceFromToken(tokenContract);
               ethValue = fallback ? tokenAmount * fallback : null;
             }
-            const symbol = tokenContract.toLowerCase() === TOKEN_NAME_TO_ADDRESS['WETH'].toLowerCase() ? 'WETH' : mint_token_symbol;
+
             methodUsed = `🟨 ${symbol}`;
             break;
           }
-        } catch {}
+        } catch (e) {
+          console.warn(`⚠️ WETH log parse failed: ${e.message}`);
+        }
       }
     }
   }
@@ -254,6 +266,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
   }
 }
+
 
 module.exports = {
   trackEthContracts,
