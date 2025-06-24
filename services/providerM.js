@@ -1,6 +1,6 @@
 const { JsonRpcProvider } = require('ethers');
 
-// ✅ RPC lists per chain (patched Ape)
+// ✅ RPC lists per chain (patched Ape — blastapi removed)
 const RPCS = {
   base: [
     'https://mainnet.base.org',
@@ -17,7 +17,7 @@ const RPCS = {
   ape: [
     'https://apechain.drpc.org',
     'https://rpc.apeiron.io'
-    // Removed blastapi: does not support eth_getLogs on public tier
+    // ❌ REMOVED blastapi – does not support eth_getLogs on public tier
   ]
 };
 
@@ -126,5 +126,6 @@ module.exports = {
   safeRpcCall,
   getMaxBatchSize
 };
+
 
 
