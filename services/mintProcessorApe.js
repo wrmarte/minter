@@ -219,13 +219,17 @@ async function handleMint(client, contractRow, contract, tokenId, to, channel_id
   };
 
   const sentChannels = new Set();
+
   for (const id of [...new Set(channel_ids)]) {
-    if (sentChannels.has(id)) continue;
-    sentChannels.add(id);
+    const dedupeKey = `${id}-${tokenId}`;
+    if (sentChannels.has(dedupeKey)) continue;
+    sentChannels.add(dedupeKey);
+
     const ch = await client.channels.fetch(id).catch(() => null);
     if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
   }
 }
+
 
 async function handleSale(client, contractRow, contract, tokenId, from, to, txHash, channel_ids, tokenPayment = null) {
   const { name, address } = contractRow;
@@ -271,13 +275,17 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
   };
 
   const sentChannels = new Set();
+
   for (const id of [...new Set(channel_ids)]) {
-    if (sentChannels.has(id)) continue;
-    sentChannels.add(id);
+    const dedupeKey = `${id}-${txHash}`;
+    if (sentChannels.has(dedupeKey)) continue;
+    sentChannels.add(dedupeKey);
+
     const ch = await client.channels.fetch(id).catch(() => null);
     if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
   }
 }
+
 
 module.exports = {
   trackApeContracts,
