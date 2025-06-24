@@ -152,15 +152,16 @@ function setupApeBlockListener(client, contractRows) {
               } catch {}
             }
 
-            if (!isNativeSale && !tokenPayment && tx.value > 0) {
-              tokenPayment = `${(parseFloat(tx.value.toString()) / 1e18).toFixed(4)} APE`;
-              console.log(`[${name}] ✅ Native APE transfer detected: ${tokenPayment}`);
-            }
+if (!isNativeSale && !tokenPayment && tx.value > 0) {
+  tokenPayment = `${(parseFloat(tx.value.toString()) / 1e18).toFixed(4)} APE`;
+  console.log(`[${name}] ✅ Native APE fallback sale: ${tokenPayment}`);
+}
 
-            if (!isNativeSale && !tokenPayment) {
-              console.log(`[${name}] ❌ Skipped non-sale tx: ${txHash}`);
-              continue;
-            }
+if (!isNativeSale && !tokenPayment) {
+  console.log(`[${name}] ❌ Skipped non-sale tx: ${txHash}`);
+  continue;
+}
+
           } catch (err) {
             console.warn(`[${name}] Tx fetch failed for ${txHash}: ${err.message}`);
             continue;
