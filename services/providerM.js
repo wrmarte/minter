@@ -1,6 +1,6 @@
 const { JsonRpcProvider } = require('ethers');
 
-// ✅ RPC lists per chain
+// ✅ RPC lists per chain (patched Ape)
 const RPCS = {
   base: [
     'https://mainnet.base.org',
@@ -16,8 +16,8 @@ const RPCS = {
   ],
   ape: [
     'https://apechain.drpc.org',
-    'https://rpc.ankr.com/ape', // ✅ Public fallback 1
-    'https://apechain-mainnet.public.blastapi.io' // ✅ Public fallback 2
+    'https://rpc.apeiron.io',
+    'https://apechain-mainnet.public.blastapi.io' // ✅ Public fallback
   ]
 };
 
@@ -72,6 +72,7 @@ async function safeRpcCall(chain, callFn, retries = 4) {
     } catch (err) {
       const msg = err?.info?.responseBody || err?.message || '';
       const isApeBatchLimit = key === 'ape' && msg.includes('Batch of more than 3 requests');
+      const isForbidden = msg.includes('403') || msg.includes('API key is not allowed');
 
       console.warn(`⚠️ [${key}] RPC Error: ${err.message || err.code || 'unknown'}`);
 
@@ -86,7 +87,8 @@ async function safeRpcCall(chain, callFn, retries = 4) {
         msg.includes('504') ||
         msg.includes('503') ||
         msg.includes('Bad Gateway') ||
-        msg.includes('Gateway Time-out')
+        msg.includes('Gateway Time-out') ||
+        isForbidden
       ) {
         if (key !== 'ape') {
           rotateProvider(key);
@@ -119,11 +121,3 @@ module.exports = {
   safeRpcCall,
   getMaxBatchSize
 };
-
-
-
-
-
-
-
-
