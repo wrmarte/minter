@@ -74,13 +74,15 @@ function setupApeBlockListener(client, contractRows) {
         const txHash = log.transactionHash.toLowerCase();
 
         const allChannelIds = [...new Set([...(row.channel_ids || [])])];
-        const allGuildIds = [];
+        const allGuildIds = new Set();
+        const channelMap = new Map();
 
         for (const id of allChannelIds) {
           try {
             const ch = await client.channels.fetch(id);
-            if (ch?.guildId && !allGuildIds.includes(ch.guildId)) {
-              allGuildIds.push(ch.guildId);
+            if (ch?.guildId) {
+              allGuildIds.add(ch.guildId);
+              if (!channelMap.has(ch.guildId)) channelMap.set(ch.guildId, ch.id);
             }
           } catch {}
         }
@@ -97,7 +99,7 @@ function setupApeBlockListener(client, contractRows) {
             const mintKey = `${gid}-${tokenIdStr}`;
             if (dedupeMints.has(mintKey)) continue;
             dedupeMints.add(mintKey);
-            await handleMint(client, row, contract, tokenId, to, allChannelIds);
+            await handleMint(client, row, contract, tokenId, to, [channelMap.get(gid)]);
             break;
           }
         }
@@ -167,15 +169,13 @@ function setupApeBlockListener(client, contractRows) {
             continue;
           }
 
-          const uniqueGuildTx = allGuildIds[0] ? `${allGuildIds[0]}-${txHash}` : txHash;
-          if (globalSeenSales.has(uniqueGuildTx) || seenSales.has(txHash)) {
-            console.log(`[${name}] Skipped sale emit (seen or deduped): ${txHash}`);
-            continue;
+          for (const gid of allGuildIds) {
+            const dedupeKey = `${gid}-${txHash}`;
+            if (globalSeenSales.has(dedupeKey) || seenSales.has(txHash)) continue;
+            globalSeenSales.add(dedupeKey);
+            seenSales.add(txHash);
+            await handleSale(client, row, contract, tokenId, from, to, txHash, [channelMap.get(gid)], tokenPayment);
           }
-          globalSeenSales.add(uniqueGuildTx);
-          seenSales.add(txHash);
-
-          await handleSale(client, row, contract, tokenId, from, to, txHash, allChannelIds, tokenPayment);
         }
       }
 
@@ -185,7 +185,8 @@ function setupApeBlockListener(client, contractRows) {
   }, 12000);
 }
 
-// ... rest remains the same
+// ...handleMint and handleSale unchanged
+
 
 async function handleMint(client, contractRow, contract, tokenId, to, channel_ids) {
   const { name, address } = contractRow;
