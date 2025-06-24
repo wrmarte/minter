@@ -218,16 +218,20 @@ async function handleMint(client, contractRow, contract, tokenId, to, channel_id
     url: magicEdenUrl
   };
 
-  const sentGuilds = new Set();
+  const guildChannelMap = new Map();
+
   for (const id of [...new Set(channel_ids)]) {
     const ch = await client.channels.fetch(id).catch(() => null);
-    if (!ch || sentGuilds.has(ch.guildId)) continue;
+    if (!ch || !ch.guildId) continue;
+    if (!guildChannelMap.has(ch.guildId)) {
+      guildChannelMap.set(ch.guildId, ch);
+    }
+  }
 
-    sentGuilds.add(ch.guildId);
+  for (const [, ch] of guildChannelMap) {
     await ch.send({ embeds: [embed] }).catch(() => {});
   }
 }
-
 
 async function handleSale(client, contractRow, contract, tokenId, from, to, txHash, channel_ids, tokenPayment = null) {
   const { name, address } = contractRow;
@@ -272,12 +276,17 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     timestamp: new Date().toISOString()
   };
 
-  const sentGuilds = new Set();
+  const guildChannelMap = new Map();
+
   for (const id of [...new Set(channel_ids)]) {
     const ch = await client.channels.fetch(id).catch(() => null);
-    if (!ch || sentGuilds.has(ch.guildId)) continue;
+    if (!ch || !ch.guildId) continue;
+    if (!guildChannelMap.has(ch.guildId)) {
+      guildChannelMap.set(ch.guildId, ch);
+    }
+  }
 
-    sentGuilds.add(ch.guildId);
+  for (const [, ch] of guildChannelMap) {
     await ch.send({ embeds: [embed] }).catch(() => {});
   }
 }
