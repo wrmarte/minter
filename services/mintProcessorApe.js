@@ -88,16 +88,17 @@ function setupApeBlockListener(client, contractRows) {
         const isDeadTransfer = from.toLowerCase() === DEAD_ADDRESS;
 
         if (isMint) {
-          if (seenTokenIds.has(tokenIdStr)) continue;
-          seenTokenIds.add(tokenIdStr);
-
+          let shouldSend = false;
           for (const gid of allGuildIds) {
-            const mintKey = `${gid}-${tokenIdStr}`;
-            if (globalSeenMints.has(mintKey)) continue;
-            globalSeenMints.add(mintKey);
-            await handleMint(client, row, contract, tokenId, to, allChannelIds);
-            break;
+            const dedupeKey = `${gid}-${address}-${tokenIdStr}`;
+            if (globalSeenMints.has(dedupeKey)) continue;
+            globalSeenMints.add(dedupeKey);
+            shouldSend = true;
           }
+          if (!shouldSend || seenTokenIds.has(tokenIdStr)) continue;
+
+          seenTokenIds.add(tokenIdStr);
+          await handleMint(client, row, contract, tokenId, to, allChannelIds);
         }
 
         if (!isMint || isDeadTransfer) {
@@ -138,13 +139,11 @@ function setupApeBlockListener(client, contractRows) {
                     const amount = parseFloat(parsedLog.args.value.toString()) / 10 ** decimals;
                     const displaySymbol = log.address.toLowerCase() === '0x3429c4973be6eb5f3c1223f53d7bda78d302d2f3' ? 'WAPE' : symbol;
                     tokenPayment = `${amount.toFixed(4)} ${displaySymbol}`;
-                    console.log(`[${name}] ✅ Token sale detected: ${tokenPayment}`);
                   } catch {
                     const amount = parseFloat(parsedLog.args.value.toString()) / 1e18;
                     const tokenAddr = log.address.toLowerCase();
                     const fallbackLabel = tokenAddr === '0x3429c4973be6eb5f3c1223f53d7bda78d302d2f3' ? 'WAPE' : 'TOKEN';
                     tokenPayment = `${amount.toFixed(4)} ${fallbackLabel}`;
-                    console.log(`[${name}] ✅ Token fallback sale detected: ${tokenPayment}`);
                   }
 
                   break;
@@ -152,37 +151,25 @@ function setupApeBlockListener(client, contractRows) {
               } catch {}
             }
 
-if (!isNativeSale && !tokenPayment && tx.value > 0) {
-  tokenPayment = `${(parseFloat(tx.value.toString()) / 1e18).toFixed(4)} APE`;
-  console.log(`[${name}] ✅ Native APE fallback sale: ${tokenPayment}`);
-}
+            if (!isNativeSale && !tokenPayment && tx.value > 0) {
+              tokenPayment = `${(parseFloat(tx.value.toString()) / 1e18).toFixed(4)} APE`;
+            }
 
-if (!isNativeSale && !tokenPayment) {
-  console.log(`[${name}] ❌ Skipped non-sale tx: ${txHash}`);
-  continue;
-}
-
+            if (!isNativeSale && !tokenPayment) continue;
           } catch (err) {
             console.warn(`[${name}] Tx fetch failed for ${txHash}: ${err.message}`);
             continue;
           }
 
           let shouldSend = false;
-          const dedupedGuilds = new Set();
           for (const gid of allGuildIds) {
             const dedupeKey = `${gid}-${txHash}`;
             if (globalSeenSales.has(dedupeKey)) continue;
             globalSeenSales.add(dedupeKey);
-            if (!dedupedGuilds.has(gid)) {
-              dedupedGuilds.add(gid);
-              shouldSend = true;
-            }
+            shouldSend = true;
           }
 
-          if (!shouldSend || seenSales.has(txHash)) {
-            console.log(`[${name}] Skipped sale emit (seen or deduped): ${txHash}`);
-            continue;
-          }
+          if (!shouldSend || seenSales.has(txHash)) continue;
 
           seenSales.add(txHash);
           await handleSale(client, row, contract, tokenId, from, to, txHash, allChannelIds, tokenPayment);
@@ -229,7 +216,6 @@ async function handleMint(client, contractRow, contract, tokenId, to, channel_id
   }
 }
 
-
 async function handleSale(client, contractRow, contract, tokenId, from, to, txHash, channel_ids, tokenPayment = null) {
   const { name, address } = contractRow;
   let imageUrl = 'https://via.placeholder.com/400x400.png?text=SOLD';
@@ -244,19 +230,6 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     }
   } catch {}
 
-  let pricePaid = tokenPayment || 'N/A';
-  if (!tokenPayment) {
-    try {
-      const tx = await safeRpcCall('ape', p => p.getTransaction(txHash));
-      const paidEth = parseFloat(tx.value.toString()) / 1e18;
-      if (paidEth > 0) {
-        pricePaid = `${paidEth.toFixed(4)} APE`;
-      }
-    } catch (err) {
-      console.warn(`⚠️ Could not fetch tx value for ${txHash}: ${err.message}`);
-    }
-  }
-
   const embed = {
     title: `🦍 ${name} #${tokenId} SOLD`,
     description: `Token \`#${tokenId}\` just sold!`,
@@ -264,7 +237,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     fields: [
       { name: '👤 Seller', value: shortWalletLink(from), inline: true },
       { name: '🧑‍💻 Buyer', value: shortWalletLink(to), inline: true },
-      { name: `💰 Paid`, value: pricePaid, inline: true },
+      { name: `💰 Paid`, value: tokenPayment || 'N/A', inline: true },
       { name: `💳 Method`, value: 'ApeChain', inline: true }
     ],
     thumbnail: { url: imageUrl },
@@ -283,9 +256,9 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
   }
 }
 
-
 module.exports = {
   trackApeContracts,
   contractListeners
 };
+
 
