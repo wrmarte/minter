@@ -15,9 +15,9 @@ const RPCS = {
     'https://rpc.ankr.com/eth'
   ],
   ape: [
-    'https://apechain-mainnet.public.blastapi.io', // ✅ Most stable first
     'https://apechain.drpc.org',
     'https://rpc.apeiron.io'
+    // Removed blastapi: does not support eth_getLogs on public tier
   ]
 };
 
@@ -28,14 +28,10 @@ const providers = {};
 // ✅ Initialize first provider for each chain
 for (const chain in RPCS) {
   providerIndex[chain] = 0;
-  try {
-    providers[chain] = new JsonRpcProvider(
-      RPCS[chain][0],
-      chain === 'ape' ? { name: 'apechain', chainId: 33139 } : undefined
-    );
-  } catch (e) {
-    console.warn(`❌ Failed to init provider for ${chain}: ${e.message}`);
-  }
+  providers[chain] = new JsonRpcProvider(
+    RPCS[chain][0],
+    chain === 'ape' ? { name: 'apechain', chainId: 33139 } : undefined
+  );
 }
 
 // ✅ Get current provider for a chain
@@ -58,16 +54,11 @@ function rotateProvider(chain = 'base') {
   }
 
   providerIndex[key] = (providerIndex[key] + 1) % RPCS[key].length;
-
-  try {
-    providers[key] = new JsonRpcProvider(
-      RPCS[key][providerIndex[key]],
-      key === 'ape' ? { name: 'apechain', chainId: 33139 } : undefined
-    );
-    console.warn(`🔁 Rotated RPC for ${key}: ${RPCS[key][providerIndex[key]]}`);
-  } catch (e) {
-    console.warn(`❌ Failed to rotate provider for ${key}: ${e.message}`);
-  }
+  providers[key] = new JsonRpcProvider(
+    RPCS[key][providerIndex[key]],
+    key === 'ape' ? { name: 'apechain', chainId: 33139 } : undefined
+  );
+  console.warn(`🔁 Rotated RPC for ${key}: ${RPCS[key][providerIndex[key]]}`);
 }
 
 // ✅ Failover-safe RPC call with smart retry and ApeChain rules
@@ -82,6 +73,7 @@ async function safeRpcCall(chain, callFn, retries = 4) {
       const msg = err?.info?.responseBody || err?.message || '';
       const isApeBatchLimit = key === 'ape' && msg.includes('Batch of more than 3 requests');
       const isForbidden = msg.includes('403') || msg.includes('API key is not allowed');
+      const isLogBlocked = msg.includes("'eth_getLogs' is unavailable");
 
       console.warn(`⚠️ [${key}] RPC Error: ${err.message || err.code || 'unknown'}`);
 
@@ -100,7 +92,8 @@ async function safeRpcCall(chain, callFn, retries = 4) {
         msg.includes('503') ||
         msg.includes('Bad Gateway') ||
         msg.includes('Gateway Time-out') ||
-        isForbidden
+        isForbidden ||
+        isLogBlocked
       ) {
         if (key !== 'ape') {
           rotateProvider(key);
@@ -133,4 +126,5 @@ module.exports = {
   safeRpcCall,
   getMaxBatchSize
 };
+
 
