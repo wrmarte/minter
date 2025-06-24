@@ -38,6 +38,7 @@ function setupApeBlockListener(client, contractRows) {
     for (const row of contractRows) {
       const name = row.name;
       const address = row.address.toLowerCase();
+
       const filter = {
         address,
         topics: [id('Transfer(address,address,uint256)')],
@@ -46,6 +47,7 @@ function setupApeBlockListener(client, contractRows) {
       };
 
       await delay(200);
+
       let logs = [];
       try {
         logs = await safeRpcCall('ape', p => p.getLogs(filter));
@@ -56,18 +58,25 @@ function setupApeBlockListener(client, contractRows) {
 
       const provider = require('../services/providerM').getProvider('ape');
       const contract = new Contract(address, iface.fragments, provider);
+
       const seenTokenIds = new Set(loadJson(seenPath(name)) || []);
       const seenSales = new Set((loadJson(seenSalesPath(name)) || []).map(tx => tx.toLowerCase()));
 
       for (const log of logs) {
         let parsed;
-        try { parsed = iface.parseLog(log); } catch { continue; }
+        try {
+          parsed = iface.parseLog(log);
+        } catch {
+          continue;
+        }
+
         const { from, to, tokenId } = parsed.args;
         const tokenIdStr = tokenId.toString();
         const txHash = log.transactionHash.toLowerCase();
 
         const allChannelIds = [...new Set([...(row.channel_ids || [])])];
         const allGuildIds = [];
+
         for (const id of allChannelIds) {
           try {
             const ch = await client.channels.fetch(id);
@@ -81,6 +90,7 @@ function setupApeBlockListener(client, contractRows) {
         if (isMint) {
           if (seenTokenIds.has(tokenIdStr)) continue;
           seenTokenIds.add(tokenIdStr);
+
           for (const gid of allGuildIds) {
             const mintKey = `${gid}-${tokenIdStr}`;
             if (globalSeenMints.has(mintKey)) continue;
@@ -91,42 +101,69 @@ function setupApeBlockListener(client, contractRows) {
         }
 
         if (!isMint || isDeadTransfer) {
-          let tx, receipt;
+          let tx;
+          let tokenPayment = null;
           try {
             tx = await safeRpcCall('ape', p => p.getTransaction(txHash));
-            receipt = await safeRpcCall('ape', p => p.getTransactionReceipt(txHash));
+            const receipt = await safeRpcCall('ape', p => p.getTransactionReceipt(txHash));
+            const toAddr = tx?.to?.toLowerCase?.();
+            const isTransferToRouter = ROUTERS.includes(to.toLowerCase());
+            const isNativeSale = ROUTERS.includes(toAddr) || isTransferToRouter;
+            let isTokenSale = false;
+
+            for (const log of receipt.logs) {
+              try {
+                const parsedLog = new Interface([
+                  'event Transfer(address indexed from, address indexed to, uint256 value)'
+                ]).parseLog(log);
+
+                const fromLog = parsedLog.args.from?.toLowerCase?.();
+                const toLog = parsedLog.args.to?.toLowerCase?.();
+
+                if (
+                  ROUTERS.includes(toLog) ||
+                  toLog === from.toLowerCase() ||
+                  toLog === toAddr
+                ) {
+                  isTokenSale = true;
+
+                  try {
+                    const tokenContract = new Contract(log.address, [
+                      'function symbol() view returns (string)',
+                      'function decimals() view returns (uint8)'
+                    ], provider);
+
+                    const symbol = await tokenContract.symbol();
+                    const decimals = await tokenContract.decimals();
+                    const amount = parseFloat(parsedLog.args.value.toString()) / 10 ** decimals;
+                    const displaySymbol = log.address.toLowerCase() === '0x3429c4973be6eb5f3c1223f53d7bda78d302d2f3' ? 'WAPE' : symbol;
+                    tokenPayment = `${amount.toFixed(4)} ${displaySymbol}`;
+                    console.log(`[${name}] ✅ Token sale detected: ${tokenPayment}`);
+                  } catch {
+                    const amount = parseFloat(parsedLog.args.value.toString()) / 1e18;
+                    const tokenAddr = log.address.toLowerCase();
+                    const fallbackLabel = tokenAddr === '0x3429c4973be6eb5f3c1223f53d7bda78d302d2f3' ? 'WAPE' : 'TOKEN';
+                    tokenPayment = `${amount.toFixed(4)} ${fallbackLabel}`;
+                    console.log(`[${name}] ✅ Token fallback sale detected: ${tokenPayment}`);
+                  }
+
+                  break;
+                }
+              } catch {}
+            }
+
+if (!isNativeSale && !tokenPayment && tx.value > 0) {
+  tokenPayment = `${(parseFloat(tx.value.toString()) / 1e18).toFixed(4)} APE`;
+  console.log(`[${name}] ✅ Native APE fallback sale: ${tokenPayment}`);
+}
+
+if (!isNativeSale && !tokenPayment) {
+  console.log(`[${name}] ❌ Skipped non-sale tx: ${txHash}`);
+  continue;
+}
+
           } catch (err) {
             console.warn(`[${name}] Tx fetch failed for ${txHash}: ${err.message}`);
-            continue;
-          }
-
-          let tokenPayment = null;
-          const transferInterface = new Interface(['event Transfer(address indexed from, address indexed to, uint256 value)']);
-
-          for (const log of receipt.logs) {
-            if (log.topics[0] !== transferInterface.getEventTopic('Transfer')) continue;
-            try {
-              const parsedLog = transferInterface.parseLog(log);
-              const toLog = parsedLog.args.to.toLowerCase();
-              const fromLog = parsedLog.args.from.toLowerCase();
-              const seller = from.toLowerCase();
-              if (toLog === seller) {
-                const tokenAddr = log.address.toLowerCase();
-                const decimals = 18;
-                const amount = parseFloat(parsedLog.args.value.toString()) / 10 ** decimals;
-                const fallbackLabel = tokenAddr === '0x3429c4973be6eb5f3c1223f53d7bda78d302d2f3' ? 'WAPE' : 'TOKEN';
-                tokenPayment = `${amount.toFixed(4)} ${fallbackLabel}`;
-                break;
-              }
-            } catch {}
-          }
-
-          if (!tokenPayment && tx.value > 0) {
-            tokenPayment = `${(parseFloat(tx.value.toString()) / 1e18).toFixed(4)} APE`;
-          }
-
-          if (!tokenPayment) {
-            console.log(`[${name}] ❌ Skipped non-sale tx: ${txHash}`);
             continue;
           }
 
@@ -192,6 +229,7 @@ async function handleMint(client, contractRow, contract, tokenId, to, channel_id
   }
 }
 
+
 async function handleSale(client, contractRow, contract, tokenId, from, to, txHash, channel_ids, tokenPayment = null) {
   const { name, address } = contractRow;
   let imageUrl = 'https://via.placeholder.com/400x400.png?text=SOLD';
@@ -206,6 +244,19 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     }
   } catch {}
 
+  let pricePaid = tokenPayment || 'N/A';
+  if (!tokenPayment) {
+    try {
+      const tx = await safeRpcCall('ape', p => p.getTransaction(txHash));
+      const paidEth = parseFloat(tx.value.toString()) / 1e18;
+      if (paidEth > 0) {
+        pricePaid = `${paidEth.toFixed(4)} APE`;
+      }
+    } catch (err) {
+      console.warn(`⚠️ Could not fetch tx value for ${txHash}: ${err.message}`);
+    }
+  }
+
   const embed = {
     title: `🦍 ${name} #${tokenId} SOLD`,
     description: `Token \`#${tokenId}\` just sold!`,
@@ -213,7 +264,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     fields: [
       { name: '👤 Seller', value: shortWalletLink(from), inline: true },
       { name: '🧑‍💻 Buyer', value: shortWalletLink(to), inline: true },
-      { name: `💰 Paid`, value: tokenPayment || 'N/A', inline: true },
+      { name: `💰 Paid`, value: pricePaid, inline: true },
       { name: `💳 Method`, value: 'ApeChain', inline: true }
     ],
     thumbnail: { url: imageUrl },
@@ -231,6 +282,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     await ch.send({ embeds: [embed] }).catch(() => {});
   }
 }
+
 
 module.exports = {
   trackApeContracts,
