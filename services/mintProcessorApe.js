@@ -87,18 +87,20 @@ function setupApeBlockListener(client, contractRows) {
         const isMint = from === ZeroAddress;
         const isDeadTransfer = from.toLowerCase() === DEAD_ADDRESS;
 
-        if (isMint) {
-          if (seenTokenIds.has(tokenIdStr)) continue;
-          seenTokenIds.add(tokenIdStr);
+if (isMint) {
+  let shouldSend = false;
+  for (const gid of allGuildIds) {
+    const dedupeKey = `${gid}-${address}-${tokenIdStr}`;
+    if (globalSeenMints.has(dedupeKey)) continue;
+    globalSeenMints.add(dedupeKey);
+    shouldSend = true;
+  }
 
-          for (const gid of allGuildIds) {
-            const mintKey = `${gid}-${tokenIdStr}`;
-            if (globalSeenMints.has(mintKey)) continue;
-            globalSeenMints.add(mintKey);
-            await handleMint(client, row, contract, tokenId, to, allChannelIds);
-            break;
-          }
-        }
+  if (!shouldSend || seenTokenIds.has(tokenIdStr)) continue;
+  seenTokenIds.add(tokenIdStr);
+  await handleMint(client, row, contract, tokenId, to, allChannelIds);
+}
+
 
         if (!isMint || isDeadTransfer) {
           let tx;
@@ -167,22 +169,19 @@ if (!isNativeSale && !tokenPayment) {
             continue;
           }
 
-          let shouldSend = false;
-          const dedupedGuilds = new Set();
-          for (const gid of allGuildIds) {
-            const dedupeKey = `${gid}-${txHash}`;
-            if (globalSeenSales.has(dedupeKey)) continue;
-            globalSeenSales.add(dedupeKey);
-            if (!dedupedGuilds.has(gid)) {
-              dedupedGuilds.add(gid);
-              shouldSend = true;
-            }
-          }
+         let shouldSend = false;
+for (const gid of allGuildIds) {
+  const dedupeKey = `${gid}-${txHash}`;
+  if (globalSeenSales.has(dedupeKey)) continue;
+  globalSeenSales.add(dedupeKey);
+  shouldSend = true;
+}
 
-          if (!shouldSend || seenSales.has(txHash)) {
-            console.log(`[${name}] Skipped sale emit (seen or deduped): ${txHash}`);
-            continue;
-          }
+if (!shouldSend || seenSales.has(txHash)) {
+  console.log(`[${name}] Skipped sale emit (seen or deduped): ${txHash}`);
+  continue;
+}
+
 
           seenSales.add(txHash);
           await handleSale(client, row, contract, tokenId, from, to, txHash, allChannelIds, tokenPayment);
