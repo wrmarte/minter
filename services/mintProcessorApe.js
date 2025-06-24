@@ -252,7 +252,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
   }
 
   const embed = {
-    title: `💸 ${name} #${tokenId} SOLD`,
+    title: `🦍 ${name} #${tokenId} SOLD`,
     description: `Token \`#${tokenId}\` just sold!`,
     url: magicEdenUrl,
     fields: [
@@ -263,7 +263,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     ],
     thumbnail: { url: imageUrl },
     color: 0x33ff99,
-    footer: { text: 'Live on ApeChain • Powered by PimpsDev' },
+    footer: { text: 'Powered by PimpsDev' },
     timestamp: new Date().toISOString()
   };
 
