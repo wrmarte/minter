@@ -43,8 +43,18 @@ function getProvider(chain = 'base') {
   return providers[key];
 }
 
-// ✅ Rotate to next provider (only if multiple exist)
-function rotateProvider(chain = 'base') {
+// ✅ Network readiness check (mainly for Ape)
+async function isNetworkReady(provider) {
+  try {
+    const net = await provider.getNetwork();
+    return !!net.chainId;
+  } catch {
+    return false;
+  }
+}
+
+// ✅ Rotate to next provider (Ape patch included)
+async function rotateProvider(chain = 'base') {
   const key = chain.toLowerCase();
 
   if (!RPCS[key] || RPCS[key].length <= 1) {
@@ -52,13 +62,24 @@ function rotateProvider(chain = 'base') {
     return;
   }
 
-  providerIndex[key] = (providerIndex[key] + 1) % RPCS[key].length;
-  providers[key] = new JsonRpcProvider(
-    RPCS[key][providerIndex[key]],
-    key === 'ape' ? { name: 'apechain', chainId: 33139 } : undefined
-  );
+  for (let attempts = 0; attempts < RPCS[key].length; attempts++) {
+    providerIndex[key] = (providerIndex[key] + 1) % RPCS[key].length;
+    const url = RPCS[key][providerIndex[key]];
+    const tempProvider = new JsonRpcProvider(
+      url,
+      key === 'ape' ? { name: 'apechain', chainId: 33139 } : undefined
+    );
 
-  console.warn(`🔁 Rotated RPC for ${key}: ${RPCS[key][providerIndex[key]]}`);
+    if (key !== 'ape' || await isNetworkReady(tempProvider)) {
+      providers[key] = tempProvider;
+      console.warn(`🔁 Rotated RPC for ${key}: ${url}`);
+      return;
+    } else {
+      console.warn(`❌ Skipped ${url} — ApeChain RPC not responding`);
+    }
+  }
+
+  console.error(`❌ All ${key} RPCs failed network check`);
 }
 
 // ✅ Failover-safe RPC call
@@ -105,7 +126,7 @@ async function safeRpcCall(chain, callFn, retries = 4) {
           return null;
         }
 
-        rotateProvider(key);
+        await rotateProvider(key);
         await new Promise(res => setTimeout(res, 500));
         continue;
       }
@@ -128,6 +149,7 @@ module.exports = {
   safeRpcCall,
   getMaxBatchSize
 };
+
 
 
 
