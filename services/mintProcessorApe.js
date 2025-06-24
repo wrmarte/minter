@@ -59,8 +59,7 @@ function setupApeBlockListener(client, contractRows) {
       const contract = new Contract(address, iface.fragments, provider);
 
       const seenTokenIds = new Set(loadJson(seenPath(name)) || []);
-      const seenSalesRaw = loadJson(seenSalesPath(name)) || [];
-      const seenSales = new Set(seenSalesRaw.map(tx => tx.toLowerCase()));
+      const seenSales = new Set((loadJson(seenSalesPath(name)) || []).map(tx => tx.toLowerCase()));
 
       for (const log of logs) {
         let parsed;
@@ -80,7 +79,9 @@ function setupApeBlockListener(client, contractRows) {
         for (const id of allChannelIds) {
           try {
             const ch = await client.channels.fetch(id);
-            if (ch?.guildId) allGuildIds.push(ch.guildId);
+            if (ch?.guildId && !allGuildIds.includes(ch.guildId)) {
+              allGuildIds.push(ch.guildId);
+            }
           } catch {}
         }
 
@@ -166,33 +167,25 @@ function setupApeBlockListener(client, contractRows) {
             continue;
           }
 
-          let shouldSend = false;
-          for (const gid of allGuildIds) {
-            const dedupeKey = `${gid}-${txHash}`;
-            if (globalSeenSales.has(dedupeKey)) continue;
-            globalSeenSales.add(dedupeKey);
-            shouldSend = true;
-          }
-
-          if (!shouldSend || seenSales.has(txHash)) {
+          const uniqueGuildTx = allGuildIds[0] ? `${allGuildIds[0]}-${txHash}` : txHash;
+          if (globalSeenSales.has(uniqueGuildTx) || seenSales.has(txHash)) {
             console.log(`[${name}] Skipped sale emit (seen or deduped): ${txHash}`);
             continue;
           }
-
+          globalSeenSales.add(uniqueGuildTx);
           seenSales.add(txHash);
-          if (!seenSalesRaw.includes(txHash)) {
-            seenSalesRaw.push(txHash);
-            saveJson(seenSalesPath(name), seenSalesRaw);
-          }
 
           await handleSale(client, row, contract, tokenId, from, to, txHash, allChannelIds, tokenPayment);
         }
       }
 
       saveJson(seenPath(name), [...seenTokenIds]);
+      saveJson(seenSalesPath(name), [...seenSales]);
     }
   }, 12000);
 }
+
+// ... rest remains the same
 
 async function handleMint(client, contractRow, contract, tokenId, to, channel_ids) {
   const { name, address } = contractRow;
