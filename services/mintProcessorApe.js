@@ -218,11 +218,16 @@ async function handleMint(client, contractRow, contract, tokenId, to, channel_id
     url: magicEdenUrl
   };
 
+  const sentGuilds = new Set();
   for (const id of [...new Set(channel_ids)]) {
     const ch = await client.channels.fetch(id).catch(() => null);
-    if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
+    if (!ch || sentGuilds.has(ch.guildId)) continue;
+
+    sentGuilds.add(ch.guildId);
+    await ch.send({ embeds: [embed] }).catch(() => {});
   }
 }
+
 
 async function handleSale(client, contractRow, contract, tokenId, from, to, txHash, channel_ids, tokenPayment = null) {
   const { name, address } = contractRow;
@@ -267,11 +272,16 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     timestamp: new Date().toISOString()
   };
 
-  for (const id of channel_ids) {
+  const sentGuilds = new Set();
+  for (const id of [...new Set(channel_ids)]) {
     const ch = await client.channels.fetch(id).catch(() => null);
-    if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
+    if (!ch || sentGuilds.has(ch.guildId)) continue;
+
+    sentGuilds.add(ch.guildId);
+    await ch.send({ embeds: [embed] }).catch(() => {});
   }
 }
+
 
 module.exports = {
   trackApeContracts,
