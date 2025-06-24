@@ -17,7 +17,6 @@ const RPCS = {
   ape: [
     'https://apechain.drpc.org',
     'https://rpc.apeiron.io'
-    // ❌ REMOVED blastapi – does not support eth_getLogs on public tier
   ]
 };
 
@@ -76,6 +75,8 @@ async function safeRpcCall(chain, callFn, retries = 4) {
       const isLogBlocked = msg.includes("'eth_getLogs' is unavailable");
 
       console.warn(`⚠️ [${key}] RPC Error: ${err.message || err.code || 'unknown'}`);
+      if (err?.code) console.warn(`🔍 RPC failure code: ${err.code}`);
+      console.warn(`🔻 RPC failed: ${getProvider(key).connection?.url}`);
 
       if (
         msg.includes('no response') ||
@@ -84,6 +85,7 @@ async function safeRpcCall(chain, callFn, retries = 4) {
         msg.includes('ENOTFOUND') ||
         msg.includes('EHOSTUNREACH') ||
         msg.includes('ECONNREFUSED') ||
+        msg.includes('ECONNRESET') ||
         msg.includes('network error') ||
         msg.includes('could not coalesce') ||
         msg.includes('invalid block range') ||
@@ -126,6 +128,7 @@ module.exports = {
   safeRpcCall,
   getMaxBatchSize
 };
+
 
 
 
