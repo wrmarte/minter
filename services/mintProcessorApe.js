@@ -59,7 +59,8 @@ function setupApeBlockListener(client, contractRows) {
       const contract = new Contract(address, iface.fragments, provider);
 
       const seenTokenIds = new Set(loadJson(seenPath(name)) || []);
-      const seenSales = new Set((loadJson(seenSalesPath(name)) || []).map(tx => tx.toLowerCase()));
+      const seenSalesRaw = loadJson(seenSalesPath(name)) || [];
+      const seenSales = new Set(seenSalesRaw.map(tx => tx.toLowerCase()));
 
       for (const log of logs) {
         let parsed;
@@ -100,94 +101,99 @@ function setupApeBlockListener(client, contractRows) {
           }
         }
 
-    if (!isMint || isDeadTransfer) {
-  let tx;
-  let tokenPayment = null;
-  try {
-    tx = await safeRpcCall('ape', p => p.getTransaction(txHash));
-    const receipt = await safeRpcCall('ape', p => p.getTransactionReceipt(txHash));
-    const toAddr = tx?.to?.toLowerCase?.();
-    const isTransferToRouter = ROUTERS.includes(to.toLowerCase());
-    const isNativeSale = ROUTERS.includes(toAddr) || isTransferToRouter;
-    let isTokenSale = false;
-
-    for (const log of receipt.logs) {
-      try {
-        const parsedLog = new Interface([
-          'event Transfer(address indexed from, address indexed to, uint256 value)'
-        ]).parseLog(log);
-
-        const fromLog = parsedLog.args.from?.toLowerCase?.();
-        const toLog = parsedLog.args.to?.toLowerCase?.();
-
-        if (
-          ROUTERS.includes(toLog) ||
-          toLog === from.toLowerCase() ||
-          toLog === toAddr
-        ) {
-          isTokenSale = true;
-
+        if (!isMint || isDeadTransfer) {
+          let tx;
+          let tokenPayment = null;
           try {
-            const tokenContract = new Contract(log.address, [
-              'function symbol() view returns (string)',
-              'function decimals() view returns (uint8)'
-            ], provider);
+            tx = await safeRpcCall('ape', p => p.getTransaction(txHash));
+            const receipt = await safeRpcCall('ape', p => p.getTransactionReceipt(txHash));
+            const toAddr = tx?.to?.toLowerCase?.();
+            const isTransferToRouter = ROUTERS.includes(to.toLowerCase());
+            const isNativeSale = ROUTERS.includes(toAddr) || isTransferToRouter;
+            let isTokenSale = false;
 
-            const symbol = await tokenContract.symbol();
-            const decimals = await tokenContract.decimals();
-            const amount = parseFloat(parsedLog.args.value.toString()) / 10 ** decimals;
-            tokenPayment = `${amount.toFixed(4)} ${symbol}`;
-            console.log(`[${name}] ✅ Token sale detected: ${tokenPayment}`);
-          } catch {
-            const amount = parseFloat(parsedLog.args.value.toString()) / 1e18;
-            const tokenAddr = log.address.toLowerCase();
-            const fallbackLabel = tokenAddr === '0x3429c4973be6eb5f3c1223f53d7bda78d302d2f3' ? 'WAPE' : 'TOKEN';
-            tokenPayment = `${amount.toFixed(4)} ${fallbackLabel}`;
-            console.log(`[${name}] ✅ Token fallback sale detected: ${tokenPayment}`);
+            for (const log of receipt.logs) {
+              try {
+                const parsedLog = new Interface([
+                  'event Transfer(address indexed from, address indexed to, uint256 value)'
+                ]).parseLog(log);
+
+                const fromLog = parsedLog.args.from?.toLowerCase?.();
+                const toLog = parsedLog.args.to?.toLowerCase?.();
+
+                if (
+                  ROUTERS.includes(toLog) ||
+                  toLog === from.toLowerCase() ||
+                  toLog === toAddr
+                ) {
+                  isTokenSale = true;
+
+                  try {
+                    const tokenContract = new Contract(log.address, [
+                      'function symbol() view returns (string)',
+                      'function decimals() view returns (uint8)'
+                    ], provider);
+
+                    const symbol = await tokenContract.symbol();
+                    const decimals = await tokenContract.decimals();
+                    const amount = parseFloat(parsedLog.args.value.toString()) / 10 ** decimals;
+                    tokenPayment = `${amount.toFixed(4)} ${symbol}`;
+                    console.log(`[${name}] ✅ Token sale detected: ${tokenPayment}`);
+                  } catch {
+                    const amount = parseFloat(parsedLog.args.value.toString()) / 1e18;
+                    const tokenAddr = log.address.toLowerCase();
+                    const fallbackLabel = tokenAddr === '0x3429c4973be6eb5f3c1223f53d7bda78d302d2f3' ? 'WAPE' : 'TOKEN';
+                    tokenPayment = `${amount.toFixed(4)} ${fallbackLabel}`;
+                    console.log(`[${name}] ✅ Token fallback sale detected: ${tokenPayment}`);
+                  }
+
+                  break;
+                }
+              } catch {}
+            }
+
+            if (!isNativeSale && !tokenPayment && tx.value > 0) {
+              tokenPayment = `${(parseFloat(tx.value.toString()) / 1e18).toFixed(4)} APE`;
+              console.log(`[${name}] ✅ Native APE transfer detected: ${tokenPayment}`);
+            }
+
+            if (!isNativeSale && !tokenPayment) {
+              console.log(`[${name}] ❌ Skipped non-sale tx: ${txHash}`);
+              continue;
+            }
+          } catch (err) {
+            console.warn(`[${name}] Tx fetch failed for ${txHash}: ${err.message}`);
+            continue;
           }
 
-          break;
+          let shouldSend = false;
+          for (const gid of allGuildIds) {
+            const dedupeKey = `${gid}-${txHash}`;
+            if (globalSeenSales.has(dedupeKey)) continue;
+            globalSeenSales.add(dedupeKey);
+            shouldSend = true;
+          }
+
+          if (!shouldSend || seenSales.has(txHash)) {
+            console.log(`[${name}] Skipped sale emit (seen or deduped): ${txHash}`);
+            continue;
+          }
+
+          seenSales.add(txHash);
+          if (!seenSalesRaw.includes(txHash)) {
+            seenSalesRaw.push(txHash);
+            saveJson(seenSalesPath(name), seenSalesRaw);
+          }
+
+          await handleSale(client, row, contract, tokenId, from, to, txHash, allChannelIds, tokenPayment);
         }
-      } catch {}
-    }
-
-    if (!isNativeSale && !tokenPayment && tx.value > 0) {
-      tokenPayment = `${(parseFloat(tx.value.toString()) / 1e18).toFixed(4)} APE`;
-      console.log(`[${name}] ✅ Native APE transfer detected: ${tokenPayment}`);
-    }
-
-    if (!isNativeSale && !tokenPayment) {
-      console.log(`[${name}] ❌ Skipped non-sale tx: ${txHash}`);
-      continue;
-    }
-  } catch (err) {
-    console.warn(`[${name}] Tx fetch failed for ${txHash}: ${err.message}`);
-    continue;
-  }
-
-  let shouldSend = false;
-  for (const gid of allGuildIds) {
-    const dedupeKey = `${gid}-${txHash}`;
-    if (globalSeenSales.has(dedupeKey)) continue;
-    globalSeenSales.add(dedupeKey);
-    shouldSend = true;
-  }
-
-  if (!shouldSend || seenSales.has(txHash)) {
-    console.log(`[${name}] Skipped sale emit (seen or deduped): ${txHash}`);
-    continue;
-  }
-
-  seenSales.add(txHash);
-  await handleSale(client, row, contract, tokenId, from, to, txHash, allChannelIds, tokenPayment);
-}
       }
 
       saveJson(seenPath(name), [...seenTokenIds]);
-      saveJson(seenSalesPath(name), [...seenSales]);
     }
   }, 12000);
 }
+
 async function handleMint(client, contractRow, contract, tokenId, to, channel_ids) {
   const { name, address } = contractRow;
   let imageUrl = 'https://via.placeholder.com/400x400.png?text=NFT';
@@ -203,7 +209,7 @@ async function handleMint(client, contractRow, contract, tokenId, to, channel_id
   } catch {}
 
   const embed = {
-    title: `🦍 New ${name.toUpperCase()} Mint!`,
+    title: `🦭 New ${name.toUpperCase()} Mint!`,
     description: `Minted by: ${shortWalletLink(to)}\nToken #${tokenId}`,
     thumbnail: { url: imageUrl },
     color: 0x9966ff,
@@ -271,5 +277,3 @@ module.exports = {
   trackApeContracts,
   contractListeners
 };
-
-
