@@ -1,6 +1,6 @@
 const { JsonRpcProvider } = require('ethers');
 
-// ✅ RPC lists per chain (patched Ape — blastapi removed)
+// ✅ RPC lists per chain
 const RPCS = {
   base: [
     'https://mainnet.base.org',
@@ -43,7 +43,7 @@ function getProvider(chain = 'base') {
   return providers[key];
 }
 
-// ✅ Rotate to next provider (only for chains with multiple options)
+// ✅ Rotate to next provider (only if multiple exist)
 function rotateProvider(chain = 'base') {
   const key = chain.toLowerCase();
 
@@ -57,10 +57,11 @@ function rotateProvider(chain = 'base') {
     RPCS[key][providerIndex[key]],
     key === 'ape' ? { name: 'apechain', chainId: 33139 } : undefined
   );
+
   console.warn(`🔁 Rotated RPC for ${key}: ${RPCS[key][providerIndex[key]]}`);
 }
 
-// ✅ Failover-safe RPC call with smart retry and ApeChain rules
+// ✅ Failover-safe RPC call
 async function safeRpcCall(chain, callFn, retries = 4) {
   const key = chain.toLowerCase();
 
@@ -78,7 +79,7 @@ async function safeRpcCall(chain, callFn, retries = 4) {
       if (err?.code) console.warn(`🔍 RPC failure code: ${err.code}`);
       console.warn(`🔻 RPC failed: ${getProvider(key).connection?.url}`);
 
-      if (
+      const shouldRotate = (
         msg.includes('no response') ||
         msg.includes('429') ||
         msg.includes('timeout') ||
@@ -96,16 +97,15 @@ async function safeRpcCall(chain, callFn, retries = 4) {
         msg.includes('Gateway Time-out') ||
         isForbidden ||
         isLogBlocked
-      ) {
-        if (key !== 'ape') {
-          rotateProvider(key);
-        } else if (isApeBatchLimit) {
+      );
+
+      if (shouldRotate) {
+        if (key === 'ape' && isApeBatchLimit) {
           console.warn('⛔ ApeChain batch limit hit — skip batch, no retry');
           return null;
-        } else {
-          rotateProvider(key);
         }
 
+        rotateProvider(key);
         await new Promise(res => setTimeout(res, 500));
         continue;
       }
@@ -128,6 +128,7 @@ module.exports = {
   safeRpcCall,
   getMaxBatchSize
 };
+
 
 
 
