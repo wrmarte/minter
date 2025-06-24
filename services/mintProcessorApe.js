@@ -28,6 +28,7 @@ function setupApeBlockListener(client, contractRows) {
   ]);
 
   const globalSeenSales = new Set();
+  const globalSeenMints = new Set();
 
   setInterval(async () => {
     const block = await safeRpcCall('ape', p => p.getBlockNumber());
@@ -90,11 +91,10 @@ function setupApeBlockListener(client, contractRows) {
           if (seenTokenIds.has(tokenIdStr)) continue;
           seenTokenIds.add(tokenIdStr);
 
-          const dedupeMints = new Set();
           for (const gid of allGuildIds) {
             const mintKey = `${gid}-${tokenIdStr}`;
-            if (dedupeMints.has(mintKey)) continue;
-            dedupeMints.add(mintKey);
+            if (globalSeenMints.has(mintKey)) continue;
+            globalSeenMints.add(mintKey);
             await handleMint(client, row, contract, tokenId, to, allChannelIds);
             break;
           }
