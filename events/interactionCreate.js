@@ -2,12 +2,11 @@ const { flavorMap } = require('../utils/flavorMap');
 const { Contract } = require('ethers');
 const fetch = require('node-fetch');
 const { getProvider } = require('../services/provider');
-const { Configuration, OpenAIApi } = require('openai');
+const OpenAI = require('openai');
 
-const configuration = new Configuration({
+const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
-const openai = new OpenAIApi(configuration);
 
 module.exports = (client, pg) => {
   const guildNameCache = new Map();
@@ -226,7 +225,7 @@ module.exports = (client, pg) => {
     await message.channel.sendTyping();
 
     try {
-      const completion = await openai.createChatCompletion({
+      const completion = await openai.chat.completions.create({
         model: 'gpt-4',
         messages: [
           {
@@ -239,7 +238,7 @@ module.exports = (client, pg) => {
         temperature: 0.95,
       });
 
-      const aiReply = completion.data.choices[0].message.content;
+      const aiReply = completion.choices[0].message.content;
       await message.reply(aiReply);
     } catch (err) {
       console.error('❌ MuscleMB (text trigger) error:', err.message);
@@ -247,3 +246,4 @@ module.exports = (client, pg) => {
     }
   });
 };
+
