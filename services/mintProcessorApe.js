@@ -5,7 +5,7 @@ const { shortWalletLink, loadJson, saveJson, seenPath, seenSalesPath } = require
 const delay = ms => new Promise(res => setTimeout(res, ms));
 
 const ROUTERS = [
-  '0x420dd381b31aef6683e2c581f93b119eee7e3f4d'
+  '0x420dd381b31aef6683e2c581f93b119eee7e3f4d' // ✅ Magic Eden Router (ApeChain)
 ];
 
 const DEAD_ADDRESS = '0x000000000000000000000000000000000000dead';
@@ -76,15 +76,11 @@ function setupApeBlockListener(client, contractRows) {
 
         const allChannelIds = [...new Set([...(row.channel_ids || [])])];
         const allGuildIds = [];
-        const guildChannelMap = {};
 
         for (const id of allChannelIds) {
           try {
             const ch = await client.channels.fetch(id);
-            if (ch?.guildId) {
-              if (!allGuildIds.includes(ch.guildId)) allGuildIds.push(ch.guildId);
-              if (!guildChannelMap[ch.guildId]) guildChannelMap[ch.guildId] = ch.id;
-            }
+            if (ch?.guildId && !allGuildIds.includes(ch.guildId)) allGuildIds.push(ch.guildId);
           } catch {}
         }
 
@@ -102,7 +98,7 @@ function setupApeBlockListener(client, contractRows) {
 
           if (!shouldSend || seenTokenIds.has(tokenIdStr)) continue;
           seenTokenIds.add(tokenIdStr);
-          await handleMint(client, row, contract, tokenId, to, Object.values(guildChannelMap));
+          await handleMint(client, row, contract, tokenId, to, allChannelIds);
         }
 
         if (!isMint || isDeadTransfer) {
@@ -114,7 +110,6 @@ function setupApeBlockListener(client, contractRows) {
             const toAddr = tx?.to?.toLowerCase?.();
             const isTransferToRouter = ROUTERS.includes(to.toLowerCase());
             const isNativeSale = ROUTERS.includes(toAddr) || isTransferToRouter;
-            let isTokenSale = false;
 
             for (const log of receipt.logs) {
               try {
@@ -123,13 +118,12 @@ function setupApeBlockListener(client, contractRows) {
                 ]).parseLog(log);
 
                 const toLog = parsedLog.args.to?.toLowerCase?.();
+
                 if (
                   ROUTERS.includes(toLog) ||
                   toLog === from.toLowerCase() ||
                   toLog === toAddr
                 ) {
-                  isTokenSale = true;
-
                   try {
                     const tokenContract = new Contract(log.address, [
                       'function symbol() view returns (string)',
@@ -141,12 +135,14 @@ function setupApeBlockListener(client, contractRows) {
                     const amount = parseFloat(parsedLog.args.value.toString()) / 10 ** decimals;
                     const displaySymbol = log.address.toLowerCase() === '0x3429c4973be6eb5f3c1223f53d7bda78d302d2f3' ? 'WAPE' : symbol;
                     tokenPayment = `${amount.toFixed(4)} ${displaySymbol}`;
+                    console.log(`[${name}] ✅ Token sale detected: ${tokenPayment}`);
                   } catch {
                     const amount = parseFloat(parsedLog.args.value.toString()) / 1e18;
-                    const fallbackLabel = log.address.toLowerCase() === '0x3429c4973be6eb5f3c1223f53d7bda78d302d2f3' ? 'WAPE' : 'TOKEN';
+                    const tokenAddr = log.address.toLowerCase();
+                    const fallbackLabel = tokenAddr === '0x3429c4973be6eb5f3c1223f53d7bda78d302d2f3' ? 'WAPE' : 'TOKEN';
                     tokenPayment = `${amount.toFixed(4)} ${fallbackLabel}`;
+                    console.log(`[${name}] ✅ Token fallback sale detected: ${tokenPayment}`);
                   }
-
                   break;
                 }
               } catch {}
@@ -154,11 +150,16 @@ function setupApeBlockListener(client, contractRows) {
 
             if (!isNativeSale && !tokenPayment && tx.value > 0) {
               tokenPayment = `${(parseFloat(tx.value.toString()) / 1e18).toFixed(4)} APE`;
+              console.log(`[${name}] ✅ Native APE fallback sale: ${tokenPayment}`);
             }
 
-            if (!isNativeSale && !tokenPayment) continue;
+            if (!isNativeSale && !tokenPayment) {
+              console.log(`[${name}] ❌ Skipped non-sale tx: ${txHash}`);
+              continue;
+            }
 
           } catch (err) {
+            console.warn(`[${name}] Tx fetch failed for ${txHash}: ${err.message}`);
             continue;
           }
 
@@ -170,9 +171,13 @@ function setupApeBlockListener(client, contractRows) {
             shouldSend = true;
           }
 
-          if (!shouldSend || seenSales.has(txHash)) continue;
+          if (!shouldSend || seenSales.has(txHash)) {
+            console.log(`[${name}] Skipped sale emit (seen or deduped): ${txHash}`);
+            continue;
+          }
+
           seenSales.add(txHash);
-          await handleSale(client, row, contract, tokenId, from, to, txHash, Object.values(guildChannelMap), tokenPayment);
+          await handleSale(client, row, contract, tokenId, from, to, txHash, allChannelIds, tokenPayment);
         }
       }
 
@@ -206,11 +211,11 @@ async function handleMint(client, contractRow, contract, tokenId, to, channel_id
     url: magicEdenUrl
   };
 
-  const sentGuilds = new Set();
-  for (const id of channel_ids) {
+  const notifiedGuilds = new Set();
+  for (const id of [...new Set(channel_ids)]) {
     const ch = await client.channels.fetch(id).catch(() => null);
-    if (!ch || sentGuilds.has(ch.guildId)) continue;
-    sentGuilds.add(ch.guildId);
+    if (!ch || notifiedGuilds.has(ch.guildId)) continue;
+    notifiedGuilds.add(ch.guildId);
     await ch.send({ embeds: [embed] }).catch(() => {});
   }
 }
@@ -237,7 +242,9 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
       if (paidEth > 0) {
         pricePaid = `${paidEth.toFixed(4)} APE`;
       }
-    } catch {}
+    } catch (err) {
+      console.warn(`⚠️ Could not fetch tx value for ${txHash}: ${err.message}`);
+    }
   }
 
   const embed = {
@@ -256,11 +263,11 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     timestamp: new Date().toISOString()
   };
 
-  const sentGuilds = new Set();
-  for (const id of channel_ids) {
+  const notifiedGuilds = new Set();
+  for (const id of [...new Set(channel_ids)]) {
     const ch = await client.channels.fetch(id).catch(() => null);
-    if (!ch || sentGuilds.has(ch.guildId)) continue;
-    sentGuilds.add(ch.guildId);
+    if (!ch || notifiedGuilds.has(ch.guildId)) continue;
+    notifiedGuilds.add(ch.guildId);
     await ch.send({ embeds: [embed] }).catch(() => {});
   }
 }
@@ -269,6 +276,7 @@ module.exports = {
   trackApeContracts,
   contractListeners
 };
+
 
 
 
