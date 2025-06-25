@@ -80,8 +80,8 @@ function setupApeBlockListener(client, contractRows) {
 
         if (isMint) {
           let shouldSend = false;
-          for (const cid of allChannelIds) {
-            const dedupeKey = `${cid}-${address}-${tokenIdStr}`;
+          for (const id of allChannelIds) {
+            const dedupeKey = `${id}-${address}-${tokenIdStr}`;
             if (globalSeenMints.has(dedupeKey)) continue;
             globalSeenMints.add(dedupeKey);
             shouldSend = true;
@@ -112,13 +112,8 @@ function setupApeBlockListener(client, contractRows) {
                 const fromLog = parsedLog.args.from?.toLowerCase?.();
                 const toLog = parsedLog.args.to?.toLowerCase?.();
 
-                if (
-                  ROUTERS.includes(toLog) ||
-                  toLog === from.toLowerCase() ||
-                  toLog === toAddr
-                ) {
+                if (ROUTERS.includes(toLog) || toLog === from.toLowerCase() || toLog === toAddr) {
                   isTokenSale = true;
-
                   try {
                     const tokenContract = new Contract(log.address, [
                       'function symbol() view returns (string)',
@@ -138,7 +133,6 @@ function setupApeBlockListener(client, contractRows) {
                     tokenPayment = `${amount.toFixed(4)} ${fallbackLabel}`;
                     console.log(`[${name}] ✅ Token fallback sale detected: ${tokenPayment}`);
                   }
-
                   break;
                 }
               } catch {}
@@ -153,14 +147,15 @@ function setupApeBlockListener(client, contractRows) {
               console.log(`[${name}] ❌ Skipped non-sale tx: ${txHash}`);
               continue;
             }
+
           } catch (err) {
             console.warn(`[${name}] Tx fetch failed for ${txHash}: ${err.message}`);
             continue;
           }
 
           let shouldSend = false;
-          for (const cid of allChannelIds) {
-            const dedupeKey = `${cid}-${txHash}`;
+          for (const id of allChannelIds) {
+            const dedupeKey = `${id}-${txHash}`;
             if (globalSeenSales.has(dedupeKey)) continue;
             globalSeenSales.add(dedupeKey);
             shouldSend = true;
