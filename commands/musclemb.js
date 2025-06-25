@@ -1,10 +1,10 @@
 const { SlashCommandBuilder } = require('discord.js');
-const { Configuration, OpenAIApi } = require('openai');
+const OpenAI = require('openai');
 
-const configuration = new Configuration({
+// ✅ OpenAI v4 compatible
+const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
-const openai = new OpenAIApi(configuration);
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -21,24 +21,24 @@ module.exports = {
     await interaction.deferReply();
 
     try {
-      const completion = await openai.createChatCompletion({
+      const completion = await openai.chat.completions.create({
         model: 'gpt-4',
         messages: [
           {
             role: 'system',
             content:
-              'You are MuscleMB — an uncensored, degen AI who lifts heavy, trades JPEGs, eats memes for breakfast, and spits alpha like fire. Be witty, raw, savage, but helpful. If the user asks something serious, give a real answer but keep your degen tone.',
+              'You are MuscleMB — an uncensored, degen AI who lifts, flips JPEGs, and spits savage alpha. Stay raw, real, and ruthless.',
           },
           { role: 'user', content: userMsg },
         ],
         temperature: 0.95,
       });
 
-      const aiReply = completion.data.choices[0].message.content;
+      const aiReply = completion.choices[0].message.content;
       await interaction.editReply(aiReply);
     } catch (err) {
       console.error('❌ MuscleMB error:', err.message);
-      await interaction.editReply('⚠️ MuscleMB blacked out from too much alpha. Try again soon.');
+      await interaction.editReply('⚠️ MuscleMB is on cooldown after leg day. Try again soon.');
     }
   },
 };
