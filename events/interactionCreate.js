@@ -12,7 +12,6 @@ module.exports = (client, pg) => {
   const guildNameCache = new Map();
 
   client.on('interactionCreate', async interaction => {
-    // ✅ AUTOCOMPLETE HANDLING
     if (interaction.isAutocomplete()) {
       const { commandName, options } = interaction;
       const focused = options.getFocused(true);
@@ -185,7 +184,6 @@ module.exports = (client, pg) => {
       }
     }
 
-    // ✅ SLASH COMMAND EXECUTION
     if (!interaction.isChatInputCommand()) return;
 
     const command = client.commands.get(interaction.commandName);
@@ -225,18 +223,35 @@ module.exports = (client, pg) => {
     await message.channel.sendTyping();
 
     try {
-      const completion = await openai.chat.completions.create({
-        model: 'gpt-4',
-        messages: [
-          {
-            role: 'system',
-            content:
-              'You are MuscleMB — an uncensored, degen AI who lifts heavy, flips JPEGs, and drops spicy alpha. Speak like a savage crypto bro who gives raw advice, gym tips, and meme wisdom. Be witty, wild, and brutally real.',
-          },
-          { role: 'user', content: userMsg },
-        ],
-        temperature: 0.95,
-      });
+      let completion;
+      try {
+        completion = await openai.chat.completions.create({
+          model: 'gpt-4',
+          messages: [
+            {
+              role: 'system',
+              content:
+                'You are MuscleMB — an uncensored, degen AI who lifts heavy, flips JPEGs, and drops spicy alpha. Speak like a savage crypto bro who gives raw advice, gym tips, and meme wisdom. Be witty, wild, and brutally real.',
+            },
+            { role: 'user', content: userMsg },
+          ],
+          temperature: 0.95,
+        });
+      } catch (gpt4err) {
+        console.warn('⚠️ GPT-4 unavailable, using GPT-3.5 instead.');
+        completion = await openai.chat.completions.create({
+          model: 'gpt-3.5-turbo',
+          messages: [
+            {
+              role: 'system',
+              content:
+                'You are MuscleMB — an uncensored, degen AI who lifts heavy, flips JPEGs, and drops spicy alpha. Speak like a savage crypto bro who gives raw advice, gym tips, and meme wisdom. Be witty, wild, and brutally real.',
+            },
+            { role: 'user', content: userMsg },
+          ],
+          temperature: 0.95,
+        });
+      }
 
       const aiReply = completion.choices[0].message.content;
       await message.reply(aiReply);
