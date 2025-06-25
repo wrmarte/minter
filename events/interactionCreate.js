@@ -2,6 +2,12 @@ const { flavorMap } = require('../utils/flavorMap');
 const { Contract } = require('ethers');
 const fetch = require('node-fetch');
 const { getProvider } = require('../services/provider');
+const { Configuration, OpenAIApi } = require('openai');
+
+const configuration = new Configuration({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+const openai = new OpenAIApi(configuration);
 
 module.exports = (client, pg) => {
   const guildNameCache = new Map();
@@ -154,7 +160,6 @@ module.exports = (client, pg) => {
           return await safeRespond(filtered);
         }
 
-        // 🔁 AUTOCOMPLETE: /untrackmintplus
         if (commandName === 'untrackmintplus' && focused.name === 'name') {
           const chainOpt = options.get('chain')?.value;
           const query = chainOpt
@@ -205,6 +210,40 @@ module.exports = (client, pg) => {
       } catch (fallbackError) {
         console.error('⚠️ Failed to send error message:', fallbackError.message);
       }
+    }
+  });
+
+  // ✅ TEXT TRIGGER FOR "musclemb ..."
+  client.on('messageCreate', async (message) => {
+    if (message.author.bot) return;
+
+    const content = message.content.trim().toLowerCase();
+    if (!content.startsWith('musclemb ')) return;
+
+    const userMsg = message.content.slice('musclemb'.length).trim();
+    if (!userMsg) return message.reply('💬 Say something for MuscleMB to chew on, bro.');
+
+    await message.channel.sendTyping();
+
+    try {
+      const completion = await openai.createChatCompletion({
+        model: 'gpt-4',
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You are MuscleMB — an uncensored, degen AI who lifts heavy, flips JPEGs, and drops spicy alpha. Speak like a savage crypto bro who gives raw advice, gym tips, and meme wisdom. Be witty, wild, and brutally real.',
+          },
+          { role: 'user', content: userMsg },
+        ],
+        temperature: 0.95,
+      });
+
+      const aiReply = completion.data.choices[0].message.content;
+      await message.reply(aiReply);
+    } catch (err) {
+      console.error('❌ MuscleMB (text trigger) error:', err.message);
+      await message.reply('⚠️ MuscleMB blacked out from too much alpha. Try again later.');
     }
   });
 };
