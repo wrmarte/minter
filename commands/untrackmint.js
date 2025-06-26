@@ -6,7 +6,7 @@ module.exports = {
     .setDescription('🛑 Stop tracking a mint/sale contract')
     .addStringOption(opt =>
       opt.setName('contract')
-        .setDescription('Tracked contract (with chain)')
+        .setDescription('Tracked contract to stop')
         .setRequired(true)
         .setAutocomplete(true)
     ),
@@ -14,7 +14,6 @@ module.exports = {
   async autocomplete(interaction) {
     const pg = interaction.client.pg;
     const focused = interaction.options.getFocused();
-    const guildId = interaction.guild?.id;
 
     try {
       const res = await pg.query(`SELECT name, address, chain, channel_ids FROM contract_watchlist`);
@@ -24,24 +23,22 @@ module.exports = {
         .slice(0, 25)
         .map(r => {
           const emoji = r.chain === 'base' ? '🟦' : r.chain === 'eth' ? '🟧' : '🐵';
-          const short = `${r.address.slice(0, 6)}...${r.address.slice(-4)}`;
+          const shortAddr = `${r.address.slice(0, 6)}...${r.address.slice(-4)}`;
           const channels = Array.isArray(r.channel_ids)
             ? r.channel_ids
             : (r.channel_ids || '').toString().split(',').filter(Boolean);
-
-          const channelDisplay = channels.length === 1
-            ? `#${interaction.client.channels.cache.get(channels[0])?.name || 'unknown'}`
-            : `${channels.length} channels`;
+          const channelInfo = channels.length === 1 ? '1 channel' : `${channels.length} channels`;
 
           return {
-            name: `${emoji} ${r.name} • ${short} • ${channelDisplay}`.slice(0, 100),
+            name: `${emoji} ${r.name} • ${shortAddr} • ${channelInfo}`.slice(0, 100),
             value: `${r.name}|${r.chain}`
           };
         });
 
+      console.log('✅ Autocomplete options sent:', options); // optional for debugging
       await interaction.respond(options);
     } catch (err) {
-      console.error('❌ Autocomplete error:', err);
+      console.error('❌ Autocomplete error in /untrackmintplus:', err);
       await interaction.respond([]);
     }
   },
@@ -76,4 +73,5 @@ module.exports = {
     }
   }
 };
+
 
