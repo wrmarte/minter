@@ -25,16 +25,24 @@ module.exports = {
     const pg = interaction.client.pg;
     const focused = interaction.options.getFocused();
     const chain = interaction.options.getString('chain');
+    const guildId = interaction.guild?.id;
+
+    if (!guildId) return interaction.respond([]);
 
     try {
-      const query = chain
-        ? `SELECT name FROM contract_watchlist WHERE chain = $1`
-        : `SELECT name FROM contract_watchlist`;
-      const values = chain ? [chain] : [];
+      const values = [guildId];
+      let query = `SELECT name FROM contract_watchlist WHERE guild_id = $1`;
+
+      if (chain) {
+        values.push(chain);
+        query += ` AND chain = $2`;
+      }
 
       const res = await pg.query(query, values);
       const names = res.rows.map(r => r.name);
-      const filtered = names.filter(n => n.toLowerCase().includes(focused.toLowerCase())).slice(0, 25);
+      const filtered = names
+        .filter(n => n.toLowerCase().includes(focused.toLowerCase()))
+        .slice(0, 25);
 
       await interaction.respond(filtered.map(name => ({ name, value: name })));
     } catch (err) {
@@ -45,10 +53,11 @@ module.exports = {
 
   async execute(interaction) {
     const pg = interaction.client.pg;
-    const { member, options } = interaction;
+    const { member, options, guild } = interaction;
 
     const name = options.getString('name');
     const chain = options.getString('chain');
+    const guildId = guild?.id;
 
     if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) {
       return interaction.reply({ content: '❌ Admins only.', ephemeral: true });
@@ -58,8 +67,8 @@ module.exports = {
 
     try {
       const result = await pg.query(
-        `DELETE FROM contract_watchlist WHERE name = $1 AND chain = $2 RETURNING *`,
-        [name, chain]
+        `DELETE FROM contract_watchlist WHERE name = $1 AND chain = $2 AND guild_id = $3 RETURNING *`,
+        [name, chain, guildId]
       );
 
       if (!result.rowCount) {
@@ -73,3 +82,4 @@ module.exports = {
     }
   }
 };
+
