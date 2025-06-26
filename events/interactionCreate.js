@@ -194,9 +194,8 @@ if (commandName === 'untrackmintplus' && focused.name === 'contract') {
 
       if (!matchedChannel) continue;
 
-      const serverName = matchedChannel.guild?.name || 'Unknown';
       const channelName = `#${matchedChannel.name}`;
-      const display = `${icon} ${row.name.padEnd(14)} • ${serverName.padEnd(12)} • ${channelName.padEnd(15)} • ${chain.charAt(0).toUpperCase() + chain.slice(1)} ${emoji}`;
+      const display = `${icon} ${row.name.padEnd(14)} • ${channelName.padEnd(15)} • ${chain.charAt(0).toUpperCase() + chain.slice(1)} ${emoji}`;
       const value = `${row.name}|${chain}`;
 
       options.push({
