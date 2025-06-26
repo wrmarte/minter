@@ -158,27 +158,44 @@ module.exports = (client, pg) => {
           return await safeRespond(filtered);
         }
 
-        if (commandName === 'untrackmintplus' && focused.name === 'name') {
-          const chainOpt = options.get('chain')?.value;
-          const query = chainOpt
-            ? `SELECT name FROM contract_watchlist WHERE chain = $1`
-            : `SELECT name FROM contract_watchlist`;
-          const params = chainOpt ? [chainOpt] : [];
+if (commandName === 'untrackmintplus' && focused.name === 'contract') {
+  try {
+    const res = await pg.query(`SELECT name, address, chain, channel_ids FROM contract_watchlist`);
+    const options = [];
 
-          try {
-            const res = await pg.query(query, params);
-            const names = res.rows
-              .map(r => r.name)
-              .filter(Boolean)
-              .filter(name => name.toLowerCase().includes(focused.value.toLowerCase()))
-              .slice(0, 25)
-              .map(name => ({ name, value: name }));
-            return await safeRespond(names);
-          } catch (err) {
-            console.warn('⚠️ Error fetching autocomplete for /untrackmintplus:', err.message);
-            return await safeRespond([]);
-          }
-        }
+    for (const row of res.rows) {
+      if (!row.name || typeof row.name !== 'string') continue;
+      if (!row.name.toLowerCase().includes(focused.value.toLowerCase())) continue;
+
+      const chain = row.chain || 'unknown';
+      const address = row.address || '0x000000';
+
+      const emoji = chain === 'base' ? '🟦' : chain === 'eth' ? '🟧' : chain === 'ape' ? '🐵' : '❓';
+      const shortAddr = `${address.slice(0, 6)}...${address.slice(-4)}`;
+      const channels = Array.isArray(row.channel_ids)
+        ? row.channel_ids
+        : (row.channel_ids || '').toString().split(',').filter(Boolean);
+
+      const channelId = channels[0];
+      const channel = interaction.client.channels.cache.get(channelId);
+      const guildName = channel?.guild?.name || 'Unknown';
+      const channelName = channel?.name || 'Unknown';
+
+      const label = `🛡️ ${guildName} • 📍 ${channelName} • ${row.name} • ${emoji} ${chain}`;
+      const value = `${row.name}|${chain}`;
+
+      options.push({ name: label.slice(0, 100), value });
+
+      if (options.length >= 25) break;
+    }
+
+    return await safeRespond(options);
+  } catch (err) {
+    console.warn('⚠️ Autocomplete /untrackmintplus error:', err.message);
+    return await safeRespond([]);
+  }
+}
+
       } catch (err) {
         console.error('❌ Autocomplete error:', err);
       }
