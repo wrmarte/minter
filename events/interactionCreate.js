@@ -158,60 +158,59 @@ module.exports = (client, pg) => {
           return await safeRespond(filtered);
         }
 
-if (commandName === 'untrackmintplus' && focused.name === 'contract') {
-  const guildId = interaction.guild?.id;
-  if (!guildId) return await safeRespond([]);
+        if (commandName === 'untrackmintplus' && focused.name === 'contract') {
+          const guildId = interaction.guild?.id;
+          if (!guildId) return await safeRespond([]);
 
-  try {
-    const res = await pg.query(`SELECT name, address, chain, channel_ids FROM contract_watchlist`);
-    const options = [];
+          try {
+            const res = await pg.query(`SELECT name, address, chain, channel_ids FROM contract_watchlist`);
+            const options = [];
 
-    for (const row of res.rows) {
-      if (!row.name || typeof row.name !== 'string') continue;
-      if (!row.name.toLowerCase().includes(focused.value.toLowerCase())) continue;
+            for (const row of res.rows) {
+              if (!row.name || typeof row.name !== 'string') continue;
+              if (!row.name.toLowerCase().includes(focused.value.toLowerCase())) continue;
 
-      const chain = row.chain || 'unknown';
-      const emoji = chain === 'base' ? '🟦' : chain === 'eth' ? '🟧' : chain === 'ape' ? '🐵' : '❓';
+              const chain = row.chain || 'unknown';
+              const emoji = chain === 'base' ? '🟦' : chain === 'eth' ? '🟧' : chain === 'ape' ? '🐵' : '❓';
 
-      const channels = Array.isArray(row.channel_ids)
-        ? row.channel_ids
-        : (row.channel_ids || '').toString().split(',').filter(Boolean);
+              const channels = Array.isArray(row.channel_ids)
+                ? row.channel_ids
+                : (row.channel_ids || '').toString().split(',').filter(Boolean);
 
-      let matchedChannel = null;
-      for (const cid of channels) {
-        const channel = interaction.client.channels.cache.get(cid);
-        if (channel?.guild?.id === guildId) {
-          matchedChannel = channel.name;
-          break;
+              let matchedChannel = null;
+              for (const cid of channels) {
+                const channel = interaction.client.channels.cache.get(cid);
+                if (channel?.guild?.id === guildId) {
+                  matchedChannel = channel.name;
+                  break;
+                }
+              }
+
+              if (!matchedChannel) continue;
+
+              const display = `${emoji} ${row.name} • #${matchedChannel} • ${chain}`;
+              const value = `${row.name}|${chain}`;
+
+              options.push({
+                name: display.slice(0, 100),
+                value,
+                _sortChain: chain === 'base' ? 0 : chain === 'eth' ? 1 : 2
+              });
+
+              if (options.length >= 50) break;
+            }
+
+            const sorted = options
+              .sort((a, b) => a._sortChain - b._sortChain)
+              .slice(0, 25)
+              .map(({ name, value }) => ({ name, value }));
+
+            return await safeRespond(sorted);
+          } catch (err) {
+            console.warn('⚠️ Autocomplete /untrackmintplus error:', err.message);
+            return await safeRespond([]);
+          }
         }
-      }
-
-      if (!matchedChannel) continue;
-
-      const display = `${emoji} ${row.name} • #${matchedChannel} • ${chain}`;
-      const value = `${row.name}|${chain}`; // needed for selection
-
-      options.push({
-        name: display.slice(0, 100),
-        value,
-        _sortChain: chain === 'base' ? 0 : chain === 'eth' ? 1 : 2
-      });
-
-      if (options.length >= 50) break;
-    }
-
-    const sorted = options
-      .sort((a, b) => a._sortChain - b._sortChain)
-      .slice(0, 25)
-      .map(({ name, value }) => ({ name, value }));
-
-    return await safeRespond(sorted);
-  } catch (err) {
-    console.warn('⚠️ Autocomplete /untrackmintplus error:', err.message);
-    return await safeRespond([]);
-  }
-}
-
 
       } catch (err) {
         console.error('❌ Autocomplete error:', err);
@@ -244,7 +243,6 @@ if (commandName === 'untrackmintplus' && focused.name === 'contract') {
     }
   });
 
-  // ✅ TEXT TRIGGER FOR "musclemb ..."
   client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
 
@@ -295,4 +293,5 @@ if (commandName === 'untrackmintplus' && focused.name === 'contract') {
     }
   });
 };
+
 
