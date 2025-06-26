@@ -17,29 +17,42 @@ module.exports = {
 
     try {
       const res = await pg.query(`SELECT name, address, chain, channel_ids FROM contract_watchlist`);
+      console.log('📦 Total tracked contracts:', res.rows.length);
+
       const options = [];
 
       for (const row of res.rows) {
-        if (!row.name || !row.name.toLowerCase().includes(focused.toLowerCase())) continue;
+        console.log('🔍 Row:', row);
 
+        if (!row.name || typeof row.name !== 'string') continue;
+        if (!row.name.toLowerCase().includes(focused.toLowerCase())) continue;
+
+        const address = row.address || '0x000000';
+        const chain = row.chain || 'unknown';
+
+        // Normalize channel_ids
         const channels = Array.isArray(row.channel_ids)
           ? row.channel_ids
           : (row.channel_ids || '').toString().split(',').filter(Boolean);
 
-        const emoji = row.chain === 'base' ? '🟦' : row.chain === 'eth' ? '🟧' : '🐵';
-        const shortAddr = `${row.address?.slice(0, 6)}...${row.address?.slice(-4)}`;
+        const emoji = chain === 'base' ? '🟦' : chain === 'eth' ? '🟧' : chain === 'ape' ? '🐵' : '❓';
+        const shortAddr = `${address.slice(0, 6)}...${address.slice(-4)}`;
         const channelInfo = channels.length === 1 ? '1 channel' : `${channels.length} channels`;
 
-        const label = `${emoji} ${row.name} • ${shortAddr} • ${channelInfo} • ${row.chain}`;
+        const label = `${emoji} ${row.name} • ${shortAddr} • ${channelInfo} • ${chain}`;
+        const value = `${row.name}|${chain}`;
 
-        options.push({
-          name: label.slice(0, 100),
-          value: `${row.name}|${row.chain}`
-        });
+        if (label && value) {
+          options.push({
+            name: label.slice(0, 100), // Discord limit
+            value
+          });
+        }
 
         if (options.length >= 25) break;
       }
 
+      console.log('✅ Responding with options:', options);
       await interaction.respond(options);
     } catch (err) {
       console.error('❌ Autocomplete error in /untrackmintplus:', err);
@@ -77,7 +90,4 @@ module.exports = {
     }
   }
 };
-
-
-
 
