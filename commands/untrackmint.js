@@ -3,10 +3,10 @@ const { SlashCommandBuilder, PermissionsBitField } = require('discord.js');
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('untrackmintplus')
-    .setDescription('🛑 Stop tracking a mint/sale contract on a specific chain')
+    .setDescription('🛑 Stop tracking a mint/sale contract')
     .addStringOption(opt =>
-      opt.setName('name')
-        .setDescription('Tracked contract to stop (name|chain)')
+      opt.setName('contract')
+        .setDescription('Tracked contract (with chain)')
         .setRequired(true)
         .setAutocomplete(true)
     ),
@@ -19,28 +19,29 @@ module.exports = {
     try {
       const res = await pg.query(`SELECT name, address, chain, channel_ids FROM contract_watchlist`);
 
-      const filtered = res.rows
-        .filter(row => row.name.toLowerCase().includes(focused.toLowerCase()))
+      const options = res.rows
+        .filter(r => r.name.toLowerCase().includes(focused.toLowerCase()))
         .slice(0, 25)
-        .map(row => {
-          const emoji = row.chain === 'base' ? '🟦' : row.chain === 'eth' ? '🟧' : '🐵';
-          const shortAddr = `${row.address.slice(0, 6)}...${row.address.slice(-4)}`;
-          const channels = Array.isArray(row.channel_ids)
-            ? row.channel_ids
-            : (row.channel_ids || '').toString().split(',').filter(Boolean);
-          const channelText = channels.length === 1
-            ? `<#${channels[0]}>`
+        .map(r => {
+          const emoji = r.chain === 'base' ? '🟦' : r.chain === 'eth' ? '🟧' : '🐵';
+          const short = `${r.address.slice(0, 6)}...${r.address.slice(-4)}`;
+          const channels = Array.isArray(r.channel_ids)
+            ? r.channel_ids
+            : (r.channel_ids || '').toString().split(',').filter(Boolean);
+
+          const channelDisplay = channels.length === 1
+            ? `#${interaction.client.channels.cache.get(channels[0])?.name || 'unknown'}`
             : `${channels.length} channels`;
 
           return {
-            name: `${emoji} ${row.name} • ${shortAddr} • ${channelText}`,
-            value: `${row.name}|${row.chain}` // must be unique
+            name: `${emoji} ${r.name} • ${short} • ${channelDisplay}`.slice(0, 100),
+            value: `${r.name}|${r.chain}`
           };
         });
 
-      await interaction.respond(filtered);
+      await interaction.respond(options);
     } catch (err) {
-      console.warn('❌ Autocomplete error in /untrackmintplus:', err);
+      console.error('❌ Autocomplete error:', err);
       await interaction.respond([]);
     }
   },
@@ -49,7 +50,7 @@ module.exports = {
     const pg = interaction.client.pg;
     const { member, options } = interaction;
 
-    const raw = options.getString('name'); // contains name|chain
+    const raw = options.getString('contract');
     const [name, chain] = raw.split('|');
 
     if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) {
