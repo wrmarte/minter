@@ -18,24 +18,37 @@ module.exports = {
     try {
       const res = await pg.query(`SELECT name, address, chain, channel_ids FROM contract_watchlist`);
 
-      const options = res.rows
-        .filter(r => r.name.toLowerCase().includes(focused.toLowerCase()))
-        .slice(0, 25)
-        .map(r => {
-          const emoji = r.chain === 'base' ? '🟦' : r.chain === 'eth' ? '🟧' : '🐵';
-          const shortAddr = `${r.address.slice(0, 6)}...${r.address.slice(-4)}`;
-          const channels = Array.isArray(r.channel_ids)
-            ? r.channel_ids
-            : (r.channel_ids || '').toString().split(',').filter(Boolean);
-          const channelInfo = channels.length === 1 ? '1 channel' : `${channels.length} channels`;
+      const options = [];
 
-          return {
-            name: `${emoji} ${r.name} • ${shortAddr} • ${channelInfo}`.slice(0, 100),
-            value: `${r.name}|${r.chain}`
-          };
-        });
+      for (const row of res.rows) {
+        if (!row.name.toLowerCase().includes(focused.toLowerCase())) continue;
 
-      console.log('✅ Autocomplete options sent:', options); // optional for debugging
+        const channels = Array.isArray(row.channel_ids)
+          ? row.channel_ids
+          : (row.channel_ids || '').toString().split(',').filter(Boolean);
+
+        for (const channelId of channels) {
+          const channel = interaction.client.channels.cache.get(channelId);
+          if (!channel || !channel.guild) continue;
+
+          const guildName = channel.guild.name;
+          const channelName = channel.name;
+          const emoji = row.chain === 'base' ? '🟦' : row.chain === 'eth' ? '🟧' : '🐵';
+
+          const label = `🛡️ ${guildName} • 📍 ${channelName} • ${row.name} • ${emoji} ${row.chain}`;
+          const value = `${row.name}|${row.chain}`; // used for actual logic
+
+          options.push({
+            name: label.slice(0, 100),
+            value
+          });
+
+          if (options.length >= 25) break;
+        }
+
+        if (options.length >= 25) break;
+      }
+
       await interaction.respond(options);
     } catch (err) {
       console.error('❌ Autocomplete error in /untrackmintplus:', err);
@@ -73,5 +86,6 @@ module.exports = {
     }
   }
 };
+
 
 
