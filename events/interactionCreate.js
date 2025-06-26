@@ -159,6 +159,9 @@ module.exports = (client, pg) => {
         }
 
 if (commandName === 'untrackmintplus' && focused.name === 'contract') {
+  const guildId = interaction.guild?.id;
+  if (!guildId) return await safeRespond([]);
+
   try {
     const res = await pg.query(`SELECT name, address, chain, channel_ids FROM contract_watchlist`);
     const options = [];
@@ -176,12 +179,22 @@ if (commandName === 'untrackmintplus' && focused.name === 'contract') {
         ? row.channel_ids
         : (row.channel_ids || '').toString().split(',').filter(Boolean);
 
-      const channelId = channels[0];
-      const channel = interaction.client.channels.cache.get(channelId);
-      const guildName = channel?.guild?.name || 'Unknown';
-      const channelName = channel?.name || 'Unknown';
+      // Check if any of the contract's channels belong to the current server
+      let foundValidChannel = false;
+      let firstChannelName = 'Unknown';
+      for (const cid of channels) {
+        const channel = interaction.client.channels.cache.get(cid);
+        if (channel?.guild?.id === guildId) {
+          firstChannelName = channel.name;
+          foundValidChannel = true;
+          break;
+        }
+      }
 
-      const label = `🛡️ ${guildName} • 📍 ${channelName} • ${row.name} • ${emoji} ${chain}`;
+      if (!foundValidChannel) continue;
+
+      const guildName = interaction.guild.name;
+      const label = `🛡️ ${guildName} • 📍 ${firstChannelName} • ${row.name} • ${emoji} ${chain}`;
       const value = `${row.name}|${chain}`;
 
       options.push({ name: label.slice(0, 100), value });
@@ -195,6 +208,7 @@ if (commandName === 'untrackmintplus' && focused.name === 'contract') {
     return await safeRespond([]);
   }
 }
+
 
       } catch (err) {
         console.error('❌ Autocomplete error:', err);
