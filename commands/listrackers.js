@@ -26,7 +26,7 @@ module.exports = {
     let nfts = [];
     const servers = {};
 
-    // ✅ Fetch Tokens (skip if you don’t use tracked_tokens)
+    // ✅ Fetch Tokens (if using tracked_tokens)
     try {
       const tokenQuery = isOwner
         ? `SELECT name, address, guild_id FROM tracked_tokens`
@@ -37,12 +37,15 @@ module.exports = {
       console.error('❌ Token fetch error:', err);
     }
 
-    // ✅ Fetch NFTs — fallback mode for missing guild_id
+    // ✅ Fetch NFTs — handle channel_ids array or CSV fallback
     try {
       const nftRes = await pg.query(`SELECT name, address, chain, channel_ids FROM contract_watchlist`);
       for (const row of nftRes.rows) {
         const { name, address, chain, channel_ids } = row;
-        const channels = (channel_ids || '').split(',').filter(Boolean);
+
+        const channels = Array.isArray(channel_ids)
+          ? channel_ids
+          : (channel_ids || '').toString().split(',').filter(Boolean);
 
         for (const channelId of channels) {
           const channel = interaction.client.channels.cache.get(channelId);
@@ -52,7 +55,10 @@ module.exports = {
 
           if (!servers[resolvedGuildId]) servers[resolvedGuildId] = { tokens: [], nfts: [] };
 
-          const alreadyExists = servers[resolvedGuildId].nfts.some(n => n.address.toLowerCase() === address.toLowerCase());
+          const alreadyExists = servers[resolvedGuildId].nfts.some(n =>
+            n.address.toLowerCase() === address.toLowerCase()
+          );
+
           if (!alreadyExists) {
             servers[resolvedGuildId].nfts.push({
               name,
@@ -73,6 +79,17 @@ module.exports = {
       servers[token.guild_id].tokens.push(token);
     }
 
+    // ✅ Chain emoji mapper
+    function chainEmoji(chain) {
+      switch (chain) {
+        case 'base': return '🟦';
+        case 'eth': return '🟧';
+        case 'ethereum': return '🟧';
+        case 'ape': return '🐵';
+        default: return '❓';
+      }
+    }
+
     // ✅ Format Embed
     const embed = new EmbedBuilder()
       .setTitle('🛠️ Tracker Overview')
@@ -89,7 +106,7 @@ module.exports = {
       const nftList = data.nfts.length
         ? data.nfts.map(n => {
             const channelText = n.channels.map(cid => `<#${cid}>`).join(', ') || '_No channels_';
-            return `• **${n.name}** \`[${n.chain}]\`\n\`${n.address}\`\n📍 ${channelText}`;
+            return `• ${chainEmoji(n.chain)} **${n.name}**\n\`${n.address}\`\n📍 ${channelText}`;
           }).join('\n\n')
         : '• _No NFTs tracked_';
 
@@ -105,6 +122,7 @@ module.exports = {
     await interaction.editReply({ embeds: [embed] });
   }
 };
+
 
 
 
