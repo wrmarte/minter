@@ -171,33 +171,28 @@ if (commandName === 'untrackmintplus' && focused.name === 'contract') {
       if (!row.name.toLowerCase().includes(focused.value.toLowerCase())) continue;
 
       const chain = row.chain || 'unknown';
-      const address = row.address || '0x000000';
-
       const emoji = chain === 'base' ? '🟦' : chain === 'eth' ? '🟧' : chain === 'ape' ? '🐵' : '❓';
-      const shortAddr = `${address.slice(0, 6)}...${address.slice(-4)}`;
+
       const channels = Array.isArray(row.channel_ids)
         ? row.channel_ids
         : (row.channel_ids || '').toString().split(',').filter(Boolean);
 
-      let foundValidChannel = false;
-      let firstChannelName = 'Unknown';
+      let matchedChannel = null;
       for (const cid of channels) {
         const channel = interaction.client.channels.cache.get(cid);
         if (channel?.guild?.id === guildId) {
-          firstChannelName = channel.name;
-          foundValidChannel = true;
+          matchedChannel = channel.name;
           break;
         }
       }
 
-      if (!foundValidChannel) continue;
+      if (!matchedChannel) continue;
 
-      const guildName = interaction.guild.name;
-      const label = `🛡️ ${guildName} • 📍 ${firstChannelName} • ${row.name} • ${emoji} ${chain}`;
-      const value = `${row.name}|${chain}`;
+      const display = `${emoji} ${row.name} • #${matchedChannel} • ${chain}`;
+      const value = `${row.name}|${chain}`; // needed for selection
 
       options.push({
-        name: label.slice(0, 100),
+        name: display.slice(0, 100),
         value,
         _sortChain: chain === 'base' ? 0 : chain === 'eth' ? 1 : 2
       });
@@ -216,6 +211,7 @@ if (commandName === 'untrackmintplus' && focused.name === 'contract') {
     return await safeRespond([]);
   }
 }
+
 
       } catch (err) {
         console.error('❌ Autocomplete error:', err);
