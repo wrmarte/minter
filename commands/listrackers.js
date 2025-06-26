@@ -26,7 +26,7 @@ module.exports = {
     let nfts = [];
     const servers = {};
 
-    // ✅ Fetch Tokens
+    // ✅ Fetch Tokens (skip if you don’t use tracked_tokens)
     try {
       const tokenQuery = isOwner
         ? `SELECT name, address, guild_id FROM tracked_tokens`
@@ -37,29 +37,37 @@ module.exports = {
       console.error('❌ Token fetch error:', err);
     }
 
-    // ✅ Fetch NFTs (with full info)
+    // ✅ Fetch NFTs — fallback mode for missing guild_id
     try {
-      const nftQuery = isOwner
-        ? `SELECT name, address, chain, guild_id, channel_ids FROM contract_watchlist`
-        : `SELECT name, address, chain, guild_id, channel_ids FROM contract_watchlist WHERE guild_id = $1`;
-      const nftRes = await pg.query(nftQuery, isOwner ? [] : [guildId]);
-
+      const nftRes = await pg.query(`SELECT name, address, chain, channel_ids FROM contract_watchlist`);
       for (const row of nftRes.rows) {
-        const { name, address, chain, guild_id, channel_ids } = row;
-        if (!servers[guild_id]) servers[guild_id] = { tokens: [], nfts: [] };
+        const { name, address, chain, channel_ids } = row;
+        const channels = (channel_ids || '').split(',').filter(Boolean);
 
-        servers[guild_id].nfts.push({
-          name,
-          address,
-          chain,
-          channels: channel_ids || []
-        });
+        for (const channelId of channels) {
+          const channel = interaction.client.channels.cache.get(channelId);
+          const resolvedGuildId = channel?.guildId;
+          if (!resolvedGuildId) continue;
+          if (!isOwner && resolvedGuildId !== guildId) continue;
+
+          if (!servers[resolvedGuildId]) servers[resolvedGuildId] = { tokens: [], nfts: [] };
+
+          const alreadyExists = servers[resolvedGuildId].nfts.some(n => n.address.toLowerCase() === address.toLowerCase());
+          if (!alreadyExists) {
+            servers[resolvedGuildId].nfts.push({
+              name,
+              address,
+              chain,
+              channels
+            });
+          }
+        }
       }
     } catch (err) {
       console.error('❌ NFT fetch error:', err);
     }
 
-    // ✅ Group Tokens by Server
+    // ✅ Group Tokens
     for (const token of tokens) {
       if (!servers[token.guild_id]) servers[token.guild_id] = { tokens: [], nfts: [] };
       servers[token.guild_id].tokens.push(token);
@@ -80,8 +88,8 @@ module.exports = {
 
       const nftList = data.nfts.length
         ? data.nfts.map(n => {
-            const channels = n.channels.map(id => `<#${id}>`).join(', ') || '_No channels_';
-            return `• **${n.name}** \`[${n.chain}]\`\n\`${n.address}\`\n📍 ${channels}`;
+            const channelText = n.channels.map(cid => `<#${cid}>`).join(', ') || '_No channels_';
+            return `• **${n.name}** \`[${n.chain}]\`\n\`${n.address}\`\n📍 ${channelText}`;
           }).join('\n\n')
         : '• _No NFTs tracked_';
 
@@ -97,6 +105,7 @@ module.exports = {
     await interaction.editReply({ embeds: [embed] });
   }
 };
+
 
 
 
