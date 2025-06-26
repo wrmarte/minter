@@ -64,8 +64,8 @@ module.exports = {
     const pg = interaction.client.pg;
     const { member, options } = interaction;
 
-    const raw = options.getString('contract');
-   const [name, chain] = options.getString('contract').split('|');
+const raw = options.getString('contract');
+const [name, chain] = raw.split('|');
 
 
     if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) {
