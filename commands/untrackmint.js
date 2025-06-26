@@ -17,11 +17,10 @@ module.exports = {
 
     try {
       const res = await pg.query(`SELECT name, address, chain, channel_ids FROM contract_watchlist`);
-
       const options = [];
 
       for (const row of res.rows) {
-        if (!row.name.toLowerCase().includes(focused.toLowerCase())) continue;
+        if (!row.name || !row.name.toLowerCase().includes(focused.toLowerCase())) continue;
 
         const channels = Array.isArray(row.channel_ids)
           ? row.channel_ids
@@ -29,19 +28,21 @@ module.exports = {
 
         for (const channelId of channels) {
           const channel = interaction.client.channels.cache.get(channelId);
-          if (!channel || !channel.guild) continue;
+          const guild = channel?.guild;
 
-          const guildName = channel.guild.name;
-          const channelName = channel.name;
+          const guildName = guild?.name || 'Unknown Server';
+          const channelName = channel?.name || 'Unknown Channel';
           const emoji = row.chain === 'base' ? '🟦' : row.chain === 'eth' ? '🟧' : '🐵';
 
           const label = `🛡️ ${guildName} • 📍 ${channelName} • ${row.name} • ${emoji} ${row.chain}`;
-          const value = `${row.name}|${row.chain}`; // used for actual logic
+          const value = `${row.name}|${row.chain}`;
 
-          options.push({
-            name: label.slice(0, 100),
-            value
-          });
+          if (label && value) {
+            options.push({
+              name: label.slice(0, 100),
+              value
+            });
+          }
 
           if (options.length >= 25) break;
         }
