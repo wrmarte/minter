@@ -179,7 +179,6 @@ if (commandName === 'untrackmintplus' && focused.name === 'contract') {
         ? row.channel_ids
         : (row.channel_ids || '').toString().split(',').filter(Boolean);
 
-      // Check if any of the contract's channels belong to the current server
       let foundValidChannel = false;
       let firstChannelName = 'Unknown';
       for (const cid of channels) {
@@ -197,18 +196,26 @@ if (commandName === 'untrackmintplus' && focused.name === 'contract') {
       const label = `🛡️ ${guildName} • 📍 ${firstChannelName} • ${row.name} • ${emoji} ${chain}`;
       const value = `${row.name}|${chain}`;
 
-      options.push({ name: label.slice(0, 100), value });
+      options.push({
+        name: label.slice(0, 100),
+        value,
+        _sortChain: chain === 'base' ? 0 : chain === 'eth' ? 1 : 2
+      });
 
-      if (options.length >= 25) break;
+      if (options.length >= 50) break;
     }
 
-    return await safeRespond(options);
+    const sorted = options
+      .sort((a, b) => a._sortChain - b._sortChain)
+      .slice(0, 25)
+      .map(({ name, value }) => ({ name, value }));
+
+    return await safeRespond(sorted);
   } catch (err) {
     console.warn('⚠️ Autocomplete /untrackmintplus error:', err.message);
     return await safeRespond([]);
   }
 }
-
 
       } catch (err) {
         console.error('❌ Autocomplete error:', err);
