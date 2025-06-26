@@ -26,26 +26,16 @@ module.exports = {
           ? row.channel_ids
           : (row.channel_ids || '').toString().split(',').filter(Boolean);
 
-        for (const channelId of channels) {
-          const channel = interaction.client.channels.cache.get(channelId);
-          const guild = channel?.guild;
+        const emoji = row.chain === 'base' ? '🟦' : row.chain === 'eth' ? '🟧' : '🐵';
+        const shortAddr = `${row.address?.slice(0, 6)}...${row.address?.slice(-4)}`;
+        const channelInfo = channels.length === 1 ? '1 channel' : `${channels.length} channels`;
 
-          const guildName = guild?.name || 'Unknown Server';
-          const channelName = channel?.name || 'Unknown Channel';
-          const emoji = row.chain === 'base' ? '🟦' : row.chain === 'eth' ? '🟧' : '🐵';
+        const label = `${emoji} ${row.name} • ${shortAddr} • ${channelInfo} • ${row.chain}`;
 
-          const label = `🛡️ ${guildName} • 📍 ${channelName} • ${row.name} • ${emoji} ${row.chain}`;
-          const value = `${row.name}|${row.chain}`;
-
-          if (label && value) {
-            options.push({
-              name: label.slice(0, 100),
-              value
-            });
-          }
-
-          if (options.length >= 25) break;
-        }
+        options.push({
+          name: label.slice(0, 100),
+          value: `${row.name}|${row.chain}`
+        });
 
         if (options.length >= 25) break;
       }
@@ -87,6 +77,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
