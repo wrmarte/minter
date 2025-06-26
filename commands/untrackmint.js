@@ -3,7 +3,7 @@ const { SlashCommandBuilder, PermissionsBitField } = require('discord.js');
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('untrackmintplus')
-    .setDescription('Stop tracking a mint/sale contract on a specific chain')
+    .setDescription('🛑 Stop tracking a mint/sale contract on a specific chain')
     .addStringOption(opt =>
       opt.setName('name')
         .setDescription('Contract name to stop tracking')
@@ -31,22 +31,44 @@ module.exports = {
 
     try {
       const values = [guildId];
-      let query = `SELECT name FROM contract_watchlist WHERE guild_id = $1`;
+      let query = `SELECT name, address, chain, channel_ids FROM contract_watchlist WHERE 1=1`;
+
+      query += ` AND (channel_ids IS NOT NULL AND channel_ids <> '')`;
+      query += ` AND EXISTS (
+        SELECT 1 FROM unnest(string_to_array(channel_ids, ',')) AS cid
+        WHERE cid ~ '^[0-9]+'
+      )`;
 
       if (chain) {
+        query += ` AND chain = $${values.length + 1}`;
         values.push(chain);
-        query += ` AND chain = $2`;
       }
 
       const res = await pg.query(query, values);
-      const names = res.rows.map(r => r.name);
-      const filtered = names
-        .filter(n => n.toLowerCase().includes(focused.toLowerCase()))
-        .slice(0, 25);
+      const results = res.rows;
 
-      await interaction.respond(filtered.map(name => ({ name, value: name })));
+      const filtered = results
+        .filter(r => r.name.toLowerCase().includes(focused.toLowerCase()))
+        .slice(0, 25)
+        .map(r => {
+          const emoji = r.chain === 'base' ? '🟦' : r.chain === 'eth' ? '🟧' : '🐵';
+          const shortAddr = `${r.address.slice(0, 6)}...${r.address.slice(-4)}`;
+          const channels = Array.isArray(r.channel_ids)
+            ? r.channel_ids
+            : (r.channel_ids || '').toString().split(',').filter(Boolean);
+          const displayChannels = channels.length === 1
+            ? `<#${channels[0]}>`
+            : `${channels.length} channels`;
+
+          return {
+            name: `${emoji} ${r.name} • ${shortAddr} • ${displayChannels}`,
+            value: r.name
+          };
+        });
+
+      await interaction.respond(filtered);
     } catch (err) {
-      console.warn('❌ Autocomplete error in untrackmintplus:', err);
+      console.warn('❌ Autocomplete error in /untrackmintplus:', err);
       await interaction.respond([]);
     }
   },
@@ -67,19 +89,20 @@ module.exports = {
 
     try {
       const result = await pg.query(
-        `DELETE FROM contract_watchlist WHERE name = $1 AND chain = $2 AND guild_id = $3 RETURNING *`,
-        [name, chain, guildId]
+        `DELETE FROM contract_watchlist WHERE name = $1 AND chain = $2 AND channel_ids IS NOT NULL AND channel_ids <> '' RETURNING *`,
+        [name, chain]
       );
 
       if (!result.rowCount) {
-        return interaction.editReply(`❌ No contract found named **${name}** on \`${chain}\`.`);
+        return interaction.editReply(`❌ No tracked contract named **${name}** on \`${chain}\`.`);
       }
 
-      return interaction.editReply(`🛑 Stopped tracking **${name}** on \`${chain}\`.`);
+      return interaction.editReply(`🛑 Successfully untracked **${name}** on \`${chain}\`.`);
     } catch (err) {
       console.error('❌ Error in /untrackmintplus:', err);
       return interaction.editReply('⚠️ Failed to execute `/untrackmintplus`.');
     }
   }
 };
+
 
