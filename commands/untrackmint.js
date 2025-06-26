@@ -6,33 +6,19 @@ module.exports = {
     .setDescription('🛑 Stop tracking a mint/sale contract on a specific chain')
     .addStringOption(opt =>
       opt.setName('name')
-        .setDescription('Contract name to stop tracking')
+        .setDescription('Tracked contract to stop (name|chain)')
         .setRequired(true)
         .setAutocomplete(true)
-    )
-    .addStringOption(opt =>
-      opt.setName('chain')
-        .setDescription('Which chain to stop tracking?')
-        .setRequired(true)
-        .addChoices(
-          { name: 'Base', value: 'base' },
-          { name: 'Ethereum', value: 'eth' },
-          { name: 'ApeChain', value: 'ape' }
-        )
     ),
 
   async autocomplete(interaction) {
     const pg = interaction.client.pg;
     const focused = interaction.options.getFocused();
-    const chain = interaction.options.getString('chain');
+    const guildId = interaction.guild?.id;
 
     try {
-      const query = chain
-        ? `SELECT name, address, chain, channel_ids FROM contract_watchlist WHERE chain = $1`
-        : `SELECT name, address, chain, channel_ids FROM contract_watchlist`;
-      const values = chain ? [chain] : [];
+      const res = await pg.query(`SELECT name, address, chain, channel_ids FROM contract_watchlist`);
 
-      const res = await pg.query(query, values);
       const filtered = res.rows
         .filter(row => row.name.toLowerCase().includes(focused.toLowerCase()))
         .slice(0, 25)
@@ -48,7 +34,7 @@ module.exports = {
 
           return {
             name: `${emoji} ${row.name} • ${shortAddr} • ${channelText}`,
-            value: row.name
+            value: `${row.name}|${row.chain}` // must be unique
           };
         });
 
@@ -63,8 +49,8 @@ module.exports = {
     const pg = interaction.client.pg;
     const { member, options } = interaction;
 
-    const name = options.getString('name');
-    const chain = options.getString('chain');
+    const raw = options.getString('name'); // contains name|chain
+    const [name, chain] = raw.split('|');
 
     if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) {
       return interaction.reply({ content: '❌ Admins only.', ephemeral: true });
@@ -89,3 +75,4 @@ module.exports = {
     }
   }
 };
+
