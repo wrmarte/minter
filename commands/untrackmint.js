@@ -65,7 +65,8 @@ module.exports = {
     const { member, options } = interaction;
 
     const raw = options.getString('contract');
-    const [name, chain] = raw.split('|');
+   const [name, chain] = options.getString('contract').split('|');
+
 
     if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) {
       return interaction.reply({ content: '❌ Admins only.', ephemeral: true });
