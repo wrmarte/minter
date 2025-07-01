@@ -34,8 +34,17 @@ module.exports = {
         ON CONFLICT (user_id) DO UPDATE SET tier = EXCLUDED.tier
       `, [userId, tier]);
 
+      // 🧠 Try to fetch actual username
+      let userDisplay;
+      try {
+        const user = await interaction.client.users.fetch(userId);
+        userDisplay = `${user.tag} (${userId})`;
+      } catch {
+        userDisplay = `<@${userId}>`;
+      }
+
       await interaction.reply({
-        content: `✅ User <@${userId}> set to **${tier}** tier.`,
+        content: `✅ User **${userDisplay}** set to **${tier}** tier.`,
         ephemeral: true
       });
     } catch (err) {
