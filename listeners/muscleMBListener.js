@@ -1,15 +1,22 @@
 const fetch = require('node-fetch');
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const cooldown = new Set(); // ⏱️ Tracks users in cooldown
 
 module.exports = (client) => {
   client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
 
-    // ✅ Trigger on any message that includes the word "musclemb"
+    // ✅ Trigger on any message that includes "musclemb"
     const lowered = message.content.toLowerCase();
     if (!lowered.includes('musclemb')) return;
 
+    // ⏱️ Check and apply cooldown
+    if (cooldown.has(message.author.id)) return;
+    cooldown.add(message.author.id);
+    setTimeout(() => cooldown.delete(message.author.id), 10000); // 10 seconds
+
+    // 🧹 Clean input
     const cleanedInput = message.content.replace(/musclemb/gi, '').trim();
     if (!cleanedInput) return;
 
