@@ -1,23 +1,30 @@
 const fetch = require('node-fetch');
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
-const cooldown = new Set(); // ⏱️ Tracks users in cooldown
+const cooldown = new Set();
+const TRIGGERS = ['musclemb', 'muscle mb', '@musclemb', 'yo mb', 'mbbot', 'mb bro'];
 
 module.exports = (client) => {
   client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
 
-    // ✅ Trigger on any message that includes "musclemb"
     const lowered = message.content.toLowerCase();
-    if (!lowered.includes('musclemb')) return;
 
-    // ⏱️ Check and apply cooldown
+    // 🔥 Trigger if any keyword matches
+    const triggered = TRIGGERS.some(trigger => lowered.includes(trigger));
+    if (!triggered) return;
+
+    // ⏱️ Cooldown logic
     if (cooldown.has(message.author.id)) return;
     cooldown.add(message.author.id);
-    setTimeout(() => cooldown.delete(message.author.id), 10000); // 10 seconds
+    setTimeout(() => cooldown.delete(message.author.id), 10000);
 
-    // 🧹 Clean input
-    const cleanedInput = message.content.replace(/musclemb/gi, '').trim();
+    // 🧹 Clean input by stripping all triggers
+    let cleanedInput = lowered;
+    TRIGGERS.forEach(trigger => {
+      cleanedInput = cleanedInput.replaceAll(trigger, '');
+    });
+    cleanedInput = cleanedInput.trim();
     if (!cleanedInput) return;
 
     try {
@@ -52,8 +59,6 @@ module.exports = (client) => {
 
       if (aiReply && aiReply.length > 0) {
         await message.reply(`💬 ${aiReply} 💪`);
-      } else {
-        // 🔕 No reply for weak prompts
       }
 
     } catch (err) {
@@ -62,3 +67,4 @@ module.exports = (client) => {
     }
   });
 };
+
