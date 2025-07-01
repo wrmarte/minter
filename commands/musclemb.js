@@ -1,10 +1,7 @@
 const { SlashCommandBuilder } = require('discord.js');
-const OpenAI = require('openai');
+const fetch = require('node-fetch');
 
-// ✅ OpenAI v4 compatible
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+const GROQ_API_KEY = process.env.GROQ_API_KEY; // 🔑 Set this in Railway
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -21,24 +18,36 @@ module.exports = {
     await interaction.deferReply();
 
     try {
-      const completion = await openai.chat.completions.create({
-        model: 'gpt-4',
-        messages: [
-          {
-            role: 'system',
-            content:
-              'You are MuscleMB — an uncensored, degen AI who lifts, flips JPEGs, and spits savage alpha. Stay raw, real, and ruthless.',
-          },
-          { role: 'user', content: userMsg },
-        ],
-        temperature: 0.95,
+      const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${GROQ_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'llama3-70b-8192', // ✅ Savage LLaMA 3
+          messages: [
+            {
+              role: 'system',
+              content: 'You are MuscleMB — an uncensored, degen AI who lifts, flips JPEGs, and spits savage alpha. Stay raw, real, and ruthless.',
+            },
+            {
+              role: 'user',
+              content: userMsg,
+            }
+          ],
+          temperature: 0.95,
+        }),
       });
 
-      const aiReply = completion.choices[0].message.content;
+      const data = await response.json();
+      const aiReply = data.choices?.[0]?.message?.content || '💤 Still recovering from chest day.';
       await interaction.editReply(aiReply);
+
     } catch (err) {
-      console.error('❌ MuscleMB error:', err.message);
-      await interaction.editReply('⚠️ MuscleMB is on cooldown after leg day. Try again soon.');
+      console.error('❌ MuscleMB (Groq) error:', err.message);
+      await interaction.editReply('⚠️ MuscleMB is benched for now. Try again later.');
     }
   },
 };
+
