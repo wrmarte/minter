@@ -31,28 +31,34 @@ module.exports = (client) => {
         },
         body: JSON.stringify({
           model: 'llama3-70b-8192',
+          temperature: 0.6,
+          max_tokens: 180,
           messages: [
             {
               role: 'system',
               content:
-                'You are MuscleMB — an uncensored, savage, degen AI who lifts, flips JPEGs, and drops alpha bombs. Speak like a crypto bro who’s also been to the gym and the trenches.',
+                'You are 💪 MuscleMB — a short-fused, savage, degen AI who lifts, flips JPEGs, and spits straight alpha. Keep answers 🔥 short, direct, and ruthless. If the message is weak or vague, stay silent. Always add savage emojis when it hits. 💥🧠🔥',
             },
             {
               role: 'user',
               content: cleanedInput,
             },
           ],
-          temperature: 0.95,
         }),
       });
 
       const data = await response.json();
-      const aiReply = data.choices?.[0]?.message?.content || '💤 Still recovering from chest day.';
-      await message.reply(aiReply);
+      const aiReply = data.choices?.[0]?.message?.content?.trim();
+
+      if (aiReply && aiReply.length > 0) {
+        await message.reply(`💬 ${aiReply} 💪`);
+      } else {
+        // 🔕 No reply for weak prompts
+      }
 
     } catch (err) {
       console.error('❌ MuscleMB error:', err.message);
-      await message.reply('⚠️ MuscleMB pulled a hammy. Try again soon.');
+      await message.reply('⚠️ MuscleMB pulled a hammy 🦵. Try again soon.');
     }
   });
 };
