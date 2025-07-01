@@ -34,22 +34,24 @@ module.exports = {
         ON CONFLICT (user_id) DO UPDATE SET tier = EXCLUDED.tier
       `, [userId, tier]);
 
-      // 🧠 Try to fetch actual username
-      let userDisplay;
+      // 🧠 Try to get user tag if possible
+      let userTag = '';
       try {
         const user = await interaction.client.users.fetch(userId);
-        userDisplay = `${user.tag} (${userId})`;
+        userTag = `**${user.tag}**`;
       } catch {
-        userDisplay = `<@${userId}>`;
+        userTag = `<@${userId}>`;
       }
 
       await interaction.reply({
-        content: `✅ User **${userDisplay}** set to **${tier}** tier.`,
+        content: `🎟️ Tier updated for user: ${userTag} \`${userId}\`\n**Tier:** ${tier}`,
         ephemeral: true
       });
+
     } catch (err) {
       console.error('❌ Error in /setuserpremium:', err);
       await interaction.reply({ content: '⚠️ Failed to set user tier.', ephemeral: true });
     }
   }
 };
+
