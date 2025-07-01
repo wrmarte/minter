@@ -3,9 +3,6 @@ const { Client, GatewayIntentBits, Collection } = require('discord.js');
 const { Client: PgClient } = require('pg');
 const fs = require('fs');
 const path = require('path');
-const muscleMBListener = require('./listeners/muscleMBListener');
-muscleMBListener(client);
-
 
 // Load helper services
 require('./services/providerM');
@@ -13,7 +10,7 @@ require('./services/logScanner');
 
 console.log("👀 Booting from:", __dirname);
 
-// Create Discord client
+// ✅ Create Discord client (must come first!)
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -22,7 +19,11 @@ const client = new Client({
   ]
 });
 
-// PostgreSQL connection
+// ✅ Load MuscleMB trigger after client is defined
+const muscleMBListener = require('./listeners/muscleMBListener');
+muscleMBListener(client);
+
+// ✅ PostgreSQL connection
 const pg = new PgClient({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
@@ -30,7 +31,7 @@ const pg = new PgClient({
 pg.connect();
 client.pg = pg;
 
-// Initialize DB tables
+// ✅ Initialize DB tables
 pg.query(`CREATE TABLE IF NOT EXISTS contract_watchlist (
   name TEXT PRIMARY KEY,
   address TEXT NOT NULL,
@@ -67,7 +68,7 @@ pg.query(`CREATE TABLE IF NOT EXISTS expressions (
 
 pg.query(`ALTER TABLE expressions ADD COLUMN IF NOT EXISTS guild_id TEXT`);
 
-// Load slash & prefix commands
+// ✅ Load slash & prefix commands
 client.commands = new Collection();
 client.prefixCommands = new Collection();
 
@@ -89,7 +90,7 @@ try {
   console.error('❌ Error loading commands:', err);
 }
 
-// Load events
+// ✅ Load event handlers
 const eventFiles = fs.readdirSync(path.join(__dirname, 'events')).filter(file => file.endsWith('.js'));
 for (const file of eventFiles) {
   try {
@@ -101,12 +102,11 @@ for (const file of eventFiles) {
   }
 }
 
-// ✅ Mint/Sale Trackers (Modular)
+// ✅ Mint/Sale Trackers
 const { trackAllContracts } = require('./services/mintRouter');
 trackAllContracts(client);
 
-
-// Global token buy/sell scanner
+// ✅ Global Token Scanner
 const processUnifiedBlock = require('./services/globalProcessor');
 const { getProvider } = require('./services/providerM');
 
@@ -119,10 +119,11 @@ setInterval(async () => {
   }
 }, 15000);  // every 15 sec
 
-// Login to Discord
+// ✅ Login to Discord
 client.login(process.env.DISCORD_BOT_TOKEN)
   .then(() => console.log(`✅ Logged in as ${client.user.tag}`))
   .catch(err => console.error('❌ Discord login failed:', err));
+
 
 
 
