@@ -4,10 +4,11 @@ module.exports = {
   data: new SlashCommandBuilder()
     .setName('setuserpremium')
     .setDescription('Set the premium tier for a user (bot owner only)')
-    .addStringOption(opt =>
+    .addUserOption(opt =>
       opt.setName('user')
-        .setDescription('User ID to upgrade')
-        .setRequired(true))
+        .setDescription('Select the user (autocomplete supported)')
+        .setRequired(true)
+    )
     .addStringOption(opt =>
       opt.setName('tier')
         .setDescription('Tier to assign')
@@ -24,7 +25,7 @@ module.exports = {
       return interaction.reply({ content: '❌ Only the bot owner can use this.', ephemeral: true });
     }
 
-    const userId = interaction.options.getString('user');
+    const user = interaction.options.getUser('user');
     const tier = interaction.options.getString('tier');
 
     try {
@@ -32,19 +33,10 @@ module.exports = {
         INSERT INTO premium_users (user_id, tier)
         VALUES ($1, $2)
         ON CONFLICT (user_id) DO UPDATE SET tier = EXCLUDED.tier
-      `, [userId, tier]);
-
-      // 🧠 Try to get user tag if possible
-      let userTag = '';
-      try {
-        const user = await interaction.client.users.fetch(userId);
-        userTag = `**${user.tag}**`;
-      } catch {
-        userTag = `<@${userId}>`;
-      }
+      `, [user.id, tier]);
 
       await interaction.reply({
-        content: `🎟️ Tier updated for user: ${userTag} \`${userId}\`\n**Tier:** ${tier}`,
+        content: `🎟️ Tier updated for user: **${user.tag}** (\`${user.id}\`)\n**Tier:** ${tier}`,
         ephemeral: true
       });
 
@@ -54,4 +46,5 @@ module.exports = {
     }
   }
 };
+
 
