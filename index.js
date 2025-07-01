@@ -79,6 +79,11 @@ pg.query(`CREATE TABLE IF NOT EXISTS premium_users (
   tier TEXT NOT NULL DEFAULT 'free'  -- for optional per-user upgrades
 )`);
 
+// ✅ MuscleMB Modes Table
+pg.query(`CREATE TABLE IF NOT EXISTS mb_modes (
+  server_id TEXT PRIMARY KEY,
+  mode TEXT NOT NULL DEFAULT 'default'  -- default, chill, roast, villain, motivator
+)`);
 
 // ✅ Load slash & prefix commands
 client.commands = new Collection();
