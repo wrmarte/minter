@@ -3,6 +3,9 @@ const { Client, GatewayIntentBits, Collection } = require('discord.js');
 const { Client: PgClient } = require('pg');
 const fs = require('fs');
 const path = require('path');
+const muscleMBListener = require('./listeners/muscleMBListener');
+muscleMBListener(client);
+
 
 // Load helper services
 require('./services/providerM');
