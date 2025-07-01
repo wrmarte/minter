@@ -68,6 +68,18 @@ pg.query(`CREATE TABLE IF NOT EXISTS expressions (
 
 pg.query(`ALTER TABLE expressions ADD COLUMN IF NOT EXISTS guild_id TEXT`);
 
+// ✅ Premium Tier Tables
+pg.query(`CREATE TABLE IF NOT EXISTS premium_servers (
+  server_id TEXT PRIMARY KEY,
+  tier TEXT NOT NULL DEFAULT 'free'  -- free, premium, premiumplus
+)`);
+
+pg.query(`CREATE TABLE IF NOT EXISTS premium_users (
+  user_id TEXT PRIMARY KEY,
+  tier TEXT NOT NULL DEFAULT 'free'  -- for optional per-user upgrades
+)`);
+
+
 // ✅ Load slash & prefix commands
 client.commands = new Collection();
 client.prefixCommands = new Collection();
