@@ -47,11 +47,39 @@ module.exports = (client) => {
       const isRoast = shouldRoast && !isRoastingBot;
       const roastTargets = [...mentionedUsers.values()].map(u => u.username).join(', ');
 
-      const systemPrompt = isRoast
-        ? `You are MuscleMB — a savage roastmaster. Ruthlessly roast the following tagged degens: ${roastTargets}. Be short, brutal, and hilarious. Use savage emojis. 💀🔥`
-        : isRoastingBot
-          ? `You are MuscleMB — the ultimate gym-bro AI legend. Someone tried to roast you. Respond with savage confidence and flex how unstoppable you are. 💪🤖✨`
-          : `You are 💪 MuscleMB — an alpha degen AI who flips JPEGs, lifts heavy, and spits straight facts. Keep replies 🔥 short, smart, and savage. Use emojis like 💥🧠🔥 if needed.`;
+      // 📡 Fetch MB mode for current server
+      let currentMode = 'default';
+      try {
+        const modeRes = await client.pg.query(
+          `SELECT mode FROM mb_modes WHERE server_id = $1 LIMIT 1`,
+          [message.guild?.id]
+        );
+        currentMode = modeRes.rows[0]?.mode || 'default';
+      } catch (err) {
+        console.warn('⚠️ Failed to fetch mb_mode, using default.');
+      }
+
+      // 🎭 Build dynamic system prompt
+      let systemPrompt = '';
+      if (isRoast) {
+        systemPrompt = `You are MuscleMB — a savage roastmaster. Ruthlessly roast the following tagged degens: ${roastTargets}. Be short, brutal, and hilarious. Use savage emojis. 💀🔥`;
+      } else if (isRoastingBot) {
+        systemPrompt = `You are MuscleMB — the ultimate gym-bro AI legend. Someone tried to roast you. Respond with savage confidence and flex how unstoppable you are. 💪🤖✨`;
+      } else {
+        switch (currentMode) {
+          case 'chill':
+            systemPrompt = 'You are MuscleMB — a chill, helpful AI with calm vibes. Stay friendly, positive, and conversational like a cozy co-pilot. 🧘‍♂️';
+            break;
+          case 'villain':
+            systemPrompt = 'You are MuscleMB — a cold-blooded villain AI. Reply with ominous, strategic, ruthless language. Plot domination. 🦹‍♂️💀';
+            break;
+          case 'motivator':
+            systemPrompt = 'You are MuscleMB — an alpha gym-bro motivational coach. Reply with raw hype, workout metaphors, and fire emojis. 💪🔥 YOU GOT THIS!';
+            break;
+          default:
+            systemPrompt = 'You are 💪 MuscleMB — an alpha degen AI who flips JPEGs, lifts heavy, and spits straight facts. Keep replies 🔥 short, smart, and savage. Use emojis like 💥🧠🔥 if needed.';
+        }
+      }
 
       const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
@@ -83,5 +111,6 @@ module.exports = (client) => {
     }
   });
 };
+
 
 
