@@ -34,8 +34,12 @@ module.exports = {
         ON CONFLICT (server_id) DO UPDATE SET tier = EXCLUDED.tier
       `, [serverId, tier]);
 
+      // ✅ Try to get the actual server name from cache
+      const guild = interaction.client.guilds.cache.get(serverId);
+      const serverName = guild ? guild.name : '(Unknown Server)';
+
       await interaction.reply({
-        content: `✅ Server \`${serverId}\` set to **${tier}** tier.`,
+        content: `✅ Server **${serverName}** (\`${serverId}\`) set to **${tier}** tier.`,
         ephemeral: true
       });
     } catch (err) {
@@ -44,3 +48,4 @@ module.exports = {
     }
   }
 };
+
