@@ -9,14 +9,20 @@ module.exports = (client) => {
     if (message.author.bot) return;
 
     const lowered = message.content.toLowerCase();
-
-    // 🔥 Trigger if any keyword or tag matches
-    const mentionedBot = message.mentions.has(client.user);
-    const mentionedUsers = message.mentions.users.filter(u => u.id !== client.user.id);
+    const botMentioned = message.mentions.has(client.user);
     const hasTriggerWord = TRIGGERS.some(trigger => lowered.includes(trigger));
-    const triggered = mentionedBot || mentionedUsers.size > 0 || hasTriggerWord;
 
-    if (!triggered) return;
+    // 🧠 Get all tagged users excluding the bot
+    const mentionedUsers = message.mentions.users.filter(u => u.id !== client.user.id);
+
+    // ✅ Proceed only if bot is triggered AND others are tagged (for roast)
+    const shouldRoast = (hasTriggerWord || botMentioned) && mentionedUsers.size > 0;
+
+    // 🤖 Compliment if they're trying to roast the bot
+    const isRoastingBot = shouldRoast && message.mentions.has(client.user) && mentionedUsers.size === 1 && mentionedUsers.has(client.user.id);
+
+    // ❌ Skip if no real trigger
+    if (!hasTriggerWord && !botMentioned) return;
 
     // ⏱️ Cooldown per user
     if (cooldown.has(message.author.id)) return;
@@ -33,18 +39,19 @@ module.exports = (client) => {
       cleanedInput = cleanedInput.replaceAll(`<@!${user.id}>`, '');
     });
     cleanedInput = cleanedInput.replaceAll(`<@${client.user.id}>`, '').trim();
-    if (!cleanedInput) cleanedInput = 'Roast this fool.';
+    if (!cleanedInput) cleanedInput = shouldRoast ? 'Roast these fools.' : 'Speak your alpha.';
 
     try {
       await message.channel.sendTyping();
 
-      // 🧨 Construct system prompt
-      const roastTarget = mentionedUsers.first();
-      const isRoast = roastTarget && !mentionedBot;
+      const isRoast = shouldRoast && !isRoastingBot;
+      const roastTargets = [...mentionedUsers.values()].map(u => u.username).join(', ');
 
       const systemPrompt = isRoast
-        ? `You are MuscleMB — a savage roastmaster. Ruthlessly roast the user "${roastTarget.username}" who was just tagged. Keep it short, brutal, and funny. Use emojis if needed. 💀🔥`
-        : `You are 💪 MuscleMB — a short-fused, savage degen AI who flips JPEGs and spits straight alpha. Keep answers 🔥 short, direct, and ruthless. Add savage emojis when it hits. 💥🧠🔥`;
+        ? `You are MuscleMB — a savage roastmaster. Ruthlessly roast the following tagged degens: ${roastTargets}. Be short, brutal, and hilarious. Use savage emojis. 💀🔥`
+        : isRoastingBot
+          ? `You are MuscleMB — the ultimate gym-bro AI legend. Someone tried to roast you. Respond with savage confidence and flex how unstoppable you are. 💪🤖✨`
+          : `You are 💪 MuscleMB — an alpha degen AI who flips JPEGs, lifts heavy, and spits straight facts. Keep replies 🔥 short, smart, and savage. Use emojis like 💥🧠🔥 if needed.`;
 
       const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
