@@ -6,7 +6,14 @@ const MODE_TIERS = {
   chill: 'premium',
   roast: 'premium',
   villain: 'premiumplus',
-  motivator: 'premiumplus'
+  motivator: 'premiumplus',
+  drill: 'premium',
+  oracle: 'premiumplus',
+  lover: 'premium',
+  troll: 'premium',
+  zen: 'premiumplus',
+  coder: 'premium',
+  random: 'premiumplus'
 };
 
 module.exports = {
@@ -22,7 +29,14 @@ module.exports = {
           { name: 'chill', value: 'chill' },
           { name: 'roast', value: 'roast' },
           { name: 'villain', value: 'villain' },
-          { name: 'motivator', value: 'motivator' }
+          { name: 'motivator', value: 'motivator' },
+          { name: 'drill', value: 'drill' },
+          { name: 'oracle', value: 'oracle' },
+          { name: 'lover', value: 'lover' },
+          { name: 'troll', value: 'troll' },
+          { name: 'zen', value: 'zen' },
+          { name: 'coder', value: 'coder' },
+          { name: 'random', value: 'random' }
         )
     ),
 
