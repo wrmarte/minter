@@ -5,8 +5,8 @@ module.exports = {
     .setName('setpremium')
     .setDescription('Set the premium tier for a server (bot owner only)')
     .addStringOption(opt =>
-      opt.setName('serverid')
-        .setDescription('Optional server ID to upgrade (defaults to current server)')
+      opt.setName('servername')
+        .setDescription('Optional server name (or use in server)')
         .setRequired(false)
     )
     .addStringOption(opt =>
@@ -25,20 +25,26 @@ module.exports = {
       return interaction.reply({ content: '❌ Only the bot owner can use this.', ephemeral: true });
     }
 
-    const manualServerId = interaction.options.getString('serverid');
+    const inputName = interaction.options.getString('servername');
     const tier = interaction.options.getString('tier');
 
-    const serverId = manualServerId || interaction.guild?.id;
-    if (!serverId) {
-      return interaction.reply({ content: '❌ No server context or server ID provided.', ephemeral: true });
+    let targetGuild = null;
+
+    if (inputName) {
+      // Try to find guild by name (partial or exact)
+      const match = interaction.client.guilds.cache.find(g =>
+        g.name.toLowerCase().includes(inputName.toLowerCase())
+      );
+      if (match) targetGuild = match;
     }
 
-    let serverName = '(Unknown Server)';
-    try {
-      const guild = interaction.client.guilds.cache.get(serverId);
-      if (guild) serverName = guild.name;
-    } catch {
-      // Keep default name
+    // Fallback to current guild
+    if (!targetGuild && interaction.guild) {
+      targetGuild = interaction.guild;
+    }
+
+    if (!targetGuild) {
+      return interaction.reply({ content: '❌ Could not find a matching server.', ephemeral: true });
     }
 
     try {
@@ -46,10 +52,10 @@ module.exports = {
         INSERT INTO premium_servers (server_id, tier)
         VALUES ($1, $2)
         ON CONFLICT (server_id) DO UPDATE SET tier = EXCLUDED.tier
-      `, [serverId, tier]);
+      `, [targetGuild.id, tier]);
 
       await interaction.reply({
-        content: `✅ Server **${serverName}** (\`${serverId}\`) set to **${tier}** tier.`,
+        content: `✅ Server **${targetGuild.name}** (\`${targetGuild.id}\`) set to **${tier}** tier.`,
         ephemeral: true
       });
     } catch (err) {
@@ -58,6 +64,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
