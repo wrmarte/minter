@@ -14,9 +14,9 @@ module.exports = {
         .setDescription('Tier to assign')
         .setRequired(true)
         .addChoices(
-          { name: 'free', value: 'free' },
-          { name: 'premium', value: 'premium' },
-          { name: 'premiumplus', value: 'premiumplus' }
+          { name: 'Free', value: 'free' },
+          { name: 'Premium', value: 'premium' },
+          { name: 'Premium Plus', value: 'premiumplus' }
         )
     ),
 
@@ -31,20 +31,24 @@ module.exports = {
     let targetGuild = null;
 
     if (inputName) {
-      // Try to find guild by name (partial or exact)
-      const match = interaction.client.guilds.cache.find(g =>
+      // Match partial name (case insensitive)
+      const guilds = [...interaction.client.guilds.cache.values()];
+      const match = guilds.find(g =>
         g.name.toLowerCase().includes(inputName.toLowerCase())
       );
       if (match) targetGuild = match;
     }
 
-    // Fallback to current guild
+    // Fallback to current server
     if (!targetGuild && interaction.guild) {
       targetGuild = interaction.guild;
     }
 
     if (!targetGuild) {
-      return interaction.reply({ content: '❌ Could not find a matching server.', ephemeral: true });
+      return interaction.reply({
+        content: '❌ Could not find a matching server. Make sure the bot is in that server.',
+        ephemeral: true
+      });
     }
 
     try {
@@ -58,12 +62,14 @@ module.exports = {
         content: `✅ Server **${targetGuild.name}** (\`${targetGuild.id}\`) set to **${tier}** tier.`,
         ephemeral: true
       });
+
     } catch (err) {
       console.error('❌ Error in /setpremium:', err);
       await interaction.reply({ content: '⚠️ Failed to set tier.', ephemeral: true });
     }
   }
 };
+
 
 
 
