@@ -5,11 +5,6 @@ module.exports = {
     .setName('setpremium')
     .setDescription('Set the premium tier for a server (bot owner only)')
     .addStringOption(opt =>
-      opt.setName('servername')
-        .setDescription('Optional server name (or use in server)')
-        .setRequired(false)
-    )
-    .addStringOption(opt =>
       opt.setName('tier')
         .setDescription('Tier to assign')
         .setRequired(true)
@@ -18,6 +13,11 @@ module.exports = {
           { name: 'Premium', value: 'premium' },
           { name: 'Premium Plus', value: 'premiumplus' }
         )
+    )
+    .addStringOption(opt =>
+      opt.setName('servername')
+        .setDescription('Optional server name (or use in server)')
+        .setRequired(false)
     ),
 
   async execute(interaction) {
@@ -25,21 +25,18 @@ module.exports = {
       return interaction.reply({ content: '❌ Only the bot owner can use this.', ephemeral: true });
     }
 
-    const inputName = interaction.options.getString('servername');
     const tier = interaction.options.getString('tier');
+    const inputName = interaction.options.getString('servername');
 
     let targetGuild = null;
 
     if (inputName) {
-      // Match partial name (case insensitive)
-      const guilds = [...interaction.client.guilds.cache.values()];
-      const match = guilds.find(g =>
+      const match = interaction.client.guilds.cache.find(g =>
         g.name.toLowerCase().includes(inputName.toLowerCase())
       );
       if (match) targetGuild = match;
     }
 
-    // Fallback to current server
     if (!targetGuild && interaction.guild) {
       targetGuild = interaction.guild;
     }
