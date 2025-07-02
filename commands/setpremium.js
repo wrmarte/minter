@@ -33,13 +33,12 @@ module.exports = {
       return interaction.reply({ content: '❌ No server context or server ID provided.', ephemeral: true });
     }
 
-    // Try to get name if bot is in that server
     let serverName = '(Unknown Server)';
-    if (!manualServerId && interaction.guild) {
-      serverName = interaction.guild.name;
-    } else {
+    try {
       const guild = interaction.client.guilds.cache.get(serverId);
       if (guild) serverName = guild.name;
+    } catch {
+      // Keep default name
     }
 
     try {
@@ -59,6 +58,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
