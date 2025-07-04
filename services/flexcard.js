@@ -64,7 +64,7 @@ module.exports = {
       const { buildFlexCard } = getFlexService(chain);
       const imageBuffer = ultraRequested
         ? await buildUltraFlexCard(contractAddress, tokenId, collectionName, chain)
-        : await buildFlexCard(contractAddress, tokenId, collectionName, chain);
+        : await buildFlexCard(contractAddress, tokenId, collectionName, pg, interaction.guild.id);
 
       const attachment = new AttachmentBuilder(imageBuffer, {
         name: ultraRequested ? 'ultraflexcard.png' : 'flexcard.png'
@@ -87,6 +87,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
