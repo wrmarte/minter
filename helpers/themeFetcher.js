@@ -14,7 +14,7 @@ const DEFAULT_ACCENT = '#294f30';
 async function getServerTheme(pg, guildId) {
   try {
     const res = await pg.query(
-      'SELECT bg_color, accent_color FROM server_themes WHERE guild_id = $1',
+      'SELECT bg_color, accent_color FROM theme_settings WHERE guild_id = $1',
       [guildId]
     );
 
