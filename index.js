@@ -49,7 +49,6 @@ pg.query(`CREATE TABLE IF NOT EXISTS tracked_tokens (
   channel_id TEXT,
   PRIMARY KEY (address, guild_id)
 )`);
-
 pg.query(`ALTER TABLE tracked_tokens ADD COLUMN IF NOT EXISTS channel_id TEXT`);
 
 pg.query(`CREATE TABLE IF NOT EXISTS flex_projects (
@@ -65,7 +64,6 @@ pg.query(`CREATE TABLE IF NOT EXISTS expressions (
   guild_id TEXT,
   PRIMARY KEY (name, guild_id)
 )`);
-
 pg.query(`ALTER TABLE expressions ADD COLUMN IF NOT EXISTS guild_id TEXT`);
 
 // ✅ Premium Tier Tables
@@ -73,25 +71,23 @@ pg.query(`CREATE TABLE IF NOT EXISTS premium_servers (
   server_id TEXT PRIMARY KEY,
   tier TEXT NOT NULL DEFAULT 'free'  -- free, premium, premiumplus
 )`);
-
 pg.query(`CREATE TABLE IF NOT EXISTS premium_users (
   user_id TEXT PRIMARY KEY,
-  tier TEXT NOT NULL DEFAULT 'free'  -- for optional per-user upgrades
+  tier TEXT NOT NULL DEFAULT 'free'
 )`);
 
 // ✅ MuscleMB Modes Table
 pg.query(`CREATE TABLE IF NOT EXISTS mb_modes (
   server_id TEXT PRIMARY KEY,
-  mode TEXT NOT NULL DEFAULT 'default'  -- default, chill, roast, villain, motivator
+  mode TEXT NOT NULL DEFAULT 'default'
 )`);
 
-// ✅ FlexCard Theme Settings Table
-pg.query(`CREATE TABLE IF NOT EXISTS theme_settings (
-  guild_id TEXT PRIMARY KEY,
+// ✅ FlexCard Theme Settings Table (alias for server_themes)
+pg.query(`CREATE TABLE IF NOT EXISTS server_themes (
+  server_id TEXT PRIMARY KEY,
   bg_color TEXT DEFAULT '#4e7442',
   accent_color TEXT DEFAULT '#294f30'
 )`);
-
 
 // ✅ Load slash & prefix commands
 client.commands = new Collection();
