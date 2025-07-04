@@ -1,6 +1,7 @@
 const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const QRCode = require('qrcode');
 const path = require('path');
+const { getThemeForGuild } = require('../helpers/themeFetcher'); // ✅ Fetch theme from DB
 
 // Register font
 const fontPath = path.join(__dirname, '../../fonts/Exo2-Bold.ttf');
@@ -18,9 +19,13 @@ async function generateFlexCard({
   mintedDate,
   network,
   totalSupply,
-  bgColor = '#4e7442',
-  accentColor = '#294f30'
+  guildId // ✅ Guild passed in
 }) {
+  // ✅ Load theme from DB, fallback if not found
+  const theme = await getThemeForGuild(guildId);
+  const bgColor = theme?.bg_color || '#4e7442';
+  const accentColor = theme?.accent_color || '#294f30';
+
   const width = 1124;
   const height = 1650;
   const canvas = createCanvas(width, height);
