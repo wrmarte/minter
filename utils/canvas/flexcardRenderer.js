@@ -1,7 +1,7 @@
 const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const QRCode = require('qrcode');
 const path = require('path');
-const { getThemeForGuild } = require('../helpers/themeFetcher'); // ✅ Fetch theme from DB
+const { getServerTheme } = require('../../helpers/themeFetcher'); // ✅ Fetch theme from DB
 
 // Register font
 const fontPath = path.join(__dirname, '../../fonts/Exo2-Bold.ttf');
