@@ -1,7 +1,7 @@
 const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const QRCode = require('qrcode');
 const path = require('path');
-const { getServerTheme } = require('../../helpers/themeFetcher'); // ✅ Fetch theme from DB
+const { getServerTheme } = require('../../helpers/themeFetcher'); // ✅ Correct import
 
 // Register font
 const fontPath = path.join(__dirname, '../../fonts/Exo2-Bold.ttf');
@@ -19,10 +19,10 @@ async function generateFlexCard({
   mintedDate,
   network,
   totalSupply,
-  guildId // ✅ Guild passed in
+  guildId // ✅ For per-server themes
 }) {
-  // ✅ Load theme from DB, fallback if not found
-  const theme = await getThemeForGuild(guildId);
+  // ✅ Load theme from DB or fallback
+  const theme = await getServerTheme(guildId);
   const bgColor = theme?.bg_color || '#4e7442';
   const accentColor = theme?.accent_color || '#294f30';
 
@@ -189,12 +189,13 @@ async function generateFlexCard({
   ctx.fillStyle = 'white';
   ctx.font = 'bold 24px Exo2';
   ctx.textAlign = 'center';
-  ctx.fillText('Powered by PimpsDev ', width / 2, footerY + 28);
+  ctx.fillText('Powered by PimpsDev', width / 2, footerY + 28);
 
   return canvas.toBuffer('image/png');
 }
 
 module.exports = { generateFlexCard };
+
 
 
 
