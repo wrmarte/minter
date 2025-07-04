@@ -40,7 +40,7 @@ async function fetchOwner(contractAddress, tokenId) {
   }
 }
 
-async function buildFlexCard(contractAddress, tokenId, collectionName) {
+async function buildFlexCard(contractAddress, tokenId, collectionName, pg, guildId) {
   // ⛏️ Fetch metadata and owner info
   const metadata = await fetchMetadata(contractAddress, tokenId);
   const owner = await fetchOwner(contractAddress, tokenId);
@@ -81,7 +81,9 @@ async function buildFlexCard(contractAddress, tokenId, collectionName) {
     traits,
     owner: ownerDisplay,
     openseaUrl,
-    ...extras // Injects: minted, rank, score, network, totalSupply
+    ...extras, // Injects: minted, rank, score, network, totalSupply
+    pg,        // ✅ Pass pg for themeFetcher
+    guildId    // ✅ Pass guildId to fetch theme per-server
   });
 }
 
