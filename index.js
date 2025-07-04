@@ -85,6 +85,14 @@ pg.query(`CREATE TABLE IF NOT EXISTS mb_modes (
   mode TEXT NOT NULL DEFAULT 'default'  -- default, chill, roast, villain, motivator
 )`);
 
+// ✅ FlexCard Theme Settings Table
+pg.query(`CREATE TABLE IF NOT EXISTS theme_settings (
+  guild_id TEXT PRIMARY KEY,
+  bg_color TEXT DEFAULT '#4e7442',
+  accent_color TEXT DEFAULT '#294f30'
+)`);
+
+
 // ✅ Load slash & prefix commands
 client.commands = new Collection();
 client.prefixCommands = new Collection();
