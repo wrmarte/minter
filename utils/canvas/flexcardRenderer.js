@@ -17,7 +17,9 @@ async function generateFlexCard({
   score,
   mintedDate,
   network,
-  totalSupply
+  totalSupply,
+  bgColor = '#4e7442',
+  accentColor = '#294f30'
 }) {
   const width = 1124;
   const height = 1650;
@@ -38,11 +40,8 @@ async function generateFlexCard({
   const metaHeaderHeight = 60;
   const metaHeight = 170;
 
-  const olive = '#4e7442';
-  const forest = '#294f30';
-
   // Background
-  ctx.fillStyle = olive;
+  ctx.fillStyle = bgColor;
   ctx.fillRect(0, 0, width, height);
 
   // Outer border
@@ -51,7 +50,7 @@ async function generateFlexCard({
   ctx.strokeRect(margin, margin, usableWidth, height - 2 * margin);
 
   // Title bar
-  ctx.fillStyle = forest;
+  ctx.fillStyle = accentColor;
   ctx.fillRect(margin, margin, usableWidth, titleHeight);
   ctx.strokeRect(margin, margin, usableWidth, titleHeight);
   ctx.fillStyle = 'white';
@@ -64,7 +63,7 @@ async function generateFlexCard({
   // NFT image
   const nftX = margin + (usableWidth - ownerWidth - nftSize) / 2;
   const nftY = margin + titleHeight + 40;
-  ctx.fillStyle = olive;
+  ctx.fillStyle = bgColor;
   ctx.fillRect(nftX, nftY, nftSize, nftSize);
   ctx.strokeStyle = 'white';
   ctx.strokeRect(nftX, nftY, nftSize, nftSize);
@@ -76,7 +75,7 @@ async function generateFlexCard({
   const ownerX = width - margin - ownerWidth;
   const ownerY = margin + titleHeight;
   const ownerHeight = height - ownerY - footerHeight;
-  ctx.fillStyle = forest;
+  ctx.fillStyle = accentColor;
   ctx.fillRect(ownerX, ownerY, ownerWidth, ownerHeight);
   ctx.strokeStyle = 'white';
   ctx.strokeRect(ownerX, ownerY, ownerWidth, ownerHeight);
@@ -91,7 +90,7 @@ async function generateFlexCard({
 
   // Traits header
   const traitsHeaderY = nftY + nftSize + 40;
-  ctx.fillStyle = forest;
+  ctx.fillStyle = accentColor;
   ctx.fillRect(margin, traitsHeaderY, usableWidth - ownerWidth, traitsHeaderHeight);
   ctx.strokeStyle = 'white';
   ctx.strokeRect(margin, traitsHeaderY, usableWidth - ownerWidth, traitsHeaderHeight);
@@ -107,7 +106,7 @@ async function generateFlexCard({
 
   // Traits block
   const traitsY = traitsHeaderY + traitsHeaderHeight;
-  ctx.fillStyle = olive;
+  ctx.fillStyle = bgColor;
   ctx.fillRect(margin, traitsY, usableWidth - ownerWidth, traitsHeight);
   ctx.strokeStyle = 'white';
   ctx.strokeRect(margin, traitsY, usableWidth - ownerWidth, traitsHeight);
@@ -123,7 +122,7 @@ async function generateFlexCard({
 
   // Metadata Header
   const metaHeaderY = traitsY + traitsHeight + 10;
-  ctx.fillStyle = forest;
+  ctx.fillStyle = accentColor;
   ctx.fillRect(margin, metaHeaderY, usableWidth, metaHeaderHeight);
   ctx.strokeStyle = 'white';
   ctx.strokeRect(margin, metaHeaderY, usableWidth, metaHeaderHeight);
@@ -136,7 +135,7 @@ async function generateFlexCard({
   const metaY = metaHeaderY + metaHeaderHeight;
   const metaX = margin;
   const metaWidth = usableWidth - qrSize;
-  ctx.fillStyle = olive;
+  ctx.fillStyle = bgColor;
   ctx.fillRect(metaX, metaY, metaWidth, metaHeight);
   ctx.strokeStyle = 'white';
   ctx.strokeRect(metaX, metaY, metaWidth, metaHeight);
@@ -178,7 +177,7 @@ async function generateFlexCard({
 
   // Footer
   const footerY = height - margin - footerHeight;
-  ctx.fillStyle = forest;
+  ctx.fillStyle = accentColor;
   ctx.fillRect(margin, footerY, usableWidth, footerHeight);
   ctx.strokeStyle = 'white';
   ctx.strokeRect(margin, footerY, usableWidth, footerHeight);
@@ -191,6 +190,7 @@ async function generateFlexCard({
 }
 
 module.exports = { generateFlexCard };
+
 
 
 
