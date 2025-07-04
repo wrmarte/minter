@@ -104,7 +104,7 @@ async function fetchRarityRankOpenSea(contract, tokenId, network) {
     const score = rarity?.score ?? json?.nft?.rarity_score;
 
     return {
-      rank: rank ? `#${rank}` : null,
+      rank: rank ? `${rank}` : null,
       score: score && !isNaN(score) ? parseFloat(score).toFixed(2) : null
     };
   } catch (err) {
