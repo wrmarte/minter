@@ -10,11 +10,31 @@ const GATEWAYS = [
   'https://dweb.link/ipfs/'
 ];
 
-async function timeoutFetch(url, ms = 3000) {
+async function timeoutFetch(url, ms = 6000) {
   return await Promise.race([
     fetch(url),
     new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), ms))
   ]);
+}
+
+function fixIpfs(url) {
+  if (!url) return null;
+  return url.startsWith('ipfs://') ? GATEWAYS[0] + url.replace('ipfs://', '') : url;
+}
+
+async function resolveImage(meta) {
+  const imageUrl = fixIpfs(meta?.image);
+  if (!imageUrl) return null;
+
+  try {
+    const res = await timeoutFetch(imageUrl);
+    if (!res.ok) return null;
+    const buf = Buffer.from(await res.arrayBuffer());
+    return await loadImage(buf);
+  } catch (err) {
+    console.warn(`❌ Failed to load image from ${imageUrl}:`, err.message);
+    return null;
+  }
 }
 
 module.exports = {
@@ -52,7 +72,7 @@ module.exports = {
       );
 
       if (!result.rows.length) {
-        return interaction.editReply('❌ Duo not found. Use `/addflexduo` first.');
+        return await interaction.editReply('❌ Duo not found. Use `/addflexduo` first.');
       }
 
       const { contract1, network1, contract2, network2 } = result.rows[0];
@@ -72,50 +92,37 @@ module.exports = {
       if (tokenId == null) {
         let total = 0;
         try {
-          total = Number(await nft1.totalSupply());
-        } catch {
-          total = 0;
+          const raw = await nft1.totalSupply();
+          total = parseInt(raw.toString()) || 50;
+        } catch {}
+
+        for (let i = 0; i < 100; i++) {
+          const candidate = Math.floor(Math.random() * total);
+          const meta1 = await fetchMetadata(contract1, candidate, network1, provider1);
+          const meta2 = await fetchMetadata(contract2, candidate, network2, provider2);
+          const img1 = await resolveImage(meta1);
+          const img2 = await resolveImage(meta2);
+          if (img1 && img2) {
+            tokenId = candidate;
+            break;
+          }
         }
-        if (!total || isNaN(total)) {
-          return interaction.editReply('❌ No tokens minted yet.');
+
+        if (tokenId == null) {
+          return await interaction.editReply('❌ Could not find a valid token to flex.');
         }
-        tokenId = Math.floor(Math.random() * total);
-        if (tokenId === 0) tokenId = 1;
       }
 
       const meta1 = await fetchMetadata(contract1, tokenId, network1, provider1);
       const meta2 = await fetchMetadata(contract2, tokenId, network2, provider2);
 
-      if (!meta1?.image || !meta2?.image) {
-        return interaction.editReply(`❌ Token #${tokenId} not available on one or both chains.`);
+      const img1 = await resolveImage(meta1);
+      const img2 = await resolveImage(meta2);
+
+      if (!img1 || !img2) {
+        return await interaction.editReply(`❌ Token #${tokenId} not available on one or both chains.`);
       }
 
-      const imgUrl1 = meta1.image.startsWith('ipfs://')
-        ? GATEWAYS.map(gw => gw + meta1.image.replace('ipfs://', ''))[0]
-        : meta1.image;
-
-      const imgUrl2 = meta2.image.startsWith('ipfs://')
-        ? GATEWAYS.map(gw => gw + meta2.image.replace('ipfs://', ''))[0]
-        : meta2.image;
-
-      let res1, res2;
-      try {
-        [res1, res2] = await Promise.all([
-          timeoutFetch(imgUrl1),
-          timeoutFetch(imgUrl2)
-        ]);
-      } catch (e) {
-        return interaction.editReply(`❌ Failed to load NFT image(s).`);
-      }
-
-      if (!res1.ok || !res2.ok) {
-        return interaction.editReply(`❌ Failed to load images for token #${tokenId}`);
-      }
-
-      const img1 = await loadImage(Buffer.from(await res1.arrayBuffer()));
-      const img2 = await loadImage(Buffer.from(await res2.arrayBuffer()));
-
-      // 🎨 Canvas config
       const imgSize = 400;
       const spacing = 30;
       const labelHeight = 60;
@@ -139,7 +146,6 @@ module.exports = {
       ctx.fillStyle = '#eaeaea';
       ctx.font = '26px sans-serif';
       ctx.textAlign = 'center';
-
       ctx.fillText(meta1?.name || `#${tokenId}`, x1 + imgSize / 2, y + imgSize + 35);
       ctx.fillText(meta2?.name || `#${tokenId}`, x2 + imgSize / 2, y + imgSize + 35);
 
@@ -159,17 +165,18 @@ module.exports = {
         .setFooter({ text: '🧪 Powered by PimpsDev' })
         .setTimestamp();
 
-      return interaction.editReply({ embeds: [embed], files: [attachment] });
+      return await interaction.editReply({ embeds: [embed], files: [attachment] });
 
     } catch (err) {
-      console.error('❌ FlexDuo Fatal Error:', err);
+      console.error('❌ FlexDuo Error:', err);
       try {
-        return interaction.editReply('❌ Something went wrong. Try again later.');
+        return await interaction.editReply('❌ Something went wrong. Try again later.');
       } catch (e) {
         console.warn('⚠️ Could not edit reply due to expired interaction.');
       }
     }
   }
 };
+
 
 
