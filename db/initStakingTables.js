@@ -28,14 +28,25 @@ module.exports = async function initStakingTables(pg) {
     );
   `);
 
-  // ✅ Patch flex_projects to support per-server tracking
+  // ✅ Ensure guild_id support for server-project linking
   await pg.query(`
     ALTER TABLE flex_projects ADD COLUMN IF NOT EXISTS guild_id TEXT;
   `);
 
-  // ✅ Patch staking_config to ensure token_contract column exists
+  // ✅ Ensure staking_config supports token_contract
   await pg.query(`
     ALTER TABLE staking_config ADD COLUMN IF NOT EXISTS token_contract TEXT;
+  `);
+
+  // ✅ New: Create reward_tx_log for payout audit
+  await pg.query(`
+    CREATE TABLE IF NOT EXISTS reward_tx_log (
+      wallet_address TEXT,
+      amount NUMERIC,
+      timestamp TIMESTAMP DEFAULT NOW(),
+      tx_hash TEXT,
+      PRIMARY KEY (wallet_address, timestamp)
+    );
   `);
 
   console.log('✅ Staking tables ensured.');
