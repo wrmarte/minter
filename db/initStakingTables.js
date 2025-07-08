@@ -1,4 +1,3 @@
-// db/initStakingTables.js
 module.exports = async function initStakingTables(pg) {
   await pg.query(`
     CREATE TABLE IF NOT EXISTS staked_nfts (
@@ -28,5 +27,11 @@ module.exports = async function initStakingTables(pg) {
     );
   `);
 
+  // ✅ Patch flex_projects to support per-server tracking
+  await pg.query(`
+    ALTER TABLE flex_projects ADD COLUMN IF NOT EXISTS guild_id TEXT;
+  `);
+
   console.log('✅ Staking tables ensured.');
 };
+
