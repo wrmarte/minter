@@ -35,12 +35,25 @@ module.exports = {
     const guildId = interaction.guild.id;
     const pg = interaction.client.pg;
 
-    // Owner override (optional)
     const isOwner = interaction.user.id === process.env.BOT_OWNER_ID;
     const hasPerms = interaction.member.permissions.has(PermissionFlagsBits.ManageGuild);
 
+    // ✅ PremiumPlus Tier Check
+    const tierRes = await pg.query(
+      `SELECT tier FROM premium_servers WHERE server_id = $1`,
+      [guildId]
+    );
+    const tier = tierRes.rows[0]?.tier || 'free';
+
+    if (!isOwner && tier !== 'premiumplus') {
+      return interaction.reply({
+        content: '❌ This command requires **PremiumPlus** tier. Upgrade your server to unlock `/addstaking`.',
+        ephemeral: true
+      });
+    }
+
     if (!isOwner && !hasPerms) {
-      return interaction.reply({ content: '❌ You must be a server admin or the bot owner to use this.', ephemeral: true });
+      return interaction.reply({ content: '❌ You must be a server admin to use this command.', ephemeral: true });
     }
 
     try {
@@ -74,3 +87,4 @@ module.exports = {
     }
   }
 };
+
