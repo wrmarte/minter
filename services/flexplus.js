@@ -1,9 +1,8 @@
-// ✅ /services/flexplus.js
-
-const { EmbedBuilder, AttachmentBuilder } = require('discord.js');
+const { SlashCommandBuilder, EmbedBuilder, AttachmentBuilder } = require('discord.js');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
 const { fetchMetadata } = require('../utils/fetchMetadata');
 const { getProvider } = require('../services/provider');
+const { Contract } = require('ethers');
 
 const GATEWAYS = [
   'https://cloudflare-ipfs.com/ipfs/',
@@ -23,36 +22,90 @@ function roundRect(ctx, x, y, width, height, radius = 20) {
   ctx.clip();
 }
 
-async function timeoutFetch(url, ms = 4000) {
+async function timeoutFetch(url, ms = 5000) {
   return await Promise.race([
-    fetch(url, { timeout: ms }),
+    fetch(url),
     new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), ms))
   ]);
 }
 
-module.exports = {
-  async execute(interaction, pg, name) {
-    try {
-      const res = await pg.query(
-        `SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`,
-        [interaction.guild.id, name.toLowerCase()]
-      );
+async function resolveImage(meta) {
+  if (!meta?.image) return null;
+  const tryUrls = meta.image.startsWith('ipfs://')
+    ? GATEWAYS.map(gw => gw + meta.image.replace('ipfs://', ''))
+    : [meta.image];
 
+  for (let url of tryUrls) {
+    try {
+      const res = await timeoutFetch(url, 5000);
+      if (!res.ok) continue;
+      const buf = Buffer.from(await res.arrayBuffer());
+      return await loadImage(buf);
+    } catch (err) {
+      console.warn(`❌ Failed to load image from ${url}:`, err.message);
+    }
+  }
+  return null;
+}
+
+module.exports = {
+  data: new SlashCommandBuilder()
+    .setName('flexplus')
+    .setDescription('Flex a collage of 6 random NFTs from a project')
+    .addStringOption(opt =>
+      opt.setName('name').setDescription('Project name').setRequired(true).setAutocomplete(true)
+    ),
+
+  async execute(interaction) {
+    const pg = interaction.client.pg;
+    const name = interaction.options.getString('name').toLowerCase();
+
+    let alreadyAcknowledged = false;
+    try {
+      await interaction.deferReply();
+    } catch {
+      alreadyAcknowledged = true;
+    }
+
+    try {
+      const res = await pg.query(`SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`, [
+        interaction.guild.id,
+        name
+      ]);
       if (!res.rows.length) {
-        return await interaction.editReply('❌ Project not found. Use `/addflex` first.');
+        if (!alreadyAcknowledged) {
+          return await interaction.editReply('❌ Project not found. Use `/addflex` first.');
+        } else {
+          return;
+        }
       }
 
       const { address, network } = res.rows[0];
       const chain = network;
-      const maxTokenId = 50;
-      const selectedIds = Array.from({ length: maxTokenId - 1 }, (_, i) => i + 1)
-        .sort(() => 0.5 - Math.random())
-        .slice(0, 6);
-
       const provider = getProvider(chain);
-      const metas = await Promise.all(
-        selectedIds.map(id => fetchMetadata(address, id, chain, provider))
-      );
+      const contract = new Contract(address, ['function totalSupply() view returns (uint256)'], provider);
+
+      let maxTokenId = 50;
+      try {
+        const supply = await contract.totalSupply();
+        maxTokenId = parseInt(supply?.toString()) || 50;
+      } catch {
+        maxTokenId = 50;
+      }
+
+      const selectedIds = [];
+      const metas = [];
+
+      for (let tries = 0; tries < 200 && metas.length < 6; tries++) {
+        const id = Math.floor(Math.random() * maxTokenId);
+        if (selectedIds.includes(id)) continue;
+        const meta = await fetchMetadata(address, id, chain, provider);
+        const image = await resolveImage(meta);
+        if (image) {
+          selectedIds.push(id);
+          metas.push({ id, image });
+        }
+      }
 
       const columns = 3, rows = 2, imgSize = 280, spacing = 20, padding = 40;
       const canvasWidth = columns * imgSize + (columns - 1) * spacing + padding * 2;
@@ -63,29 +116,14 @@ module.exports = {
       ctx.fillStyle = '#0d1117';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      await Promise.all(metas.map(async (meta, i) => {
-        if (!meta?.image) return;
-
-        const imgUrl = meta.image.startsWith('ipfs://')
-          ? GATEWAYS.map(gw => gw + meta.image.replace('ipfs://', ''))[0]
-          : meta.image;
-
-        try {
-          const response = await timeoutFetch(imgUrl, 5000);
-          if (!response.ok) return;
-
-          const arrayBuffer = await response.arrayBuffer();
-          const nftImage = await loadImage(Buffer.from(arrayBuffer));
-
-          const x = padding + (i % columns) * (imgSize + spacing);
-          const y = padding + Math.floor(i / columns) * (imgSize + spacing);
-          roundRect(ctx, x, y, imgSize, imgSize);
-          ctx.drawImage(nftImage, x, y, imgSize, imgSize);
-          ctx.restore();
-        } catch (err) {
-          console.warn(`⚠️ Failed to load image for token ${selectedIds[i]}:`, err.message);
-        }
-      }));
+      for (let i = 0; i < metas.length; i++) {
+        const { image } = metas[i];
+        const x = padding + (i % columns) * (imgSize + spacing);
+        const y = padding + Math.floor(i / columns) * (imgSize + spacing);
+        roundRect(ctx, x, y, imgSize, imgSize);
+        ctx.drawImage(image, x, y, imgSize, imgSize);
+        ctx.restore();
+      }
 
       const buffer = canvas.toBuffer('image/png');
       const attachment = new AttachmentBuilder(buffer, { name: 'flexplus.png' });
@@ -98,17 +136,13 @@ module.exports = {
         .setFooter({ text: '🔧 Powered by PimpsDev' })
         .setTimestamp();
 
-      return await interaction.editReply({ embeds: [embed], files: [attachment] });
+      await interaction.editReply({ embeds: [embed], files: [attachment] });
 
     } catch (err) {
       console.error('❌ FlexPlus Ultra Error:', err);
       if (!interaction.replied && !interaction.deferred) {
-        await interaction.reply({ content: '⚠️ Something went wrong with FlexPlus.', ephemeral: true });
-      } else {
-        await interaction.editReply('⚠️ Something went wrong while generating the collage.');
+        await interaction.reply('⚠️ Something went wrong while generating the collage.');
       }
     }
   }
 };
-
-
