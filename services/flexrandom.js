@@ -40,9 +40,9 @@ module.exports = {
 
   async execute(interaction) {
     try {
-      await interaction.deferReply();
+      await interaction.deferReply().catch(() => {});
     } catch (err) {
-      console.warn('⚠️ Interaction expired before deferReply:', err.message);
+      console.warn('⚠️ Defer failed:', err.message);
       return;
     }
 
@@ -64,6 +64,7 @@ module.exports = {
       const chain = (network || 'base').toLowerCase();
       const provider = getProvider(chain);
       const contract = new Contract(address, abi, provider);
+
       let tokenId = tokenIdOption;
 
       if (!tokenId) {
@@ -89,11 +90,9 @@ module.exports = {
       const cacheKey = `${address}:${tokenId}:${chain}`;
       let metadata = metadataCache.get(cacheKey);
       if (!metadata) {
-      metadata = await fetchMetadata(address, tokenId, chain);
-console.log('🧬 Raw metadata:', JSON.stringify(metadata, null, 2));
-
+        metadata = await fetchMetadata(address, tokenId, chain);
         if (!metadata || !metadata.image) {
-          return interaction.editReply('⚠️ Metadata not found for this token.');
+          return interaction.editReply('⚠️ Metadata not found or missing image.');
         }
         metadataCache.set(cacheKey, metadata);
       }
@@ -109,39 +108,28 @@ console.log('🧬 Raw metadata:', JSON.stringify(metadata, null, 2));
         const arrayBuffer = await response.arrayBuffer();
         image = await loadImage(Buffer.from(arrayBuffer));
       } catch (err) {
-        console.error(`❌ Failed to load image: ${imageUrl}`, err);
-        return interaction.editReply('⚠️ Could not load the NFT image.');
+        console.error(`❌ Image load error for ${tokenId}: ${imageUrl}`, err.message);
+        return interaction.editReply('⚠️ Could not load NFT image.');
       }
 
-      let traitsList = [];
-
+      const traitsList = [];
       try {
-        let rawTraits = [];
+        const rawTraits = Array.isArray(metadata?.attributes)
+          ? metadata.attributes
+          : Array.isArray(metadata?.traits)
+            ? metadata.traits
+            : [];
 
-        if (Array.isArray(metadata?.attributes)) {
-          rawTraits = metadata.attributes;
-        } else if (Array.isArray(metadata?.traits)) {
-          rawTraits = metadata.traits;
-        } else if (Array.isArray(metadata?.metadata?.attributes)) {
-          rawTraits = metadata.metadata.attributes;
-        } else if (metadata?.token?.attributes) {
-          rawTraits = metadata.token.attributes;
-        } else if (metadata?.token?.metadata?.attributes) {
-          rawTraits = metadata.token.metadata.attributes;
-        } else if (typeof metadata?.attributes === 'object' && metadata.attributes !== null) {
-          rawTraits = Object.entries(metadata.attributes).map(([trait_type, value]) => ({ trait_type, value }));
-        }
-
-        traitsList = rawTraits
-          .filter(t => t?.trait_type && t?.value)
-          .map(t => `• **${t.trait_type}**: ${t.value}`);
-      } catch (err) {
-        console.warn(`⚠️ Failed to parse traits for ${name} #${tokenId}: ${err.message}`);
+        rawTraits.forEach(t => {
+          if (t?.trait_type && t?.value) {
+            traitsList.push(`• **${t.trait_type}**: ${t.value}`);
+          }
+        });
+      } catch (e) {
+        console.warn(`⚠️ Trait parsing failed for #${tokenId}`);
       }
 
-      const traits = traitsList.length > 0
-        ? traitsList.join('\n')
-        : '⚠️ No traits available or unrevealed.';
+      const traits = traitsList.length ? traitsList.join('\n') : '⚠️ No traits found.';
 
       const canvasSize = 480;
       const canvas = createCanvas(canvasSize, canvasSize);
@@ -149,19 +137,17 @@ console.log('🧬 Raw metadata:', JSON.stringify(metadata, null, 2));
       ctx.fillStyle = '#0d1117';
       ctx.fillRect(0, 0, canvasSize, canvasSize);
 
-      const { width, height } = image;
-      const scale = Math.min(canvasSize / width, canvasSize / height);
-      const scaledWidth = width * scale;
-      const scaledHeight = height * scale;
-      const offsetX = (canvasSize - scaledWidth) / 2;
-      const offsetY = (canvasSize - scaledHeight) / 2;
+      const scale = Math.min(canvasSize / image.width, canvasSize / image.height);
+      const scaledW = image.width * scale;
+      const scaledH = image.height * scale;
+      const x = (canvasSize - scaledW) / 2;
+      const y = (canvasSize - scaledH) / 2;
 
       roundRect(ctx, 0, 0, canvasSize, canvasSize, 30);
-      ctx.drawImage(image, offsetX, offsetY, scaledWidth, scaledHeight);
+      ctx.drawImage(image, x, y, scaledW, scaledH);
       const buffer = canvas.toBuffer('image/png');
       const attachment = new AttachmentBuilder(buffer, { name: 'flex.png' });
 
-      const chainDisplay = chain === 'base' ? 'Base' : chain === 'eth' ? 'Ethereum' : 'ApeChain';
       const openseaUrl = chain === 'eth'
         ? `https://opensea.io/assets/ethereum/${address}/${tokenId}`
         : `https://opensea.io/assets/${chain}/${address}/${tokenId}`;
@@ -171,27 +157,16 @@ console.log('🧬 Raw metadata:', JSON.stringify(metadata, null, 2));
         .setDescription(tokenIdOption ? `🎯 Specific token flexed` : `🎲 Random token flexed`)
         .setImage('attachment://flex.png')
         .setURL(openseaUrl)
-        .setColor(chain === 'base' ? 0x1d9bf0 : chain === 'ape' ? 0xff6600 : 0xf5851f)
+        .setColor(chain === 'base' ? 0x1d9bf0 : chain === 'eth' ? 0xf5851f : 0xff6600)
         .addFields({ name: '🧬 Traits', value: traits, inline: false })
-        .setFooter({ text: `🔧 Powered by PimpsDev • ${chainDisplay}` })
+        .setFooter({ text: `🔧 Powered by PimpsDev • ${chain.toUpperCase()}` })
         .setTimestamp();
 
-      await interaction.editReply({ content: null, embeds: [embed], files: [attachment] });
+      await interaction.editReply({ embeds: [embed], files: [attachment] });
 
     } catch (err) {
-      console.error('❌ Error in /flex:', err);
-      await interaction.editReply('⚠️ Something went wrong while flexing.');
+      console.error('❌ Flex command error:', err);
+      await interaction.editReply('⚠️ Unexpected error while flexing.');
     }
   }
 };
-
-
-
-
-
-
-
-
-
-
-
