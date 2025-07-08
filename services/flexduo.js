@@ -38,11 +38,8 @@ module.exports = {
     const tokenIdInput = interaction.options.getInteger('tokenid');
     const guildId = interaction.guild?.id;
 
-    let alreadyDeferred = false;
-
     try {
       await interaction.deferReply({ ephemeral: false });
-      alreadyDeferred = true;
     } catch (err) {
       console.warn('⚠️ Interaction already acknowledged or expired.');
       return;
@@ -55,10 +52,7 @@ module.exports = {
       );
 
       if (!result.rows.length) {
-        if (alreadyDeferred) {
-          return interaction.editReply('❌ Duo not found. Use `/addflexduo` first.');
-        }
-        return;
+        return interaction.editReply('❌ Duo not found. Use `/addflexduo` first.');
       }
 
       const { contract1, network1, contract2, network2 } = result.rows[0];
@@ -76,7 +70,12 @@ module.exports = {
 
       let tokenId = tokenIdInput;
       if (tokenId == null) {
-        const total = Number(await nft1.totalSupply());
+        let total = 0;
+        try {
+          total = Number(await nft1.totalSupply());
+        } catch {
+          total = 0;
+        }
         if (!total || isNaN(total)) {
           return interaction.editReply('❌ No tokens minted yet.');
         }
@@ -99,10 +98,15 @@ module.exports = {
         ? GATEWAYS.map(gw => gw + meta2.image.replace('ipfs://', ''))[0]
         : meta2.image;
 
-      const [res1, res2] = await Promise.all([
-        timeoutFetch(imgUrl1),
-        timeoutFetch(imgUrl2)
-      ]);
+      let res1, res2;
+      try {
+        [res1, res2] = await Promise.all([
+          timeoutFetch(imgUrl1),
+          timeoutFetch(imgUrl2)
+        ]);
+      } catch (e) {
+        return interaction.editReply(`❌ Failed to load NFT image(s).`);
+      }
 
       if (!res1.ok || !res2.ok) {
         return interaction.editReply(`❌ Failed to load images for token #${tokenId}`);
@@ -155,14 +159,17 @@ module.exports = {
         .setFooter({ text: '🧪 Powered by PimpsDev' })
         .setTimestamp();
 
-      return await interaction.editReply({ embeds: [embed], files: [attachment] });
+      return interaction.editReply({ embeds: [embed], files: [attachment] });
 
     } catch (err) {
-      console.error('❌ FlexDuo Error:', err);
-      if (alreadyDeferred) {
-        return await interaction.editReply('❌ Something went wrong. Try again later.');
+      console.error('❌ FlexDuo Fatal Error:', err);
+      try {
+        return interaction.editReply('❌ Something went wrong. Try again later.');
+      } catch (e) {
+        console.warn('⚠️ Could not edit reply due to expired interaction.');
       }
     }
   }
 };
+
 
