@@ -3,7 +3,6 @@ const { createCanvas, loadImage } = require('@napi-rs/canvas');
 const { Contract } = require('ethers');
 const { getProvider } = require('../services/provider');
 const { fetchMetadata } = require('../utils/fetchMetadata');
-const fetch = require('node-fetch');
 
 const GATEWAYS = [
   'https://cloudflare-ipfs.com/ipfs/',
@@ -58,11 +57,11 @@ module.exports = {
     const tokenIdInput = interaction.options.getInteger('tokenid');
     const guildId = interaction.guild?.id;
 
-    let alreadyAcknowledged = false;
     try {
-      await interaction.deferReply();
+      await interaction.deferReply({ ephemeral: false });
     } catch (err) {
-      alreadyAcknowledged = true;
+      console.warn('⚠️ Interaction already acknowledged or expired.');
+      return;
     }
 
     try {
@@ -72,14 +71,12 @@ module.exports = {
       );
 
       if (!result.rows.length) {
-        if (!alreadyAcknowledged) {
-          return await interaction.editReply('❌ Duo not found. Use `/addflexduo` first.');
-        } else return;
+        return await interaction.editReply('❌ Duo not found. Use `/addflexduo` first.');
       }
 
       const { contract1, network1, contract2, network2 } = result.rows[0];
-      const provider1 = getProvider(network1);
-      const provider2 = getProvider(network2);
+      const provider1 = await getProvider(network1);
+      const provider2 = await getProvider(network2);
 
       const nft1 = new Contract(contract1, [
         'function tokenURI(uint256 tokenId) view returns (string)',
@@ -96,7 +93,7 @@ module.exports = {
         let supply = 50;
         try {
           const raw = await nft1.totalSupply();
-          supply = parseInt(raw.toString()) || 50;
+          supply = Math.min(parseInt(raw.toString()) || 50, 500);
         } catch {}
 
         let attempts = 0;
@@ -111,7 +108,6 @@ module.exports = {
             break;
           }
         }
-
         if (tokenId == null) {
           return await interaction.editReply('❌ Could not find a valid token to flex.');
         }
@@ -119,6 +115,7 @@ module.exports = {
 
       const meta1 = await fetchMetadata(contract1, tokenId, network1, provider1);
       const meta2 = await fetchMetadata(contract2, tokenId, network2, provider2);
+
       const img1 = await resolveImage(meta1);
       const img2 = await resolveImage(meta2);
 
@@ -126,6 +123,7 @@ module.exports = {
         return await interaction.editReply(`❌ Token #${tokenId} not available on one or both chains.`);
       }
 
+      // Render canvas
       const imgSize = 400;
       const spacing = 30;
       const labelHeight = 60;
@@ -168,13 +166,12 @@ module.exports = {
         .setFooter({ text: '🧪 Powered by PimpsDev' })
         .setTimestamp();
 
-      await interaction.editReply({ embeds: [embed], files: [attachment] });
+      return await interaction.editReply({ embeds: [embed], files: [attachment] });
 
     } catch (err) {
       console.error('❌ FlexDuo Error:', err);
-      if (!interaction.replied && !interaction.deferred) {
-        await interaction.reply('❌ Something went wrong. Try again later.');
-      }
+      return await interaction.editReply('❌ Something went wrong. Try again later.');
     }
   }
 };
+
