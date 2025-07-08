@@ -37,28 +37,34 @@ module.exports = {
     ),
 
   async execute(interaction) {
+    try {
+      await interaction.deferReply().catch(() => {});
+    } catch (err) {
+      console.warn('⚠️ Defer failed for /flexplus:', err.message);
+    }
+
     const pg = interaction.client.pg;
     const name = interaction.options.getString('name').toLowerCase();
-    await interaction.deferReply();
 
     try {
-      const res = await pg.query(`SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`, [
-        interaction.guild.id,
-        name
-      ]);
+      const res = await pg.query(
+        `SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`,
+        [interaction.guild.id, name]
+      );
 
       if (!res.rows.length) {
         return interaction.editReply('❌ Project not found. Use `/addflex` first.');
       }
 
       const { address, network } = res.rows[0];
-      const chain = network;
+      const chain = network.toLowerCase();
+      const provider = getProvider(chain);
+
       const maxTokenId = 50;
       const selectedIds = Array.from({ length: maxTokenId - 1 }, (_, i) => i + 1)
         .sort(() => 0.5 - Math.random())
         .slice(0, 6);
 
-      const provider = getProvider(chain);
       const metas = await Promise.all(
         selectedIds.map(id => fetchMetadata(address, id, chain, provider))
       );
@@ -83,16 +89,18 @@ module.exports = {
         try {
           const response = await timeoutFetch(imgUrl);
           if (!response.ok) continue;
+
           const arrayBuffer = await response.arrayBuffer();
           const nftImage = await loadImage(Buffer.from(arrayBuffer));
 
           const x = padding + (i % columns) * (imgSize + spacing);
           const y = padding + Math.floor(i / columns) * (imgSize + spacing);
+
           roundRect(ctx, x, y, imgSize, imgSize);
           ctx.drawImage(nftImage, x, y, imgSize, imgSize);
           ctx.restore();
         } catch (err) {
-          console.warn(`❌ Failed to load image for token ${selectedIds[i]}:`, err.message);
+          console.warn(`❌ FlexPlus image fail (token ${selectedIds[i]}):`, err.message);
         }
       }
 
@@ -101,35 +109,17 @@ module.exports = {
 
       const embed = new EmbedBuilder()
         .setTitle(`🖼️ Flex Collage: ${name}`)
-        .setDescription(`Here's a random collage from ${name}`)
+        .setDescription(`Here’s a random collage from ${name}`)
         .setImage('attachment://flexplus.png')
         .setColor(chain === 'base' ? 0x1d9bf0 : chain === 'eth' ? 0xf5851f : 0xff6600)
         .setFooter({ text: '🔧 Powered by PimpsDev' })
         .setTimestamp();
 
       await interaction.editReply({ embeds: [embed], files: [attachment] });
+
     } catch (err) {
       console.error('❌ Error in /flexplus:', err);
       await interaction.editReply('⚠️ Something went wrong while generating the collage.');
     }
   }
 };
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
