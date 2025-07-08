@@ -23,7 +23,8 @@ module.exports = async function initStakingTables(pg) {
       contract_address TEXT PRIMARY KEY,
       network TEXT NOT NULL DEFAULT 'base',
       daily_reward NUMERIC NOT NULL,
-      vault_wallet TEXT NOT NULL
+      vault_wallet TEXT NOT NULL,
+      token_contract TEXT
     );
   `);
 
@@ -32,6 +33,12 @@ module.exports = async function initStakingTables(pg) {
     ALTER TABLE flex_projects ADD COLUMN IF NOT EXISTS guild_id TEXT;
   `);
 
+  // ✅ Patch staking_config to ensure token_contract column exists
+  await pg.query(`
+    ALTER TABLE staking_config ADD COLUMN IF NOT EXISTS token_contract TEXT;
+  `);
+
   console.log('✅ Staking tables ensured.');
 };
+
 
