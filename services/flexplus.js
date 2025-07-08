@@ -1,4 +1,3 @@
-// ✅ Ultra-Patch /flexplus.js — resilient fetch with retries
 const { SlashCommandBuilder, EmbedBuilder, AttachmentBuilder } = require('discord.js');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
 const { fetchMetadata } = require('../utils/fetchMetadata');
@@ -10,8 +9,6 @@ const GATEWAYS = [
   'https://ipfs.io/ipfs/',
   'https://dweb.link/ipfs/'
 ];
-
-const abi = ['function totalSupply() view returns (uint256)'];
 
 function roundRect(ctx, x, y, width, height, radius = 20) {
   ctx.save();
@@ -25,11 +22,30 @@ function roundRect(ctx, x, y, width, height, radius = 20) {
   ctx.clip();
 }
 
-async function timeoutFetch(url, ms = 3000) {
+async function timeoutFetch(url, ms = 5000) {
   return await Promise.race([
     fetch(url),
     new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), ms))
   ]);
+}
+
+async function resolveImage(meta) {
+  if (!meta?.image) return null;
+  const tryUrls = meta.image.startsWith('ipfs://')
+    ? GATEWAYS.map(gw => gw + meta.image.replace('ipfs://', ''))
+    : [meta.image];
+
+  for (let url of tryUrls) {
+    try {
+      const res = await timeoutFetch(url, 5000);
+      if (!res.ok) continue;
+      const buf = Buffer.from(await res.arrayBuffer());
+      return await loadImage(buf);
+    } catch (err) {
+      console.warn(`❌ Failed to load image from ${url}:`, err.message);
+    }
+  }
+  return null;
 }
 
 module.exports = {
@@ -44,52 +60,51 @@ module.exports = {
     const pg = interaction.client.pg;
     const name = interaction.options.getString('name').toLowerCase();
 
+    let alreadyAcknowledged = false;
     try {
-      await interaction.deferReply({ ephemeral: false });
+      await interaction.deferReply();
+    } catch {
+      alreadyAcknowledged = true;
+    }
+
+    try {
       const res = await pg.query(`SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`, [
         interaction.guild.id,
         name
       ]);
-
       if (!res.rows.length) {
-        return interaction.editReply('❌ Project not found. Use `/addflex` first.');
+        if (!alreadyAcknowledged) {
+          return await interaction.editReply('❌ Project not found. Use `/addflex` first.');
+        } else {
+          return;
+        }
       }
 
       const { address, network } = res.rows[0];
       const chain = network;
       const provider = getProvider(chain);
-      const contract = new Contract(address, abi, provider);
-      const totalSupply = await contract.totalSupply().catch(() => 10000);
-      const maxAttempts = 20;
+      const contract = new Contract(address, ['function totalSupply() view returns (uint256)'], provider);
 
-      const validMetas = [];
-      const triedIds = new Set();
-
-      while (validMetas.length < 6 && triedIds.size < maxAttempts) {
-        const randomId = Math.floor(Math.random() * totalSupply);
-        if (triedIds.has(randomId)) continue;
-        triedIds.add(randomId);
-
-        const meta = await fetchMetadata(address, randomId, chain, provider);
-        if (!meta?.image) continue;
-
-        const imgUrl = meta.image.startsWith('ipfs://')
-          ? GATEWAYS.map(gw => gw + meta.image.replace('ipfs://', ''))[0]
-          : meta.image;
-
-        try {
-          const res = await timeoutFetch(imgUrl);
-          if (!res.ok) continue;
-          const arrayBuffer = await res.arrayBuffer();
-          const nftImage = await loadImage(Buffer.from(arrayBuffer));
-          validMetas.push({ image: nftImage, id: randomId });
-        } catch (e) {
-          continue;
-        }
+      let maxTokenId = 50;
+      try {
+        const supply = await contract.totalSupply();
+        maxTokenId = parseInt(supply?.toString()) || 50;
+      } catch {
+        maxTokenId = 50;
       }
 
-      if (!validMetas.length) {
-        return interaction.editReply('❌ No images found to flex.');
+      const selectedIds = [];
+      const metas = [];
+
+      for (let tries = 0; tries < 200 && metas.length < 6; tries++) {
+        const id = Math.floor(Math.random() * maxTokenId);
+        if (selectedIds.includes(id)) continue;
+        const meta = await fetchMetadata(address, id, chain, provider);
+        const image = await resolveImage(meta);
+        if (image) {
+          selectedIds.push(id);
+          metas.push({ id, image });
+        }
       }
 
       const columns = 3, rows = 2, imgSize = 280, spacing = 20, padding = 40;
@@ -101,8 +116,8 @@ module.exports = {
       ctx.fillStyle = '#0d1117';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      for (let i = 0; i < validMetas.length; i++) {
-        const { image } = validMetas[i];
+      for (let i = 0; i < metas.length; i++) {
+        const { image } = metas[i];
         const x = padding + (i % columns) * (imgSize + spacing);
         const y = padding + Math.floor(i / columns) * (imgSize + spacing);
         roundRect(ctx, x, y, imgSize, imgSize);
@@ -115,7 +130,7 @@ module.exports = {
 
       const embed = new EmbedBuilder()
         .setTitle(`🖼️ Flex Collage: ${name}`)
-        .setDescription(`Showing ${validMetas.length} randomly minted NFTs from ${name}`)
+        .setDescription(`Here's a random collage from ${name}`)
         .setImage('attachment://flexplus.png')
         .setColor(chain === 'base' ? 0x1d9bf0 : chain === 'eth' ? 0xf5851f : 0xff6600)
         .setFooter({ text: '🔧 Powered by PimpsDev' })
@@ -125,12 +140,9 @@ module.exports = {
 
     } catch (err) {
       console.error('❌ FlexPlus Ultra Error:', err);
-      if (!interaction.replied) {
-        await interaction.editReply('⚠️ Something went wrong while generating the collage.');
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction.reply('⚠️ Something went wrong while generating the collage.');
       }
     }
   }
 };
-
-
-
