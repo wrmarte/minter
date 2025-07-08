@@ -24,7 +24,7 @@ module.exports = {
       option.setName('token_contract')
         .setDescription('ERC20 token contract for rewards')
         .setRequired(true))
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild), // admins only by default
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
   async execute(interaction) {
     const name = interaction.options.getString('name');
@@ -67,7 +67,7 @@ module.exports = {
           guild_id = EXCLUDED.guild_id
       `, [name, contract, guildId]);
 
-      // Insert or update staking_config
+      // Insert or update staking_config (vault_private_key left NULL for now)
       await pg.query(`
         INSERT INTO staking_config (contract_address, network, daily_reward, vault_wallet, token_contract)
         VALUES ($1, 'base', $2, $3, $4)
@@ -87,4 +87,5 @@ module.exports = {
     }
   }
 };
+
 
