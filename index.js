@@ -31,7 +31,11 @@ const pg = new PgClient({
 pg.connect();
 client.pg = pg;
 
-// ✅ Initialize DB tables
+// ✅ Initialize staking-related tables
+const initStakingTables = require('./db/initStakingTables');
+initStakingTables(pg).catch(console.error);
+
+// ✅ Core bot tables
 pg.query(`CREATE TABLE IF NOT EXISTS contract_watchlist (
   name TEXT PRIMARY KEY,
   address TEXT NOT NULL,
@@ -66,23 +70,20 @@ pg.query(`CREATE TABLE IF NOT EXISTS expressions (
 )`);
 pg.query(`ALTER TABLE expressions ADD COLUMN IF NOT EXISTS guild_id TEXT`);
 
-// ✅ Premium Tier Tables
 pg.query(`CREATE TABLE IF NOT EXISTS premium_servers (
   server_id TEXT PRIMARY KEY,
-  tier TEXT NOT NULL DEFAULT 'free'  -- free, premium, premiumplus
+  tier TEXT NOT NULL DEFAULT 'free'
 )`);
 pg.query(`CREATE TABLE IF NOT EXISTS premium_users (
   user_id TEXT PRIMARY KEY,
   tier TEXT NOT NULL DEFAULT 'free'
 )`);
 
-// ✅ MuscleMB Modes Table
 pg.query(`CREATE TABLE IF NOT EXISTS mb_modes (
   server_id TEXT PRIMARY KEY,
   mode TEXT NOT NULL DEFAULT 'default'
 )`);
 
-// ✅ FlexCard Theme Settings Table (alias for server_themes)
 pg.query(`CREATE TABLE IF NOT EXISTS server_themes (
   server_id TEXT PRIMARY KEY,
   bg_color TEXT DEFAULT '#4e7442',
@@ -144,6 +145,7 @@ setInterval(async () => {
 client.login(process.env.DISCORD_BOT_TOKEN)
   .then(() => console.log(`✅ Logged in as ${client.user.tag}`))
   .catch(err => console.error('❌ Discord login failed:', err));
+
 
 
 
