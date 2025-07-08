@@ -22,8 +22,8 @@ function roundRect(ctx, x, y, width, height, radius = 20) {
   ctx.clip();
 }
 
-async function fetchWithTimeout(url, ms = 3000) {
-  return Promise.race([
+async function timeoutFetch(url, ms = 2000) {
+  return await Promise.race([
     fetch(url),
     new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), ms))
   ]);
@@ -35,19 +35,17 @@ async function resolveImage(meta) {
     ? GATEWAYS.map(gw => gw + meta.image.replace('ipfs://', ''))
     : [meta.image];
 
-  const promises = tryUrls.map(async (url) => {
+  for (let url of tryUrls) {
     try {
-      const res = await fetchWithTimeout(url);
-      if (!res.ok) throw new Error('Bad response');
+      const res = await timeoutFetch(url, 2000);
+      if (!res.ok) continue;
       const buf = Buffer.from(await res.arrayBuffer());
       return await loadImage(buf);
     } catch (err) {
-      return null;
+      console.warn(`❌ Failed to load image from ${url}:`, err.message);
     }
-  });
-
-  const results = await Promise.all(promises);
-  return results.find(img => img !== null) || null;
+  }
+  return null;
 }
 
 module.exports = {
@@ -74,6 +72,7 @@ module.exports = {
         interaction.guild.id,
         name
       ]);
+
       if (!res.rows.length) {
         if (!alreadyAcknowledged) {
           return await interaction.editReply('❌ Project not found. Use `/addflex` first.');
@@ -88,21 +87,19 @@ module.exports = {
       let maxTokenId = 50;
       try {
         const supply = await contract.totalSupply();
-        maxTokenId = parseInt(supply?.toString()) || 50;
-      } catch {}
+        maxTokenId = Math.min(parseInt(supply?.toString()) || 50, 500);
+      } catch {
+        maxTokenId = 50;
+      }
 
-      const selectedIds = [];
+      const shuffled = Array.from({ length: maxTokenId }, (_, i) => i).sort(() => 0.5 - Math.random());
       const metas = [];
 
-      for (let tries = 0; tries < 200 && metas.length < 6; tries++) {
-        const id = Math.floor(Math.random() * maxTokenId);
-        if (selectedIds.includes(id)) continue;
+      for (let i = 0; i < shuffled.length && metas.length < 6; i++) {
+        const id = shuffled[i];
         const meta = await fetchMetadata(address, id, chain, provider);
         const image = await resolveImage(meta);
-        if (image) {
-          selectedIds.push(id);
-          metas.push({ id, image });
-        }
+        if (image) metas.push({ id, image });
       }
 
       const columns = 3, rows = 2, imgSize = 280, spacing = 20, padding = 40;
@@ -135,6 +132,7 @@ module.exports = {
         .setTimestamp();
 
       await interaction.editReply({ embeds: [embed], files: [attachment] });
+
     } catch (err) {
       console.error('❌ FlexPlus Ultra Error:', err);
       if (!interaction.replied && !interaction.deferred) {
@@ -143,4 +141,3 @@ module.exports = {
     }
   }
 };
-
