@@ -17,14 +17,15 @@ async function timeoutFetch(url, ms = 5000) {
   ]);
 }
 
-async function resolveImage(imageUrl) {
-  const urls = imageUrl.startsWith('ipfs://')
-    ? GATEWAYS.map(gw => gw + imageUrl.replace('ipfs://', ''))
-    : [imageUrl];
+async function resolveImage(meta) {
+  if (!meta?.image) return null;
+  const tryUrls = meta.image.startsWith('ipfs://')
+    ? GATEWAYS.map(gw => gw + meta.image.replace('ipfs://', ''))
+    : [meta.image];
 
-  for (let url of urls) {
+  for (let url of tryUrls) {
     try {
-      const res = await timeoutFetch(url);
+      const res = await timeoutFetch(url, 5000);
       if (!res.ok) continue;
       const buf = Buffer.from(await res.arrayBuffer());
       return await loadImage(buf);
@@ -56,11 +57,11 @@ module.exports = {
     const tokenIdInput = interaction.options.getInteger('tokenid');
     const guildId = interaction.guild?.id;
 
+    let alreadyAcknowledged = false;
     try {
-      await interaction.deferReply({ ephemeral: false });
-    } catch (err) {
-      console.warn('⚠️ Interaction already acknowledged or expired.');
-      return;
+      await interaction.deferReply();
+    } catch {
+      alreadyAcknowledged = true;
     }
 
     try {
@@ -70,12 +71,14 @@ module.exports = {
       );
 
       if (!result.rows.length) {
-        return await interaction.editReply('❌ Duo not found. Use `/addflexduo` first.');
+        if (!alreadyAcknowledged) {
+          return interaction.editReply('❌ Duo not found. Use `/addflexduo` first.');
+        } else return;
       }
 
       const { contract1, network1, contract2, network2 } = result.rows[0];
-      const provider1 = await getProvider(network1);
-      const provider2 = await getProvider(network2);
+      const provider1 = getProvider(network1);
+      const provider2 = getProvider(network2);
 
       const nft1 = new Contract(contract1, [
         'function tokenURI(uint256 tokenId) view returns (string)',
@@ -89,25 +92,21 @@ module.exports = {
       let tokenId = tokenIdInput;
       if (tokenId == null) {
         const total = Number(await nft1.totalSupply());
-        tokenId = Math.max(1, Math.floor(Math.random() * total));
+        if (!total || isNaN(total)) {
+          return interaction.editReply('❌ No tokens minted yet.');
+        }
+        tokenId = Math.floor(Math.random() * total);
+        if (tokenId === 0) tokenId = 1;
       }
 
-      const [meta1, meta2] = await Promise.all([
-        fetchMetadata(contract1, tokenId, network1, provider1),
-        fetchMetadata(contract2, tokenId, network2, provider2)
-      ]);
+      const meta1 = await fetchMetadata(contract1, tokenId, network1, provider1);
+      const meta2 = await fetchMetadata(contract2, tokenId, network2, provider2);
 
-      if (!meta1?.image || !meta2?.image) {
-        return await interaction.editReply(`❌ Token #${tokenId} not available on one or both chains.`);
-      }
-
-      const [img1, img2] = await Promise.all([
-        resolveImage(meta1.image),
-        resolveImage(meta2.image)
-      ]);
+      const img1 = await resolveImage(meta1);
+      const img2 = await resolveImage(meta2);
 
       if (!img1 || !img2) {
-        return await interaction.editReply(`❌ Failed to load images for token #${tokenId}`);
+        return interaction.editReply(`❌ Failed to load images for token #${tokenId}`);
       }
 
       const imgSize = 400;
@@ -162,6 +161,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
