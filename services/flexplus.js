@@ -9,13 +9,6 @@ const GATEWAYS = [
   'https://dweb.link/ipfs/'
 ];
 
-async function timeoutFetch(url, ms = 3000) {
-  return await Promise.race([
-    fetch(url),
-    new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), ms))
-  ]);
-}
-
 function roundRect(ctx, x, y, width, height, radius = 20) {
   ctx.save();
   ctx.beginPath();
@@ -28,26 +21,11 @@ function roundRect(ctx, x, y, width, height, radius = 20) {
   ctx.clip();
 }
 
-async function tryLoadImage(meta) {
-  if (!meta?.image) return null;
-
-  const ipfsHash = meta.image.replace('ipfs://', '');
-  const urls = meta.image.startsWith('ipfs://')
-    ? GATEWAYS.map(gw => gw + ipfsHash)
-    : [meta.image];
-
-  for (const url of urls) {
-    try {
-      const res = await timeoutFetch(url);
-      if (!res.ok) continue;
-      const arrayBuffer = await res.arrayBuffer();
-      return await loadImage(Buffer.from(arrayBuffer));
-    } catch (err) {
-      console.warn(`🌐 Image failed: ${url}`);
-    }
-  }
-
-  return null;
+async function timeoutFetch(url, ms = 3000) {
+  return await Promise.race([
+    fetch(url),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), ms))
+  ]);
 }
 
 module.exports = {
@@ -61,7 +39,18 @@ module.exports = {
   async execute(interaction) {
     const pg = interaction.client.pg;
     const name = interaction.options.getString('name').toLowerCase();
-    await interaction.deferReply();
+
+    // ✅ Prevent double defer
+    async function safeDeferReply(interaction) {
+      if (interaction.deferred || interaction.replied) return;
+      try {
+        await interaction.deferReply();
+      } catch (err) {
+        console.warn('⚠️ Could not defer reply:', err.message);
+      }
+    }
+
+    await safeDeferReply(interaction);
 
     try {
       const res = await pg.query(
@@ -74,25 +63,17 @@ module.exports = {
       }
 
       const { address, network } = res.rows[0];
-      const provider = getProvider(network);
+      const chain = network;
+      const maxTokenId = 50;
 
-      const desiredCount = 6;
-      const maxTokenId = 150;
-      const selectedIds = [];
+      const selectedIds = Array.from({ length: maxTokenId - 1 }, (_, i) => i + 1)
+        .sort(() => 0.5 - Math.random())
+        .slice(0, 6);
 
-      for (let attempts = 0; selectedIds.length < desiredCount && attempts < 50; attempts++) {
-        const randomId = Math.floor(Math.random() * maxTokenId) + 1;
-        if (selectedIds.includes(randomId)) continue;
-
-        const meta = await fetchMetadata(address, randomId, network, provider);
-        const image = await tryLoadImage(meta);
-        if (image) selectedIds.push({ id: randomId, image });
-        else console.warn(`❌ Token ${randomId} skipped (no image).`);
-      }
-
-      if (selectedIds.length === 0) {
-        return interaction.editReply('⚠️ Could not load any NFT images to display.');
-      }
+      const provider = getProvider(chain);
+      const metas = await Promise.all(
+        selectedIds.map(id => fetchMetadata(address, id, chain, provider))
+      );
 
       const columns = 3, rows = 2, imgSize = 280, spacing = 20, padding = 40;
       const canvasWidth = columns * imgSize + (columns - 1) * spacing + padding * 2;
@@ -103,13 +84,28 @@ module.exports = {
       ctx.fillStyle = '#0d1117';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      for (let i = 0; i < selectedIds.length; i++) {
-        const { image } = selectedIds[i];
-        const x = padding + (i % columns) * (imgSize + spacing);
-        const y = padding + Math.floor(i / columns) * (imgSize + spacing);
-        roundRect(ctx, x, y, imgSize, imgSize);
-        ctx.drawImage(image, x, y, imgSize, imgSize);
-        ctx.restore();
+      for (let i = 0; i < metas.length; i++) {
+        const meta = metas[i];
+        if (!meta?.image) continue;
+
+        let imgUrl = meta.image.startsWith('ipfs://')
+          ? GATEWAYS.map(gw => gw + meta.image.replace('ipfs://', ''))[0]
+          : meta.image;
+
+        try {
+          const response = await timeoutFetch(imgUrl);
+          if (!response.ok) continue;
+          const arrayBuffer = await response.arrayBuffer();
+          const nftImage = await loadImage(Buffer.from(arrayBuffer));
+
+          const x = padding + (i % columns) * (imgSize + spacing);
+          const y = padding + Math.floor(i / columns) * (imgSize + spacing);
+          roundRect(ctx, x, y, imgSize, imgSize);
+          ctx.drawImage(nftImage, x, y, imgSize, imgSize);
+          ctx.restore();
+        } catch (err) {
+          console.warn(`❌ Failed to load image for token ${selectedIds[i]}:`, err.message);
+        }
       }
 
       const buffer = canvas.toBuffer('image/png');
@@ -119,7 +115,7 @@ module.exports = {
         .setTitle(`🖼️ Flex Collage: ${name}`)
         .setDescription(`Here's a random collage from ${name}`)
         .setImage('attachment://flexplus.png')
-        .setColor(network === 'base' ? 0x1d9bf0 : network === 'eth' ? 0xf5851f : 0xff6600)
+        .setColor(chain === 'base' ? 0x1d9bf0 : chain === 'eth' ? 0xf5851f : 0xff6600)
         .setFooter({ text: '🔧 Powered by PimpsDev' })
         .setTimestamp();
 
@@ -127,8 +123,17 @@ module.exports = {
 
     } catch (err) {
       console.error('❌ Error in /flexplus:', err);
-      await interaction.editReply('⚠️ Something went wrong while generating the collage.');
+      try {
+        if (!interaction.replied && !interaction.deferred) {
+          await interaction.reply('⚠️ Something went wrong while generating the collage.');
+        } else {
+          await interaction.editReply('⚠️ Something went wrong while generating the collage.');
+        }
+      } catch (e) {
+        console.warn('⚠️ Failed to send error message:', e.message);
+      }
     }
   }
 };
+
 
