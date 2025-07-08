@@ -139,12 +139,21 @@ setInterval(async () => {
   } catch (err) {
     console.error("Global scanner error:", err);
   }
-}, 15000);  // every 15 sec
+}, 15000); // every 15 sec
+
+// ✅ Auto Reward Payout System
+const autoRewardPayout = require('./services/autoRewardPayout');
+
+setInterval(() => {
+  console.log('💸 Running autoRewardPayout...');
+  autoRewardPayout(client).catch(console.error);
+}, 24 * 60 * 60 * 1000); // run every 24 hours
 
 // ✅ Login to Discord
 client.login(process.env.DISCORD_BOT_TOKEN)
   .then(() => console.log(`✅ Logged in as ${client.user.tag}`))
   .catch(err => console.error('❌ Discord login failed:', err));
+
 
 
 
