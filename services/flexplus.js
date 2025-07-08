@@ -22,8 +22,8 @@ function roundRect(ctx, x, y, width, height, radius = 20) {
   ctx.clip();
 }
 
-async function timeoutFetch(url, ms = 5000) {
-  return await Promise.race([
+async function fetchWithTimeout(url, ms = 3000) {
+  return Promise.race([
     fetch(url),
     new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), ms))
   ]);
@@ -35,17 +35,19 @@ async function resolveImage(meta) {
     ? GATEWAYS.map(gw => gw + meta.image.replace('ipfs://', ''))
     : [meta.image];
 
-  for (let url of tryUrls) {
+  const promises = tryUrls.map(async (url) => {
     try {
-      const res = await timeoutFetch(url, 5000);
-      if (!res.ok) continue;
+      const res = await fetchWithTimeout(url);
+      if (!res.ok) throw new Error('Bad response');
       const buf = Buffer.from(await res.arrayBuffer());
       return await loadImage(buf);
     } catch (err) {
-      console.warn(`❌ Failed to load image from ${url}:`, err.message);
+      return null;
     }
-  }
-  return null;
+  });
+
+  const results = await Promise.all(promises);
+  return results.find(img => img !== null) || null;
 }
 
 module.exports = {
@@ -75,9 +77,7 @@ module.exports = {
       if (!res.rows.length) {
         if (!alreadyAcknowledged) {
           return await interaction.editReply('❌ Project not found. Use `/addflex` first.');
-        } else {
-          return;
-        }
+        } else return;
       }
 
       const { address, network } = res.rows[0];
@@ -89,9 +89,7 @@ module.exports = {
       try {
         const supply = await contract.totalSupply();
         maxTokenId = parseInt(supply?.toString()) || 50;
-      } catch {
-        maxTokenId = 50;
-      }
+      } catch {}
 
       const selectedIds = [];
       const metas = [];
@@ -137,7 +135,6 @@ module.exports = {
         .setTimestamp();
 
       await interaction.editReply({ embeds: [embed], files: [attachment] });
-
     } catch (err) {
       console.error('❌ FlexPlus Ultra Error:', err);
       if (!interaction.replied && !interaction.deferred) {
@@ -146,3 +143,4 @@ module.exports = {
     }
   }
 };
+
