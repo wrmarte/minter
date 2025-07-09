@@ -17,9 +17,9 @@ module.exports = {
     await interaction.deferReply({ ephemeral: true });
 
     try {
-      // Get current project
+      // Get staking project for this server
       const projectRes = await pg.query(`
-        SELECT * FROM flex_projects WHERE guild_id = $1
+        SELECT * FROM staking_projects WHERE guild_id = $1
       `, [guildId]);
 
       if (projectRes.rowCount === 0) {
@@ -27,16 +27,18 @@ module.exports = {
       }
 
       const project = projectRes.rows[0];
+      const contract = project.contract_address;
 
-      // Count currently staked NFTs
-      const stakedRes = await pg.query(`
-        SELECT COUNT(*) FROM staked_nfts
+      // Get staked token IDs from compact table
+      const stakeRes = await pg.query(`
+        SELECT token_ids FROM staked_wallets
         WHERE wallet_address = $1 AND contract_address = $2
-      `, [wallet, project.address]);
+      `, [wallet, contract]);
 
-      const nftCount = parseInt(stakedRes.rows[0].count || '0');
+      const tokenIds = stakeRes.rows[0]?.token_ids || [];
+      const nftCount = tokenIds.length;
 
-      // Get total rewards paid
+      // Get rewards
       const rewardRes = await pg.query(`
         SELECT * FROM reward_log WHERE wallet_address = $1
       `, [wallet]);
@@ -46,25 +48,25 @@ module.exports = {
         ? new Date(rewardRes.rows[0].last_claimed).toLocaleString()
         : 'N/A';
 
-      // Get reward token info
+      // Reward config
       const configRes = await pg.query(`
         SELECT * FROM staking_config WHERE contract_address = $1
-      `, [project.address]);
+      `, [contract]);
 
       const config = configRes.rows[0];
-      const rewardSymbol = config?.token_contract?.slice(0, 6) + '...';
+      const rewardToken = config?.token_contract || 'N/A';
+      const rewardSymbol = rewardToken !== 'N/A' ? `${rewardToken.slice(0, 6)}...` : 'N/A';
 
-      // Response Embed
       const embed = new EmbedBuilder()
         .setTitle(`📊 Staking Summary`)
         .setDescription(`Project: **${project.name}**`)
         .addFields(
           { name: 'Wallet', value: `\`${wallet.slice(0, 6)}...${wallet.slice(-4)}\``, inline: true },
           { name: 'NFTs Staked', value: `${nftCount}`, inline: true },
-          { name: 'Daily Reward per NFT', value: `${config?.daily_reward || 0}`, inline: true },
-          { name: 'Total Rewards Earned', value: `${totalRewards} tokens`, inline: true },
-          { name: 'Last Reward Timestamp', value: lastClaimed, inline: true },
-          { name: 'Reward Token', value: `\`${config?.token_contract || 'N/A'}\``, inline: true }
+          { name: 'Daily Reward', value: `${config?.daily_reward || 0}`, inline: true },
+          { name: 'Total Earned', value: `${totalRewards} tokens`, inline: true },
+          { name: 'Last Claimed', value: lastClaimed, inline: true },
+          { name: 'Reward Token', value: `\`${rewardToken}\``, inline: true }
         )
         .setFooter({ text: 'Rewards are auto-distributed daily.' })
         .setColor('#00cc99');
@@ -77,3 +79,4 @@ module.exports = {
     }
   }
 };
+
