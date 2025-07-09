@@ -1,12 +1,13 @@
 module.exports = async function initStakingTables(pg) {
+  // ✅ Optimized staking table: one row per wallet + contract
   await pg.query(`
-    CREATE TABLE IF NOT EXISTS staked_nfts (
+    CREATE TABLE IF NOT EXISTS staked_wallets (
       wallet_address TEXT NOT NULL,
       contract_address TEXT NOT NULL,
-      token_id TEXT NOT NULL,
       network TEXT NOT NULL DEFAULT 'base',
+      token_ids TEXT[] NOT NULL,
       staked_at TIMESTAMP NOT NULL DEFAULT NOW(),
-      PRIMARY KEY (wallet_address, contract_address, token_id)
+      PRIMARY KEY (wallet_address, contract_address)
     );
   `);
 
@@ -55,8 +56,9 @@ module.exports = async function initStakingTables(pg) {
     );
   `);
 
-  console.log('✅ Staking tables ensured.');
+  console.log('✅ Staking tables ensured (optimized for wallet-based staking).');
 };
+
 
 
 
