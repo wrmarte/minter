@@ -1,7 +1,7 @@
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 const crypto = require('crypto');
 
-const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
+const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY; // Must be 32 characters
 const IV_LENGTH = 16;
 
 function encrypt(text) {
@@ -15,12 +15,13 @@ function encrypt(text) {
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('setvaultkey')
-    .setDescription('Set encrypted private key for this server’s staking vault (admin or bot owner only)')
+    .setDescription('Securely store the private key for this server’s staking vault.')
     .addStringOption(option =>
       option.setName('private_key')
-        .setDescription('Private key for vault (starts with 0x...)')
-        .setRequired(true))
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+        .setDescription('Private key for the vault wallet (starts with 0x)')
+        .setRequired(true)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild), // Admin only
 
   async execute(interaction) {
     const userId = interaction.user.id;
@@ -31,12 +32,11 @@ module.exports = {
 
     if (!isOwner && !hasPerms) {
       return interaction.reply({
-        content: '❌ You must be a server admin or the bot owner to use this.',
+        content: '❌ Only server admins or the bot owner can use this command.',
         ephemeral: true
       });
     }
 
-    // Get contract from staking_projects
     const res = await pg.query(
       `SELECT contract_address FROM staking_projects WHERE guild_id = $1`,
       [guildId]
@@ -44,7 +44,7 @@ module.exports = {
 
     if (res.rowCount === 0) {
       return interaction.reply({
-        content: '❌ This server has no staking project set. Use `/addstaking` first.',
+        content: '❌ This server has no staking project configured. Use `/addstaking` first.',
         ephemeral: true
       });
     }
@@ -54,14 +54,14 @@ module.exports = {
 
     if (!privateKey.startsWith('0x') || privateKey.length !== 66) {
       return interaction.reply({
-        content: '❌ Invalid private key format. It must start with `0x` and be 66 characters long.',
+        content: '❌ Invalid private key. It must start with `0x` and be 66 characters long.',
         ephemeral: true
       });
     }
 
     if (!ENCRYPTION_KEY || ENCRYPTION_KEY.length !== 32) {
       return interaction.reply({
-        content: '❌ Missing or invalid `ENCRYPTION_KEY` in your environment. It must be exactly 32 characters.',
+        content: '❌ Missing or invalid `ENCRYPTION_KEY` in environment. Must be exactly 32 characters.',
         ephemeral: true
       });
     }
@@ -70,23 +70,24 @@ module.exports = {
 
     try {
       await pg.query(`
-        UPDATE staking_config
+        UPDATE staking_projects
         SET vault_private_key = $1
         WHERE contract_address = $2
       `, [encrypted, contract]);
 
       return interaction.reply({
-        content: `✅ Vault key securely stored for contract: \`${contract}\`. It will be used during auto payouts.`,
+        content: `✅ Vault key encrypted and stored for staking contract \`${contract}\`.`,
         ephemeral: true
       });
     } catch (err) {
-      console.error('❌ /setvaultkey error:', err);
+      console.error('❌ /setvaultkey DB error:', err);
       return interaction.reply({
-        content: '❌ Failed to update vault key. Check logs for details.',
+        content: '❌ Failed to update vault key. See console for error.',
         ephemeral: true
       });
     }
   }
 };
+
 
 
