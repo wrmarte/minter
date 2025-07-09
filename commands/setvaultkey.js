@@ -29,7 +29,6 @@ module.exports = {
     const hasPerms = interaction.member.permissions.has(PermissionFlagsBits.ManageGuild);
     const pg = interaction.client.pg;
 
-    // Permission check
     if (!isOwner && !hasPerms) {
       return interaction.reply({
         content: '❌ You must be a server admin or the bot owner to use this.',
@@ -73,8 +72,8 @@ module.exports = {
       await pg.query(`
         UPDATE staking_config
         SET vault_private_key = $1
-        WHERE contract_address = $2
-      `, [encrypted, contract]);
+        WHERE contract_address = $2 AND guild_id = $3
+      `, [encrypted, contract, guildId]);
 
       return interaction.reply({
         content: `✅ Vault key securely stored for contract: \`${contract}\`. It will be used during auto payouts.`,
@@ -89,3 +88,4 @@ module.exports = {
     }
   }
 };
+
