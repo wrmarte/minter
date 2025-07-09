@@ -20,26 +20,20 @@ function decrypt(text) {
 async function autoRewardPayout(client) {
   const pg = client.pg;
 
-  const res = await pg.query(`
-    SELECT DISTINCT s.wallet_address, s.contract_address, s.network, f.guild_id
-    FROM staked_nfts s
-    JOIN flex_projects f ON f.address = s.contract_address
-  `);
+  // 🔁 For every unique staked user & contract
+  const res = await pg.query('SELECT DISTINCT wallet_address, contract_address, network FROM staked_nfts');
 
   for (const row of res.rows) {
-    const { wallet_address, contract_address, network, guild_id } = row;
+    const { wallet_address, contract_address, network } = row;
     const provider = getProvider(network);
     const nft = new Contract(contract_address, ['function ownerOf(uint256) view returns (address)'], provider);
 
-    // Fetch staking config for this server + contract
-    const configRes = await pg.query(`
-      SELECT * FROM staking_config 
-      WHERE contract_address = $1 AND guild_id = $2
-    `, [contract_address, guild_id]);
+    // 🔍 Lookup staking config
+    const configRes = await pg.query('SELECT * FROM staking_config WHERE contract_address = $1', [contract_address]);
     const config = configRes.rows[0];
     if (!config || !config.vault_private_key) continue;
 
-    // Decrypt vault key
+    // 🔓 Decrypt vault key
     let vaultWallet;
     try {
       const decryptedKey = decrypt(config.vault_private_key);
@@ -54,13 +48,14 @@ async function autoRewardPayout(client) {
       'function transfer(address to, uint256 amount) returns (bool)'
     ], vaultWallet);
 
-    // Check token ownership
+    // 🔁 Check token ownership
     const tokensRes = await pg.query(`
       SELECT token_id FROM staked_nfts
       WHERE wallet_address = $1 AND contract_address = $2
     `, [wallet_address, contract_address]);
 
     const ownedTokens = [];
+
     for (const t of tokensRes.rows) {
       try {
         const owner = await nft.ownerOf(t.token_id);
@@ -73,14 +68,15 @@ async function autoRewardPayout(client) {
           `, [wallet_address, contract_address, t.token_id]);
         }
       } catch (err) {
-        console.warn(`⚠️ ownerOf(${t.token_id}) failed: ${err.message}`);
+        console.warn(`⚠️ ownerOf failed for ${contract_address} #${t.token_id}: ${err.message}`);
       }
     }
 
     if (ownedTokens.length === 0) continue;
 
+    // 🧮 Calculate reward
     const dailyReward = parseFloat(config.daily_reward);
-    const logRes = await pg.query(`SELECT * FROM reward_log WHERE wallet_address = $1`, [wallet_address]);
+    const logRes = await pg.query('SELECT * FROM reward_log WHERE wallet_address = $1', [wallet_address]);
     const now = Date.now();
     const lastClaimed = logRes.rows[0]?.last_claimed ? new Date(logRes.rows[0].last_claimed).getTime() : now;
     const daysElapsed = (now - lastClaimed) / (1000 * 60 * 60 * 24);
@@ -90,7 +86,7 @@ async function autoRewardPayout(client) {
     if (rewardToSend <= 0) continue;
 
     if (DRY_RUN) {
-      console.log(`💡 [DRY RUN] Would send ${rewardToSend} tokens to ${wallet_address}`);
+      console.log(`💡 [DRY RUN] Would send ${rewardToSend} to ${wallet_address}`);
       continue;
     }
 
@@ -98,8 +94,8 @@ async function autoRewardPayout(client) {
       const vaultBalance = await rewardToken.balanceOf(vaultWallet.address);
       const rewardAmount = ethers.parseUnits(rewardToSend.toString(), 18);
 
-      if (vaultBalance < rewardAmount) {
-        console.warn(`⚠️ Not enough vault balance for ${wallet_address}`);
+      if (vaultBalance.lt(rewardAmount)) {
+        console.warn(`❌ Not enough balance in vault for ${wallet_address}`);
         continue;
       }
 
@@ -128,4 +124,5 @@ async function autoRewardPayout(client) {
 }
 
 module.exports = autoRewardPayout;
+
 
