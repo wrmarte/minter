@@ -48,22 +48,25 @@ module.exports = {
           tokenIds.push(tokenId.toString());
         } catch (e) {
           console.warn(`⚠️ tokenOfOwnerByIndex failed at index ${i}:`, e.message);
-          throw new Error('non-enumerable'); // trigger fallback
+          throw new Error('non-enumerable');
         }
       }
     } catch (err) {
       if (err.message === 'non-enumerable') {
         console.log('🔁 Falling back to sweep method using ownerOf()');
 
-        // Try scanning recent tokens based on known staked or estimated range
         const fallbackRes = await pg.query(
-          `SELECT DISTINCT token_id FROM staked_nfts WHERE contract_address = $1`,
+          `SELECT token_ids FROM staked_wallets WHERE contract_address = $1`,
           [contract]
         );
 
-        const seenTokenIds = new Set(fallbackRes.rows.map(r => r.token_id));
+        const seenTokenIds = new Set();
+        fallbackRes.rows.forEach(row => {
+          if (Array.isArray(row.token_ids)) {
+            row.token_ids.forEach(id => seenTokenIds.add(id));
+          }
+        });
 
-        // Try up to 1000 token IDs if no prior staked data
         const tokenIdRange = seenTokenIds.size > 0
           ? Array.from(seenTokenIds)
           : Array.from({ length: 1000 }, (_, i) => i);
@@ -75,7 +78,7 @@ module.exports = {
               tokenIds.push(id.toString());
             }
           } catch (err) {
-            // Likely not minted yet or failed
+            // Likely not minted yet
           }
         }
       } else {
@@ -88,38 +91,20 @@ module.exports = {
       return interaction.editReply(`❌ No NFTs detected in wallet \`${wallet.slice(0, 6)}...${wallet.slice(-4)}\` for this project.`);
     }
 
-    const stakedRes = await pg.query(
-      `SELECT token_id FROM staked_nfts WHERE wallet_address = $1 AND contract_address = $2`,
-      [wallet, contract]
-    );
+    try {
+      await pg.query(
+        `INSERT INTO staked_wallets (wallet_address, contract_address, network, token_ids, staked_at)
+         VALUES ($1, $2, $3, $4, NOW())
+         ON CONFLICT (wallet_address, contract_address)
+         DO UPDATE SET token_ids = $4, staked_at = NOW()`,
+        [wallet, contract, project.network || 'base', tokenIds]
+      );
 
-    const previouslyStaked = stakedRes.rows.map(r => r.token_id);
-    const stillOwnedSet = new Set(tokenIds);
-
-    for (const tokenId of previouslyStaked) {
-      if (!stillOwnedSet.has(tokenId)) {
-        await pg.query(
-          `DELETE FROM staked_nfts WHERE wallet_address = $1 AND contract_address = $2 AND token_id = $3`,
-          [wallet, contract, tokenId]
-        );
-        console.log(`🧹 Removed unstaked token #${tokenId} from DB.`);
-      }
+      return interaction.editReply(`✅ ${tokenIds.length} NFT(s) now actively staked for wallet \`${wallet.slice(0, 6)}...${wallet.slice(-4)}\`. Rewards will be distributed automatically.`);
+    } catch (err) {
+      console.error('❌ Error inserting into staked_wallets:', err);
+      return interaction.editReply(`❌ Failed to stake NFTs due to database error.`);
     }
-
-    const insertQuery = `
-      INSERT INTO staked_nfts (wallet_address, contract_address, token_id, network)
-      VALUES ($1, $2, $3, $4)
-      ON CONFLICT DO NOTHING
-    `;
-
-    for (const tokenId of tokenIds) {
-      try {
-        await pg.query(insertQuery, [wallet, contract, tokenId, project.network || 'base']);
-      } catch (err) {
-        console.warn(`⚠️ Failed to insert token #${tokenId}:`, err.message);
-      }
-    }
-
-    await interaction.editReply(`✅ ${tokenIds.length} NFT(s) now actively staked for wallet \`${wallet.slice(0, 6)}...${wallet.slice(-4)}\`. Rewards will be distributed automatically.`);
   }
 };
+
