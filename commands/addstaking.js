@@ -53,29 +53,32 @@ module.exports = {
     }
 
     if (!isOwner && !hasPerms) {
-      return interaction.reply({ content: '❌ You must be a server admin to use this command.', ephemeral: true });
+      return interaction.reply({
+        content: '❌ You must be a server admin to use this command.',
+        ephemeral: true
+      });
     }
 
     try {
-      // Insert into flex_projects with guild_id
+      // Insert into staking_projects (replaces flex_projects usage)
       await pg.query(`
-        INSERT INTO flex_projects (name, address, network, guild_id)
+        INSERT INTO staking_projects (name, contract_address, network, guild_id)
         VALUES ($1, $2, 'base', $3)
-        ON CONFLICT (name) DO UPDATE SET
-          address = EXCLUDED.address,
+        ON CONFLICT (contract_address) DO UPDATE SET
+          name = EXCLUDED.name,
           network = 'base',
           guild_id = EXCLUDED.guild_id
       `, [name, contract, guildId]);
 
-      // ✅ Insert or update staking_config using (contract, guild_id) composite key
+      // Insert or update staking_config
       await pg.query(`
-        INSERT INTO staking_config (contract_address, network, daily_reward, vault_wallet, token_contract, guild_id)
-        VALUES ($1, 'base', $2, $3, $4, $5)
-        ON CONFLICT (contract_address, guild_id) DO UPDATE SET
-          daily_reward = EXCLUDED.daily_reward,
-          vault_wallet = EXCLUDED.vault_wallet,
-          token_contract = EXCLUDED.token_contract
-      `, [contract, reward, vaultWallet, tokenContract, guildId]);
+        INSERT INTO staking_config (contract_address, network, daily_reward, vault_wallet, token_contract)
+        VALUES ($1, 'base', $2, $3, $4)
+        ON CONFLICT (contract_address) DO UPDATE SET
+          daily_reward = $2,
+          vault_wallet = $3,
+          token_contract = $4
+      `, [contract, reward, vaultWallet, tokenContract]);
 
       return interaction.reply({
         content: `✅ Staking setup added:\n• **${name}**\n• Contract: \`${contract}\`\n• Reward: \`${reward}/day\`\n• Vault: \`${vaultWallet.slice(0, 6)}...${vaultWallet.slice(-4)}\`\n• Token: \`${tokenContract.slice(0, 6)}...${tokenContract.slice(-4)}\``,
@@ -83,10 +86,14 @@ module.exports = {
       });
     } catch (err) {
       console.error('❌ /addstaking DB Error:', err);
-      return interaction.reply({ content: '❌ Failed to save staking setup. Check console for errors.', ephemeral: true });
+      return interaction.reply({
+        content: '❌ Failed to save staking setup. Check console for errors.',
+        ephemeral: true
+      });
     }
   }
 };
+
 
 
 
