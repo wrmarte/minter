@@ -5,7 +5,8 @@ const { getProvider } = require('../services/providerM');
 const erc721Abi = [
   'function balanceOf(address owner) view returns (uint256)',
   'function tokenOfOwnerByIndex(address owner, uint256 index) view returns (uint256)',
-  'function ownerOf(uint256 tokenId) view returns (address)'
+  'function ownerOf(uint256 tokenId) view returns (address)',
+  'function totalSupply() view returns (uint256)'
 ];
 
 module.exports = {
@@ -47,26 +48,34 @@ module.exports = {
           tokenIds.push(tokenId.toString());
         } catch (e) {
           console.warn(`⚠️ tokenOfOwnerByIndex failed at index ${i}:`, e.message);
-          throw new Error('non-enumerable'); // Fallback trigger
+          throw new Error('non-enumerable'); // trigger fallback
         }
       }
     } catch (err) {
       if (err.message === 'non-enumerable') {
-        console.log('🔁 Falling back to ownerOf() sweep method…');
+        console.log('🔁 Falling back to sweep method using ownerOf()');
 
-        const sweepRes = await pg.query(
+        // Try scanning recent tokens based on known staked or estimated range
+        const fallbackRes = await pg.query(
           `SELECT DISTINCT token_id FROM staked_nfts WHERE contract_address = $1`,
           [contract]
         );
 
-        for (const row of sweepRes.rows) {
+        const seenTokenIds = new Set(fallbackRes.rows.map(r => r.token_id));
+
+        // Try up to 1000 token IDs if no prior staked data
+        const tokenIdRange = seenTokenIds.size > 0
+          ? Array.from(seenTokenIds)
+          : Array.from({ length: 1000 }, (_, i) => i);
+
+        for (const id of tokenIdRange) {
           try {
-            const owner = await nftContract.ownerOf(row.token_id);
+            const owner = await nftContract.ownerOf(id);
             if (owner.toLowerCase() === wallet) {
-              tokenIds.push(row.token_id);
+              tokenIds.push(id.toString());
             }
           } catch (err) {
-            console.warn(`⚠️ ownerOf failed on token ${row.token_id}: ${err.message}`);
+            // Likely not minted yet or failed
           }
         }
       } else {
@@ -79,20 +88,20 @@ module.exports = {
       return interaction.editReply(`❌ No NFTs detected in wallet \`${wallet.slice(0, 6)}...${wallet.slice(-4)}\` for this project.`);
     }
 
-    const stakedRes = await pg.query(`
-      SELECT token_id FROM staked_nfts
-      WHERE wallet_address = $1 AND contract_address = $2
-    `, [wallet, contract]);
+    const stakedRes = await pg.query(
+      `SELECT token_id FROM staked_nfts WHERE wallet_address = $1 AND contract_address = $2`,
+      [wallet, contract]
+    );
 
     const previouslyStaked = stakedRes.rows.map(r => r.token_id);
     const stillOwnedSet = new Set(tokenIds);
 
     for (const tokenId of previouslyStaked) {
       if (!stillOwnedSet.has(tokenId)) {
-        await pg.query(`
-          DELETE FROM staked_nfts
-          WHERE wallet_address = $1 AND contract_address = $2 AND token_id = $3
-        `, [wallet, contract, tokenId]);
+        await pg.query(
+          `DELETE FROM staked_nfts WHERE wallet_address = $1 AND contract_address = $2 AND token_id = $3`,
+          [wallet, contract, tokenId]
+        );
         console.log(`🧹 Removed unstaked token #${tokenId} from DB.`);
       }
     }
