@@ -24,10 +24,7 @@ module.exports = {
 
     await interaction.deferReply({ ephemeral: true });
 
-    // Get NFT contract for this server
-    const res = await pg.query(`
-      SELECT * FROM staking_projects WHERE guild_id = $1
-    `, [guildId]);
+    const res = await pg.query(`SELECT * FROM staking_projects WHERE guild_id = $1`, [guildId]);
 
     if (res.rowCount === 0) {
       return interaction.editReply('❌ No staking contract is set for this server. Ask an admin to use `/addstaking`.');
@@ -42,22 +39,46 @@ module.exports = {
 
     try {
       const balance = await nftContract.balanceOf(wallet);
-      const count = Number(balance); // ✅ FIXED
-
-      if (count === 0) {
-        return interaction.editReply(`❌ Wallet \`${wallet.slice(0, 6)}...${wallet.slice(-4)}\` owns no NFTs from this project.`);
-      }
+      const count = Number(balance);
 
       for (let i = 0; i < count; i++) {
-        const tokenId = await nftContract.tokenOfOwnerByIndex(wallet, i);
-        tokenIds.push(tokenId.toString());
+        try {
+          const tokenId = await nftContract.tokenOfOwnerByIndex(wallet, i);
+          tokenIds.push(tokenId.toString());
+        } catch (e) {
+          console.warn(`⚠️ tokenOfOwnerByIndex failed at index ${i}:`, e.message);
+          throw new Error('non-enumerable'); // Fallback trigger
+        }
       }
     } catch (err) {
-      console.error('❌ Error fetching owned NFTs:', err);
-      return interaction.editReply(`⚠️ Could not fetch NFT ownership. Make sure this contract supports ERC721Enumerable.`);
+      if (err.message === 'non-enumerable') {
+        console.log('🔁 Falling back to ownerOf() sweep method…');
+
+        const sweepRes = await pg.query(
+          `SELECT DISTINCT token_id FROM staked_nfts WHERE contract_address = $1`,
+          [contract]
+        );
+
+        for (const row of sweepRes.rows) {
+          try {
+            const owner = await nftContract.ownerOf(row.token_id);
+            if (owner.toLowerCase() === wallet) {
+              tokenIds.push(row.token_id);
+            }
+          } catch (err) {
+            console.warn(`⚠️ ownerOf failed on token ${row.token_id}: ${err.message}`);
+          }
+        }
+      } else {
+        console.error('❌ Error fetching owned NFTs:', err);
+        return interaction.editReply(`⚠️ Could not fetch NFT ownership. Either the contract is not ERC721Enumerable or RPC is rate-limiting.`);
+      }
     }
 
-    // Cleanup previously staked NFTs the user no longer owns
+    if (tokenIds.length === 0) {
+      return interaction.editReply(`❌ No NFTs detected in wallet \`${wallet.slice(0, 6)}...${wallet.slice(-4)}\` for this project.`);
+    }
+
     const stakedRes = await pg.query(`
       SELECT token_id FROM staked_nfts
       WHERE wallet_address = $1 AND contract_address = $2
@@ -76,7 +97,6 @@ module.exports = {
       }
     }
 
-    // Save new NFTs (if not already staked)
     const insertQuery = `
       INSERT INTO staked_nfts (wallet_address, contract_address, token_id, network)
       VALUES ($1, $2, $3, $4)
@@ -94,4 +114,3 @@ module.exports = {
     await interaction.editReply(`✅ ${tokenIds.length} NFT(s) now actively staked for wallet \`${wallet.slice(0, 6)}...${wallet.slice(-4)}\`. Rewards will be distributed automatically.`);
   }
 };
-
