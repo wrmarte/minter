@@ -67,15 +67,15 @@ module.exports = {
           guild_id = EXCLUDED.guild_id
       `, [name, contract, guildId]);
 
-      // Insert or update staking_config (vault_private_key left NULL for now)
+      // ✅ Insert or update staking_config using (contract, guild_id) composite key
       await pg.query(`
-        INSERT INTO staking_config (contract_address, network, daily_reward, vault_wallet, token_contract)
-        VALUES ($1, 'base', $2, $3, $4)
-        ON CONFLICT (contract_address) DO UPDATE SET
-          daily_reward = $2,
-          vault_wallet = $3,
-          token_contract = $4
-      `, [contract, reward, vaultWallet, tokenContract]);
+        INSERT INTO staking_config (contract_address, network, daily_reward, vault_wallet, token_contract, guild_id)
+        VALUES ($1, 'base', $2, $3, $4, $5)
+        ON CONFLICT (contract_address, guild_id) DO UPDATE SET
+          daily_reward = EXCLUDED.daily_reward,
+          vault_wallet = EXCLUDED.vault_wallet,
+          token_contract = EXCLUDED.token_contract
+      `, [contract, reward, vaultWallet, tokenContract, guildId]);
 
       return interaction.reply({
         content: `✅ Staking setup added:\n• **${name}**\n• Contract: \`${contract}\`\n• Reward: \`${reward}/day\`\n• Vault: \`${vaultWallet.slice(0, 6)}...${vaultWallet.slice(-4)}\`\n• Token: \`${tokenContract.slice(0, 6)}...${tokenContract.slice(-4)}\``,
@@ -87,5 +87,6 @@ module.exports = {
     }
   }
 };
+
 
 
