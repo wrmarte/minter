@@ -36,20 +36,20 @@ module.exports = {
       });
     }
 
-    // Get contract assigned to this server
+    // Get contract from staking_projects
     const res = await pg.query(
-      `SELECT address FROM flex_projects WHERE guild_id = $1`,
+      `SELECT contract_address FROM staking_projects WHERE guild_id = $1`,
       [guildId]
     );
 
     if (res.rowCount === 0) {
       return interaction.reply({
-        content: '❌ This server has no staking contract set. Use `/addstaking` first.',
+        content: '❌ This server has no staking project set. Use `/addstaking` first.',
         ephemeral: true
       });
     }
 
-    const contract = res.rows[0].address;
+    const contract = res.rows[0].contract_address;
     const privateKey = interaction.options.getString('private_key');
 
     if (!privateKey.startsWith('0x') || privateKey.length !== 66) {
@@ -72,8 +72,8 @@ module.exports = {
       await pg.query(`
         UPDATE staking_config
         SET vault_private_key = $1
-        WHERE contract_address = $2 AND guild_id = $3
-      `, [encrypted, contract, guildId]);
+        WHERE contract_address = $2
+      `, [encrypted, contract]);
 
       return interaction.reply({
         content: `✅ Vault key securely stored for contract: \`${contract}\`. It will be used during auto payouts.`,
@@ -88,4 +88,5 @@ module.exports = {
     }
   }
 };
+
 
