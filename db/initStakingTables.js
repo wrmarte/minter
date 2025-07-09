@@ -39,6 +39,12 @@ module.exports = async function initStakingTables(pg) {
     );
   `);
 
+  // ✅ Ensure vault_private_key column exists in staking_projects
+  await pg.query(`
+    ALTER TABLE staking_projects
+    ADD COLUMN IF NOT EXISTS vault_private_key TEXT;
+  `);
+
   await pg.query(`
     CREATE TABLE IF NOT EXISTS reward_tx_log (
       wallet_address TEXT,
