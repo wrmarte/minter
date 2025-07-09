@@ -24,7 +24,7 @@ module.exports = {
 
     await interaction.deferReply({ ephemeral: true });
 
-    // Get staking contract assigned to this server
+    // Get NFT contract for this server
     const res = await pg.query(`
       SELECT * FROM staking_projects WHERE guild_id = $1
     `, [guildId]);
@@ -35,15 +35,14 @@ module.exports = {
 
     const project = res.rows[0];
     const contract = project.contract_address;
-    const network = project.network || 'base';
-    const provider = getProvider(network);
+    const provider = getProvider(project.network || 'base');
     const nftContract = new Contract(contract, erc721Abi, provider);
 
     let tokenIds = [];
 
     try {
       const balance = await nftContract.balanceOf(wallet);
-      const count = balance.toNumber();
+      const count = Number(balance); // ✅ FIXED
 
       if (count === 0) {
         return interaction.editReply(`❌ Wallet \`${wallet.slice(0, 6)}...${wallet.slice(-4)}\` owns no NFTs from this project.`);
@@ -55,7 +54,7 @@ module.exports = {
       }
     } catch (err) {
       console.error('❌ Error fetching owned NFTs:', err);
-      return interaction.editReply(`⚠️ Could not fetch NFT ownership. Ensure this is a valid ERC721 contract and supports enumeration.`);
+      return interaction.editReply(`⚠️ Could not fetch NFT ownership. Make sure this contract supports ERC721Enumerable.`);
     }
 
     // Cleanup previously staked NFTs the user no longer owns
@@ -86,7 +85,7 @@ module.exports = {
 
     for (const tokenId of tokenIds) {
       try {
-        await pg.query(insertQuery, [wallet, contract, tokenId, network]);
+        await pg.query(insertQuery, [wallet, contract, tokenId, project.network || 'base']);
       } catch (err) {
         console.warn(`⚠️ Failed to insert token #${tokenId}:`, err.message);
       }
