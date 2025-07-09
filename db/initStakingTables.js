@@ -18,24 +18,22 @@ module.exports = async function initStakingTables(pg) {
     );
   `);
 
+  // ✅ Updated: staking_config with guild_id and composite PK
   await pg.query(`
     CREATE TABLE IF NOT EXISTS staking_config (
-      contract_address TEXT PRIMARY KEY,
+      contract_address TEXT NOT NULL,
       network TEXT NOT NULL DEFAULT 'base',
       daily_reward NUMERIC NOT NULL,
       vault_wallet TEXT NOT NULL,
-      token_contract TEXT
+      token_contract TEXT,
+      guild_id TEXT NOT NULL,
+      PRIMARY KEY (contract_address, guild_id)
     );
   `);
 
-  // ✅ Ensure guild_id support for server-project linking
+  // ✅ Patch flex_projects for guild support
   await pg.query(`
     ALTER TABLE flex_projects ADD COLUMN IF NOT EXISTS guild_id TEXT;
-  `);
-
-  // ✅ Ensure staking_config supports token_contract
-  await pg.query(`
-    ALTER TABLE staking_config ADD COLUMN IF NOT EXISTS token_contract TEXT;
   `);
 
   // ✅ New: Create reward_tx_log for payout audit
