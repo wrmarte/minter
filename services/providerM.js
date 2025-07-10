@@ -121,7 +121,7 @@ async function safeRpcCall(chain, callFn, retries = 4) {
         isLogBlocked
       );
 
-      // 🧹 Suppress logs for known "expected" errors
+      // 🧹 Suppress logs for known ignorable errors
       const suppressLog = isCallException || isBadRequest;
 
       if (!suppressLog) {
@@ -159,6 +159,7 @@ module.exports = {
   safeRpcCall,
   getMaxBatchSize
 };
+
 
 
 
