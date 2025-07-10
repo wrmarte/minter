@@ -12,24 +12,16 @@ module.exports = (client) => {
     const botMentioned = message.mentions.has(client.user);
     const hasTriggerWord = TRIGGERS.some(trigger => lowered.includes(trigger));
 
-    // 🧠 Get all tagged users excluding the bot
     const mentionedUsers = message.mentions.users.filter(u => u.id !== client.user.id);
-
-    // ✅ Proceed only if bot is triggered AND others are tagged (for roast)
     const shouldRoast = (hasTriggerWord || botMentioned) && mentionedUsers.size > 0;
-
-    // 🤖 Compliment if they're trying to roast the bot
     const isRoastingBot = shouldRoast && message.mentions.has(client.user) && mentionedUsers.size === 1 && mentionedUsers.has(client.user.id);
 
-    // ❌ Skip if no real trigger
     if (!hasTriggerWord && !botMentioned) return;
 
-    // ⏱️ Cooldown per user
     if (cooldown.has(message.author.id)) return;
     cooldown.add(message.author.id);
     setTimeout(() => cooldown.delete(message.author.id), 10000);
 
-    // 🧹 Clean input
     let cleanedInput = lowered;
     TRIGGERS.forEach(trigger => {
       cleanedInput = cleanedInput.replaceAll(trigger, '');
@@ -47,7 +39,6 @@ module.exports = (client) => {
       const isRoast = shouldRoast && !isRoastingBot;
       const roastTargets = [...mentionedUsers.values()].map(u => u.username).join(', ');
 
-      // 📡 Fetch MB mode for current server
       let currentMode = 'default';
       try {
         const modeRes = await client.pg.query(
@@ -59,7 +50,6 @@ module.exports = (client) => {
         console.warn('⚠️ Failed to fetch mb_mode, using default.');
       }
 
-      // 🎭 Build dynamic system prompt
       let systemPrompt = '';
       if (isRoast) {
         systemPrompt = `You are MuscleMB — a savage roastmaster. Ruthlessly roast the following tagged degens: ${roastTargets}. Be short, brutal, and hilarious. Use savage emojis. 💀🔥`;
@@ -102,15 +92,28 @@ module.exports = (client) => {
       const aiReply = data.choices?.[0]?.message?.content?.trim();
 
       if (aiReply && aiReply.length > 0) {
-        await message.reply(`💬 ${aiReply} 💪`);
+        try {
+          await message.reply(`💬 ${aiReply} 💪`);
+        } catch (err) {
+          if (err.code === 50013) {
+            console.warn('⚠️ MuscleMB can’t reply — missing permissions in channel.');
+          } else {
+            console.warn('❌ MuscleMB reply error:', err.message);
+          }
+        }
       }
 
     } catch (err) {
       console.error('❌ MuscleMB error:', err.message);
-      await message.reply('⚠️ MuscleMB pulled a hammy 🦵. Try again soon.');
+      try {
+        await message.reply('⚠️ MuscleMB pulled a hammy 🦵. Try again soon.');
+      } catch (fallbackErr) {
+        if (fallbackErr.code === 50013) {
+          console.warn('⚠️ Fallback message failed — missing permissions.');
+        } else {
+          console.warn('❌ Fallback send error:', fallbackErr.message);
+        }
+      }
     }
   });
 };
-
-
-
