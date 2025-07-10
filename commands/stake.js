@@ -26,7 +26,7 @@ module.exports = {
 
     await interaction.deferReply({ ephemeral: true });
 
-    // ✅ Load staking project info
+    // ✅ Fetch staking project info
     const res = await pg.query(`SELECT * FROM staking_projects WHERE guild_id = $1`, [guildId]);
     if (res.rowCount === 0) {
       return interaction.editReply('❌ No staking contract is set for this server. Ask an admin to use `/addstaking`.');
@@ -61,15 +61,17 @@ module.exports = {
     } catch (err) {
       if (err.message === 'non-enumerable') {
         console.log('🔁 Falling back to ownerOf() sweeping...');
-        let tokenIdRange = [];
 
+        let tokenIdRange = [];
         try {
           const total = await nftContract.totalSupply();
-          const limit = Math.min(Number(total) + 50, 3000);
+          const buffer = 250; // extra buffer for ongoing mints
+          const limit = project.scan_limit || Math.min(Number(total) + buffer, 4000);
           tokenIdRange = Array.from({ length: limit }, (_, i) => i);
         } catch {
-          console.warn('⚠️ totalSupply() not supported. Scanning first 1000 tokens.');
-          tokenIdRange = Array.from({ length: 1000 }, (_, i) => i);
+          console.warn('⚠️ totalSupply() unsupported. Defaulting to 2000 token sweep.');
+          const limit = project.scan_limit || 2000;
+          tokenIdRange = Array.from({ length: limit }, (_, i) => i);
         }
 
         const BATCH_SIZE = 10;
@@ -84,7 +86,12 @@ module.exports = {
                   return await tempContract.ownerOf(id);
                 });
                 return { id, owner };
-              } catch {
+              } catch (err) {
+                const msg = err?.message || '';
+                const isCallException = msg.includes('CALL_EXCEPTION') || msg.includes('execution reverted');
+                if (!isCallException) {
+                  console.warn(`❌ Unexpected error for token ${id}:`, msg);
+                }
                 return null;
               }
             })
@@ -101,8 +108,7 @@ module.exports = {
             }
           }
 
-          // Slight delay between batches (optional)
-          await new Promise((res) => setTimeout(res, 100));
+          await new Promise((res) => setTimeout(res, 100)); // optional delay between batches
         }
       } else {
         console.error('❌ Unexpected error fetching NFTs:', err);
@@ -129,6 +135,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
