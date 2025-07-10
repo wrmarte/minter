@@ -16,98 +16,130 @@ module.exports = {
     .addStringOption(option =>
       option.setName('wallet')
         .setDescription('Your wallet address')
-        .setRequired(true)),
+        .setRequired(true)
+    ),
 
   async execute(interaction) {
-    const wallet = interaction.options.getString('wallet');
-    const guildId = interaction.guildId;
-    const client = interaction.client;
-    const pg = client.pg;
+    const wallet = interaction.options.getString('wallet').toLowerCase();
+    const guildId = interaction.guild.id;
+    const pg = interaction.client.pg;
 
-    // Fetch contract from staking_projects
-    const res = await pg.query('SELECT contract, chain FROM staking_projects WHERE server = $1', [guildId]);
-    if (res.rowCount === 0) return interaction.reply({ content: '⚠️ No staking project set for this server.', ephemeral: true });
+    await interaction.deferReply({ ephemeral: true });
 
-    const { contract, chain } = res.rows[0];
-    const provider = getProvider(chain);
-    const nft = new Contract(contract, erc721Abi, provider);
+    const res = await pg.query(`SELECT * FROM staking_projects WHERE guild_id = $1`, [guildId]);
+    if (res.rowCount === 0) {
+      return interaction.editReply('❌ No staking contract is set for this server. Ask an admin to use `/addstaking`.');
+    }
 
-    let ownedTokenIds = [];
-    let usedFallback = false;
+    const project = res.rows[0];
+    const contract = project.contract_address;
+    const network = project.network || 'base';
+    const provider = getProvider(network);
+    const nftContract = new Contract(contract, erc721Abi, provider);
+
+    let tokenIds = [];
+    const scanned = new Set();
 
     try {
-      const balance = await safeRpcCall(chain, p => nft.connect(p).balanceOf(wallet));
-      const tokenFetches = [];
+      const balance = await nftContract.balanceOf(wallet);
+      const count = Number(balance);
 
-      for (let i = 0; i < balance; i++) {
-        tokenFetches.push(
-          safeRpcCall(chain, async p => {
-            try {
-              const tokenId = await nft.connect(p).tokenOfOwnerByIndex(wallet, i);
-              ownedTokenIds.push(tokenId.toString());
-            } catch (e) {
-              if (e.code === 'CALL_EXCEPTION') {
-                console.warn(`⚠️ tokenOfOwnerByIndex failed at index ${i}`);
-              } else {
-                throw e;
+      for (let i = 0; i < count; i++) {
+        try {
+          const tokenId = await nftContract.tokenOfOwnerByIndex(wallet, i);
+          const idStr = tokenId.toString();
+          if (!scanned.has(idStr)) {
+            tokenIds.push(idStr);
+            scanned.add(idStr);
+          }
+        } catch (e) {
+          console.warn(`⚠️ tokenOfOwnerByIndex failed at index ${i}: ${e.message}`);
+          throw new Error('non-enumerable');
+        }
+      }
+    } catch (err) {
+      if (err.message === 'non-enumerable') {
+        console.log('🔁 Falling back to ownerOf() sweeping...');
+
+        let tokenIdRange = [];
+        try {
+          const total = await nftContract.totalSupply();
+          const buffer = 250;
+          const limit = project.scan_limit || Math.min(Number(total) + buffer, 4000);
+          tokenIdRange = Array.from({ length: limit }, (_, i) => i);
+        } catch {
+          console.warn('⚠️ totalSupply() unsupported. Defaulting to 2000 token sweep.');
+          const limit = project.scan_limit || 2000;
+          tokenIdRange = Array.from({ length: limit }, (_, i) => i);
+        }
+
+        const BATCH_SIZE = 10;
+        let scannedCount = 0;
+        let ownedCount = 0;
+        let skippedCount = 0;
+
+        for (let i = 0; i < tokenIdRange.length; i += BATCH_SIZE) {
+          const batch = tokenIdRange.slice(i, i + BATCH_SIZE);
+
+          const results = await Promise.all(
+            batch.map(async (id) => {
+              try {
+                const owner = await safeRpcCall(network, async (prov) => {
+                  const tempContract = new Contract(contract, erc721Abi, prov);
+                  return await tempContract.ownerOf(id);
+                });
+                return { id, owner };
+              } catch {
+                skippedCount++;
+                return null;
+              }
+            })
+          );
+
+          for (const res of results) {
+            scannedCount++;
+            if (!res || !res.owner) continue;
+            if (res.owner.toLowerCase() === wallet) {
+              const idStr = res.id.toString();
+              if (!scanned.has(idStr)) {
+                tokenIds.push(idStr);
+                scanned.add(idStr);
+                ownedCount++;
               }
             }
-          })
-        );
+          }
+
+          await new Promise((res) => setTimeout(res, 100));
+        }
+
+        console.log(`🧾 Stake fallback scan for ${wallet}:
+Scanned: ${scannedCount}
+Owned:   ${ownedCount}
+Skipped (errors): ${skippedCount}
+✅ Final NFT count: ${tokenIds.length}`);
+      } else {
+        console.error('❌ Unexpected error fetching NFTs:', err);
+        return interaction.editReply(`⚠️ Could not fetch NFT ownership. RPC issue or unsupported contract.`);
       }
-
-      await Promise.all(tokenFetches);
-    } catch (e) {
-      console.warn('🔁 Falling back to ownerOf() sweeping...');
-      usedFallback = true;
-
-      let totalSupply;
-      try {
-        totalSupply = await safeRpcCall(chain, p => nft.connect(p).totalSupply());
-      } catch (err) {
-        totalSupply = 1000;
-        console.warn('⚠️ totalSupply() not supported. Scanning first 1000 tokens.');
-      }
-
-      const scan = [];
-      for (let i = 0; i < totalSupply; i++) {
-        scan.push(
-          safeRpcCall(chain, async p => {
-            try {
-              const owner = await nft.connect(p).ownerOf(i);
-              if (owner.toLowerCase() === wallet.toLowerCase()) {
-                ownedTokenIds.push(i.toString());
-              }
-            } catch (err) {
-              if (err.code !== 'CALL_EXCEPTION') {
-                console.warn(`❌ Unexpected error for token ${i}: ${err.message}`);
-              }
-              // Skip silently if token does not exist
-            }
-          })
-        );
-      }
-
-      await Promise.all(scan);
     }
 
-    if (ownedTokenIds.length === 0) {
-      return interaction.reply({ content: '😢 No NFTs owned from this project.', ephemeral: true });
+    if (tokenIds.length === 0) {
+      return interaction.editReply(`❌ No NFTs detected in wallet \`${wallet.slice(0, 6)}...${wallet.slice(-4)}\` for this project.`);
     }
 
-    // Store staking data
-    for (const tokenId of ownedTokenIds) {
-      await pg.query(
-        `INSERT INTO staking_data (server, wallet, contract, token_id, staked_at)
-         VALUES ($1, $2, $3, $4, NOW())
-         ON CONFLICT (server, contract, token_id) DO NOTHING`,
-        [guildId, wallet, contract, tokenId]
-      );
-    }
+    try {
+      await pg.query(`
+        INSERT INTO staked_wallets (wallet_address, contract_address, network, token_ids, staked_at)
+        VALUES ($1, $2, $3, $4, NOW())
+        ON CONFLICT (wallet_address, contract_address)
+        DO UPDATE SET token_ids = $4, staked_at = NOW()
+      `, [wallet, contract, network, tokenIds]);
 
-    await interaction.reply({
-      content: `✅ Staked ${ownedTokenIds.length} NFT${ownedTokenIds.length > 1 ? 's' : ''} from contract **${contract.slice(0, 6)}...${contract.slice(-4)}** ${usedFallback ? '(fallback mode)' : ''}`,
-      ephemeral: true
-    });
+      return interaction.editReply(`✅ ${tokenIds.length} NFT(s) now actively staked for wallet \`${wallet.slice(0, 6)}...${wallet.slice(-4)}\`.`);
+    } catch (err) {
+      console.error('❌ Error inserting into staked_wallets:', err);
+      return interaction.editReply(`❌ Failed to stake NFTs due to database error.`);
+    }
   }
 };
+
