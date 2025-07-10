@@ -1,13 +1,12 @@
 const { JsonRpcProvider } = require('ethers');
 
-// ✅ RPC lists per chain
+// ✅ RPC lists per chain (patched: removed base.meowrpc.com)
 const RPCS = {
   base: [
     'https://mainnet.base.org',
     'https://base.publicnode.com',
     'https://1rpc.io/base',
-    'https://base.llamarpc.com',
-    'https://base.meowrpc.com'
+    'https://base.llamarpc.com'
   ],
   eth: [
     'https://eth.llamarpc.com',
@@ -92,15 +91,15 @@ async function safeRpcCall(chain, callFn, retries = 4) {
       return await callFn(provider);
     } catch (err) {
       const msg = err?.info?.responseBody || err?.message || '';
-      const code = err?.code || '';
-
-      const isCallException = code === 'CALL_EXCEPTION' || msg.includes('execution reverted');
-      const isBadRequest = msg.includes('400 Bad Request');
-      const isForbidden = msg.includes('403') || msg.includes('API key is not allowed');
       const isApeBatchLimit = key === 'ape' && msg.includes('Batch of more than 3 requests');
+      const isForbidden = msg.includes('403') || msg.includes('API key is not allowed');
       const isLogBlocked = msg.includes("'eth_getLogs' is unavailable");
 
-      const isRotatable = (
+      console.warn(`⚠️ [${key}] RPC Error: ${err.message || err.code || 'unknown'}`);
+      if (err?.code) console.warn(`🔍 RPC failure code: ${err.code}`);
+      console.warn(`🔻 RPC failed: ${getProvider(key).connection?.url}`);
+
+      const shouldRotate = (
         msg.includes('no response') ||
         msg.includes('429') ||
         msg.includes('timeout') ||
@@ -116,21 +115,12 @@ async function safeRpcCall(chain, callFn, retries = 4) {
         msg.includes('503') ||
         msg.includes('Bad Gateway') ||
         msg.includes('Gateway Time-out') ||
-        isBadRequest ||
+        msg.includes('400 Bad Request') || // ✅ Added this
         isForbidden ||
         isLogBlocked
       );
 
-      // 🧹 Suppress logs for known ignorable errors
-      const suppressLog = isCallException || isBadRequest;
-
-      if (!suppressLog) {
-        console.warn(`⚠️ [${key}] RPC Error: ${err.message || code}`);
-        if (code) console.warn(`🔍 RPC failure code: ${code}`);
-        console.warn(`🔻 RPC failed: ${getProvider(key).connection?.url}`);
-      }
-
-      if (isRotatable) {
+      if (shouldRotate) {
         if (key === 'ape' && isApeBatchLimit) {
           console.warn('⛔ ApeChain batch limit hit — skip batch, no retry');
           return null;
