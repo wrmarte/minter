@@ -1,113 +1,106 @@
 const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
+const { Contract } = require('ethers');
 const { getProvider } = require('../services/provider');
-const { contractListeners } = require('../services/mintProcessorBase');
-const { statSync } = require('fs');
-const version = require('../package.json').version;
 
-let mintProcessorStartTime = Date.now();
+const erc721Abi = [
+  'function balanceOf(address owner) view returns (uint256)',
+  'function tokenOfOwnerByIndex(address owner, uint256 index) view returns (uint256)',
+  'function ownerOf(uint256 tokenId) view returns (address)',
+  'function totalSupply() view returns (uint256)'
+];
+
+// ✅ Fallback counter if contract is not enumerable
+async function countOwnedTokensFallback(contract, wallet) {
+  let total = 0;
+  try {
+    const supply = await contract.totalSupply();
+    for (let i = 0; i < supply; i++) {
+      try {
+        const owner = await contract.ownerOf(i);
+        if (owner.toLowerCase() === wallet.toLowerCase()) {
+          total++;
+        }
+      } catch (err) {
+        continue; // skip burned/missing token
+      }
+    }
+  } catch (err) {
+    console.warn(`❌ Fallback count failed: ${err.message}`);
+  }
+  return total;
+}
 
 module.exports = {
   data: new SlashCommandBuilder()
-    .setName('status')
-    .setDescription('📊 Display full system health overview'),
+    .setName('stake')
+    .setDescription('Stake all NFTs from this server’s project using your wallet')
+    .addStringOption(option =>
+      option.setName('wallet')
+        .setDescription('Your wallet address')
+        .setRequired(true)),
 
   async execute(interaction) {
-    const client = interaction.client;
-    const pg = client.pg;
+    const wallet = interaction.options.getString('wallet');
+    const pg = interaction.client.pg;
 
     await interaction.deferReply();
 
-    let dbStatus = '🔴 Failed';
+    // ✅ Fetch the NFT contract for this server
+    let contractRow;
     try {
-      await pg.query('SELECT 1');
-      dbStatus = '🟢 Connected';
-    } catch {}
+      const res = await pg.query(
+        `SELECT contract, name FROM flex_projects WHERE server_id = $1 LIMIT 1`,
+        [interaction.guildId]
+      );
+      contractRow = res.rows[0];
+    } catch (err) {
+      return await interaction.editReply('❌ Failed to fetch contract for this server.');
+    }
 
-    let rpcStatus = '🔴 Failed';
-    let blockNum = 'N/A';
+    if (!contractRow) {
+      return await interaction.editReply('❌ No NFT contract is configured for this server.');
+    }
+
+    const provider = getProvider('base');
+    const contract = new Contract(contractRow.contract, erc721Abi, provider);
+
+    let nftCount = 0;
     try {
-      const block = await getProvider().getBlockNumber();
-      rpcStatus = '🟢 Live';
-      blockNum = `#${block}`;
-    } catch {}
+      // Primary method using balanceOf
+      nftCount = await contract.balanceOf(wallet);
 
-    const discordStatus = client.ws.status === 0 ? '🟢 Connected' : '🔴 Disconnected';
+      // Try to verify each token if tokenOfOwnerByIndex exists
+      const tokens = [];
+      for (let i = 0; i < nftCount; i++) {
+        try {
+          const tokenId = await contract.tokenOfOwnerByIndex(wallet, i);
+          tokens.push(tokenId.toString());
+        } catch (err) {
+          console.warn('⚠️ tokenOfOwnerByIndex failed. Falling back to full scan.');
+          nftCount = await countOwnedTokensFallback(contract, wallet);
+          break;
+        }
+      }
+    } catch (err) {
+      console.warn('⚠️ balanceOf failed. Using fallback.');
+      nftCount = await countOwnedTokensFallback(contract, wallet);
+    }
 
-    let mintStatus = '🔴 Inactive';
-    let activeListeners = 0;
-    try {
-      activeListeners = Object.keys(contractListeners || {}).length;
-      mintStatus = activeListeners > 0 ? `🟢 ${activeListeners} Active` : '🟠 No listeners';
-    } catch {}
-
-    let commandCount = 0;
-    try {
-      const appCmds = await client.application.commands.fetch();
-      commandCount = appCmds.size;
-    } catch {}
-
-    const totalGuilds = client.guilds.cache.size;
-
-    let flexProjects = 0;
-    try {
-      const flexRes = await pg.query('SELECT COUNT(*) FROM flex_projects');
-      flexProjects = parseInt(flexRes.rows[0].count);
-    } catch {}
-
-    let nftContracts = 0;
-    try {
-      const nftRes = await pg.query('SELECT COUNT(*) FROM contract_watchlist');
-      nftContracts = parseInt(nftRes.rows[0].count);
-    } catch {}
-
-    let tokensTracked = 0;
-    try {
-      const tokenRes = await pg.query('SELECT COUNT(*) FROM tracked_tokens');
-      tokensTracked = parseInt(tokenRes.rows[0].count);
-    } catch {}
-
-    const uptimeMs = process.uptime() * 1000;
-    const uptime = `${Math.floor(uptimeMs / 3600000)}h ${Math.floor((uptimeMs % 3600000) / 60000)}m`;
-
-    const mintUptimeMs = Date.now() - mintProcessorStartTime;
-    const mintUptime = `${Math.floor(mintUptimeMs / 3600000)}h ${Math.floor((mintUptimeMs % 3600000) / 60000)}m`;
-
-    const memoryUsage = `${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1)} MB`;
-
-    let lastEventTime = 'N/A';
-    try {
-      const seenStats = statSync('./data/seen.json');
-      lastEventTime = `<t:${Math.floor(seenStats.mtimeMs / 1000)}:R>`;
-    } catch {}
-
-    const ping = Date.now() - interaction.createdTimestamp;
-
+    // ✅ Display result
     const embed = new EmbedBuilder()
-      .setTitle('📊 Full System Status')
-      .setColor(0x2ecc71)
+      .setTitle('🧱 Soft Stake Summary')
+      .setColor(0x00bcd4)
       .setDescription([
-        `🗄️ **Database** — ${dbStatus}`,
-        `📡 **RPC Provider** — ${rpcStatus} (${blockNum})`,
-        `📶 **Bot Ping** — ${ping}ms`,
-        `🤖 **Discord Gateway** — ${discordStatus}`,
-        `🧱 **Mint Processor** — ${mintStatus} *(Uptime: ${mintUptime})*`,
-        `🌐 **Servers** — ${totalGuilds} Guilds`,
-        `🔑 **Slash Commands** — ${commandCount}`,
-        `📦 **NFT Contracts Tracked** — ${nftContracts}`,
-        `💰 **Tokens Tracked** — ${tokensTracked}`,
-        `🎯 **Flex Projects** — ${flexProjects}`,
-        `⏱️ **Last Event** — ${lastEventTime}`,
-        `🧮 **Memory Usage** — ${memoryUsage}`,
-        `🧪 **Bot Version** — v${version}`,
-        `⏱️ **Total Uptime** — ${uptime}`
+        `🔹 **Project:** ${contractRow.name}`,
+        `🔹 **Wallet:** \`${wallet.slice(0, 6)}...${wallet.slice(-4)}\``,
+        `🔹 **NFTs Detected:** ${nftCount}`
       ].join('\n'))
-      .setFooter({ text: 'Powered by PimpsDev 🧪' })
+      .setFooter({ text: 'Soft Stake • MuscleMB' })
       .setTimestamp();
 
     await interaction.editReply({ embeds: [embed] });
   }
 };
-
 
 
 
