@@ -16,7 +16,8 @@ module.exports = {
     .addStringOption(option =>
       option.setName('wallet')
         .setDescription('Your wallet address')
-        .setRequired(true)),
+        .setRequired(true)
+    ),
 
   async execute(interaction) {
     const wallet = interaction.options.getString('wallet').toLowerCase();
@@ -25,6 +26,7 @@ module.exports = {
 
     await interaction.deferReply({ ephemeral: true });
 
+    // ✅ Load staking project info
     const res = await pg.query(`SELECT * FROM staking_projects WHERE guild_id = $1`, [guildId]);
     if (res.rowCount === 0) {
       return interaction.editReply('❌ No staking contract is set for this server. Ask an admin to use `/addstaking`.');
@@ -38,7 +40,6 @@ module.exports = {
     let tokenIds = [];
     const scanned = new Set();
 
-    // ✅ Try ERC721Enumerable first
     try {
       const balance = await nftContract.balanceOf(wallet);
       const count = Number(balance);
@@ -52,19 +53,18 @@ module.exports = {
             scanned.add(idStr);
           }
         } catch (e) {
-          console.warn(`⚠️ tokenOfOwnerByIndex failed at index ${i}:`, e.message);
+          console.warn(`⚠️ tokenOfOwnerByIndex failed at index ${i}: ${e.message}`);
           throw new Error('non-enumerable');
         }
       }
     } catch (err) {
       if (err.message === 'non-enumerable') {
-        console.log('🔁 Falling back to sweep method using ownerOf()');
-
+        console.log('🔁 Falling back to ownerOf() sweeping...');
         let tokenIdRange = [];
 
         try {
           const total = await nftContract.totalSupply();
-          const limit = Math.min(Number(total) + 50, 3000);
+          const limit = Math.min(Number(total) + 50, 3000); // give buffer beyond totalSupply
           tokenIdRange = Array.from({ length: limit }, (_, i) => i);
         } catch {
           console.warn('⚠️ totalSupply() not supported. Scanning first 1000 tokens.');
@@ -82,11 +82,11 @@ module.exports = {
               }
             }
           } catch {
-            // token likely doesn't exist or burned
+            // skip missing/burned tokens
           }
         }
       } else {
-        console.error('❌ Error fetching owned NFTs:', err);
+        console.error('❌ Unexpected error fetching NFTs:', err);
         return interaction.editReply(`⚠️ Could not fetch NFT ownership. RPC issue or unsupported contract.`);
       }
     }
@@ -105,9 +105,10 @@ module.exports = {
 
       return interaction.editReply(`✅ ${tokenIds.length} NFT(s) now actively staked for wallet \`${wallet.slice(0, 6)}...${wallet.slice(-4)}\`.`);
     } catch (err) {
-      console.error('❌ Error inserting into staked_wallets:', err);
+      console.error('❌ DB insert failed:', err);
       return interaction.editReply(`❌ Failed to stake NFTs due to database error.`);
     }
   }
 };
+
 
