@@ -26,7 +26,6 @@ module.exports = {
 
     await interaction.deferReply({ ephemeral: true });
 
-    // ✅ Fetch staking project info
     const res = await pg.query(`SELECT * FROM staking_projects WHERE guild_id = $1`, [guildId]);
     if (res.rowCount === 0) {
       return interaction.editReply('❌ No staking contract is set for this server. Ask an admin to use `/addstaking`.');
@@ -65,7 +64,7 @@ module.exports = {
         let tokenIdRange = [];
         try {
           const total = await nftContract.totalSupply();
-          const buffer = 250; // extra buffer for ongoing mints
+          const buffer = 250;
           const limit = project.scan_limit || Math.min(Number(total) + buffer, 4000);
           tokenIdRange = Array.from({ length: limit }, (_, i) => i);
         } catch {
@@ -75,6 +74,10 @@ module.exports = {
         }
 
         const BATCH_SIZE = 10;
+        let scannedCount = 0;
+        let ownedCount = 0;
+        let skippedCount = 0;
+
         for (let i = 0; i < tokenIdRange.length; i += BATCH_SIZE) {
           const batch = tokenIdRange.slice(i, i + BATCH_SIZE);
 
@@ -86,30 +89,34 @@ module.exports = {
                   return await tempContract.ownerOf(id);
                 });
                 return { id, owner };
-              } catch (err) {
-                const msg = err?.message || '';
-                const isCallException = msg.includes('CALL_EXCEPTION') || msg.includes('execution reverted');
-                if (!isCallException) {
-                  console.warn(`❌ Unexpected error for token ${id}:`, msg);
-                }
+              } catch {
+                skippedCount++;
                 return null;
               }
             })
           );
 
           for (const res of results) {
+            scannedCount++;
             if (!res || !res.owner) continue;
             if (res.owner.toLowerCase() === wallet) {
               const idStr = res.id.toString();
               if (!scanned.has(idStr)) {
                 tokenIds.push(idStr);
                 scanned.add(idStr);
+                ownedCount++;
               }
             }
           }
 
-          await new Promise((res) => setTimeout(res, 100)); // optional delay between batches
+          await new Promise((res) => setTimeout(res, 100));
         }
+
+        console.log(`🧾 Stake fallback scan for ${wallet}:
+Scanned: ${scannedCount}
+Owned:   ${ownedCount}
+Skipped (errors): ${skippedCount}
+✅ Final NFT count: ${tokenIds.length}`);
       } else {
         console.error('❌ Unexpected error fetching NFTs:', err);
         return interaction.editReply(`⚠️ Could not fetch NFT ownership. RPC issue or unsupported contract.`);
