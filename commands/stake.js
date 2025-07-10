@@ -1,6 +1,6 @@
 const { SlashCommandBuilder } = require('discord.js');
 const { Contract } = require('ethers');
-const { getProvider } = require('../services/providerM');
+const { getProvider, safeRpcCall } = require('../services/providerM');
 
 const erc721Abi = [
   'function balanceOf(address owner) view returns (uint256)',
@@ -34,7 +34,8 @@ module.exports = {
 
     const project = res.rows[0];
     const contract = project.contract_address;
-    const provider = getProvider(project.network || 'base');
+    const network = project.network || 'base';
+    const provider = getProvider(network);
     const nftContract = new Contract(contract, erc721Abi, provider);
 
     let tokenIds = [];
@@ -64,26 +65,44 @@ module.exports = {
 
         try {
           const total = await nftContract.totalSupply();
-          const limit = Math.min(Number(total) + 50, 3000); // give buffer beyond totalSupply
+          const limit = Math.min(Number(total) + 50, 3000);
           tokenIdRange = Array.from({ length: limit }, (_, i) => i);
         } catch {
           console.warn('⚠️ totalSupply() not supported. Scanning first 1000 tokens.');
           tokenIdRange = Array.from({ length: 1000 }, (_, i) => i);
         }
 
-        for (const id of tokenIdRange) {
-          try {
-            const owner = await nftContract.ownerOf(id);
-            if (owner.toLowerCase() === wallet) {
-              const idStr = id.toString();
+        const BATCH_SIZE = 10;
+        for (let i = 0; i < tokenIdRange.length; i += BATCH_SIZE) {
+          const batch = tokenIdRange.slice(i, i + BATCH_SIZE);
+
+          const results = await Promise.all(
+            batch.map(async (id) => {
+              try {
+                const owner = await safeRpcCall(network, async (prov) => {
+                  const tempContract = new Contract(contract, erc721Abi, prov);
+                  return await tempContract.ownerOf(id);
+                });
+                return { id, owner };
+              } catch {
+                return null;
+              }
+            })
+          );
+
+          for (const res of results) {
+            if (!res || !res.owner) continue;
+            if (res.owner.toLowerCase() === wallet) {
+              const idStr = res.id.toString();
               if (!scanned.has(idStr)) {
                 tokenIds.push(idStr);
                 scanned.add(idStr);
               }
             }
-          } catch {
-            // skip missing/burned tokens
           }
+
+          // Slight delay between batches (optional)
+          await new Promise((res) => setTimeout(res, 100));
         }
       } else {
         console.error('❌ Unexpected error fetching NFTs:', err);
@@ -101,14 +120,15 @@ module.exports = {
         VALUES ($1, $2, $3, $4, NOW())
         ON CONFLICT (wallet_address, contract_address)
         DO UPDATE SET token_ids = $4, staked_at = NOW()
-      `, [wallet, contract, project.network || 'base', tokenIds]);
+      `, [wallet, contract, network, tokenIds]);
 
       return interaction.editReply(`✅ ${tokenIds.length} NFT(s) now actively staked for wallet \`${wallet.slice(0, 6)}...${wallet.slice(-4)}\`.`);
     } catch (err) {
-      console.error('❌ DB insert failed:', err);
+      console.error('❌ Error inserting into staked_wallets:', err);
       return interaction.editReply(`❌ Failed to stake NFTs due to database error.`);
     }
   }
 };
+
 
 
