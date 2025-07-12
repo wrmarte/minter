@@ -1,5 +1,6 @@
 const { SlashCommandBuilder, AttachmentBuilder } = require('discord.js');
 const { buildUltraFlexCard } = require('../services/ultraFlexService');
+const { buildFloppyFlexCard } = require('../services/floppyFlexService');
 
 function getFlexService(chain) {
   switch (chain) {
@@ -25,16 +26,21 @@ module.exports = {
         .setDescription('Token ID')
         .setRequired(true)
     )
-    .addBooleanOption(opt =>
-      opt.setName('ultra')
-        .setDescription('Use Ultra Flex mode (Bot Owner only)')
+    .addStringOption(opt =>
+      opt.setName('style')
+        .setDescription('FlexCard Style')
+        .addChoices(
+          { name: 'Default', value: 'default' },
+          { name: 'Ultra', value: 'ultra' },
+          { name: 'Floppy', value: 'floppy' }
+        )
     ),
 
   async execute(interaction) {
     const pg = interaction.client.pg;
     const name = interaction.options.getString('name').toLowerCase();
     const tokenId = interaction.options.getInteger('tokenid');
-    const ultraRequested = interaction.options.getBoolean('ultra') || false;
+    const style = interaction.options.getString('style') || 'default';
     const userIsOwner = interaction.user.id === process.env.BOT_OWNER_ID;
 
     try {
@@ -57,17 +63,23 @@ module.exports = {
       const collectionName = display_name || storedName;
       const chain = network.toLowerCase();
 
-      if (ultraRequested && !userIsOwner) {
+      if (style === 'ultra' && !userIsOwner) {
         return await interaction.editReply('🚫 Only the bot owner can use Ultra mode for now.');
       }
 
-      const { buildFlexCard } = getFlexService(chain);
-      const imageBuffer = ultraRequested
-        ? await buildUltraFlexCard(contractAddress, tokenId, collectionName, chain)
-        : await buildFlexCard(contractAddress, tokenId, collectionName, pg, interaction.guild.id);
+      let imageBuffer;
+
+      if (style === 'ultra') {
+        imageBuffer = await buildUltraFlexCard(contractAddress, tokenId, collectionName, chain);
+      } else if (style === 'floppy') {
+        imageBuffer = await buildFloppyFlexCard(contractAddress, tokenId, collectionName, chain);
+      } else {
+        const { buildFlexCard } = getFlexService(chain);
+        imageBuffer = await buildFlexCard(contractAddress, tokenId, collectionName, pg, interaction.guild.id);
+      }
 
       const attachment = new AttachmentBuilder(imageBuffer, {
-        name: ultraRequested ? 'ultraflexcard.png' : 'flexcard.png'
+        name: `${style}flexcard.png`
       });
 
       return await interaction.editReply({ files: [attachment] });
@@ -87,6 +99,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
