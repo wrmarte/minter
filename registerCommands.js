@@ -13,8 +13,7 @@ for (const file of commandFiles) {
   const filePath = path.join(commandsPath, file);
   const command = require(filePath);
 
-  
-  if ('data' in command && 'execute' in command) {
+   if ('data' in command && 'execute' in command) {
     try {
       commands.push(command.data.toJSON());
       console.log(`✅ Prepared /${command.data.name}`);
