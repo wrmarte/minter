@@ -63,8 +63,8 @@ module.exports = {
       const collectionName = display_name || storedName;
       const chain = network.toLowerCase();
 
-      if (style === 'ultra' && !userIsOwner) {
-        return await interaction.editReply('🚫 Only the bot owner can use Ultra mode for now.');
+      if ((style === 'ultra' || style === 'floppy') && !userIsOwner) {
+        return await interaction.editReply('🚫 Only the bot owner can use Ultra or Floppy mode for now.');
       }
 
       let imageBuffer;
