@@ -39,25 +39,29 @@ function setupBaseBlockListener(client, contractRows) {
       try {
         const name = row.name;
         const address = row.address.toLowerCase();
+        const chainKey = `${address}_${row.chain || 'base'}`;
+        if (!row._lastFallback) row._lastFallback = 0;
 
         let logs = [];
         try {
-          const transferFilter = {
+          const filter = {
             address,
             topics: [id('Transfer(address,address,uint256)')],
             fromBlock,
             toBlock
           };
 
-          logs = await provider.getLogs(transferFilter);
+          logs = await provider.getLogs(filter);
 
-          if (logs.length === 0 && name.toLowerCase().includes('adrian')) {
-            const fallbackFilter = {
-              address,
-              fromBlock,
-              toBlock
-            };
+          if (
+            logs.length === 0 &&
+            name.toLowerCase().includes('adrian') &&
+            (toBlock - fromBlock) <= 5 &&
+            Date.now() - row._lastFallback > 15000
+          ) {
+            const fallbackFilter = { address, fromBlock, toBlock };
             logs = await provider.getLogs(fallbackFilter);
+            row._lastFallback = Date.now();
             console.warn(`[${name}] Using fallback getLogs without topics.`);
           }
         } catch (err) {
@@ -123,7 +127,6 @@ function setupBaseBlockListener(client, contractRows) {
     }
   });
 }
-
 
 async function handleMint(client, contractRow, contract, tokenId, to, channel_ids) {
   const { name, mint_price, mint_token, mint_token_symbol } = contractRow;
