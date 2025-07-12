@@ -1,6 +1,6 @@
 const { JsonRpcProvider } = require('ethers');
 
-// ✅ RPC lists per chain (patched: removed base.meowrpc.com)
+// ✅ RPC lists per chain (Ape disabled and handled safely)
 const RPCS = {
   base: [
     'https://mainnet.base.org',
@@ -12,12 +12,7 @@ const RPCS = {
     'https://eth.llamarpc.com',
     'https://1rpc.io/eth',
     'https://rpc.ankr.com/eth'
-  ],
-ape: [
-  // 'https://apechain.drpc.org',
-  // 'https://rpc.apeiron.io'
-]
-
+  ]
 };
 
 // ✅ Track current index per chain
@@ -27,23 +22,20 @@ const providers = {};
 // ✅ Initialize first provider for each chain
 for (const chain in RPCS) {
   providerIndex[chain] = 0;
-  providers[chain] = new JsonRpcProvider(
-    RPCS[chain][0],
-    chain === 'ape' ? { name: 'apechain', chainId: 33139 } : undefined
-  );
+  providers[chain] = new JsonRpcProvider(RPCS[chain][0]);
 }
 
 // ✅ Get current provider for a chain
 function getProvider(chain = 'base') {
   const key = chain.toLowerCase();
   if (!providers[key]) {
-    console.warn(`⚠️ Unknown chain "${key}" — defaulting to Base`);
+    console.warn(`⚠️ Unknown or disabled chain "${key}" — defaulting to Base`);
     return providers['base'];
   }
   return providers[key];
 }
 
-// ✅ Network readiness check (mainly for Ape)
+// ✅ Network readiness check
 async function isNetworkReady(provider) {
   try {
     const net = await provider.getNetwork();
@@ -53,10 +45,9 @@ async function isNetworkReady(provider) {
   }
 }
 
-// ✅ Rotate to next provider (Ape patch included)
+// ✅ Rotate to next provider
 async function rotateProvider(chain = 'base') {
   const key = chain.toLowerCase();
-
   if (!RPCS[key] || RPCS[key].length <= 1) {
     console.warn(`⛔ No rotation available for ${key} (using static RPC)`);
     return;
@@ -65,26 +56,24 @@ async function rotateProvider(chain = 'base') {
   for (let attempts = 0; attempts < RPCS[key].length; attempts++) {
     providerIndex[key] = (providerIndex[key] + 1) % RPCS[key].length;
     const url = RPCS[key][providerIndex[key]];
-    const tempProvider = new JsonRpcProvider(
-      url,
-      key === 'ape' ? { name: 'apechain', chainId: 33139 } : undefined
-    );
+    const tempProvider = new JsonRpcProvider(url);
 
-    if (key !== 'ape' || await isNetworkReady(tempProvider)) {
+    if (await isNetworkReady(tempProvider)) {
       providers[key] = tempProvider;
       console.warn(`🔁 Rotated RPC for ${key}: ${url}`);
       return;
-    } else {
-      console.warn(`❌ Skipped ${url} — ApeChain RPC not responding`);
     }
   }
-
   console.error(`❌ All ${key} RPCs failed network check`);
 }
 
 // ✅ Failover-safe RPC call
 async function safeRpcCall(chain, callFn, retries = 4) {
   const key = chain.toLowerCase();
+  if (!RPCS[key]) {
+    console.warn(`⛔ No RPC configured for ${key}. Skipping request.`);
+    return null;
+  }
 
   for (let i = 0; i < retries; i++) {
     try {
@@ -92,7 +81,6 @@ async function safeRpcCall(chain, callFn, retries = 4) {
       return await callFn(provider);
     } catch (err) {
       const msg = err?.info?.responseBody || err?.message || '';
-      const isApeBatchLimit = key === 'ape' && msg.includes('Batch of more than 3 requests');
       const isForbidden = msg.includes('403') || msg.includes('API key is not allowed');
       const isLogBlocked = msg.includes("'eth_getLogs' is unavailable");
 
@@ -116,30 +104,22 @@ async function safeRpcCall(chain, callFn, retries = 4) {
         msg.includes('503') ||
         msg.includes('Bad Gateway') ||
         msg.includes('Gateway Time-out') ||
-        msg.includes('400 Bad Request') || // ✅ Added this
+        msg.includes('400 Bad Request') ||
         isForbidden ||
         isLogBlocked
       );
 
       if (shouldRotate) {
-        if (key === 'ape' && isApeBatchLimit) {
-          console.warn('⛔ ApeChain batch limit hit — skip batch, no retry');
-          return null;
-        }
-
         await rotateProvider(key);
         await new Promise(res => setTimeout(res, 500));
         continue;
       }
-
       throw err;
     }
   }
-
   throw new Error(`❌ All RPCs failed for ${key}`);
 }
 
-// ✅ Max batch size per chain
 function getMaxBatchSize(chain = 'base') {
   return chain.toLowerCase() === 'ape' ? 3 : 10;
 }
