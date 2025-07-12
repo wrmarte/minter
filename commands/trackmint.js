@@ -38,9 +38,10 @@ module.exports = {
     const tokenAddr = TOKEN_NAME_TO_ADDRESS?.[resolvedSymbol] || tokenSymbol;
     const currentChannel = channel.id;
 
-    if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-      return interaction.reply({ content: '❌ Admin only.', ephemeral: true });
-    }
+ if (!member.permissions.has(PermissionsBitField.Flags.Administrator) && interaction.user.id !== process.env.BOT_OWNER_ID) {
+  return interaction.reply({ content: '❌ Admin only.', ephemeral: true });
+}
+
 
     await interaction.deferReply({ ephemeral: true });
 
