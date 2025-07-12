@@ -39,18 +39,27 @@ function setupBaseBlockListener(client, contractRows) {
       try {
         const name = row.name;
         const address = row.address.toLowerCase();
-        const filter = {
-          address,
-          topics: [id('Transfer(address,address,uint256)')],
-          fromBlock,
-          toBlock
-        };
 
-        await delay(150);
-
-        let logs;
+        let logs = [];
         try {
-          logs = await provider.getLogs(filter);
+          const transferFilter = {
+            address,
+            topics: [id('Transfer(address,address,uint256)')],
+            fromBlock,
+            toBlock
+          };
+
+          logs = await provider.getLogs(transferFilter);
+
+          if (logs.length === 0 && name.toLowerCase().includes('adrian')) {
+            const fallbackFilter = {
+              address,
+              fromBlock,
+              toBlock
+            };
+            logs = await provider.getLogs(fallbackFilter);
+            console.warn(`[${name}] Using fallback getLogs without topics.`);
+          }
         } catch (err) {
           if (err.message.includes('maximum 10 calls in 1 batch')) return;
           console.warn(`[${name}] Log fetch error: ${err.message}`);
