@@ -26,7 +26,6 @@ module.exports = {
     let nfts = [];
     const servers = {};
 
-    // ✅ Fetch Tokens (if using tracked_tokens)
     try {
       const tokenQuery = isOwner
         ? `SELECT name, address, guild_id FROM tracked_tokens`
@@ -37,7 +36,6 @@ module.exports = {
       console.error('❌ Token fetch error:', err);
     }
 
-    // ✅ Fetch NFTs — handle channel_ids array or CSV fallback
     try {
       const nftRes = await pg.query(`SELECT name, address, chain, channel_ids FROM contract_watchlist`);
       for (const row of nftRes.rows) {
@@ -73,13 +71,11 @@ module.exports = {
       console.error('❌ NFT fetch error:', err);
     }
 
-    // ✅ Group Tokens
     for (const token of tokens) {
       if (!servers[token.guild_id]) servers[token.guild_id] = { tokens: [], nfts: [] };
       servers[token.guild_id].tokens.push(token);
     }
 
-    // ✅ Chain emoji mapper
     function chainEmoji(chain) {
       switch (chain) {
         case 'base': return '🟦';
@@ -90,7 +86,6 @@ module.exports = {
       }
     }
 
-    // ✅ Format Embed
     const embed = new EmbedBuilder()
       .setTitle('🛠️ Tracker Overview')
       .setColor(0x2ecc71);
@@ -110,11 +105,11 @@ module.exports = {
           }).join('\n\n')
         : '• _No NFTs tracked_';
 
-      embed.addFields(
-        { name: `📍 **Server: ${serverName}**`, value: '\u200b' },
-        { name: '💰 Tokens', value: tokenList },
-        { name: '📦 NFTs', value: nftList }
-      );
+      const combinedValue = `💰 Tokens:\n${tokenList}\n\n📦 NFTs:\n${nftList}`;
+      const chunks = combinedValue.match(/[\s\S]{1,1024}/g);
+      chunks.forEach((chunk, i) => {
+        embed.addFields({ name: i === 0 ? `📍 **Server: ${serverName}**` : `📍 (cont.)`, value: chunk });
+      });
     }
 
     embed.setFooter({ text: 'Powered by MuscleMB 💪' }).setTimestamp();
@@ -122,6 +117,7 @@ module.exports = {
     await interaction.editReply({ embeds: [embed] });
   }
 };
+
 
 
 
