@@ -149,10 +149,19 @@ setInterval(() => {
   autoRewardPayout(client).catch(console.error);
 }, 24 * 60 * 60 * 1000); // run every 24 hours
 
+// ✅ Conditional Mint Processor Ape Loader
+if (process.env.APE_ENABLED === 'true') {
+  console.log('🔄 Loading Mint Processor Ape...');
+  require('./services/mintProcessorApe')(client);
+} else {
+  console.log('⛔ Mint Processor Ape disabled by config.');
+}
+
 // ✅ Login to Discord
 client.login(process.env.DISCORD_BOT_TOKEN)
   .then(() => console.log(`✅ Logged in as ${client.user.tag}`))
   .catch(err => console.error('❌ Discord login failed:', err));
+
 
 
 
