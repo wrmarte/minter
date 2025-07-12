@@ -39,36 +39,24 @@ function setupBaseBlockListener(client, contractRows) {
       try {
         const name = row.name;
         const address = row.address.toLowerCase();
-        const chainKey = `${address}_${row.chain || 'base'}`;
-        if (!row._lastFallback) row._lastFallback = 0;
+        const filter = {
+          address,
+          topics: [id('Transfer(address,address,uint256)')],
+          fromBlock,
+          toBlock
+        };
 
-        let logs = [];
+        await delay(150);
+        let logs;
+
         try {
-          const filter = {
-            address,
-            topics: [id('Transfer(address,address,uint256)')],
-            fromBlock,
-            toBlock
-          };
-
           logs = await provider.getLogs(filter);
-
-          if (
-            logs.length === 0 &&
-            name.toLowerCase().includes('adrian') &&
-            (toBlock - fromBlock) <= 5 &&
-            Date.now() - row._lastFallback > 15000
-          ) {
-            const fallbackFilter = { address, fromBlock, toBlock };
-            logs = await provider.getLogs(fallbackFilter);
-            row._lastFallback = Date.now();
-            console.warn(`[${name}] Using fallback getLogs without topics.`);
-          }
         } catch (err) {
-          if (err.message.includes('maximum 10 calls in 1 batch')) return;
           console.warn(`[${name}] Log fetch error: ${err.message}`);
-          return;
+          continue;
         }
+
+        if (!logs.length) continue;
 
         const contract = new Contract(address, iface.fragments, provider);
         let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
@@ -228,7 +216,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
 
   const embed = {
     title: `💸 NFT SOLD – ${name} #${tokenId}`,
-    description: `Token \`#${tokenId}\` just sold!`,
+    description: `Token \`${tokenId}\` just sold!`,
     fields: [
       { name: '👤 Seller', value: shortWalletLink(from), inline: true },
       { name: '🧑‍💻 Buyer', value: shortWalletLink(to), inline: true },
@@ -255,6 +243,7 @@ module.exports = {
   trackBaseContracts,
   contractListeners
 };
+
 
 
 
