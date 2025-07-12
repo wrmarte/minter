@@ -13,10 +13,11 @@ const RPCS = {
     'https://1rpc.io/eth',
     'https://rpc.ankr.com/eth'
   ],
-  ape: [
-    'https://apechain.drpc.org',
-    'https://rpc.apeiron.io'
-  ]
+ape: [
+  // 'https://apechain.drpc.org',
+  // 'https://rpc.apeiron.io'
+]
+
 };
 
 // ✅ Track current index per chain
