@@ -1,4 +1,4 @@
-const { Interface, Contract, id, ZeroAddress, ethers } = require('ethers');
+const { Interface, Contract, id, ZeroAddress } = require('ethers');
 const fetch = require('node-fetch');
 const { getRealDexPriceForToken, getEthPriceFromToken } = require('./price');
 const { shortWalletLink, loadJson, saveJson, seenPath, seenSalesPath } = require('../utils/helpers');
@@ -47,16 +47,13 @@ function setupBaseBlockListener(client, contractRows) {
         };
 
         await delay(150);
-        let logs;
 
+        let logs = [];
         try {
           logs = await provider.getLogs(filter);
         } catch (err) {
-          console.warn(`[${name}] Log fetch error: ${err.message}`);
-          continue;
+          return;
         }
-
-        if (!logs.length) continue;
 
         const contract = new Contract(address, iface.fragments, provider);
         let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
@@ -117,6 +114,49 @@ function setupBaseBlockListener(client, contractRows) {
 }
 
 async function handleMint(client, contractRow, contract, tokenId, to, channel_ids) {
+  const { name, mint_price, mint_token, mint_token_symbol } = contractRow;
+  let imageUrl = 'https://via.placeholder.com/400x400.png?text=NFT';
+  try {
+    let uri = await contract.tokenURI(tokenId);
+    if (uri.startsWith('ipfs://')) uri = uri.replace('ipfs://', 'https://ipfs.io/ipfs/');
+    const meta = await fetch(uri).then(res => res.json());
+    if (meta?.image) {
+      imageUrl = meta.image.startsWith('ipfs://') ? meta.image.replace('ipfs://', 'https://ipfs.io/ipfs/') : meta.image;
+    }
+  } catch {}
+
+  const total = Number(mint_price);
+  let tokenAddr = mint_token?.toLowerCase?.() || '';
+  if (TOKEN_NAME_TO_ADDRESS[mint_token_symbol?.toUpperCase?.()]) {
+    tokenAddr = TOKEN_NAME_TO_ADDRESS[mint_token_symbol.toUpperCase()];
+  }
+
+  let ethValue = await getRealDexPriceForToken(total, tokenAddr);
+  if (!ethValue) {
+    const fallback = await getEthPriceFromToken(tokenAddr);
+    ethValue = fallback ? total * fallback : null;
+  }
+
+  const embed = {
+    title: `✨ NEW ${name.toUpperCase()} MINT!`,
+    description: `Minted by: ${shortWalletLink(to)}\nToken #${tokenId}`,
+    fields: [
+      { name: `💰 Spent (${mint_token_symbol})`, value: total.toFixed(4), inline: true },
+      { name: `⇄ ETH Value`, value: ethValue ? `${ethValue.toFixed(4)} ETH` : 'N/A', inline: true }
+    ],
+    thumbnail: { url: imageUrl },
+    color: 219139,
+    footer: { text: 'Live on Base • Powered by PimpsDev' },
+    timestamp: new Date().toISOString()
+  };
+
+  for (const id of [...new Set(channel_ids)]) {
+    const ch = await client.channels.fetch(id).catch(() => null);
+    if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
+  }
+}
+
+async function handleSale(client, contractRow, contract, tokenId, from, to, txHash, channel_ids) {
   const { name, mint_price, mint_token, mint_token_symbol } = contractRow;
 
   let imageUrl = 'https://via.placeholder.com/400x400.png?text=NFT';
