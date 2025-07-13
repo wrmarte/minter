@@ -1,4 +1,4 @@
-const { Interface, Contract, id, ZeroAddress, ethers } = require('ethers');
+const { Interface, Contract, ethers } = require('ethers');
 const fetch = require('node-fetch');
 const { getRealDexPriceForToken, getEthPriceFromToken } = require('./price');
 const { shortWalletLink, loadJson, saveJson, seenPath, seenSalesPath } = require('../utils/helpers');
@@ -9,6 +9,7 @@ const TOKEN_NAME_TO_ADDRESS = {
   'ADRIAN': '0x7e99075ce287f1cf8cbcaaa6a1c7894e404fd7ea'
 };
 
+const ZERO_ADDRESS = ethers.ZeroAddress;
 const contractListeners = {};
 
 async function trackBaseContracts(client) {
@@ -36,16 +37,18 @@ function setupBaseBlockListener(client, contractRows) {
     const toBlock = blockNumber;
 
     let logs = [];
-    try { logs = await provider.getLogs({
-      topics: [id('Transfer(address,address,uint256)')],
-      fromBlock,
-      toBlock
-    }); } catch (err) { return; }
+    try {
+      logs = await provider.getLogs({
+        topics: [ethers.id('Transfer(address,address,uint256)')],
+        fromBlock,
+        toBlock
+      });
+    } catch (err) { return; }
 
     const mintTxMap = new Map();
 
     for (const log of logs) {
-      if (log.topics[0] !== id('Transfer(address,address,uint256)')) continue;
+      if (log.topics[0] !== ethers.id('Transfer(address,address,uint256)')) continue;
       const matchedContract = contractRows.find(row => row.address.toLowerCase() === log.address.toLowerCase());
       if (!matchedContract) continue;
 
@@ -72,7 +75,7 @@ function setupBaseBlockListener(client, contractRows) {
       const mintKey = `${log.address}-${tokenIdStr}`;
       const saleKey = `${log.address}-${txHash}`;
 
-      if (from === ZeroAddress) {
+      if (from === ZERO_ADDRESS) {
         let shouldSend = false;
         for (const gid of allGuildIds) {
           const dedupeKey = `${gid}-${mintKey}`;
@@ -112,12 +115,10 @@ function setupBaseBlockListener(client, contractRows) {
   });
 }
 
-// ✅ HANDLE MINT SINGLE
 async function handleMintSingle(client, contractRow, contract, tokenIdStr, txHash, channel_ids) {
   await handleMintBulk(client, contractRow, contract, [tokenIdStr], txHash, channel_ids, true);
 }
 
-// ✅ HANDLE MINT BULK
 async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, channel_ids, isSingle = false) {
   const { name, mint_price, mint_token, mint_token_symbol } = contractRow;
   const provider = getProvider('base');
@@ -185,7 +186,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
   }
 
   if (!ethValue) {
-    const transferTopic = id('Transfer(address,address,uint256)');
+    const transferTopic = ethers.id('Transfer(address,address,uint256)');
     const seller = ethers.getAddress(from);
 
     for (const log of receipt.logs) {
@@ -239,3 +240,4 @@ module.exports = {
   trackBaseContracts,
   contractListeners
 };
+
