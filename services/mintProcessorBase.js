@@ -39,6 +39,7 @@ function setupBaseBlockListener(client, contractRows) {
       try {
         const name = row.name;
         const address = row.address.toLowerCase();
+        const allChannelIds = [...new Set([...(row.channel_ids || [])])];
         const filter = {
           address,
           topics: [id('Transfer(address,address,uint256)')],
@@ -48,13 +49,14 @@ function setupBaseBlockListener(client, contractRows) {
 
         await delay(150);
         let logs = [];
-        try { logs = await provider.getLogs(filter); } catch (err) { return; }
+        try { logs = await provider.getLogs(filter); } catch (err) { continue; }
 
         const contract = new Contract(address, iface.fragments, provider);
         let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
         let seenSales = new Set((loadJson(seenSalesPath(name)) || []).map(tx => tx.toLowerCase()));
 
         const mintTxMap = new Map();
+        const txToFromTo = new Map();
 
         for (const log of logs) {
           let parsed;
@@ -62,23 +64,16 @@ function setupBaseBlockListener(client, contractRows) {
           const { from, to, tokenId } = parsed.args;
           const tokenIdStr = tokenId.toString();
           const txHash = log.transactionHash.toLowerCase();
-          const allChannelIds = [...new Set([...(row.channel_ids || [])])];
-          const allGuildIds = [];
-
-          for (const id of allChannelIds) {
-            try {
-              const ch = await client.channels.fetch(id);
-              if (ch.guildId) allGuildIds.push(ch.guildId);
-            } catch {}
-          }
 
           const mintKey = `${address}-${tokenIdStr}`;
           const saleKey = `${address}-${txHash}`;
 
           if (from === ZeroAddress) {
             let shouldSend = false;
-            for (const gid of allGuildIds) {
-              const dedupeKey = `${gid}-${mintKey}`;
+            for (const id of allChannelIds) {
+              const ch = await client.channels.fetch(id).catch(() => null);
+              if (!ch?.guildId) continue;
+              const dedupeKey = `${ch.guildId}-${mintKey}`;
               if (globalSeenMints.has(dedupeKey)) continue;
               globalSeenMints.add(dedupeKey);
               shouldSend = true;
@@ -88,11 +83,14 @@ function setupBaseBlockListener(client, contractRows) {
 
             if (!mintTxMap.has(txHash)) mintTxMap.set(txHash, []);
             mintTxMap.get(txHash).push(tokenIdStr);
+            txToFromTo.set(txHash, to);
 
           } else {
             let shouldSend = false;
-            for (const gid of allGuildIds) {
-              const dedupeKey = `${gid}-${txHash}`;
+            for (const id of allChannelIds) {
+              const ch = await client.channels.fetch(id).catch(() => null);
+              if (!ch?.guildId) continue;
+              const dedupeKey = `${ch.guildId}-${txHash}`;
               if (globalSeenSales.has(dedupeKey)) continue;
               globalSeenSales.add(dedupeKey);
               shouldSend = true;
@@ -104,10 +102,11 @@ function setupBaseBlockListener(client, contractRows) {
         }
 
         for (const [txHash, tokenIds] of mintTxMap.entries()) {
+          const minter = txToFromTo.get(txHash);
           if (tokenIds.length === 1) {
-            await handleMintSingle(client, row, contract, tokenIds[0], txHash, allChannelIds);
+            await handleMintSingle(client, row, contract, tokenIds[0], minter, allChannelIds);
           } else {
-            await handleMintBulk(client, row, contract, tokenIds, txHash, allChannelIds);
+            await handleMintBulk(client, row, contract, tokenIds, txHash, minter, allChannelIds);
           }
         }
 
@@ -120,57 +119,16 @@ function setupBaseBlockListener(client, contractRows) {
   });
 }
 
-async function handleMintSingle(client, contractRow, contract, tokenId, txHash, channel_ids) {
-  const { name, mint_price, mint_token, mint_token_symbol } = contractRow;
-  let imageUrl = 'https://via.placeholder.com/400x400.png?text=NFT';
-
-  try {
-    let uri = await contract.tokenURI(tokenId);
-    if (uri.startsWith('ipfs://')) uri = uri.replace('ipfs://', 'https://ipfs.io/ipfs/');
-    const meta = await fetch(uri).then(res => res.json());
-    if (meta?.image) {
-      imageUrl = meta.image.startsWith('ipfs://') ? meta.image.replace('ipfs://', 'https://ipfs.io/ipfs/') : meta.image;
-    }
-  } catch {}
-
-  let tokenAddr = mint_token?.toLowerCase?.() || '';
-  if (TOKEN_NAME_TO_ADDRESS[mint_token_symbol?.toUpperCase?.()]) {
-    tokenAddr = TOKEN_NAME_TO_ADDRESS[mint_token_symbol.toUpperCase()];
-  }
-
-  let total = Number(mint_price);
-  let ethValue = await getRealDexPriceForToken(total, tokenAddr);
-  if (!ethValue) {
-    const fallback = await getEthPriceFromToken(tokenAddr);
-    ethValue = fallback ? total * fallback : null;
-  }
-
-  const embed = {
-    title: `✨ NEW ${name.toUpperCase()} MINT!`,
-    description: `Token ID: #${tokenId}`,
-    fields: [
-      { name: `💰 Spent (${mint_token_symbol})`, value: total.toFixed(4), inline: true },
-      { name: `⇄ ETH Value`, value: ethValue ? `${ethValue.toFixed(4)} ETH` : 'N/A', inline: true }
-    ],
-    thumbnail: { url: imageUrl },
-    color: 219139,
-    footer: { text: 'Live on Base • Powered by PimpsDev' },
-    timestamp: new Date().toISOString()
-  };
-
-  for (const id of [...new Set(channel_ids)]) {
-    const ch = await client.channels.fetch(id).catch(() => null);
-    if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
-  }
+async function handleMintSingle(client, contractRow, contract, tokenIdStr, to, channel_ids) {
+  await handleMintBulk(client, contractRow, contract, [tokenIdStr], null, to, channel_ids);
 }
 
-async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, channel_ids) {
+async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, to, channel_ids) {
   const { name, mint_price, mint_token, mint_token_symbol } = contractRow;
   let tokenAddr = mint_token?.toLowerCase?.() || '';
   if (TOKEN_NAME_TO_ADDRESS[mint_token_symbol?.toUpperCase?.()]) {
     tokenAddr = TOKEN_NAME_TO_ADDRESS[mint_token_symbol.toUpperCase()];
   }
-
   let total = Number(mint_price) * tokenIds.length;
   let ethValue = await getRealDexPriceForToken(total, tokenAddr);
   if (!ethValue) {
@@ -178,10 +136,19 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     ethValue = fallback ? total * fallback : null;
   }
 
-  const imageUrl = 'https://via.placeholder.com/400x400.png?text=NFT';
+  let imageUrl = 'https://via.placeholder.com/400x400.png?text=NFT';
+  try {
+    let uri = await contract.tokenURI(tokenIds[0]);
+    if (uri.startsWith('ipfs://')) uri = uri.replace('ipfs://', 'https://ipfs.io/ipfs/');
+    const meta = await fetch(uri).then(res => res.json());
+    if (meta?.image) {
+      imageUrl = meta.image.startsWith('ipfs://') ? meta.image.replace('ipfs://', 'https://ipfs.io/ipfs/') : meta.image;
+    }
+  } catch {}
+
   const embed = {
-    title: `✨ BULK ${name.toUpperCase()} MINT (${tokenIds.length})!`,
-    description: `Minted Token IDs:\n${tokenIds.map(id => `#${id}`).join(', ')}`,
+    title: tokenIds.length === 1 ? `✨ NEW ${name.toUpperCase()} MINT!` : `✨ BULK ${name.toUpperCase()} MINT (${tokenIds.length})!`,
+    description: tokenIds.length === 1 ? `Minted by: ${shortWalletLink(to)}\nToken #${tokenIds[0]}` : `Minted by: ${shortWalletLink(to)}\nToken IDs: ${tokenIds.map(id => `#${id}`).join(', ')}`,
     fields: [
       { name: `💰 Total Spent (${mint_token_symbol})`, value: total.toFixed(4), inline: true },
       { name: `⇄ ETH Value`, value: ethValue ? `${ethValue.toFixed(4)} ETH` : 'N/A', inline: true }
@@ -197,6 +164,7 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
   }
 }
+
 async function handleSale(client, contractRow, contract, tokenId, from, to, txHash, channel_ids) {
   const { name, mint_token, mint_token_symbol } = contractRow;
 
