@@ -11,36 +11,41 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 module.exports = (client, pg) => {
   const guildNameCache = new Map();
 
-  // INTERACTION HANDLER
-  client.on('interactionCreate', async interaction => {
-    // BLOCK 1: Check if autocomplete command exists first (modular check)
-    if (interaction.isAutocomplete()) {
-      const command = client.commands.get(interaction.commandName);
-      if (command && typeof command.autocomplete === 'function') {
-        await command.autocomplete(interaction, pg);
-        return;
+// INTERACTION HANDLER
+client.on('interactionCreate', async interaction => {
+  // BLOCK 1: Check if autocomplete command exists first (modular check)
+  if (interaction.isAutocomplete()) {
+    const command = client.commands.get(interaction.commandName);
+    if (command && typeof command.autocomplete === 'function') {
+      if (command.autocomplete.length > 1) {
+        await command.autocomplete(interaction, { pg });
+      } else {
+        await command.autocomplete(interaction);
       }
+      return;
+    }
 
-      // BLOCK 2: Fallback autocomplete logic
-      const { commandName, options } = interaction;
-      const focused = options.getFocused(true);
-      const guildId = interaction.guild?.id;
-      const userId = interaction.user.id;
-      const ownerId = process.env.BOT_OWNER_ID;
-      const isOwner = userId === ownerId;
+    // BLOCK 2: Fallback autocomplete logic
+    const { commandName, options } = interaction;
+    const focused = options.getFocused(true);
+    const guildId = interaction.guild?.id;
+    const userId = interaction.user.id;
+    const ownerId = process.env.BOT_OWNER_ID;
+    const isOwner = userId === ownerId;
 
-      const safeRespond = async (choices) => {
-        try {
-          if (!interaction.responded) await interaction.respond(choices);
-        } catch (err) {
-          if (err.code === 10062) console.warn('⚠️ Autocomplete expired');
-          else if (err.code === 40060) console.warn('⚠️ Already acknowledged');
-          else console.error('❌ Autocomplete respond error:', err);
-        }
-      };
-
+    const safeRespond = async (choices) => {
       try {
-        const subcommand = interaction.options.getSubcommand(false);
+        if (!interaction.responded) await interaction.respond(choices);
+      } catch (err) {
+        if (err.code === 10062) console.warn('⚠️ Autocomplete expired');
+        else if (err.code === 40060) console.warn('⚠️ Already acknowledged');
+        else console.error('❌ Autocomplete respond error:', err);
+      }
+    };
+
+    try {
+      const subcommand = interaction.options.getSubcommand(false);
+
 
         // FLEX AUTOCOMPLETE BLOCK
         if (commandName === 'flex') {
