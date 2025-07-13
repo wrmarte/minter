@@ -36,14 +36,19 @@ module.exports = {
     const guildId = interaction.guild?.id;
 
     if (focused.name === 'name') {
-      const res = await pg.query(`SELECT name FROM flex_projects WHERE (guild_id = $1 OR guild_id IS NULL) AND network = 'base'`, [guildId]);
-      const projectNames = res.rows
-        .map(row => row.name)
-        .filter(Boolean)
-        .filter(name => name.toLowerCase().includes(focused.value.toLowerCase()))
-        .slice(0, 25)
-        .map(name => ({ name, value: name }));
-      await interaction.respond(projectNames);
+      try {
+        const res = await pg.query(`SELECT name FROM flex_projects WHERE (guild_id = $1 OR guild_id IS NULL) AND network = 'base'`, [guildId]);
+        const projectNames = res.rows
+          .map(row => row.name)
+          .filter(Boolean)
+          .filter(name => name.toLowerCase().includes(focused.value.toLowerCase()))
+          .slice(0, 25)
+          .map(name => ({ name, value: name }));
+        await interaction.respond(projectNames);
+      } catch (err) {
+        console.error('❌ FlexFloppy autocomplete error:', err);
+        await interaction.respond([]);
+      }
     }
   },
 
@@ -103,3 +108,4 @@ module.exports = {
     }
   }
 };
+
