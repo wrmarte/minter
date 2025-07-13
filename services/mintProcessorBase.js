@@ -1,4 +1,4 @@
-const { Interface, Contract, id, ZeroAddress } = require('ethers');
+const { Interface, Contract, id, ZeroAddress, ethers } = require('ethers');
 const fetch = require('node-fetch');
 const { getRealDexPriceForToken, getEthPriceFromToken } = require('./price');
 const { shortWalletLink, loadJson, saveJson, seenPath, seenSalesPath } = require('../utils/helpers');
@@ -47,17 +47,14 @@ function setupBaseBlockListener(client, contractRows) {
         };
 
         await delay(150);
-
         let logs = [];
-        try {
-          logs = await provider.getLogs(filter);
-        } catch (err) {
-          return;
-        }
+        try { logs = await provider.getLogs(filter); } catch (err) { return; }
 
         const contract = new Contract(address, iface.fragments, provider);
         let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
         let seenSales = new Set((loadJson(seenSalesPath(name)) || []).map(tx => tx.toLowerCase()));
+
+        const mintTxMap = new Map();
 
         for (const log of logs) {
           let parsed;
@@ -65,7 +62,6 @@ function setupBaseBlockListener(client, contractRows) {
           const { from, to, tokenId } = parsed.args;
           const tokenIdStr = tokenId.toString();
           const txHash = log.transactionHash.toLowerCase();
-
           const allChannelIds = [...new Set([...(row.channel_ids || [])])];
           const allGuildIds = [];
 
@@ -89,7 +85,10 @@ function setupBaseBlockListener(client, contractRows) {
             }
             if (!shouldSend || seenTokenIds.has(tokenIdStr)) continue;
             seenTokenIds.add(tokenIdStr);
-            await handleMint(client, row, contract, tokenId, to, allChannelIds);
+
+            if (!mintTxMap.has(txHash)) mintTxMap.set(txHash, []);
+            mintTxMap.get(txHash).push(tokenIdStr);
+
           } else {
             let shouldSend = false;
             for (const gid of allGuildIds) {
@@ -104,6 +103,10 @@ function setupBaseBlockListener(client, contractRows) {
           }
         }
 
+        for (const [txHash, tokenIds] of mintTxMap.entries()) {
+          await handleMintBulk(client, row, contract, tokenIds, txHash, allChannelIds);
+        }
+
         saveJson(seenPath(name), [...seenTokenIds]);
         saveJson(seenSalesPath(name), [...seenSales]);
       } catch (err) {
@@ -113,35 +116,31 @@ function setupBaseBlockListener(client, contractRows) {
   });
 }
 
-async function handleMint(client, contractRow, contract, tokenId, to, channel_ids) {
+async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, channel_ids) {
   const { name, mint_price, mint_token, mint_token_symbol } = contractRow;
-  let imageUrl = 'https://via.placeholder.com/400x400.png?text=NFT';
-  try {
-    let uri = await contract.tokenURI(tokenId);
-    if (uri.startsWith('ipfs://')) uri = uri.replace('ipfs://', 'https://ipfs.io/ipfs/');
-    const meta = await fetch(uri).then(res => res.json());
-    if (meta?.image) {
-      imageUrl = meta.image.startsWith('ipfs://') ? meta.image.replace('ipfs://', 'https://ipfs.io/ipfs/') : meta.image;
-    }
-  } catch {}
+  const provider = getProvider('base');
+  const receipt = await provider.getTransactionReceipt(txHash);
+  if (!receipt) return;
 
-  const total = Number(mint_price);
   let tokenAddr = mint_token?.toLowerCase?.() || '';
   if (TOKEN_NAME_TO_ADDRESS[mint_token_symbol?.toUpperCase?.()]) {
     tokenAddr = TOKEN_NAME_TO_ADDRESS[mint_token_symbol.toUpperCase()];
   }
 
+  let total = Number(mint_price) * tokenIds.length;
   let ethValue = await getRealDexPriceForToken(total, tokenAddr);
   if (!ethValue) {
     const fallback = await getEthPriceFromToken(tokenAddr);
     ethValue = fallback ? total * fallback : null;
   }
 
+  const imageUrl = 'https://via.placeholder.com/400x400.png?text=NFT';
   const embed = {
-    title: `✨ NEW ${name.toUpperCase()} MINT!`,
-    description: `Minted by: ${shortWalletLink(to)}\nToken #${tokenId}`,
+    title: `✨ BULK ${name.toUpperCase()} MINT (${tokenIds.length})!`,
+    description: `Minted Token IDs:
+${tokenIds.map(id => `#${id}`).join(', ')}`,
     fields: [
-      { name: `💰 Spent (${mint_token_symbol})`, value: total.toFixed(4), inline: true },
+      { name: `💰 Total Spent (${mint_token_symbol})`, value: total.toFixed(4), inline: true },
       { name: `⇄ ETH Value`, value: ethValue ? `${ethValue.toFixed(4)} ETH` : 'N/A', inline: true }
     ],
     thumbnail: { url: imageUrl },
