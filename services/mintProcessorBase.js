@@ -12,6 +12,24 @@ const TOKEN_NAME_TO_ADDRESS = {
 const ZERO_ADDRESS = ethers.ZeroAddress;
 const contractListeners = {};
 
+async function safeGetLogs(provider, filter, retries = 3) {
+  while (retries > 0) {
+    try {
+      return await provider.getLogs(filter);
+    } catch (err) {
+      if (err.code === 'UNKNOWN_ERROR' && err.error?.message?.includes('over rate limit')) {
+        console.warn(`⏳ Rate limited for ${filter.address}, retrying in 500ms... (${retries} left)`);
+        await delay(500);
+        retries--;
+      } else {
+        console.warn(`⚠️ [base] Error fetching logs for ${filter.address} ${filter.fromBlock}–${filter.toBlock}: ${err.message}`);
+        break;
+      }
+    }
+  }
+  return [];
+}
+
 async function trackBaseContracts(client) {
   const pg = client.pg;
   const res = await pg.query("SELECT * FROM contract_watchlist WHERE chain = 'base'");
@@ -63,8 +81,7 @@ function setupBaseBlockListener(client, contractRows) {
       ];
 
       for (const filter of filters) {
-        let logs = [];
-        try { logs = await provider.getLogs(filter); } catch {}
+        let logs = await safeGetLogs(provider, filter);
 
         for (const log of logs) {
           let parsed;
