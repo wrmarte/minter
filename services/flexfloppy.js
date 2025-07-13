@@ -31,6 +31,22 @@ module.exports = {
         .setDescription('Enable Ultra Style')
     ),
 
+  async autocomplete(interaction, pg) {
+    const focused = interaction.options.getFocused(true);
+    const guildId = interaction.guild?.id;
+
+    if (focused.name === 'name') {
+      const res = await pg.query(`SELECT name FROM flex_projects WHERE (guild_id = $1 OR guild_id IS NULL) AND network = 'base'`, [guildId]);
+      const projectNames = res.rows
+        .map(row => row.name)
+        .filter(Boolean)
+        .filter(name => name.toLowerCase().includes(focused.value.toLowerCase()))
+        .slice(0, 25)
+        .map(name => ({ name, value: name }));
+      await interaction.respond(projectNames);
+    }
+  },
+
   async execute(interaction) {
     const pg = interaction.client.pg;
     const name = interaction.options.getString('name').toLowerCase();
@@ -44,7 +60,7 @@ module.exports = {
       await interaction.deferReply({ flags: 0 }).catch(() => {});
 
       const result = await pg.query(
-        `SELECT * FROM flex_projects WHERE (guild_id = $1 OR guild_id IS NULL) AND name = $2 ORDER BY guild_id DESC LIMIT 1`,
+        `SELECT * FROM flex_projects WHERE (guild_id = $1 OR guild_id IS NULL) AND name = $2 AND network = 'base' ORDER BY guild_id DESC LIMIT 1`,
         [interaction.guild.id, name]
       );
 
@@ -87,3 +103,4 @@ module.exports = {
     }
   }
 };
+
