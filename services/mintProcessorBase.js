@@ -68,7 +68,8 @@ function setupBaseBlockListener(client, contractRows) {
           const mintKey = `${address}-${tokenIdStr}`;
           const saleKey = `${address}-${txHash}`;
 
-          if (from === ZeroAddress) {
+          if (from === ZeroAddress || from.toLowerCase() === address) {
+
             let shouldSend = false;
             for (const id of allChannelIds) {
               const ch = await client.channels.fetch(id).catch(() => null);
