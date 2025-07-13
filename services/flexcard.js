@@ -26,28 +26,28 @@ module.exports = {
         .setDescription('Token ID')
         .setRequired(true)
     )
-    .addStringOption(opt =>
-      opt.setName('style')
-        .setDescription('FlexCard Style')
-        .addChoices(
-          { name: 'Default', value: 'default' },
-          { name: 'Ultra', value: 'ultra' },
-          { name: 'Floppy', value: 'floppy' }
-        )
+    .addBooleanOption(opt =>
+      opt.setName('ultra')
+        .setDescription('Enable Ultra Style')
+    )
+    .addBooleanOption(opt =>
+      opt.setName('floppy')
+        .setDescription('Enable Floppy Style')
     ),
 
   async execute(interaction) {
     const pg = interaction.client.pg;
     const name = interaction.options.getString('name').toLowerCase();
     const tokenId = interaction.options.getInteger('tokenid');
-    const style = interaction.options.getString('style') || 'default';
+    const ultra = interaction.options.getBoolean('ultra');
+    const floppy = interaction.options.getBoolean('floppy');
     const userIsOwner = interaction.user.id === process.env.BOT_OWNER_ID;
 
     try {
       await interaction.deferReply({ ephemeral: false }).catch(() => {});
 
       const result = await pg.query(
-        `SELECT * FROM flex_projects WHERE guild_id = $1 AND name = $2`,
+        `SELECT * FROM flex_projects WHERE (guild_id = $1 OR guild_id IS NULL) AND name = $2 ORDER BY guild_id DESC LIMIT 1`,
         [interaction.guild.id, name]
       );
 
@@ -63,15 +63,19 @@ module.exports = {
       const collectionName = display_name || storedName;
       const chain = network.toLowerCase();
 
-      if ((style === 'ultra' || style === 'floppy') && !userIsOwner) {
+      if ((ultra || floppy) && !userIsOwner) {
         return await interaction.editReply('🚫 Only the bot owner can use Ultra or Floppy mode for now.');
+      }
+
+      if (ultra && floppy) {
+        return await interaction.editReply('❌ You can’t use both Ultra and Floppy styles at the same time.');
       }
 
       let imageBuffer;
 
-      if (style === 'ultra') {
+      if (ultra) {
         imageBuffer = await buildUltraFlexCard(contractAddress, tokenId, collectionName, chain);
-      } else if (style === 'floppy') {
+      } else if (floppy) {
         imageBuffer = await buildFloppyFlexCard(contractAddress, tokenId, collectionName, chain);
       } else {
         const { buildFlexCard } = getFlexService(chain);
@@ -79,7 +83,7 @@ module.exports = {
       }
 
       const attachment = new AttachmentBuilder(imageBuffer, {
-        name: `${style}flexcard.png`
+        name: `${ultra ? 'ultra' : floppy ? 'floppy' : 'default'}flexcard.png`
       });
 
       return await interaction.editReply({ files: [attachment] });
@@ -99,6 +103,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
