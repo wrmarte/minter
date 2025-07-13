@@ -1,3 +1,4 @@
+// ✅ Mintprocessor Base Patch With Fallback TX Receipt Check
 const { Interface, Contract, id, ZeroAddress, ethers } = require('ethers');
 const fetch = require('node-fetch');
 const { getRealDexPriceForToken, getEthPriceFromToken } = require('./price');
@@ -35,78 +36,91 @@ function setupBaseBlockListener(client, contractRows) {
     const fromBlock = Math.max(blockNumber - 5, 0);
     const toBlock = blockNumber;
 
-    let logs = [];
-    try { logs = await provider.getLogs({
-      topics: [id('Transfer(address,address,uint256)')],
-      fromBlock,
-      toBlock
-    }); } catch (err) { return; }
+    for (const row of contractRows) {
+      try {
+        const name = row.name;
+        const address = row.address.toLowerCase();
+        const filter = {
+          address,
+          topics: [id('Transfer(address,address,uint256)')],
+          fromBlock,
+          toBlock
+        };
 
-    const mintTxMap = new Map();
+        await delay(150);
+        let logs = [];
+        try { logs = await provider.getLogs(filter); } catch {}
 
-    for (const log of logs) {
-      if (log.topics[0] !== id('Transfer(address,address,uint256)')) continue;
-      const matchedContract = contractRows.find(row => row.address.toLowerCase() === log.address.toLowerCase());
-      if (!matchedContract) continue;
+        const contract = new Contract(address, iface.fragments, provider);
+        let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
+        let seenSales = new Set((loadJson(seenSalesPath(name)) || []).map(tx => tx.toLowerCase()));
 
-      const contract = new Contract(log.address, iface.fragments, provider);
-      const name = matchedContract.name;
-      let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
-      let seenSales = new Set((loadJson(seenSalesPath(name)) || []).map(tx => tx.toLowerCase()));
+        const mintTxMap = new Map();
+        const processedTx = new Set();
 
-      let parsed;
-      try { parsed = iface.parseLog(log); } catch { continue; }
-      const { from, to, tokenId } = parsed.args;
-      const tokenIdStr = tokenId.toString();
-      const txHash = log.transactionHash.toLowerCase();
-      const allChannelIds = [...new Set([...(matchedContract.channel_ids || [])])];
-      const allGuildIds = [];
+        for (const log of logs) {
+          let parsed;
+          try { parsed = iface.parseLog(log); } catch { continue; }
+          const { from, to, tokenId } = parsed.args;
+          const tokenIdStr = tokenId.toString();
+          const txHash = log.transactionHash.toLowerCase();
+          processedTx.add(txHash);
+          const allChannelIds = [...new Set([...(row.channel_ids || [])])];
+          const allGuildIds = [];
 
-      for (const id of allChannelIds) {
-        try {
-          const ch = await client.channels.fetch(id);
-          if (ch.guildId) allGuildIds.push(ch.guildId);
-        } catch {}
-      }
+          for (const id of allChannelIds) {
+            try {
+              const ch = await client.channels.fetch(id);
+              if (ch.guildId) allGuildIds.push(ch.guildId);
+            } catch {}
+          }
 
-      const mintKey = `${log.address}-${tokenIdStr}`;
-      const saleKey = `${log.address}-${txHash}`;
+          const mintKey = `${address}-${tokenIdStr}`;
 
-      if (from === ZeroAddress) {
-        let shouldSend = false;
-        for (const gid of allGuildIds) {
-          const dedupeKey = `${gid}-${mintKey}`;
-          if (globalSeenMints.has(dedupeKey)) continue;
-          globalSeenMints.add(dedupeKey);
-          shouldSend = true;
+          if (from === ZeroAddress) {
+            let shouldSend = false;
+            for (const gid of allGuildIds) {
+              const dedupeKey = `${gid}-${mintKey}`;
+              if (globalSeenMints.has(dedupeKey)) continue;
+              globalSeenMints.add(dedupeKey);
+              shouldSend = true;
+            }
+            if (!shouldSend || seenTokenIds.has(tokenIdStr)) continue;
+            seenTokenIds.add(tokenIdStr);
+
+            if (!mintTxMap.has(txHash)) mintTxMap.set(txHash, []);
+            mintTxMap.get(txHash).push(tokenIdStr);
+          }
         }
-        if (!shouldSend || seenTokenIds.has(tokenIdStr)) continue;
-        seenTokenIds.add(tokenIdStr);
 
-        if (!mintTxMap.has(txHash)) mintTxMap.set(txHash, { matchedContract, contract, tokenIds: [] });
-        mintTxMap.get(txHash).tokenIds.push(tokenIdStr);
+        // ✅ Fallback: Check recent TX receipts if no logs returned
+        if (logs.length === 0) {
+          const block = await provider.getBlockWithTransactions(toBlock);
+          for (const tx of block.transactions) {
+            if (processedTx.has(tx.hash)) continue;
+            const receipt = await provider.getTransactionReceipt(tx.hash);
+            if (!receipt) continue;
+            for (const log of receipt.logs) {
+              if (log.address.toLowerCase() !== address) continue;
+              if (log.topics[0] !== id('Transfer(address,address,uint256)')) continue;
+              const from = ethers.getAddress('0x' + log.topics[1].slice(26));
+              if (from !== ZeroAddress) continue;
+              const tokenId = ethers.BigNumber.from(log.topics[3]).toString();
+              const txHash = receipt.transactionHash.toLowerCase();
+              if (!mintTxMap.has(txHash)) mintTxMap.set(txHash, []);
+              mintTxMap.get(txHash).push(tokenId);
+            }
+          }
+        }
+
+        for (const [txHash, tokenIds] of mintTxMap.entries()) {
+          await handleMintBulk(client, row, contract, tokenIds, txHash, row.channel_ids);
+        }
 
         saveJson(seenPath(name), [...seenTokenIds]);
-      } else {
-        let shouldSend = false;
-        for (const gid of allGuildIds) {
-          const dedupeKey = `${gid}-${txHash}`;
-          if (globalSeenSales.has(dedupeKey)) continue;
-          globalSeenSales.add(dedupeKey);
-          shouldSend = true;
-        }
-        if (!shouldSend || seenSales.has(txHash)) continue;
-        seenSales.add(txHash);
-        await handleSale(client, matchedContract, contract, tokenId, from, to, txHash, allChannelIds);
         saveJson(seenSalesPath(name), [...seenSales]);
-      }
-    }
-
-    for (const [txHash, { matchedContract, contract, tokenIds }] of mintTxMap.entries()) {
-      if (tokenIds.length === 1) {
-        await handleMintSingle(client, matchedContract, contract, tokenIds[0], txHash, matchedContract.channel_ids);
-      } else {
-        await handleMintBulk(client, matchedContract, contract, tokenIds, txHash, matchedContract.channel_ids);
+      } catch (err) {
+        console.warn(`[${row.name}] Block processing error: ${err.message}`);
       }
     }
   });
