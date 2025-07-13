@@ -43,8 +43,10 @@ module.exports = {
     const floppy = interaction.options.getBoolean('floppy');
     const userIsOwner = interaction.user.id === process.env.BOT_OWNER_ID;
 
+    console.log(`FlexCard Debug → User ID: ${interaction.user.id}, BOT_OWNER_ID: ${process.env.BOT_OWNER_ID}`);
+
     try {
-      await interaction.deferReply({ ephemeral: false }).catch(() => {});
+      await interaction.deferReply({ flags: 0 }).catch(() => {});
 
       const result = await pg.query(
         `SELECT * FROM flex_projects WHERE (guild_id = $1 OR guild_id IS NULL) AND name = $2 ORDER BY guild_id DESC LIMIT 1`,
@@ -94,7 +96,7 @@ module.exports = {
 
       try {
         if (!interaction.replied && !interaction.deferred) {
-          await interaction.reply({ content: '❌ Failed to generate FlexCard.', ephemeral: true });
+          await interaction.reply({ content: '❌ Failed to generate FlexCard.', flags: 64 });
         } else {
           await interaction.editReply({ content: '❌ Failed to generate FlexCard.' });
         }
@@ -104,6 +106,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
