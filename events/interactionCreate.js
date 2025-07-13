@@ -1,3 +1,5 @@
+// interactionCreate.js FULL PATCHED + LABELS
+
 const { flavorMap } = require('../utils/flavorMap');
 const { Contract } = require('ethers');
 const fetch = require('node-fetch');
@@ -9,7 +11,9 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 module.exports = (client, pg) => {
   const guildNameCache = new Map();
 
+  // INTERACTION HANDLER
   client.on('interactionCreate', async interaction => {
+    // BLOCK 1: Check if autocomplete command exists first (modular check)
     if (interaction.isAutocomplete()) {
       const command = client.commands.get(interaction.commandName);
       if (command && typeof command.autocomplete === 'function') {
@@ -17,6 +21,7 @@ module.exports = (client, pg) => {
         return;
       }
 
+      // BLOCK 2: Fallback autocomplete logic
       const { commandName, options } = interaction;
       const focused = options.getFocused(true);
       const guildId = interaction.guild?.id;
@@ -37,6 +42,7 @@ module.exports = (client, pg) => {
       try {
         const subcommand = interaction.options.getSubcommand(false);
 
+        // FLEX AUTOCOMPLETE BLOCK
         if (commandName === 'flex') {
           if (subcommand === 'duo' && focused.name === 'name') {
             const res = await pg.query(`SELECT name FROM flex_duo WHERE guild_id = $1`, [guildId]);
@@ -57,7 +63,6 @@ module.exports = (client, pg) => {
             if (!res.rows.length) return;
             const { address, network } = res.rows[0];
             const chain = (network || 'base').toLowerCase();
-
             let tokenIds = [];
             if (chain === 'eth') {
               try {
@@ -74,18 +79,19 @@ module.exports = (client, pg) => {
                 tokenIds = Array.from({ length: Math.min(100, totalNum) }, (_, i) => (i + 1).toString());
               } catch { tokenIds = []; }
             }
-
             const filtered = tokenIds.filter(id => id.includes(focused.value)).slice(0, 25).map(id => ({ name: `#${id}`, value: parseInt(id) }));
             return await safeRespond(filtered);
           }
         }
 
+        // FLEXDEV AUTOCOMPLETE BLOCK
         if (commandName === 'flexdev' && focused.name === 'name') {
           const res = await pg.query(`SELECT name FROM flex_projects WHERE guild_id = $1`, [guildId]);
           const choices = res.rows.map(r => r.name).filter(Boolean).filter(n => n.toLowerCase().includes(focused.value.toLowerCase())).slice(0, 25).map(name => ({ name, value: name }));
           return await safeRespond(choices);
         }
 
+        // EXP AUTOCOMPLETE BLOCK
         if (commandName === 'exp' && focused.name === 'name') {
           const builtInChoices = Object.keys(flavorMap).map(name => ({ name: `🔥 ${name} (Built-in)`, value: name }));
           let query, params;
@@ -94,10 +100,8 @@ module.exports = (client, pg) => {
           } else {
             query = `SELECT DISTINCT name, guild_id FROM expressions WHERE guild_id = $1 OR guild_id IS NULL`; params = [guildId];
           }
-
           const res = await pg.query(query, params);
           const thisServer = [], global = [], otherServers = [];
-
           for (const row of res.rows) {
             if (!row.name) continue;
             if (row.guild_id === null) global.push({ name: `🌐 ${row.name} (Global)`, value: row.name });
@@ -112,12 +116,12 @@ module.exports = (client, pg) => {
               otherServers.push({ name: `🛡️ ${row.name} (${guildName})`, value: row.name });
             }
           }
-
           const combined = [...builtInChoices, ...thisServer, ...global, ...otherServers];
           const filtered = combined.filter(c => c.name.toLowerCase().includes(focused.value.toLowerCase())).slice(0, 25);
           return await safeRespond(filtered);
         }
 
+        // UNTRACKMINTPLUS AUTOCOMPLETE BLOCK
         if (commandName === 'untrackmintplus' && focused.name === 'contract') {
           const res = await pg.query(`SELECT name, address, chain, channel_ids FROM contract_watchlist`);
           const options = [];
@@ -126,7 +130,6 @@ module.exports = (client, pg) => {
             const chain = row.chain || 'unknown';
             const emoji = chain === 'base' ? '🟦' : chain === 'eth' ? '🟧' : chain === 'ape' ? '🐵' : '❓';
             const icon = row.name.toLowerCase().includes('ghost') ? '👻' : row.name.toLowerCase().includes('brother') ? '👑' : row.name.toLowerCase().includes('adrian') ? '💀' : row.name.toLowerCase().includes('dz') ? '🎯' : row.name.toLowerCase().includes('crypto') ? '🖼️' : '📦';
-
             const channels = Array.isArray(row.channel_ids) ? row.channel_ids : (row.channel_ids || '').toString().split(',').filter(Boolean);
             let matchedChannel = null;
             for (const cid of channels) {
@@ -137,49 +140,41 @@ module.exports = (client, pg) => {
               }
             }
             if (!matchedChannel) continue;
-
             const channelName = `#${matchedChannel.name}`;
             const display = `${icon} ${row.name.padEnd(14)} • ${channelName.padEnd(15)} • ${chain.charAt(0).toUpperCase() + chain.slice(1)} ${emoji}`;
             const value = `${row.name}|${chain}`;
             options.push({ name: display.slice(0, 100), value, _sortChain: chain === 'base' ? 0 : chain === 'eth' ? 1 : 2 });
             if (options.length >= 50) break;
           }
-
           const sorted = options.sort((a, b) => a._sortChain - b._sortChain).slice(0, 25).map(({ name, value }) => ({ name, value }));
           return await safeRespond(sorted);
         }
-
       } catch (err) {
         console.error('❌ Autocomplete error:', err);
       }
     }
 
+    // CHAT INPUT COMMAND HANDLER
     if (!interaction.isChatInputCommand()) return;
-
     const command = client.commands.get(interaction.commandName);
     if (!command) return;
 
     try {
       const needsPg = command.execute.length > 1;
-      if (needsPg) {
-        await command.execute(interaction, { pg });
-      } else {
-        await command.execute(interaction);
-      }
+      if (needsPg) await command.execute(interaction, { pg });
+      else await command.execute(interaction);
     } catch (error) {
       console.error(`❌ Error executing /${interaction.commandName}:`, error);
       try {
-        if (interaction.deferred || interaction.replied) {
-          await interaction.editReply({ content: '⚠️ Something went wrong.' });
-        } else {
-          await interaction.reply({ content: '⚠️ Error executing command.', ephemeral: true });
-        }
+        if (interaction.deferred || interaction.replied) await interaction.editReply({ content: '⚠️ Something went wrong.' });
+        else await interaction.reply({ content: '⚠️ Error executing command.', ephemeral: true });
       } catch (fallbackError) {
         console.error('⚠️ Failed to send error message:', fallbackError.message);
       }
     }
   });
 
+  // MUSCLEMB TEXT TRIGGER BLOCK
   client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
     const content = message.content.trim().toLowerCase();
@@ -187,7 +182,6 @@ module.exports = (client, pg) => {
     const userMsg = message.content.slice('musclemb'.length).trim();
     if (!userMsg) return message.reply('💬 Say something for MuscleMB to chew on, bro.');
     await message.channel.sendTyping();
-
     try {
       let completion;
       try {
@@ -209,7 +203,6 @@ module.exports = (client, pg) => {
           temperature: 0.95,
         });
       }
-
       const aiReply = completion.choices[0].message.content;
       await message.reply(aiReply);
     } catch (err) {
@@ -218,5 +211,6 @@ module.exports = (client, pg) => {
     }
   });
 };
+
 
 
