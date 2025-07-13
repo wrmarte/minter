@@ -17,20 +17,15 @@ module.exports = {
 
     try {
       const res = await pg.query(`SELECT name, address, chain, channel_ids FROM contract_watchlist`);
-      console.log('📦 Total tracked contracts:', res.rows.length);
-
       const options = [];
 
       for (const row of res.rows) {
-        console.log('🔍 Row:', row);
-
         if (!row.name || typeof row.name !== 'string') continue;
         if (!row.name.toLowerCase().includes(focused.toLowerCase())) continue;
 
         const address = row.address || '0x000000';
         const chain = row.chain || 'unknown';
 
-        // Normalize channel_ids
         const channels = Array.isArray(row.channel_ids)
           ? row.channel_ids
           : (row.channel_ids || '').toString().split(',').filter(Boolean);
@@ -43,16 +38,12 @@ module.exports = {
         const value = `${row.name}|${chain}`;
 
         if (label && value) {
-          options.push({
-            name: label.slice(0, 100), // Discord limit
-            value
-          });
+          options.push({ name: label.slice(0, 100), value });
         }
 
         if (options.length >= 25) break;
       }
 
-      console.log('✅ Responding with options:', options);
       await interaction.respond(options);
     } catch (err) {
       console.error('❌ Autocomplete error in /untrackmintplus:', err);
@@ -62,14 +53,18 @@ module.exports = {
 
   async execute(interaction) {
     const pg = interaction.client.pg;
-    const { member, options } = interaction;
+    const { member, options, user } = interaction;
 
-const raw = options.getString('contract');
-const [name, chain] = raw.split('|');
+    const ownerId = process.env.BOT_OWNER_ID;
+    const raw = options.getString('contract');
+    const [name, chain] = raw.split('|');
 
+    // ✅ Allow Admins OR Bot Owner
+    const isAdmin = member?.permissions?.has(PermissionsBitField.Flags.Administrator);
+    const isOwner = user.id === ownerId;
 
-    if (!member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-      return interaction.reply({ content: '❌ Admins only.', ephemeral: true });
+    if (!isAdmin && !isOwner) {
+      return interaction.reply({ content: '❌ Only server admins or the bot owner can use this command.', ephemeral: true });
     }
 
     await interaction.deferReply({ ephemeral: true });
@@ -91,4 +86,5 @@ const [name, chain] = raw.split('|');
     }
   }
 };
+
 
