@@ -68,6 +68,7 @@ module.exports = {
       }
 
       if (ultra && floppy) {
+        console.warn(`⚠️ ${interaction.user.username} tried using Ultra + Floppy at once.`);
         return await interaction.editReply('❌ You can’t use both Ultra and Floppy styles at the same time.');
       }
 
@@ -103,6 +104,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
