@@ -1,5 +1,3 @@
-// ✅ MintProcessor Base - Full Length With Labels
-
 const { Interface, Contract, id, ZeroAddress, ethers } = require('ethers');
 const fetch = require('node-fetch');
 const { getRealDexPriceForToken, getEthPriceFromToken } = require('./price');
@@ -13,7 +11,7 @@ const TOKEN_NAME_TO_ADDRESS = {
 
 const contractListeners = {};
 
-// ✅ MAIN TRACKER
+// ✅ TRACK BASE CONTRACTS ENTRY POINT
 async function trackBaseContracts(client) {
   const pg = client.pg;
   const res = await pg.query("SELECT * FROM contract_watchlist WHERE chain = 'base'");
@@ -21,7 +19,7 @@ async function trackBaseContracts(client) {
   setupBaseBlockListener(client, contracts);
 }
 
-// ✅ BASE BLOCK LISTENER WITH BULK MAP
+// ✅ SETUP BLOCK LISTENER WITH BULK MINT SUPPORT
 function setupBaseBlockListener(client, contractRows) {
   const provider = getProvider('base');
   if (provider._global_block_listener_base) return;
@@ -52,7 +50,7 @@ function setupBaseBlockListener(client, contractRows) {
 
         await delay(150);
         let logs = [];
-        try { logs = await provider.getLogs(filter); } catch (err) { return; }
+        try { logs = await provider.getLogs(filter); } catch (err) { continue; }
 
         const contract = new Contract(address, iface.fragments, provider);
         let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
@@ -66,6 +64,7 @@ function setupBaseBlockListener(client, contractRows) {
           const { from, to, tokenId } = parsed.args;
           const tokenIdStr = tokenId.toString();
           const txHash = log.transactionHash.toLowerCase();
+
           const allChannelIds = [...new Set([...(row.channel_ids || [])])];
           const allGuildIds = [];
 
@@ -89,6 +88,7 @@ function setupBaseBlockListener(client, contractRows) {
             }
             if (!shouldSend || seenTokenIds.has(tokenIdStr)) continue;
             seenTokenIds.add(tokenIdStr);
+
             if (!mintTxMap.has(txHash)) mintTxMap.set(txHash, []);
             mintTxMap.get(txHash).push(tokenIdStr);
           } else {
@@ -106,6 +106,7 @@ function setupBaseBlockListener(client, contractRows) {
         }
 
         for (const [txHash, tokenIds] of mintTxMap.entries()) {
+          const allChannelIds = [...new Set([...(row.channel_ids || [])])];
           await handleMintBulk(client, row, contract, tokenIds, txHash, allChannelIds);
         }
 
@@ -118,7 +119,7 @@ function setupBaseBlockListener(client, contractRows) {
   });
 }
 
-// ✅ HANDLE BULK MINT
+// ✅ HANDLE MINT BULK TOKENS
 async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, channel_ids) {
   const { name, mint_price, mint_token, mint_token_symbol } = contractRow;
   const provider = getProvider('base');
