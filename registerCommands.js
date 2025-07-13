@@ -33,25 +33,40 @@ const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_BOT_TOKEN)
 
 (async () => {
   try {
+    const clientId = process.env.CLIENT_ID;
+    const guildId = process.env.TEST_GUILD_ID;
+
+    if (guildId) {
+      console.log(`🗑️ Clearing guild commands for guild ID: ${guildId}...`);
+      await rest.put(
+        Routes.applicationGuildCommands(clientId, guildId),
+        { body: [] }
+      );
+      console.log('✅ Guild commands cleared.');
+    }
+
+    console.log('🗑️ Clearing global commands...');
+    await rest.put(
+      Routes.applicationCommands(clientId),
+      { body: [] }
+    );
+    console.log('✅ Global commands cleared.');
+
     console.log(`🔁 Registering ${commands.length} slash commands globally...`);
     await rest.put(
-      Routes.applicationCommands(process.env.CLIENT_ID),
+      Routes.applicationCommands(clientId),
       { body: commands }
     );
-    console.log('✅ Slash commands registered successfully!');
+    console.log('✅ Global slash commands registered!');
 
-    // OPTIONAL: Uncomment this if testing on a specific dev guild only
-    /*
-    const guildId = process.env.TEST_GUILD_ID;
     if (guildId) {
       console.log(`🔁 Registering slash commands to guild: ${guildId}...`);
       await rest.put(
-        Routes.applicationGuildCommands(process.env.CLIENT_ID, guildId),
+        Routes.applicationGuildCommands(clientId, guildId),
         { body: commands }
       );
       console.log('✅ Guild slash commands registered successfully!');
     }
-    */
 
   } catch (error) {
     console.error('❌ Error registering slash commands:', error?.rawError || error);
