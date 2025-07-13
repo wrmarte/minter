@@ -1,3 +1,5 @@
+// ✅ MintProcessor Base - Full Length With Labels
+
 const { Interface, Contract, id, ZeroAddress, ethers } = require('ethers');
 const fetch = require('node-fetch');
 const { getRealDexPriceForToken, getEthPriceFromToken } = require('./price');
@@ -11,6 +13,7 @@ const TOKEN_NAME_TO_ADDRESS = {
 
 const contractListeners = {};
 
+// ✅ MAIN TRACKER
 async function trackBaseContracts(client) {
   const pg = client.pg;
   const res = await pg.query("SELECT * FROM contract_watchlist WHERE chain = 'base'");
@@ -18,6 +21,7 @@ async function trackBaseContracts(client) {
   setupBaseBlockListener(client, contracts);
 }
 
+// ✅ BASE BLOCK LISTENER WITH BULK MAP
 function setupBaseBlockListener(client, contractRows) {
   const provider = getProvider('base');
   if (provider._global_block_listener_base) return;
@@ -47,9 +51,8 @@ function setupBaseBlockListener(client, contractRows) {
         };
 
         await delay(150);
-
         let logs = [];
-        try { logs = await provider.getLogs(filter); } catch { continue; }
+        try { logs = await provider.getLogs(filter); } catch (err) { return; }
 
         const contract = new Contract(address, iface.fragments, provider);
         let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
@@ -63,7 +66,6 @@ function setupBaseBlockListener(client, contractRows) {
           const { from, to, tokenId } = parsed.args;
           const tokenIdStr = tokenId.toString();
           const txHash = log.transactionHash.toLowerCase();
-
           const allChannelIds = [...new Set([...(row.channel_ids || [])])];
           const allGuildIds = [];
 
@@ -87,10 +89,8 @@ function setupBaseBlockListener(client, contractRows) {
             }
             if (!shouldSend || seenTokenIds.has(tokenIdStr)) continue;
             seenTokenIds.add(tokenIdStr);
-
             if (!mintTxMap.has(txHash)) mintTxMap.set(txHash, []);
             mintTxMap.get(txHash).push(tokenIdStr);
-
           } else {
             let shouldSend = false;
             for (const gid of allGuildIds) {
@@ -118,6 +118,7 @@ function setupBaseBlockListener(client, contractRows) {
   });
 }
 
+// ✅ HANDLE BULK MINT
 async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, channel_ids) {
   const { name, mint_price, mint_token, mint_token_symbol } = contractRow;
   const provider = getProvider('base');
@@ -139,7 +140,7 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
   const imageUrl = 'https://via.placeholder.com/400x400.png?text=NFT';
   const embed = {
     title: `✨ BULK ${name.toUpperCase()} MINT (${tokenIds.length})!`,
-    description: `Minted Token IDs: ${tokenIds.map(id => `#${id}`).join(', ')}`,
+    description: `Minted Token IDs:\n${tokenIds.map(id => `#${id}`).join(', ')}`,
     fields: [
       { name: `💰 Total Spent (${mint_token_symbol})`, value: total.toFixed(4), inline: true },
       { name: `⇄ ETH Value`, value: ethValue ? `${ethValue.toFixed(4)} ETH` : 'N/A', inline: true }
@@ -155,7 +156,6 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
   }
 }
-
 async function handleSale(client, contractRow, contract, tokenId, from, to, txHash, channel_ids) {
   const { name, mint_token, mint_token_symbol } = contractRow;
 
