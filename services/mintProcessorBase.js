@@ -1,3 +1,4 @@
+// ✅ Rolled-back ERC721-only mint processor with fixed embed visuals
 const { Interface, Contract, ethers } = require('ethers');
 const fetch = require('node-fetch');
 const { getRealDexPriceForToken, getEthPriceFromToken } = require('./price');
@@ -84,7 +85,7 @@ function setupBaseBlockListener(client, contractRows) {
           if (!shouldSend || seenTokenIds.has(tokenIdStr)) continue;
           seenTokenIds.add(tokenIdStr);
 
-          if (!mintTxMap.has(txHash)) mintTxMap.set(txHash, { row, contract, tokenIds: [] });
+          if (!mintTxMap.has(txHash)) mintTxMap.set(txHash, { row, contract, tokenIds: [], to });
           mintTxMap.get(txHash).tokenIds.push(tokenIdStr);
 
           saveJson(seenPath(name), [...seenTokenIds]);
@@ -102,44 +103,24 @@ function setupBaseBlockListener(client, contractRows) {
           saveJson(seenSalesPath(name), [...seenSales]);
         }
       }
-
-      if (logs.length === 0) {
-        const block = await provider.getBlock(toBlock, true);
-        for (const tx of block.transactions) {
-          if (!tx?.hash) continue;
-          const receipt = await provider.getTransactionReceipt(tx.hash);
-          if (!receipt) continue;
-          for (const log of receipt.logs) {
-            if (log.address.toLowerCase() !== row.address.toLowerCase()) continue;
-            if (log.topics[0] !== ethers.id('Transfer(address,address,uint256)')) continue;
-            const from = ethers.getAddress('0x' + log.topics[1].slice(26));
-            if (from !== ZERO_ADDRESS) continue;
-            const tokenId = ethers.BigNumber.from(log.topics[3]).toString();
-            const txHash = receipt.transactionHash?.toLowerCase();
-            if (!txHash) continue;
-            if (!mintTxMap.has(txHash)) mintTxMap.set(txHash, { row, contract, tokenIds: [] });
-            mintTxMap.get(txHash).tokenIds.push(tokenId);
-          }
-        }
-      }
     }
 
-    for (const [txHash, { row, contract, tokenIds }] of mintTxMap.entries()) {
+    for (const [txHash, { row, contract, tokenIds, to }] of mintTxMap.entries()) {
       if (!txHash) continue;
       if (tokenIds.length === 1) {
-        await handleMintSingle(client, row, contract, tokenIds[0], txHash, row.channel_ids);
+        await handleMintSingle(client, row, contract, tokenIds[0], txHash, row.channel_ids, to);
       } else {
-        await handleMintBulk(client, row, contract, tokenIds, txHash, row.channel_ids);
+        await handleMintBulk(client, row, contract, tokenIds, txHash, row.channel_ids, false, to);
       }
     }
   });
 }
 
-async function handleMintSingle(client, contractRow, contract, tokenIdStr, txHash, channel_ids) {
-  await handleMintBulk(client, contractRow, contract, [tokenIdStr], txHash, channel_ids, true);
+async function handleMintSingle(client, contractRow, contract, tokenIdStr, txHash, channel_ids, minterAddress) {
+  await handleMintBulk(client, contractRow, contract, [tokenIdStr], txHash, channel_ids, true, minterAddress);
 }
 
-async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, channel_ids, isSingle = false) {
+async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, channel_ids, isSingle = false, minterAddress = '') {
   const { name, mint_price, mint_token, mint_token_symbol } = contractRow;
   const provider = getProvider('base');
   if (!txHash) return;
@@ -158,13 +139,23 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     ethValue = fallback ? total * fallback : null;
   }
 
-  const imageUrl = 'https://via.placeholder.com/400x400.png?text=NFT';
+  let imageUrl = 'https://via.placeholder.com/400x400.png?text=NFT';
+  try {
+    let uri = await contract.tokenURI(tokenIds[0]);
+    if (uri.startsWith('ipfs://')) uri = uri.replace('ipfs://', 'https://ipfs.io/ipfs/');
+    const meta = await fetch(uri).then(res => res.json());
+    if (meta?.image) {
+      imageUrl = meta.image.startsWith('ipfs://') ? meta.image.replace('ipfs://', 'https://ipfs.io/ipfs/') : meta.image;
+    }
+  } catch {}
+
   const embed = {
     title: isSingle ? `✨ NEW ${name.toUpperCase()} MINT!` : `✨ BULK ${name.toUpperCase()} MINT (${tokenIds.length})!`,
     description: isSingle ? `Minted Token ID: #${tokenIds[0]}` : `Minted Token IDs: ${tokenIds.map(id => `#${id}`).join(', ')}`,
     fields: [
       { name: `💰 Total Spent (${mint_token_symbol})`, value: total.toFixed(4), inline: true },
-      { name: `⇄ ETH Value`, value: ethValue ? `${ethValue.toFixed(4)} ETH` : 'N/A', inline: true }
+      { name: `⇄ ETH Value`, value: ethValue ? `${ethValue.toFixed(4)} ETH` : 'N/A', inline: true },
+      { name: `👤 Minter`, value: minterAddress ? shortWalletLink(minterAddress) : 'Unknown', inline: true }
     ],
     thumbnail: { url: imageUrl },
     color: 219139,
