@@ -48,7 +48,7 @@ function setupBaseBlockListener(client, contractRows) {
 
         await delay(150);
         let logs = [];
-        try { logs = await provider.getLogs(filter); } catch (err) { return; }
+        try { logs = await provider.getLogs(filter); } catch (err) { continue; }
 
         const contract = new Contract(address, iface.fragments, provider);
         let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
@@ -62,6 +62,7 @@ function setupBaseBlockListener(client, contractRows) {
           const { from, to, tokenId } = parsed.args;
           const tokenIdStr = tokenId.toString();
           const txHash = log.transactionHash.toLowerCase();
+
           const allChannelIds = [...new Set([...(row.channel_ids || [])])];
           const allGuildIds = [];
 
@@ -75,9 +76,7 @@ function setupBaseBlockListener(client, contractRows) {
           const mintKey = `${address}-${tokenIdStr}`;
           const saleKey = `${address}-${txHash}`;
 
-          const isMint = from === ZeroAddress || from.toLowerCase() === address || from.toLowerCase() === '0x0000000000000000000000000000000000000001';
-
-          if (isMint) {
+          if (from === ZeroAddress && log.address.toLowerCase() === address) {
             let shouldSend = false;
             for (const gid of allGuildIds) {
               const dedupeKey = `${gid}-${mintKey}`;
@@ -106,10 +105,10 @@ function setupBaseBlockListener(client, contractRows) {
         }
 
         for (const [txHash, tokenIds] of mintTxMap.entries()) {
-          if (tokenIds.length > 1) {
-            await handleMintBulk(client, row, contract, tokenIds, txHash, allChannelIds);
-          } else {
+          if (tokenIds.length === 1) {
             await handleMintSingle(client, row, contract, tokenIds[0], txHash, allChannelIds);
+          } else {
+            await handleMintBulk(client, row, contract, tokenIds, txHash, allChannelIds);
           }
         }
 
@@ -123,26 +122,33 @@ function setupBaseBlockListener(client, contractRows) {
 }
 
 async function handleMintSingle(client, contractRow, contract, tokenId, txHash, channel_ids) {
+  await handleMintBulk(client, contractRow, contract, [tokenId], txHash, channel_ids);
+}
+
+async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, channel_ids) {
   const { name, mint_price, mint_token, mint_token_symbol } = contractRow;
   const provider = getProvider('base');
+  const receipt = await provider.getTransactionReceipt(txHash);
+  if (!receipt) return;
 
   let tokenAddr = mint_token?.toLowerCase?.() || '';
   if (TOKEN_NAME_TO_ADDRESS[mint_token_symbol?.toUpperCase?.()]) {
     tokenAddr = TOKEN_NAME_TO_ADDRESS[mint_token_symbol.toUpperCase()];
   }
 
-  let ethValue = await getRealDexPriceForToken(Number(mint_price), tokenAddr);
+  let total = Number(mint_price) * tokenIds.length;
+  let ethValue = await getRealDexPriceForToken(total, tokenAddr);
   if (!ethValue) {
     const fallback = await getEthPriceFromToken(tokenAddr);
-    ethValue = fallback ? Number(mint_price) * fallback : null;
+    ethValue = fallback ? total * fallback : null;
   }
 
   const imageUrl = 'https://via.placeholder.com/400x400.png?text=NFT';
   const embed = {
-    title: `✨ NEW ${name.toUpperCase()} MINT!`,
-    description: `Minted Token ID: #${tokenId}`,
+    title: tokenIds.length === 1 ? `✨ NEW ${name.toUpperCase()} MINT!` : `✨ BULK ${name.toUpperCase()} MINT (${tokenIds.length})!`,
+    description: tokenIds.length === 1 ? `Minted Token ID: #${tokenIds[0]}` : `Minted Token IDs: ${tokenIds.map(id => `#${id}`).join(', ')}`,
     fields: [
-      { name: `💰 Spent (${mint_token_symbol})`, value: Number(mint_price).toFixed(4), inline: true },
+      { name: `💰 Total Spent (${mint_token_symbol})`, value: total.toFixed(4), inline: true },
       { name: `⇄ ETH Value`, value: ethValue ? `${ethValue.toFixed(4)} ETH` : 'N/A', inline: true }
     ],
     thumbnail: { url: imageUrl },
@@ -156,6 +162,7 @@ async function handleMintSingle(client, contractRow, contract, tokenId, txHash, 
     if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
   }
 }
+
 
 async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, channel_ids) {
   const { name, mint_price, mint_token, mint_token_symbol } = contractRow;
