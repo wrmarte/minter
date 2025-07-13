@@ -1,9 +1,11 @@
+// 📦 Imports
 const { SlashCommandBuilder, AttachmentBuilder, EmbedBuilder } = require('discord.js');
 const fetch = require('node-fetch');
 const { flavorMap, getRandomFlavor } = require('../utils/flavorMap');
 
 const guildNameCache = new Map();
 
+// 🎨 Helper: Random color for embeds
 function getRandomColor() {
   const colors = [
     0xFFD700, 0x66CCFF, 0xFF66CC, 0xFF4500,
@@ -12,6 +14,7 @@ function getRandomColor() {
   return colors[Math.floor(Math.random() * colors.length)];
 }
 
+// ✅ Main Export
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('exp')
@@ -28,10 +31,10 @@ module.exports = {
         .setRequired(false)
     ),
 
+  // ✅ Slash Command Logic
   async execute(interaction, { pg }) {
     const ownerId = process.env.BOT_OWNER_ID;
     const isOwner = interaction.user.id === ownerId;
-
     const name = interaction.options.getString('name').toLowerCase();
     const targetUser = interaction.options.getUser('target') || interaction.user;
     const userMention = `<@${targetUser.id}>`;
@@ -86,6 +89,7 @@ module.exports = {
     return interaction.reply({ embeds: [embed] });
   },
 
+  // ✅ Autocomplete Handler
   async autocomplete(interaction, { pg }) {
     const focused = interaction.options.getFocused();
     const guildId = interaction.guild?.id ?? null;
@@ -113,7 +117,6 @@ module.exports = {
     const thisServer = [], global = [], otherServers = [];
     for (const row of res.rows) {
       if (!row.name) continue;
-
       if (row.guild_id === null) global.push({ name: `🌐 ${row.name} (Global)`, value: row.name });
       else if (row.guild_id === guildId) thisServer.push({ name: `🏠 ${row.name} (This Server)`, value: row.name });
       else {
@@ -133,21 +136,22 @@ module.exports = {
   }
 };
 
-// 🧠 AI Stack with fallback to multiple providers
+// ✅ Smart AI with Fallback Logic
 async function smartAIResponse(keyword, userMention) {
   try {
     return await getGroqAI(keyword, userMention);
-  } catch (e1) {
+  } catch {
     console.warn('❌ Groq failed, trying OpenAI');
     try {
       return await getOpenAI(keyword, userMention);
-    } catch (e2) {
+    } catch {
       console.warn('❌ OpenAI failed');
       return `🧠 ${userMention} tried to flex "${keyword}" but confused every AI out there.`;
     }
   }
 }
 
+// ✅ Groq API Handler
 async function getGroqAI(keyword, userMention) {
   const url = 'https://api.groq.com/openai/v1/chat/completions';
   const apiKey = process.env.GROQ_API_KEY;
@@ -155,14 +159,8 @@ async function getGroqAI(keyword, userMention) {
   const body = {
     model: 'llama3-70b-8192',
     messages: [
-      {
-        role: 'system',
-        content: 'You are a savage Discord bot AI expression generator.'
-      },
-      {
-        role: 'user',
-        content: `Someone typed "${keyword}". Generate a savage one-liner. Insert {user} where you want to mention the user. Use Discord/Web3 slang. Max 1 sentence.`
-      }
+      { role: 'system', content: 'You are a savage Discord bot AI expression generator.' },
+      { role: 'user', content: `Someone typed "${keyword}". Generate a savage one-liner. Insert {user} where you want to mention the user. Use Discord/Web3 slang. Max 1 sentence.` }
     ],
     max_tokens: 50,
     temperature: 0.9
@@ -178,10 +176,10 @@ async function getGroqAI(keyword, userMention) {
   const rawReply = data?.choices?.[0]?.message?.content?.trim();
   if (!rawReply) throw new Error('Empty AI response');
 
-  const replaced = rawReply.replace(/{user}/gi, userMention);
-  return cleanQuotes(replaced);
+  return cleanQuotes(rawReply.replace(/{user}/gi, userMention));
 }
 
+// ✅ OpenAI API Handler
 async function getOpenAI(keyword, userMention) {
   const res = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
@@ -192,14 +190,8 @@ async function getOpenAI(keyword, userMention) {
     body: JSON.stringify({
       model: 'gpt-3.5-turbo',
       messages: [
-        {
-          role: 'system',
-          content: 'You are a witty and sarcastic Discord bot that talks like a Web3 degenerate.'
-        },
-        {
-          role: 'user',
-          content: `Make a short sharp comment for someone expressing "${keyword}". Mention {user}.`
-        }
+        { role: 'system', content: 'You are a witty and sarcastic Discord bot that talks like a Web3 degenerate.' },
+        { role: 'user', content: `Make a short sharp comment for someone expressing "${keyword}". Mention {user}.` }
       ],
       max_tokens: 60,
       temperature: 1.1
@@ -212,9 +204,11 @@ async function getOpenAI(keyword, userMention) {
   return cleanQuotes(rawReply).replace(/{user}/gi, userMention);
 }
 
+// ✅ Clean Quote Helper
 function cleanQuotes(text) {
   return text.replace(/^"(.*)"$/, '$1').trim();
 }
+
 
 
 
