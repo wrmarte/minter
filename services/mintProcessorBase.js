@@ -69,7 +69,8 @@ function setupBaseBlockListener(client, contractRows) {
         try { parsed = iface.parseLog(log); } catch { continue; }
         const { from, to, tokenId } = parsed.args;
         const tokenIdStr = tokenId.toString();
-        const txHash = log.transactionHash.toLowerCase();
+        const txHash = log.transactionHash?.toLowerCase();
+        if (!txHash) continue;
         const mintKey = `${log.address}-${tokenIdStr}`;
 
         if (from === ZERO_ADDRESS) {
@@ -105,6 +106,7 @@ function setupBaseBlockListener(client, contractRows) {
       if (logs.length === 0) {
         const block = await provider.getBlock(toBlock, true);
         for (const tx of block.transactions) {
+          if (!tx?.hash) continue;
           const receipt = await provider.getTransactionReceipt(tx.hash);
           if (!receipt) continue;
           for (const log of receipt.logs) {
@@ -113,7 +115,8 @@ function setupBaseBlockListener(client, contractRows) {
             const from = ethers.getAddress('0x' + log.topics[1].slice(26));
             if (from !== ZERO_ADDRESS) continue;
             const tokenId = ethers.BigNumber.from(log.topics[3]).toString();
-            const txHash = receipt.transactionHash.toLowerCase();
+            const txHash = receipt.transactionHash?.toLowerCase();
+            if (!txHash) continue;
             if (!mintTxMap.has(txHash)) mintTxMap.set(txHash, { row, contract, tokenIds: [] });
             mintTxMap.get(txHash).tokenIds.push(tokenId);
           }
@@ -122,6 +125,7 @@ function setupBaseBlockListener(client, contractRows) {
     }
 
     for (const [txHash, { row, contract, tokenIds }] of mintTxMap.entries()) {
+      if (!txHash) continue;
       if (tokenIds.length === 1) {
         await handleMintSingle(client, row, contract, tokenIds[0], txHash, row.channel_ids);
       } else {
@@ -138,6 +142,7 @@ async function handleMintSingle(client, contractRow, contract, tokenIdStr, txHas
 async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, channel_ids, isSingle = false) {
   const { name, mint_price, mint_token, mint_token_symbol } = contractRow;
   const provider = getProvider('base');
+  if (!txHash) return;
   const receipt = await provider.getTransactionReceipt(txHash);
   if (!receipt) return;
 
@@ -256,5 +261,3 @@ module.exports = {
   trackBaseContracts,
   contractListeners
 };
-
-
