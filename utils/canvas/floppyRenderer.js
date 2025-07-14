@@ -16,7 +16,7 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
 
     ctx.drawImage(floppyImage, 0, 0, 600, 600);
     ctx.drawImage(nftImage, 100, 50, 260, 260); // Bigger NFT top left inside label
-    ctx.drawImage(qrImage, 410, 350, 85, 85); // QR bottom right inside label
+    ctx.drawImage(qrImage, 400, 250, 85, 85); // QR bottom right inside label
 
     ctx.font = 'bold 18px Arial';
     ctx.fillStyle = '#111';
