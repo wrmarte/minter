@@ -1,7 +1,7 @@
-// ✅ Clean direct flexfloppy using floppyRenderer directly
+// ✅ Clean direct flexfloppy using floppyRenderer directly with random color logic
 const { SlashCommandBuilder, AttachmentBuilder } = require('discord.js');
 const path = require('path');
-const { buildFloppyCard } = require('../utils/canvas/floppyRenderer');
+const { buildFloppyCard, getRandomFloppyPath } = require('../utils/canvas/floppyRenderer');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -20,7 +20,7 @@ module.exports = {
     )
     .addStringOption(opt =>
       opt.setName('color')
-        .setDescription('Floppy Color (red, yellow, green, blue, purple, black)')
+        .setDescription('Floppy Color (leave empty for random)')
         .setRequired(false)
     ),
 
@@ -49,7 +49,7 @@ module.exports = {
     const pg = interaction.client.pg;
     const name = interaction.options.getString('name').toLowerCase();
     const tokenId = interaction.options.getInteger('tokenid');
-    const color = interaction.options.getString('color')?.toLowerCase() || 'red';
+    const color = interaction.options.getString('color')?.toLowerCase();
 
     try {
       await interaction.deferReply({ flags: 0 }).catch(() => {});
@@ -72,7 +72,14 @@ module.exports = {
         return await interaction.editReply('⚠️ FlexFloppy is only supported for Base network NFTs right now.');
       }
 
-      const floppyPath = path.resolve(__dirname, `../assets/floppies/floppy-${color}.png`);
+      // ✅ RANDOM COLOR LOGIC
+      let floppyPath;
+      if (color) {
+        floppyPath = path.resolve(__dirname, `../assets/floppies/floppy-${color}.png`);
+      } else {
+        floppyPath = getRandomFloppyPath();
+      }
+
       const imageBuffer = await buildFloppyCard(contractAddress, tokenId, collectionName, chain, floppyPath);
 
       const attachment = new AttachmentBuilder(imageBuffer, { name: `floppyflexcard.png` });
@@ -85,5 +92,6 @@ module.exports = {
     }
   }
 };
+
 
 
