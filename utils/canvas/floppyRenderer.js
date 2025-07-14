@@ -1,4 +1,4 @@
-// ✅ utils/canvas/floppyRenderer.js with vertical minted text and metadata under NFT image
+// ✅ utils/canvas/floppyRenderer.js with inline metadata and vertical minted text adjusted direction
 const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const path = require('path');
 const { fetchMetadata } = require('../../utils/fetchMetadata');
@@ -27,13 +27,11 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
 
     ctx.font = 'bold 22px Exo2';
     ctx.textAlign = 'left';
-    ctx.fillText(`${collectionName}`, 100, 350);
-    ctx.fillText(`ID #${tokenId}`, 100, 380);
-    ctx.fillText(`Rank: ${meta.rank || 'N/A'}`, 100, 410);
+    ctx.fillText(`${collectionName} • ID #${tokenId} • Rank: ${meta.rank || 'N/A'}`, 100, 350);
 
     ctx.save();
-    ctx.translate(500, 400);
-    ctx.rotate(Math.PI / 2);
+    ctx.translate(550, 400);
+    ctx.rotate(-Math.PI / 2);
     ctx.font = 'bold 18px Exo2';
     ctx.fillText(`Minted with $ADRIAN on Base`, 0, 0);
     ctx.restore();
@@ -52,6 +50,7 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
 module.exports = {
   buildFloppyCard
 };
+
 
 
 
