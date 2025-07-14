@@ -1,23 +1,28 @@
-// ✅ utils/canvas/floppyRenderer.js
+// ✅ utils/canvas/floppyRenderer.js with QR, NFT rank, and repositioned image
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
-const { fetchMetadata } = require('../../utils/fetchMetadata');
-const { shortWalletLink } = require('../../utils/helpers');
+const { fetchMetadataExtras } = require('../../utils/fetchMetadataExtras');
+const { generateQrCode } = require('../../utils/qrService');
 
 async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, floppyPath) {
   const canvas = createCanvas(600, 600);
   const ctx = canvas.getContext('2d');
 
   try {
-    const meta = await fetchMetadata(contractAddress, tokenId, chain);
+    const meta = await fetchMetadataExtras(contractAddress, tokenId, chain);
     const nftImage = await loadImage(meta.image_fixed || meta.image || 'https://via.placeholder.com/400x400.png?text=NFT');
     const floppyImage = await loadImage(floppyPath);
+    const qrBuffer = await generateQrCode(meta.permalink || `https://basescan.org/token/${contractAddress}?a=${tokenId}`);
+    const qrImage = await loadImage(qrBuffer);
 
     ctx.drawImage(floppyImage, 0, 0, 600, 600);
-    ctx.drawImage(nftImage, 120, 140, 360, 320);
+    ctx.drawImage(nftImage, 60, 140, 200, 200);
+    ctx.drawImage(qrImage, 420, 430, 130, 130);
 
-    ctx.font = 'bold 28px Arial';
-    ctx.fillStyle = '#ffffff';
-    ctx.fillText(`${collectionName} #${tokenId}`, 30, 580);
+    ctx.font = 'bold 22px Arial';
+    ctx.fillStyle = '#111';
+    ctx.fillText(`${collectionName}`, 60, 370);
+    ctx.fillText(`ID #${tokenId}`, 60, 400);
+    ctx.fillText(`Rank: ${meta.rank || 'N/A'}`, 60, 430);
   } catch (err) {
     console.warn('❌ buildFloppyCard error:', err);
     ctx.fillStyle = '#111';
