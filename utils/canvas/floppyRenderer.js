@@ -1,8 +1,9 @@
-// ✅ utils/canvas/floppyRenderer.js with in-canvas transparent QR and inline metadata layout
+// ✅ utils/canvas/floppyRenderer.js with in-canvas transparent QR and FlexCard rank/traits fallback
 const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const QRCode = require('qrcode');
 const path = require('path');
 const { fetchMetadata } = require('../../utils/fetchMetadata');
+const { fetchMetadataExtras } = require('../../utils/fetchMetadataExtras');
 
 const fontPath = path.join(__dirname, '../../fonts/Exo2-Bold.ttf');
 GlobalFonts.registerFromPath(fontPath, 'Exo2');
@@ -13,6 +14,8 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
 
   try {
     const meta = await fetchMetadata(contractAddress, tokenId, chain);
+    const metaExtras = await fetchMetadataExtras(contractAddress, tokenId, chain);
+
     const localPlaceholder = path.resolve(__dirname, '../../assets/placeholders/nft-placeholder.png');
     const nftImage = await loadImage(meta.image_fixed || meta.image || localPlaceholder);
     const floppyImage = await loadImage(floppyPath);
@@ -37,12 +40,14 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
 
     ctx.font = 'bold 20px Exo2';
     ctx.textAlign = 'left';
-    const traitsArray = meta.traits?.length ? meta.traits : meta.attributes || [];
-    const traitsCount = traitsArray.length;
-    const rankValue = meta.rank ?? meta.rarity_rank ?? meta.rarity?.rank ?? 'N/A';
-ctx.fillText(`${collectionName} #${tokenId} • Traits: ${traitsCount} • Rank: ${rankValue}`, 100, 350);
 
-    
+    const traitsArray = meta.traits?.length ? meta.traits : meta.attributes || metaExtras.traits || [];
+    const traitsCount = traitsArray.length;
+
+    const rankValue = meta.rank ?? metaExtras.rank ?? metaExtras.rarity_rank ?? metaExtras.rarity?.rank ?? 'N/A';
+
+    ctx.fillText(`${collectionName} #${tokenId} • Traits: ${traitsCount} • Rank: ${rankValue}`, 100, 350);
+
     ctx.save();
     ctx.translate(500, 315);
     ctx.rotate(-Math.PI / 2);
@@ -64,7 +69,6 @@ ctx.fillText(`${collectionName} #${tokenId} • Traits: ${traitsCount} • Rank:
 module.exports = {
   buildFloppyCard
 };
-
 
 
 
