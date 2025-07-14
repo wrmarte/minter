@@ -1,4 +1,4 @@
-// ✅ utils/canvas/floppyRenderer.js with random floppy color logic and rank/traits fallback
+// ✅ utils/canvas/floppyRenderer.js — Stable build with random floppy color only, keeping logic untouched
 const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const QRCode = require('qrcode');
 const path = require('path');
@@ -22,8 +22,10 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
   try {
     const meta = await fetchMetadata(contractAddress, tokenId, chain);
     const metaExtras = await fetchMetadataExtras(contractAddress, tokenId, chain);
+
     const localPlaceholder = path.resolve(__dirname, '../../assets/placeholders/nft-placeholder.png');
     const nftImage = await loadImage(meta.image_fixed || meta.image || localPlaceholder);
+
     const finalFloppyPath = floppyPath || getRandomFloppyPath();
     const floppyImage = await loadImage(finalFloppyPath);
 
@@ -47,9 +49,11 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
 
     ctx.font = 'bold 20px Exo2';
     ctx.textAlign = 'left';
+
     const traitsArray = meta.traits?.length ? meta.traits : meta.attributes || metaExtras.traits || [];
     const traitsCount = traitsArray.length;
     const rankValue = meta.rank || meta.rarity_rank || metaExtras.rank || metaExtras.rarity_rank || 'N/A';
+
     ctx.fillText(`${collectionName} #${tokenId} • Traits: ${traitsCount} • Rank: ${rankValue}`, 100, 350);
 
     ctx.save();
@@ -61,21 +65,6 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
   } catch (err) {
     console.warn('❌ buildFloppyCard error:', err);
     ctx.fillStyle = '#111';
-    ctx.fillRect(20, 20, 600, 600);
-    ctx.font = 'bold 30px Arial';
-    ctx.fillStyle = '#fff';
-    ctx.fillText('Error Loading NFT', 150, 300);
-  }
-
-  return canvas.toBuffer('image/png');
-}
-
-module.exports = {
-  buildFloppyCard
-};
-
-
-
 
 
 
