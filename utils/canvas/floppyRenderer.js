@@ -1,4 +1,4 @@
-// ✅ utils/canvas/floppyRenderer.js with in-canvas transparent QR and extended metadata layout
+// ✅ utils/canvas/floppyRenderer.js with in-canvas transparent QR and inline metadata layout
 const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const QRCode = require('qrcode');
 const path = require('path');
@@ -29,7 +29,7 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
 
     ctx.drawImage(floppyImage, 0, 0, 600, 600);
     ctx.drawImage(nftImage, 100, 50, 275, 275);
-    ctx.drawImage(qrImage, 50, 450, 60, 60);
+    ctx.drawImage(qrImage, 60, 470, 60, 60);
 
     ctx.shadowColor = 'rgba(0, 0, 0, 0.6)';
     ctx.shadowBlur = 4;
@@ -37,14 +37,10 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
 
     ctx.font = 'bold 20px Exo2';
     ctx.textAlign = 'left';
-    ctx.fillText(`${collectionName}`, 100, 350);
-    ctx.fillText(`#${tokenId}`, 100, 380);
-    ctx.fillText(`Traits: ${meta.traits?.length || 0}`, 100, 410);
-    ctx.fillText(`Rank: ${meta.rank || 'N/A'}`, 100, 440);
-  
+    ctx.fillText(`${collectionName} • #${tokenId} • Traits: ${meta.traits?.length || 0} • Rank: ${meta.rank || 'N/A'}`, 100, 350);
 
     ctx.save();
-    ctx.translate(500, 360);
+    ctx.translate(500, 340);
     ctx.rotate(-Math.PI / 2);
     ctx.font = 'bold 18px Exo2';
     ctx.fillText(`Minted with $ADRIAN on Base`, 0, 0);
@@ -64,7 +60,6 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
 module.exports = {
   buildFloppyCard
 };
-
 
 
 
