@@ -15,8 +15,8 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
     const qrImage = await loadImage('https://api.qrserver.com/v1/create-qr-code/?size=90x90&data=' + encodeURIComponent(meta.permalink || `https://basescan.org/token/${contractAddress}?a=${tokenId}`));
 
     ctx.drawImage(floppyImage, 0, 0, 600, 600);
-    ctx.drawImage(nftImage, 65, 115, 260, 260); // Bigger NFT top left inside label
-    ctx.drawImage(qrImage, 410, 390, 190, 190); // QR bottom right inside label
+    ctx.drawImage(nftImage, 85, 150, 260, 260); // Bigger NFT top left inside label
+    ctx.drawImage(qrImage, 410, 290, 85, 85); // QR bottom right inside label
 
     ctx.font = 'bold 18px Arial';
     ctx.fillStyle = '#111';
