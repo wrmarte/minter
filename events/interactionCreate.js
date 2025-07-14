@@ -17,14 +17,17 @@ client.on('interactionCreate', async interaction => {
   if (interaction.isAutocomplete()) {
     const command = client.commands.get(interaction.commandName);
     if (command && typeof command.autocomplete === 'function') {
-      if (command.autocomplete.length > 1) {
-        await command.autocomplete(interaction, { pg });
-      } else {
-        await command.autocomplete(interaction);
+      try {
+        if (command.autocomplete.length > 1) {
+          await command.autocomplete(interaction, client.pg);
+        } else {
+          await command.autocomplete(interaction);
+        }
+      } catch (err) {
+        console.error(`❌ Autocomplete error for ${interaction.commandName}:`, err);
       }
       return;
     }
-
     // BLOCK 2: Fallback autocomplete logic
     const { commandName, options } = interaction;
     const focused = options.getFocused(true);
