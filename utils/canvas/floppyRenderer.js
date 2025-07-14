@@ -1,4 +1,4 @@
-// ✅ utils/canvas/floppyRenderer.js with FlexCard-style text and shadow setup
+// ✅ utils/canvas/floppyRenderer.js with vertical minted text and metadata under NFT image
 const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const path = require('path');
 const { fetchMetadata } = require('../../utils/fetchMetadata');
@@ -27,12 +27,16 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
 
     ctx.font = 'bold 22px Exo2';
     ctx.textAlign = 'left';
-    ctx.fillText(`${collectionName}`, 250, 100);
-    ctx.fillText(`ID #${tokenId}`, 250, 130);
-    ctx.fillText(`Rank: ${meta.rank || 'N/A'}`, 250, 160);
+    ctx.fillText(`${collectionName}`, 100, 350);
+    ctx.fillText(`ID #${tokenId}`, 100, 380);
+    ctx.fillText(`Rank: ${meta.rank || 'N/A'}`, 100, 410);
 
+    ctx.save();
+    ctx.translate(500, 400);
+    ctx.rotate(Math.PI / 2);
     ctx.font = 'bold 18px Exo2';
-    ctx.fillText(`Minted with $ADRIAN on Base`, 100, 330);
+    ctx.fillText(`Minted with $ADRIAN on Base`, 0, 0);
+    ctx.restore();
   } catch (err) {
     console.warn('❌ buildFloppyCard error:', err);
     ctx.fillStyle = '#111';
@@ -48,6 +52,7 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
 module.exports = {
   buildFloppyCard
 };
+
 
 
 
