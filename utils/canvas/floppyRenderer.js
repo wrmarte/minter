@@ -18,8 +18,8 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
     const qrImage = await loadImage(`https://api.qrserver.com/v1/create-qr-code/?size=90x90&bgcolor=255-255-255-0&data=${encodeURIComponent(meta.permalink || `https://basescan.org/token/${contractAddress}?a=${tokenId}`)}`);
 
     ctx.drawImage(floppyImage, 0, 0, 600, 600);
-    ctx.drawImage(nftImage, 100, 50, 260, 260);
-    ctx.drawImage(qrImage, 50, 365, 85, 85);
+    ctx.drawImage(nftImage, 100, 50, 300, 300);
+    ctx.drawImage(qrImage, 50, 400, 85, 85);
 
     ctx.shadowColor = 'rgba(0, 0, 0, 0.6)';
     ctx.shadowBlur = 4;
