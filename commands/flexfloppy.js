@@ -1,16 +1,7 @@
+// ✅ Clean direct flexfloppy using floppyRenderer directly
 const { SlashCommandBuilder, AttachmentBuilder } = require('discord.js');
-const { buildUltraFlexCard } = require('../services/ultraFlexService');
-const { buildFloppyFlexCard } = require('../services/floppyFlexService');
 const path = require('path');
-
-function getFlexService(chain) {
-  switch (chain) {
-    case 'base': return require('../services/flexcardBaseS');
-    case 'eth': return require('../services/flexcardEthS');
-    case 'ape': return require('../services/flexcardApeS');
-    default: throw new Error(`Unsupported chain: ${chain}`);
-  }
-}
+const { buildFloppyCard } = require('../utils/canvas/floppyRenderer');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -26,10 +17,6 @@ module.exports = {
       opt.setName('tokenid')
         .setDescription('Token ID')
         .setRequired(true)
-    )
-    .addBooleanOption(opt =>
-      opt.setName('ultra')
-        .setDescription('Enable Ultra Style')
     )
     .addStringOption(opt =>
       opt.setName('color')
@@ -62,11 +49,7 @@ module.exports = {
     const pg = interaction.client.pg;
     const name = interaction.options.getString('name').toLowerCase();
     const tokenId = interaction.options.getInteger('tokenid');
-    const ultra = interaction.options.getBoolean('ultra');
     const color = interaction.options.getString('color')?.toLowerCase() || 'red';
-    const userIsOwner = interaction.user.id === process.env.BOT_OWNER_ID;
-
-    console.log(`FlexFloppy Debug → User ID: ${interaction.user.id}, BOT_OWNER_ID: ${process.env.BOT_OWNER_ID}`);
 
     try {
       await interaction.deferReply({ flags: 0 }).catch(() => {});
@@ -89,25 +72,11 @@ module.exports = {
         return await interaction.editReply('⚠️ FlexFloppy is only supported for Base network NFTs right now.');
       }
 
-      if (ultra && !userIsOwner) {
-        return await interaction.editReply('🚫 Only the bot owner can use Ultra mode in FlexFloppy.');
-      }
+      const floppyPath = path.resolve(__dirname, `../assets/floppies/floppy-${color}.png`);
+      const imageBuffer = await buildFloppyCard(contractAddress, tokenId, collectionName, chain, floppyPath);
 
-      let imageBuffer;
-
-      if (ultra) {
-        imageBuffer = await buildUltraFlexCard(contractAddress, tokenId, collectionName, chain);
-      } else {
-        const floppyPath = path.resolve(__dirname, `../assets/floppies/floppy-${color}.png`);
-        imageBuffer = await buildFloppyFlexCard(contractAddress, tokenId, collectionName, chain, floppyPath);
-      }
-
-      const attachment = new AttachmentBuilder(imageBuffer, {
-        name: `${ultra ? 'ultra' : 'floppy'}flexcard.png`
-      });
-
+      const attachment = new AttachmentBuilder(imageBuffer, { name: `floppyflexcard.png` });
       return await interaction.editReply({ files: [attachment] });
-
     } catch (err) {
       console.error('❌ FlexFloppy error:', err);
       if (!interaction.replied) {
@@ -116,4 +85,5 @@ module.exports = {
     }
   }
 };
+
 
