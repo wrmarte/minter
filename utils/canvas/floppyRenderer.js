@@ -1,4 +1,4 @@
-// ✅ utils/canvas/floppyRenderer.js — Enforced random color fallback
+// ✅ utils/canvas/floppyRenderer.js — stable random floppy color logic with meta/rank fallback
 const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const QRCode = require('qrcode');
 const path = require('path');
@@ -11,11 +11,11 @@ GlobalFonts.registerFromPath(fontPath, 'Exo2');
 const FLOPPY_COLORS = ['red', 'yellow', 'green', 'blue', 'purple', 'black'];
 
 function getRandomFloppyPath() {
-  const randomColor = FLOPPY_COLORS[Math.floor(Math.random() * FLOPPY_COLORS.length)];
-  return path.resolve(__dirname, `../../assets/floppies/floppy-${randomColor}.png`);
+  const color = FLOPPY_COLORS[Math.floor(Math.random() * FLOPPY_COLORS.length)];
+  return path.resolve(__dirname, `../../assets/floppies/floppy-${color}.png`);
 }
 
-async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, floppyPath) {
+async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, floppyPath = null) {
   const canvas = createCanvas(600, 600);
   const ctx = canvas.getContext('2d');
 
@@ -32,7 +32,10 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
     const qrCanvas = createCanvas(90, 90);
     await QRCode.toCanvas(qrCanvas, meta.permalink || `https://basescan.org/token/${contractAddress}?a=${tokenId}`, {
       margin: 1,
-      color: { dark: '#000000', light: '#00000000' },
+      color: {
+        dark: '#000000',
+        light: '#00000000',
+      },
     });
     const qrImage = await loadImage(qrCanvas.toBuffer('image/png'));
 
@@ -73,7 +76,7 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
 
 module.exports = {
   buildFloppyCard,
-  getRandomFloppyPath // Export this if you want control from the command level
+  getRandomFloppyPath
 };
 
 
