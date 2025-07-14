@@ -1,4 +1,4 @@
-// ✅ utils/canvas/floppyRenderer.js with in-canvas transparent QR and inline metadata layout using fetchMetadataExtras
+// ✅ utils/canvas/floppyRenderer.js with in-canvas transparent QR and corrected metadata handling
 const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const QRCode = require('qrcode');
 const path = require('path');
@@ -14,7 +14,8 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
   try {
     const meta = await fetchMetadataExtras(contractAddress, tokenId, chain);
     const localPlaceholder = path.resolve(__dirname, '../../assets/placeholders/nft-placeholder.png');
-    const nftImage = await loadImage(meta.image_fixed || meta.image || localPlaceholder);
+    const nftImageUrl = meta.image_fixed || meta.image;
+    const nftImage = await loadImage(nftImageUrl ? nftImageUrl : localPlaceholder);
     const floppyImage = await loadImage(floppyPath);
 
     const qrCanvas = createCanvas(90, 90);
@@ -37,7 +38,8 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
 
     ctx.font = 'bold 20px Exo2';
     ctx.textAlign = 'left';
-    const traitsCount = meta.traits?.length || (Array.isArray(meta.attributes) ? meta.attributes.length : 0);
+    const traitsArray = meta.traits?.length ? meta.traits : meta.attributes || [];
+    const traitsCount = traitsArray.length;
     const rankValue = meta.rank || meta.rarity_rank || 'N/A';
     ctx.fillText(`${collectionName} • #${tokenId} • Traits: ${traitsCount} • Rank: ${rankValue}`, 100, 350);
 
@@ -62,6 +64,7 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
 module.exports = {
   buildFloppyCard
 };
+
 
 
 
