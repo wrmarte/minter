@@ -1,4 +1,4 @@
-// ✅ utils/canvas/floppyRenderer.js with random floppy color logic and rank/traits fallback
+const floppyImage = await loadImage(floppyPath);// ✅ utils/canvas/floppyRenderer.js with random floppy color logic and rank/traits fallback
 const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const QRCode = require('qrcode');
 const path = require('path');
@@ -15,7 +15,7 @@ function getRandomFloppyPath() {
   return path.resolve(__dirname, `../../assets/floppies/floppy-${color}.png`);
 }
 
-async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, floppyPath) {
+async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, floppyPath = getRandomFloppyPath()) {
   const canvas = createCanvas(600, 600);
   const ctx = canvas.getContext('2d');
 
@@ -73,7 +73,6 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
 module.exports = {
   buildFloppyCard
 };
-
 
 
 
