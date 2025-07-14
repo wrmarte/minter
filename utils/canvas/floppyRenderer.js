@@ -29,7 +29,7 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
 
     ctx.drawImage(floppyImage, 0, 0, 600, 600);
     ctx.drawImage(nftImage, 100, 50, 275, 275);
-    ctx.drawImage(qrImage, 200, 450, 60, 60);
+    ctx.drawImage(qrImage, 20, 550, 60, 60);
 
     ctx.shadowColor = 'rgba(0, 0, 0, 0.6)';
     ctx.shadowBlur = 4;
@@ -40,7 +40,7 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
     ctx.fillText(`${collectionName} • ID #${tokenId} • Rank: ${meta.rank || 'N/A'}`, 100, 350);
 
     ctx.save();
-    ctx.translate(500, 400);
+    ctx.translate(500, 350);
     ctx.rotate(-Math.PI / 2);
     ctx.font = 'bold 18px Exo2';
     ctx.fillText(`Minted with $ADRIAN on Base`, 0, 0);
