@@ -39,7 +39,7 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
     ctx.textAlign = 'left';
     const traitsArray = meta.traits?.length ? meta.traits : meta.attributes || [];
     const traitsCount = traitsArray.length;
-    ctx.fillText(`${collectionName} #${tokenId} • Traits: ${traitsCount} • Rank: ${meta.rank || 'N/A', 100, 350);
+    ctx.fillText(${collectionName} #${tokenId} • Traits: ${traitscount} • Rank: ${meta.rank || 'N/A'}, 100, 350);
 
     ctx.save();
     ctx.translate(500, 315);
