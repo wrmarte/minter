@@ -39,7 +39,7 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
     ctx.textAlign = 'left';
     const traitsArray = meta.traits?.length ? meta.traits : meta.attributes || [];
     const traitsCount = traitsArray.length;
-    const rankValue = meta.rank || meta.rarity_rank || 'N/A';
+    const rankValue = meta.rank || meta.rarity_rank || meta.rarity?.rank || 'N/A';
     ctx.fillText(`${collectionName} • #${tokenId} • Traits: ${traitsCount} • Rank: ${rankValue}`, 100, 350);
 
     ctx.save();
@@ -63,6 +63,7 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
 module.exports = {
   buildFloppyCard
 };
+
 
 
 
