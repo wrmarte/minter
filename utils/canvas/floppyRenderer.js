@@ -1,4 +1,4 @@
-// ✅ utils/canvas/floppyRenderer.js — stable random floppy color logic, full meta logic untouched
+// ✅ utils/canvas/floppyRenderer.js — Enforced random color fallback
 const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const QRCode = require('qrcode');
 const path = require('path');
@@ -15,7 +15,7 @@ function getRandomFloppyPath() {
   return path.resolve(__dirname, `../../assets/floppies/floppy-${randomColor}.png`);
 }
 
-async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, floppyPath = null) {
+async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, floppyPath) {
   const canvas = createCanvas(600, 600);
   const ctx = canvas.getContext('2d');
 
@@ -26,16 +26,13 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
     const placeholderPath = path.resolve(__dirname, '../../assets/placeholders/nft-placeholder.png');
     const nftImage = await loadImage(meta.image_fixed || meta.image || placeholderPath);
 
-    const finalFloppyPath = floppyPath ?? getRandomFloppyPath();
+    const finalFloppyPath = floppyPath || getRandomFloppyPath();
     const floppyImage = await loadImage(finalFloppyPath);
 
     const qrCanvas = createCanvas(90, 90);
     await QRCode.toCanvas(qrCanvas, meta.permalink || `https://basescan.org/token/${contractAddress}?a=${tokenId}`, {
       margin: 1,
-      color: {
-        dark: '#000000',
-        light: '#00000000',
-      },
+      color: { dark: '#000000', light: '#00000000' },
     });
     const qrImage = await loadImage(qrCanvas.toBuffer('image/png'));
 
@@ -75,8 +72,10 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
 }
 
 module.exports = {
-  buildFloppyCard
+  buildFloppyCard,
+  getRandomFloppyPath // Export this if you want control from the command level
 };
+
 
 
 
