@@ -1,8 +1,8 @@
-// ✅ utils/canvas/floppyRenderer.js with in-canvas transparent QR and corrected metadata handling
+// ✅ utils/canvas/floppyRenderer.js with in-canvas transparent QR and inline metadata layout
 const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const QRCode = require('qrcode');
 const path = require('path');
-const { fetchMetadataExtras } = require('../../utils/fetchMetadataExtras');
+const { fetchMetadata } = require('../../utils/fetchMetadata');
 
 const fontPath = path.join(__dirname, '../../fonts/Exo2-Bold.ttf');
 GlobalFonts.registerFromPath(fontPath, 'Exo2');
@@ -12,10 +12,9 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
   const ctx = canvas.getContext('2d');
 
   try {
-    const meta = await fetchMetadataExtras(contractAddress, tokenId, chain);
+    const meta = await fetchMetadata(contractAddress, tokenId, chain);
     const localPlaceholder = path.resolve(__dirname, '../../assets/placeholders/nft-placeholder.png');
-    const nftImageUrl = meta.image_fixed || meta.image;
-    const nftImage = await loadImage(nftImageUrl ? nftImageUrl : localPlaceholder);
+    const nftImage = await loadImage(meta.image_fixed || meta.image || localPlaceholder);
     const floppyImage = await loadImage(floppyPath);
 
     const qrCanvas = createCanvas(90, 90);
