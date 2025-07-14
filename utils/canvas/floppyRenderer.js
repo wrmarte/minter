@@ -1,4 +1,4 @@
-// ✅ utils/canvas/floppyRenderer.js — stable random floppy color logic only, keeping full meta logic
+// ✅ utils/canvas/floppyRenderer.js — stable random floppy color logic, full meta logic untouched
 const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const QRCode = require('qrcode');
 const path = require('path');
@@ -26,7 +26,7 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
     const placeholderPath = path.resolve(__dirname, '../../assets/placeholders/nft-placeholder.png');
     const nftImage = await loadImage(meta.image_fixed || meta.image || placeholderPath);
 
-    const finalFloppyPath = floppyPath || getRandomFloppyPath();
+    const finalFloppyPath = floppyPath ?? getRandomFloppyPath();
     const floppyImage = await loadImage(finalFloppyPath);
 
     const qrCanvas = createCanvas(90, 90);
@@ -77,5 +77,6 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
 module.exports = {
   buildFloppyCard
 };
+
 
 
