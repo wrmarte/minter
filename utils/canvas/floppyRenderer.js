@@ -28,7 +28,7 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
     const qrImage = await loadImage(qrCanvas.toBuffer('image/png'));
 
     ctx.drawImage(floppyImage, 0, 0, 600, 600);
-    ctx.drawImage(nftImage, 225, 50, 275, 275);
+    ctx.drawImage(nftImage, 175, 50, 275, 275);
     ctx.drawImage(qrImage, 65, 480, 60, 60);
 
     ctx.shadowColor = 'rgba(0, 0, 0, 0.6)';
