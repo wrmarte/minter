@@ -1,6 +1,7 @@
 const { SlashCommandBuilder, AttachmentBuilder } = require('discord.js');
 const { buildUltraFlexCard } = require('../services/ultraFlexService');
 const { buildFloppyFlexCard } = require('../services/floppyFlexService');
+const path = require('path');
 
 function getFlexService(chain) {
   switch (chain) {
@@ -29,6 +30,11 @@ module.exports = {
     .addBooleanOption(opt =>
       opt.setName('ultra')
         .setDescription('Enable Ultra Style')
+    )
+    .addStringOption(opt =>
+      opt.setName('color')
+        .setDescription('Floppy Color (red, yellow, green, blue, purple, black)')
+        .setRequired(false)
     ),
 
   async autocomplete(interaction, pg) {
@@ -57,6 +63,7 @@ module.exports = {
     const name = interaction.options.getString('name').toLowerCase();
     const tokenId = interaction.options.getInteger('tokenid');
     const ultra = interaction.options.getBoolean('ultra');
+    const color = interaction.options.getString('color')?.toLowerCase() || 'red';
     const userIsOwner = interaction.user.id === process.env.BOT_OWNER_ID;
 
     console.log(`FlexFloppy Debug → User ID: ${interaction.user.id}, BOT_OWNER_ID: ${process.env.BOT_OWNER_ID}`);
@@ -91,7 +98,8 @@ module.exports = {
       if (ultra) {
         imageBuffer = await buildUltraFlexCard(contractAddress, tokenId, collectionName, chain);
       } else {
-        imageBuffer = await buildFloppyFlexCard(contractAddress, tokenId, collectionName, chain);
+        const floppyPath = path.resolve(__dirname, `../assets/floppies/floppy-${color}.png`);
+        imageBuffer = await buildFloppyFlexCard(contractAddress, tokenId, collectionName, chain, floppyPath);
       }
 
       const attachment = new AttachmentBuilder(imageBuffer, {
