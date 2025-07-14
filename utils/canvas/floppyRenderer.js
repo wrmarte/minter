@@ -1,5 +1,6 @@
-// ✅ utils/canvas/floppyRenderer.js with static QR fallback
+// ✅ utils/canvas/floppyRenderer.js with local placeholder and static QR fallback
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
+const path = require('path');
 const { fetchMetadataExtras } = require('../../utils/fetchMetadataExtras');
 
 async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, floppyPath) {
@@ -8,7 +9,8 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
 
   try {
     const meta = await fetchMetadataExtras(contractAddress, tokenId, chain);
-    const nftImage = await loadImage(meta.image_fixed || meta.image || 'https://via.placeholder.com/400x400.png?text=NFT');
+    const localPlaceholder = path.resolve(__dirname, '../../assets/placeholders/nft-placeholder.png');
+    const nftImage = await loadImage(meta.image_fixed || meta.image || localPlaceholder);
     const floppyImage = await loadImage(floppyPath);
     const qrImage = await loadImage('https://api.qrserver.com/v1/create-qr-code/?size=130x130&data=' + encodeURIComponent(meta.permalink || `https://basescan.org/token/${contractAddress}?a=${tokenId}`));
 
