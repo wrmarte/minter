@@ -1,4 +1,4 @@
-// ✅ utils/canvas/floppyRenderer.js with local placeholder and static QR fallback
+// ✅ utils/canvas/floppyRenderer.js adjusted image position for floppy label
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
 const path = require('path');
 const { fetchMetadataExtras } = require('../../utils/fetchMetadataExtras');
@@ -15,14 +15,14 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
     const qrImage = await loadImage('https://api.qrserver.com/v1/create-qr-code/?size=130x130&data=' + encodeURIComponent(meta.permalink || `https://basescan.org/token/${contractAddress}?a=${tokenId}`));
 
     ctx.drawImage(floppyImage, 0, 0, 600, 600);
-    ctx.drawImage(nftImage, 60, 140, 200, 200);
-    ctx.drawImage(qrImage, 420, 430, 130, 130);
+    ctx.drawImage(nftImage, 70, 250, 160, 160);
+    ctx.drawImage(qrImage, 400, 440, 130, 130);
 
-    ctx.font = 'bold 22px Arial';
+    ctx.font = 'bold 20px Arial';
     ctx.fillStyle = '#111';
-    ctx.fillText(`${collectionName}`, 60, 370);
-    ctx.fillText(`ID #${tokenId}`, 60, 400);
-    ctx.fillText(`Rank: ${meta.rank || 'N/A'}`, 60, 430);
+    ctx.fillText(`${collectionName}`, 70, 440);
+    ctx.fillText(`ID #${tokenId}`, 70, 470);
+    ctx.fillText(`Rank: ${meta.rank || 'N/A'}`, 70, 500);
   } catch (err) {
     console.warn('❌ buildFloppyCard error:', err);
     ctx.fillStyle = '#111';
