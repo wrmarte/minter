@@ -1,4 +1,4 @@
-// ✅ utils/canvas/floppyRenderer.js adjusted image position for floppy label
+// ✅ utils/canvas/floppyRenderer.js final layout
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
 const path = require('path');
 const { fetchMetadataExtras } = require('../../utils/fetchMetadataExtras');
@@ -15,14 +15,15 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
     const qrImage = await loadImage('https://api.qrserver.com/v1/create-qr-code/?size=130x130&data=' + encodeURIComponent(meta.permalink || `https://basescan.org/token/${contractAddress}?a=${tokenId}`));
 
     ctx.drawImage(floppyImage, 0, 0, 600, 600);
-    ctx.drawImage(nftImage, 70, 250, 160, 160);
+    ctx.drawImage(nftImage, 60, 140, 140, 140);
     ctx.drawImage(qrImage, 400, 440, 130, 130);
 
-    ctx.font = 'bold 20px Arial';
+    ctx.font = 'bold 18px Arial';
     ctx.fillStyle = '#111';
-    ctx.fillText(`${collectionName}`, 70, 440);
-    ctx.fillText(`ID #${tokenId}`, 70, 470);
-    ctx.fillText(`Rank: ${meta.rank || 'N/A'}`, 70, 500);
+    ctx.fillText(`${collectionName}`, 220, 160);
+    ctx.fillText(`ID #${tokenId}`, 220, 190);
+    ctx.fillText(`Rank: ${meta.rank || 'N/A'}`, 220, 220);
+    ctx.fillText(`Minted with $ADRIAN on Base`, 60, 300);
   } catch (err) {
     console.warn('❌ buildFloppyCard error:', err);
     ctx.fillStyle = '#111';
@@ -38,5 +39,6 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
 module.exports = {
   buildFloppyCard
 };
+
 
 
