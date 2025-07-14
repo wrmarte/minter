@@ -19,11 +19,11 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
 
     ctx.drawImage(floppyImage, 0, 0, 600, 600);
     ctx.drawImage(nftImage, 100, 50, 260, 260);
-    ctx.drawImage(qrImage, 395, 265, 85, 85);
+    ctx.drawImage(qrImage, 220, 265, 85, 85);
 
     ctx.shadowColor = 'rgba(0, 0, 0, 0.6)';
     ctx.shadowBlur = 4;
-    ctx.fillStyle = '#ffffff';
+    ctx.fillStyle = '#000000';
 
     ctx.font = 'bold 22px Exo2';
     ctx.textAlign = 'left';
