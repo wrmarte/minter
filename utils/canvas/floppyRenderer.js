@@ -1,5 +1,6 @@
-// ✅ utils/canvas/floppyRenderer.js with inline metadata and vertical minted text adjusted direction
+// ✅ utils/canvas/floppyRenderer.js with in-canvas transparent QR using qrcode package
 const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
+const QRCode = require('qrcode');
 const path = require('path');
 const { fetchMetadata } = require('../../utils/fetchMetadata');
 
@@ -15,11 +16,20 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
     const localPlaceholder = path.resolve(__dirname, '../../assets/placeholders/nft-placeholder.png');
     const nftImage = await loadImage(meta.image_fixed || meta.image || localPlaceholder);
     const floppyImage = await loadImage(floppyPath);
-    const qrImage = await loadImage(`https://api.qrserver.com/v1/create-qr-code/?size=90x90&bgcolor=255-255-255-0&data=${encodeURIComponent(meta.permalink || `https://basescan.org/token/${contractAddress}?a=${tokenId}`)}`);
+
+    const qrCanvas = createCanvas(90, 90);
+    await QRCode.toCanvas(qrCanvas, meta.permalink || `https://basescan.org/token/${contractAddress}?a=${tokenId}`, {
+      margin: 1,
+      color: {
+        dark: '#000000',
+        light: '#00000000'
+      }
+    });
+    const qrImage = await loadImage(qrCanvas.toBuffer('image/png'));
 
     ctx.drawImage(floppyImage, 0, 0, 600, 600);
     ctx.drawImage(nftImage, 100, 50, 275, 275);
-    ctx.drawImage(qrImage, 200, 450, 80, 80);
+    ctx.drawImage(qrImage, 200, 450, 70, 70);
 
     ctx.shadowColor = 'rgba(0, 0, 0, 0.6)';
     ctx.shadowBlur = 4;
@@ -38,7 +48,7 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
   } catch (err) {
     console.warn('❌ buildFloppyCard error:', err);
     ctx.fillStyle = '#111';
-    ctx.fillRect(0, 0, 600, 600);
+    ctx.fillRect(20, 20, 600, 600);
     ctx.font = 'bold 30px Arial';
     ctx.fillStyle = '#fff';
     ctx.fillText('Error Loading NFT', 150, 300);
@@ -50,6 +60,7 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
 module.exports = {
   buildFloppyCard
 };
+
 
 
 
