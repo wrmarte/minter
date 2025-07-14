@@ -1,21 +1,26 @@
-// ✅ utils/canvas/floppyRenderer.js with in-canvas transparent QR and inline metadata layout
+// ✅ utils/canvas/floppyRenderer.js with in-canvas transparent QR, inline metadata, and random floppy color
 const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const QRCode = require('qrcode');
 const path = require('path');
-const { fetchMetadata } = require('../../utils/fetchMetadata');
+const { fetchMetadataExtras } = require('../../utils/fetchMetadataExtras');
 
 const fontPath = path.join(__dirname, '../../fonts/Exo2-Bold.ttf');
 GlobalFonts.registerFromPath(fontPath, 'Exo2');
 
-async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, floppyPath) {
+const FLOPPY_COLORS = ['red', 'yellow', 'green', 'blue', 'purple', 'black'];
+
+async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, floppyPath = null) {
   const canvas = createCanvas(600, 600);
   const ctx = canvas.getContext('2d');
 
   try {
-    const meta = await fetchMetadata(contractAddress, tokenId, chain);
+    const meta = await fetchMetadataExtras(contractAddress, tokenId, chain);
     const localPlaceholder = path.resolve(__dirname, '../../assets/placeholders/nft-placeholder.png');
     const nftImage = await loadImage(meta.image_fixed || meta.image || localPlaceholder);
-    const floppyImage = await loadImage(floppyPath);
+
+    const randomColor = FLOPPY_COLORS[Math.floor(Math.random() * FLOPPY_COLORS.length)];
+    const fallbackFloppyPath = path.resolve(__dirname, `../../assets/floppies/floppy-${randomColor}.png`);
+    const floppyImage = await loadImage(floppyPath || fallbackFloppyPath);
 
     const qrCanvas = createCanvas(90, 90);
     await QRCode.toCanvas(qrCanvas, meta.permalink || `https://basescan.org/token/${contractAddress}?a=${tokenId}`, {
@@ -60,7 +65,6 @@ async function buildFloppyCard(contractAddress, tokenId, collectionName, chain, 
 module.exports = {
   buildFloppyCard
 };
-
 
 
 
