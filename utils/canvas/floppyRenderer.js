@@ -1,4 +1,4 @@
-const floppyImage = await loadImage(floppyPath);// ✅ utils/canvas/floppyRenderer.js with random floppy color logic and rank/traits fallback
+const floppyImage = await loadImage(floppyPath);
 const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const QRCode = require('qrcode');
 const path = require('path');
