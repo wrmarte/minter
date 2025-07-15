@@ -1,4 +1,5 @@
 const fetch = require('node-fetch');
+const { EmbedBuilder } = require('discord.js');
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const cooldown = new Set();
@@ -6,19 +7,17 @@ const TRIGGERS = ['musclemb', 'muscle mb', 'yo mb', 'mbbot', 'mb bro'];
 
 module.exports = (client) => {
   client.on('messageCreate', async (message) => {
-    if (message.author.bot) return;
+    if (message.author.bot || !message.guild) return;
 
     const lowered = message.content.toLowerCase();
     const botMentioned = message.mentions.has(client.user);
     const hasTriggerWord = TRIGGERS.some(trigger => lowered.includes(trigger));
-
     const mentionedUsers = message.mentions.users.filter(u => u.id !== client.user.id);
     const shouldRoast = (hasTriggerWord || botMentioned) && mentionedUsers.size > 0;
     const isRoastingBot = shouldRoast && message.mentions.has(client.user) && mentionedUsers.size === 1 && mentionedUsers.has(client.user.id);
 
-    if (!hasTriggerWord && !botMentioned) return;
-
-    if (cooldown.has(message.author.id)) return;
+    const isOwner = message.author.id === process.env.BOT_OWNER_ID;
+    if (cooldown.has(message.author.id) && !isOwner) return;
     cooldown.add(message.author.id);
     setTimeout(() => cooldown.delete(message.author.id), 10000);
 
@@ -31,7 +30,15 @@ module.exports = (client) => {
       cleanedInput = cleanedInput.replaceAll(`<@!${user.id}>`, '');
     });
     cleanedInput = cleanedInput.replaceAll(`<@${client.user.id}>`, '').trim();
+
+    let introLine = '';
+    if (hasTriggerWord) {
+      introLine = `Detected trigger word: "${TRIGGERS.find(trigger => lowered.includes(trigger))}". `;
+    } else if (botMentioned) {
+      introLine = `You mentioned MuscleMB directly. `;
+    }
     if (!cleanedInput) cleanedInput = shouldRoast ? 'Roast these fools.' : 'Speak your alpha.';
+    cleanedInput = `${introLine}${cleanedInput}`;
 
     try {
       await message.channel.sendTyping();
@@ -43,7 +50,7 @@ module.exports = (client) => {
       try {
         const modeRes = await client.pg.query(
           `SELECT mode FROM mb_modes WHERE server_id = $1 LIMIT 1`,
-          [message.guild?.id]
+          [message.guild.id]
         );
         currentMode = modeRes.rows[0]?.mode || 'default';
       } catch (err) {
@@ -71,6 +78,26 @@ module.exports = (client) => {
         }
       }
 
+      const extraPersonas = [
+        'MuscleMB is ultra-sarcastic. Dry humor only, mock everything.',
+        'MuscleMB is feeling poetic. Reply like a gym-bro Shakespeare.',
+        'MuscleMB is in retro VHS mode. Speak like an 80s workout tape.',
+        'MuscleMB is intoxicated. Sloppy but confident replies.',
+        'MuscleMB is philosophical. Speak like a stoic lifting monk.',
+        'MuscleMB is conspiracy-minded. Relate everything to secret NFT cabals.',
+        'MuscleMB is flexing luxury. Act like a millionaire gym-bro NFT whale.',
+        'MuscleMB is anime mode. Reply like a shounen anime sensei.',
+        'MuscleMB is Miami mode. Heavy Miami slang, flex energy.',
+        'MuscleMB is ultra-degen. Reply like you haven’t slept in 3 days flipping coins.',
+      ];
+      const randomOverlay = Math.random() < 0.4 ? extraPersonas[Math.floor(Math.random() * extraPersonas.length)] : null;
+      if (randomOverlay) systemPrompt += ` ${randomOverlay}`;
+
+      let temperature = 0.7;
+      if (currentMode === 'villain') temperature = 0.4;
+      if (currentMode === 'motivator') temperature = 0.9;
+      if (randomOverlay?.includes('intoxicated')) temperature = 1.0;
+
       const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -79,7 +106,7 @@ module.exports = (client) => {
         },
         body: JSON.stringify({
           model: 'llama3-70b-8192',
-          temperature: 0.7,
+          temperature,
           max_tokens: 180,
           messages: [
             { role: 'system', content: systemPrompt },
@@ -91,15 +118,16 @@ module.exports = (client) => {
       const data = await response.json();
       const aiReply = data.choices?.[0]?.message?.content?.trim();
 
-      if (aiReply && aiReply.length > 0) {
+      if (aiReply?.length) {
+        const embed = new EmbedBuilder()
+          .setColor('#ff007f')
+          .setDescription(`💬 ${aiReply}`)
+          .setFooter({ text: `Mode: ${currentMode}${randomOverlay ? ` • ${randomOverlay}` : ''}` });
+
         try {
-          await message.reply(`💬 ${aiReply} 💪`);
+          await message.reply({ embeds: [embed] });
         } catch (err) {
-          if (err.code === 50013) {
-            console.warn('⚠️ MuscleMB can’t reply — missing permissions in channel.');
-          } else {
-            console.warn('❌ MuscleMB reply error:', err.message);
-          }
+          console.warn('❌ MuscleMB embed reply error:', err.message);
         }
       }
 
@@ -108,12 +136,9 @@ module.exports = (client) => {
       try {
         await message.reply('⚠️ MuscleMB pulled a hammy 🦵. Try again soon.');
       } catch (fallbackErr) {
-        if (fallbackErr.code === 50013) {
-          console.warn('⚠️ Fallback message failed — missing permissions.');
-        } else {
-          console.warn('❌ Fallback send error:', fallbackErr.message);
-        }
+        console.warn('❌ Fallback send error:', fallbackErr.message);
       }
     }
   });
 };
+
