@@ -9,7 +9,7 @@ const erc721Abi = [
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('stake')
-    .setDescription('Stake all NFTs from this server’s project using your wallet')
+    .setDescription('Scan 1000 token IDs and count NFTs from contract owned by wallet')
     .addStringOption(option =>
       option.setName('wallet')
         .setDescription('Your wallet address')
@@ -35,22 +35,15 @@ module.exports = {
     const provider = getProvider(network);
     const nftContract = new Contract(contract, erc721Abi, provider);
 
+    const MAX_SCAN = 1000;
     const BATCH_SIZE = 5;
     const scanned = new Set();
     let tokenIds = [];
-    let tokenId = 0;
-    let consecutiveErrors = 0;
-    const maxConsecutiveErrors = 20;
-    const scanLimit = project.scan_limit || 20000;
 
-    await interaction.editReply(`Scanning NFTs... Starting from tokenId 0.`);
+    await interaction.editReply(`Scanning first ${MAX_SCAN} token IDs for wallet ownership.`);
 
-    while (tokenId < scanLimit && consecutiveErrors < maxConsecutiveErrors) {
-      let batch = [];
-      for (let i = 0; i < BATCH_SIZE; i++) {
-        batch.push(tokenId);
-        tokenId++;
-      }
+    for (let tokenId = 0; tokenId < MAX_SCAN; tokenId += BATCH_SIZE) {
+      const batch = Array.from({ length: BATCH_SIZE }, (_, i) => tokenId + i).filter(id => id < MAX_SCAN);
 
       const results = await Promise.all(
         batch.map(async (id) => {
@@ -60,19 +53,14 @@ module.exports = {
               return await tempContract.ownerOf(id);
             });
             return { id, owner };
-          } catch (error) {
-            if (error.code === 'CALL_EXCEPTION' || error.code === 'BAD_DATA') {
-              consecutiveErrors++;
-            }
+          } catch {
             return null;
           }
         })
       );
 
       for (const res of results) {
-        if (!res || !res.owner) continue;
-        consecutiveErrors = 0;
-        if (res.owner.toLowerCase() === wallet) {
+        if (res && res.owner && res.owner.toLowerCase() === wallet) {
           const idStr = res.id.toString();
           if (!scanned.has(idStr)) {
             tokenIds.push(idStr);
@@ -80,13 +68,11 @@ module.exports = {
           }
         }
       }
-
-      await interaction.editReply(`Scanning NFTs... Last checked tokenId: ${tokenId}. Found: ${tokenIds.length}. Consecutive errors: ${consecutiveErrors}/${maxConsecutiveErrors}`);
       await new Promise((res) => setTimeout(res, 150));
     }
 
     if (tokenIds.length === 0) {
-      return interaction.editReply(`❌ No NFTs detected in wallet \`${wallet.slice(0, 6)}...${wallet.slice(-4)}\` for this project.`);
+      return interaction.editReply(`❌ No NFTs detected in wallet \`${wallet.slice(0, 6)}...${wallet.slice(-4)}\` within first ${MAX_SCAN} token IDs.`);
     }
 
     await pg.query(`
@@ -96,7 +82,7 @@ module.exports = {
       DO UPDATE SET token_ids = $4, staked_at = NOW()
     `, [wallet, contract, network, tokenIds]);
 
-    return interaction.editReply(`✅ ${tokenIds.length} NFT(s) now actively staked for wallet \`${wallet.slice(0, 6)}...${wallet.slice(-4)}\`.`);
+    return interaction.editReply(`✅ ${tokenIds.length} NFT(s) found within first ${MAX_SCAN} token IDs for wallet \`${wallet.slice(0, 6)}...${wallet.slice(-4)}\`.`);
   }
 };
 
