@@ -34,18 +34,17 @@ module.exports = {
     const provider = getProvider(network);
     const nftContract = new Contract(contract, erc721Abi, provider);
 
+    const scanLimit = project.scan_limit || 5000;
     const BATCH_SIZE = 10;
     let tokenIds = [];
     const scanned = new Set();
     let tokenId = 0;
-    let invalidCount = 0;
-    const invalidThreshold = 20;
 
-    let progressMsg = await interaction.editReply(`Scanning NFTs... Starting from tokenId 0...`);
+    let progressMsg = await interaction.editReply(`Scanning NFTs... Starting from tokenId 0 up to ${scanLimit}...`);
 
-    while (invalidCount < invalidThreshold) {
+    while (tokenId < scanLimit) {
       let batch = [];
-      for (let i = 0; i < BATCH_SIZE; i++) {
+      for (let i = 0; i < BATCH_SIZE && tokenId < scanLimit; i++) {
         batch.push(tokenId);
         tokenId++;
       }
@@ -64,25 +63,18 @@ module.exports = {
         })
       );
 
-      let foundAny = false;
       for (const res of results) {
-        if (!res || !res.owner) {
-          invalidCount++;
-          continue;
-        }
-        invalidCount = 0; // Reset invalid streak if valid token found
-
+        if (!res || !res.owner) continue;
         if (res.owner.toLowerCase() === wallet) {
           const idStr = res.id.toString();
           if (!scanned.has(idStr)) {
             tokenIds.push(idStr);
             scanned.add(idStr);
-            foundAny = true;
           }
         }
       }
 
-      await interaction.editReply(`Scanning NFTs... Last checked tokenId: ${tokenId}. Found: ${tokenIds.length}`);
+      await interaction.editReply(`Scanning NFTs... Last checked tokenId: ${tokenId} / ${scanLimit}. Found: ${tokenIds.length}`);
       await new Promise((res) => setTimeout(res, 100));
     }
 
@@ -100,5 +92,6 @@ module.exports = {
     return interaction.editReply(`✅ ${tokenIds.length} NFT(s) now actively staked for wallet \`${wallet.slice(0, 6)}...${wallet.slice(-4)}\`.`);
   }
 };
+
 
 
