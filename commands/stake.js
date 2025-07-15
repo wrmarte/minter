@@ -62,7 +62,7 @@ module.exports = {
 
       if (tokenOfFail || tokenIds.length < count) {
         console.warn(`⚠️ tokenIds found (${tokenIds.length}) less than balanceOf count (${count}). Running ownerOf() sweep...`);
-        const limit = project.scan_limit || 4000;
+        const limit = project.scan_limit || 6000;
         const BATCH_SIZE = 10;
 
         let scannedCount = 0;
