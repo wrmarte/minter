@@ -35,7 +35,7 @@ module.exports = {
     const provider = getProvider(network);
     const nftContract = new Contract(contract, erc721Abi, provider);
 
-    const BATCH_SIZE = 10;
+    const BATCH_SIZE = 5;
     const scanned = new Set();
     let tokenIds = [];
     let tokenId = 0;
@@ -61,7 +61,7 @@ module.exports = {
             });
             return { id, owner };
           } catch (error) {
-            if (error.code === 'CALL_EXCEPTION') {
+            if (error.code === 'CALL_EXCEPTION' || error.code === 'BAD_DATA') {
               consecutiveErrors++;
             }
             return null;
@@ -82,7 +82,7 @@ module.exports = {
       }
 
       await interaction.editReply(`Scanning NFTs... Last checked tokenId: ${tokenId}. Found: ${tokenIds.length}. Consecutive errors: ${consecutiveErrors}/${maxConsecutiveErrors}`);
-      await new Promise((res) => setTimeout(res, 100));
+      await new Promise((res) => setTimeout(res, 150));
     }
 
     if (tokenIds.length === 0) {
