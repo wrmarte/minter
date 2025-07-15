@@ -13,7 +13,6 @@ module.exports = (client) => {
     const botMentioned = message.mentions.has(client.user);
     const hasTriggerWord = TRIGGERS.some(trigger => lowered.includes(trigger));
 
-    // ✅ Clean filter: only trigger on real triggers, ignore mass mentions
     if (!hasTriggerWord && !botMentioned) return;
     if (message.mentions.everyone || message.mentions.roles.size > 0) return;
 
@@ -124,8 +123,27 @@ module.exports = (client) => {
       const aiReply = data.choices?.[0]?.message?.content?.trim();
 
       if (aiReply?.length) {
+        let embedColor = '#9b59b6';
+        switch (currentMode) {
+          case 'chill': embedColor = '#3498db'; break;
+          case 'villain': embedColor = '#8b0000'; break;
+          case 'motivator': embedColor = '#e67e22'; break;
+        }
+        if (randomOverlay) {
+          if (randomOverlay.includes('ultra-sarcastic')) embedColor = '#95a5a6';
+          if (randomOverlay.includes('poetic')) embedColor = '#a29bfe';
+          if (randomOverlay.includes('retro')) embedColor = '#f39c12';
+          if (randomOverlay.includes('intoxicated')) embedColor = '#bdc3c7';
+          if (randomOverlay.includes('philosophical')) embedColor = '#34495e';
+          if (randomOverlay.includes('conspiracy')) embedColor = '#27ae60';
+          if (randomOverlay.includes('luxury')) embedColor = '#f1c40f';
+          if (randomOverlay.includes('anime')) embedColor = '#ff6b81';
+          if (randomOverlay.includes('Miami')) embedColor = '#1abc9c';
+          if (randomOverlay.includes('ultra-degen')) embedColor = '#e84393';
+        }
+
         const embed = new EmbedBuilder()
-          .setColor('#ff007f')
+          .setColor(embedColor)
           .setDescription(`💬 ${aiReply}`)
           .setFooter({ text: `Mode: ${currentMode}${randomOverlay ? ` • ${randomOverlay}` : ''}` });
 
