@@ -23,6 +23,10 @@ const client = new Client({
 const muscleMBListener = require('./listeners/muscleMBListener');
 muscleMBListener(client);
 
+// ✅ Load FF Trigger listener
+const ffTriggerListener = require('./listeners/fftrigger');
+ffTriggerListener(client);
+
 // ✅ PostgreSQL connection
 const pg = new PgClient({
   connectionString: process.env.DATABASE_URL,
@@ -161,6 +165,7 @@ if (process.env.APE_ENABLED === 'true') {
 client.login(process.env.DISCORD_BOT_TOKEN)
   .then(() => console.log(`✅ Logged in as ${client.user.tag}`))
   .catch(err => console.error('❌ Discord login failed:', err));
+
 
 
 
