@@ -157,10 +157,29 @@ module.exports = (client) => {
           embedColor = modeColorMap[currentMode] || embedColor;
         }
 
+        const colorEmojiMap = {
+          '#3498db': '🟦',
+          '#8b0000': '🟥',
+          '#e67e22': '🟧',
+          '#9b59b6': '🟪',
+          '#95a5a6': '⬜',
+          '#a29bfe': '🟪',
+          '#f39c12': '🟨',
+          '#bdc3c7': '⬛',
+          '#34495e': '🟫',
+          '#27ae60': '🟩',
+          '#f1c40f': '🟨',
+          '#ff6b81': '🩷',
+          '#1abc9c': '🟩',
+          '#e84393': '🟥',
+        };
+
+        const footerEmoji = colorEmojiMap[embedColor] || '🟪';
+
         const embed = new EmbedBuilder()
           .setColor(embedColor)
           .setDescription(`💬 ${aiReply}`)
-          .setFooter({ text: `Mode: ${currentMode} • ${randomOverlay}` });
+          .setFooter({ text: `Mode: ${footerEmoji}` });
 
         const delayMs = Math.min(aiReply.length * 40, 5000);
         await new Promise(resolve => setTimeout(resolve, delayMs));
@@ -182,3 +201,4 @@ module.exports = (client) => {
     }
   });
 };
+
