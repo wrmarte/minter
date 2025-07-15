@@ -12,6 +12,11 @@ module.exports = (client) => {
     const lowered = message.content.toLowerCase();
     const botMentioned = message.mentions.has(client.user);
     const hasTriggerWord = TRIGGERS.some(trigger => lowered.includes(trigger));
+
+    // ✅ Clean filter: only trigger on real triggers, ignore mass mentions
+    if (!hasTriggerWord && !botMentioned) return;
+    if (message.mentions.everyone || message.mentions.roles.size > 0) return;
+
     const mentionedUsers = message.mentions.users.filter(u => u.id !== client.user.id);
     const shouldRoast = (hasTriggerWord || botMentioned) && mentionedUsers.size > 0;
     const isRoastingBot = shouldRoast && message.mentions.has(client.user) && mentionedUsers.size === 1 && mentionedUsers.has(client.user.id);
