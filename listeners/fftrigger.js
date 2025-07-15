@@ -1,11 +1,13 @@
-// ✅ listeners/fftrigger.js — Open access version, all users and servers can use it
+// ✅ listeners/fftrigger.js — ff-projectname or ff-projectname-id, only minted token IDs
 const { AttachmentBuilder } = require('discord.js');
 const { buildFloppyCard } = require('../utils/canvas/floppyRenderer');
+const path = require('path');
+const { Contract } = require('ethers');
+const { getProvider } = require('../services/providerM');
 
 module.exports = (client) => {
   client.on('messageCreate', async message => {
     if (message.author.bot || !message.guild) return;
-
     const guildId = message.guild.id;
     const trigger = message.content.trim().toLowerCase();
     if (!trigger.startsWith('ff-')) return;
@@ -24,7 +26,6 @@ module.exports = (client) => {
       );
 
       const row = result.rows[0];
-
       if (!row) {
         return message.reply('❌ Flex project not found. Use `/addflex` first.').catch(() => {});
       }
@@ -33,16 +34,27 @@ module.exports = (client) => {
       const contractAddress = address;
       const collectionName = display_name || storedName || projectName;
       const chain = network?.toLowerCase() || 'base';
-
       if (!contractAddress || chain !== 'base') {
         return message.reply('⚠️ Invalid contract or unsupported network.').catch(() => {});
       }
 
+      let totalSupply = 200; // Default fallback
+      try {
+        const provider = getProvider(chain);
+        const erc721Abi = ['function totalSupply() view returns (uint256)'];
+        const contract = new Contract(contractAddress, erc721Abi, provider);
+        totalSupply = Number(await contract.totalSupply());
+        if (!totalSupply || isNaN(totalSupply) || totalSupply <= 0) totalSupply = 500;
+      } catch (err) {
+        console.warn(`⚠️ totalSupply fetch failed: ${err.message}`);
+      }
+
       const tokenId = Number.isInteger(tokenIdInput) && tokenIdInput > 0
         ? tokenIdInput
-        : Math.floor(Math.random() * 500) + 1;
+        : Math.floor(Math.random() * totalSupply) + 1;
 
-      const imageBuffer = await buildFloppyCard(contractAddress, tokenId, collectionName, chain, null);
+      const floppyPath = null; // Force random floppy color
+      const imageBuffer = await buildFloppyCard(contractAddress, tokenId, collectionName, chain, floppyPath);
       const attachment = new AttachmentBuilder(imageBuffer, { name: `floppyflexcard.png` });
 
       await message.channel.send({ files: [attachment] });
