@@ -61,6 +61,25 @@ module.exports = (client) => {
         console.warn('⚠️ Failed to fetch mb_mode, using default.');
       }
 
+      if (currentMode === 'default' || Math.random() < 0.5) {
+        const randomModes = ['chill', 'villain', 'motivator'];
+        currentMode = randomModes[Math.floor(Math.random() * randomModes.length)];
+      }
+
+      const extraPersonas = [
+        'MuscleMB is ultra-sarcastic. Dry humor only, mock everything.',
+        'MuscleMB is feeling poetic. Reply like a gym-bro Shakespeare.',
+        'MuscleMB is in retro VHS mode. Speak like an 80s workout tape.',
+        'MuscleMB is intoxicated. Sloppy but confident replies.',
+        'MuscleMB is philosophical. Speak like a stoic lifting monk.',
+        'MuscleMB is conspiracy-minded. Relate everything to secret NFT cabals.',
+        'MuscleMB is flexing luxury. Act like a millionaire gym-bro NFT whale.',
+        'MuscleMB is anime mode. Reply like a shounen anime sensei.',
+        'MuscleMB is Miami mode. Heavy Miami slang, flex energy.',
+        'MuscleMB is ultra-degen. Reply like you haven’t slept in 3 days flipping coins.',
+      ];
+      const randomOverlay = extraPersonas[Math.floor(Math.random() * extraPersonas.length)];
+
       let systemPrompt = '';
       if (isRoast) {
         systemPrompt = `You are MuscleMB — a savage roastmaster. Ruthlessly roast the following tagged degens: ${roastTargets}. Be short, brutal, and hilarious. Use savage emojis. 💀🔥`;
@@ -82,25 +101,12 @@ module.exports = (client) => {
         }
       }
 
-      const extraPersonas = [
-        'MuscleMB is ultra-sarcastic. Dry humor only, mock everything.',
-        'MuscleMB is feeling poetic. Reply like a gym-bro Shakespeare.',
-        'MuscleMB is in retro VHS mode. Speak like an 80s workout tape.',
-        'MuscleMB is intoxicated. Sloppy but confident replies.',
-        'MuscleMB is philosophical. Speak like a stoic lifting monk.',
-        'MuscleMB is conspiracy-minded. Relate everything to secret NFT cabals.',
-        'MuscleMB is flexing luxury. Act like a millionaire gym-bro NFT whale.',
-        'MuscleMB is anime mode. Reply like a shounen anime sensei.',
-        'MuscleMB is Miami mode. Heavy Miami slang, flex energy.',
-        'MuscleMB is ultra-degen. Reply like you haven’t slept in 3 days flipping coins.',
-      ];
-      const randomOverlay = Math.random() < 0.4 ? extraPersonas[Math.floor(Math.random() * extraPersonas.length)] : null;
-      if (randomOverlay) systemPrompt += ` ${randomOverlay}`;
+      systemPrompt += ` ${randomOverlay}`;
 
       let temperature = 0.7;
       if (currentMode === 'villain') temperature = 0.4;
       if (currentMode === 'motivator') temperature = 0.9;
-      if (randomOverlay?.includes('intoxicated')) temperature = 1.0;
+      if (randomOverlay.includes('intoxicated')) temperature = 1.0;
 
       const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
@@ -124,30 +130,38 @@ module.exports = (client) => {
 
       if (aiReply?.length) {
         let embedColor = '#9b59b6';
-        switch (currentMode) {
-          case 'chill': embedColor = '#3498db'; break;
-          case 'villain': embedColor = '#8b0000'; break;
-          case 'motivator': embedColor = '#e67e22'; break;
+        const colorMap = {
+          'ultra-sarcastic': '#95a5a6',
+          'poetic': '#a29bfe',
+          'retro': '#f39c12',
+          'intoxicated': '#bdc3c7',
+          'philosophical': '#34495e',
+          'conspiracy': '#27ae60',
+          'luxury': '#f1c40f',
+          'anime': '#ff6b81',
+          'Miami': '#1abc9c',
+          'ultra-degen': '#e84393',
+        };
+        for (const key in colorMap) {
+          if (randomOverlay.includes(key)) {
+            embedColor = colorMap[key];
+            break;
+          }
         }
-        if (randomOverlay) {
-          if (randomOverlay.includes('ultra-sarcastic')) embedColor = '#95a5a6';
-          if (randomOverlay.includes('poetic')) embedColor = '#a29bfe';
-          if (randomOverlay.includes('retro')) embedColor = '#f39c12';
-          if (randomOverlay.includes('intoxicated')) embedColor = '#bdc3c7';
-          if (randomOverlay.includes('philosophical')) embedColor = '#34495e';
-          if (randomOverlay.includes('conspiracy')) embedColor = '#27ae60';
-          if (randomOverlay.includes('luxury')) embedColor = '#f1c40f';
-          if (randomOverlay.includes('anime')) embedColor = '#ff6b81';
-          if (randomOverlay.includes('Miami')) embedColor = '#1abc9c';
-          if (randomOverlay.includes('ultra-degen')) embedColor = '#e84393';
+        if (embedColor === '#9b59b6') {
+          const modeColorMap = {
+            chill: '#3498db',
+            villain: '#8b0000',
+            motivator: '#e67e22',
+          };
+          embedColor = modeColorMap[currentMode] || embedColor;
         }
 
         const embed = new EmbedBuilder()
           .setColor(embedColor)
           .setDescription(`💬 ${aiReply}`)
-          .setFooter({ text: `Mode: ${currentMode}${randomOverlay ? ` • ${randomOverlay}` : ''}` });
+          .setFooter({ text: `Mode: ${currentMode} • ${randomOverlay}` });
 
-        // ✅ Animated Typing Delay Logic
         const delayMs = Math.min(aiReply.length * 40, 5000);
         await new Promise(resolve => setTimeout(resolve, delayMs));
 
