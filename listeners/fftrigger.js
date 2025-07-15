@@ -6,6 +6,7 @@ const path = require('path');
 const BOT_OWNER_ID = process.env.BOT_OWNER_ID;
 const ADRIAN_GUILD_ID = process.env.ADRIAN_GUILD_ID;
 
+
 module.exports = (client) => {
   client.on('messageCreate', async message => {
     if (message.author.bot || !message.guild) return;
