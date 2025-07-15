@@ -40,8 +40,9 @@ module.exports = {
     let tokenIds = [];
     const scanned = new Set();
 
+    let balance = 0;
     try {
-      const balance = await nftContract.balanceOf(wallet);
+      balance = await nftContract.balanceOf(wallet);
       const count = Number(balance);
 
       for (let i = 0; i < count; i++) {
@@ -54,12 +55,17 @@ module.exports = {
           }
         } catch (e) {
           console.warn(`⚠️ tokenOfOwnerByIndex failed at index ${i}: ${e.message}`);
-          throw new Error('non-enumerable');
         }
       }
+
+      if (tokenIds.length < count) {
+        console.warn(`⚠️ tokenIds found (${tokenIds.length}) less than balanceOf count (${count}). Running fallback sweep...`);
+        throw new Error('non-enumerable');
+      }
+
     } catch (err) {
       if (err.message === 'non-enumerable') {
-        console.log('🔁 Falling back to ownerOf() sweeping...');
+        console.log('🔁 Fallback ownerOf() sweep triggered...');
 
         let tokenIdRange = [];
         try {
