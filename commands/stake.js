@@ -3,10 +3,7 @@ const { Contract } = require('ethers');
 const { getProvider, safeRpcCall } = require('../services/providerM');
 
 const erc721Abi = [
-  'function balanceOf(address owner) view returns (uint256)',
-  'function tokenOfOwnerByIndex(address owner, uint256 index) view returns (uint256)',
-  'function ownerOf(uint256 tokenId) view returns (address)',
-  'function totalSupply() view returns (uint256)'
+  'function ownerOf(uint256 tokenId) view returns (address)'
 ];
 
 module.exports = {
@@ -37,82 +34,56 @@ module.exports = {
     const provider = getProvider(network);
     const nftContract = new Contract(contract, erc721Abi, provider);
 
+    const BATCH_SIZE = 10;
     let tokenIds = [];
     const scanned = new Set();
+    let tokenId = 0;
+    let invalidCount = 0;
+    const invalidThreshold = 20;
 
-    try {
-      const balance = await nftContract.balanceOf(wallet);
-      const count = Number(balance);
-      let tokenOfFail = false;
+    let progressMsg = await interaction.editReply(`Scanning NFTs... Starting from tokenId 0...`);
 
-      for (let i = 0; i < count; i++) {
-        try {
-          const tokenId = await nftContract.tokenOfOwnerByIndex(wallet, i);
-          const idStr = tokenId.toString();
+    while (invalidCount < invalidThreshold) {
+      let batch = [];
+      for (let i = 0; i < BATCH_SIZE; i++) {
+        batch.push(tokenId);
+        tokenId++;
+      }
+
+      const results = await Promise.all(
+        batch.map(async (id) => {
+          try {
+            const owner = await safeRpcCall(network, async (prov) => {
+              const tempContract = new Contract(contract, erc721Abi, prov);
+              return await tempContract.ownerOf(id);
+            });
+            return { id, owner };
+          } catch {
+            return null;
+          }
+        })
+      );
+
+      let foundAny = false;
+      for (const res of results) {
+        if (!res || !res.owner) {
+          invalidCount++;
+          continue;
+        }
+        invalidCount = 0; // Reset invalid streak if valid token found
+
+        if (res.owner.toLowerCase() === wallet) {
+          const idStr = res.id.toString();
           if (!scanned.has(idStr)) {
             tokenIds.push(idStr);
             scanned.add(idStr);
+            foundAny = true;
           }
-        } catch (e) {
-          console.warn(`⚠️ tokenOfOwnerByIndex failed at index ${i}: ${e.message}`);
-          tokenOfFail = true;
-          break;
         }
       }
 
-      if (tokenOfFail || tokenIds.length < count) {
-        console.warn(`⚠️ tokenIds found (${tokenIds.length}) less than balanceOf count (${count}). Running ownerOf() sweep...`);
-        const limit = project.scan_limit || 6000;
-        const BATCH_SIZE = 10;
-
-        let scannedCount = 0;
-        let ownedCount = 0;
-        let skippedCount = 0;
-        let progressMsg = await interaction.editReply(`Scanning NFTs... 0 / ${limit} checked.`);
-
-        for (let i = 0; i < limit; i += BATCH_SIZE) {
-          const batch = Array.from({ length: BATCH_SIZE }, (_, k) => i + k);
-
-          const results = await Promise.all(
-            batch.map(async (id) => {
-              try {
-                const owner = await safeRpcCall(network, async (prov) => {
-                  const tempContract = new Contract(contract, erc721Abi, prov);
-                  return await tempContract.ownerOf(id);
-                });
-                return { id, owner };
-              } catch {
-                skippedCount++;
-                return null;
-              }
-            })
-          );
-
-          for (const res of results) {
-            scannedCount++;
-            if (!res || !res.owner) continue;
-            if (res.owner.toLowerCase() === wallet) {
-              const idStr = res.id.toString();
-              if (!scanned.has(idStr)) {
-                tokenIds.push(idStr);
-                scanned.add(idStr);
-                ownedCount++;
-              }
-            }
-          }
-
-          if (i % (BATCH_SIZE * 5) === 0 && progressMsg) {
-            await interaction.editReply(`Scanning NFTs... ${Math.min(i + BATCH_SIZE, limit)} / ${limit} checked. Owned: ${ownedCount}`);
-          }
-
-          await new Promise((res) => setTimeout(res, 100));
-        }
-
-        console.log(`✅ Fallback scan complete: Checked ${scannedCount}, Owned ${ownedCount}, Skipped ${skippedCount}`);
-      }
-    } catch (err) {
-      console.error('❌ Unexpected error fetching NFTs:', err);
-      return interaction.editReply(`⚠️ Could not fetch NFT ownership. RPC issue or unsupported contract.`);
+      await interaction.editReply(`Scanning NFTs... Last checked tokenId: ${tokenId}. Found: ${tokenIds.length}`);
+      await new Promise((res) => setTimeout(res, 100));
     }
 
     if (tokenIds.length === 0) {
