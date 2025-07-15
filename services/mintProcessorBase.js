@@ -1,4 +1,4 @@
-// ✅ Rolled-back ERC721-only mint processor with fixed embed visuals
+// ✅ Rolled-back ERC721-only mint processor with fixed embed visuals and duplicate tokenId safeguard
 const { Interface, Contract, ethers } = require('ethers');
 const fetch = require('node-fetch');
 const { getRealDexPriceForToken, getEthPriceFromToken } = require('./price');
@@ -85,8 +85,8 @@ function setupBaseBlockListener(client, contractRows) {
           if (!shouldSend || seenTokenIds.has(tokenIdStr)) continue;
           seenTokenIds.add(tokenIdStr);
 
-          if (!mintTxMap.has(txHash)) mintTxMap.set(txHash, { row, contract, tokenIds: [], to });
-          mintTxMap.get(txHash).tokenIds.push(tokenIdStr);
+          if (!mintTxMap.has(txHash)) mintTxMap.set(txHash, { row, contract, tokenIds: new Set(), to });
+          mintTxMap.get(txHash).tokenIds.add(tokenIdStr);
 
           saveJson(seenPath(name), [...seenTokenIds]);
         } else {
@@ -107,10 +107,11 @@ function setupBaseBlockListener(client, contractRows) {
 
     for (const [txHash, { row, contract, tokenIds, to }] of mintTxMap.entries()) {
       if (!txHash) continue;
-      if (tokenIds.length === 1) {
-        await handleMintSingle(client, row, contract, tokenIds[0], txHash, row.channel_ids, to);
+      const tokenIdArray = Array.from(tokenIds);
+      if (tokenIdArray.length === 1) {
+        await handleMintSingle(client, row, contract, tokenIdArray[0], txHash, row.channel_ids, to);
       } else {
-        await handleMintBulk(client, row, contract, tokenIds, txHash, row.channel_ids, false, to);
+        await handleMintBulk(client, row, contract, tokenIdArray, txHash, row.channel_ids, false, to);
       }
     }
   });
