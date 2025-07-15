@@ -1,11 +1,6 @@
-// ✅ listeners/fftrigger.js — Supports ff-projectname or ff-projectname-id
+// ✅ listeners/fftrigger.js — Open access version, all users and servers can use it
 const { AttachmentBuilder } = require('discord.js');
 const { buildFloppyCard } = require('../utils/canvas/floppyRenderer');
-const path = require('path');
-
-const BOT_OWNER_ID = process.env.BOT_OWNER_ID;
-const ADRIAN_GUILD_ID = process.env.ADRIAN_GUILD_ID;
-
 
 module.exports = (client) => {
   client.on('messageCreate', async message => {
@@ -30,16 +25,8 @@ module.exports = (client) => {
 
       const row = result.rows[0];
 
-      if (!row && message.author.id !== BOT_OWNER_ID) {
-        return message.reply('❌ Flex project not found. Use `/addflex` first.').catch(() => {});
-      }
-
-      if (message.author.id !== BOT_OWNER_ID && guildId !== ADRIAN_GUILD_ID) {
-        return message.reply('🚫 This command is restricted to Adrian server.').catch(() => {});
-      }
-
       if (!row) {
-        return message.reply('⚠️ No contract address available for this project.').catch(() => {});
+        return message.reply('❌ Flex project not found. Use `/addflex` first.').catch(() => {});
       }
 
       const { address, display_name, name: storedName, network } = row;
@@ -51,10 +38,11 @@ module.exports = (client) => {
         return message.reply('⚠️ Invalid contract or unsupported network.').catch(() => {});
       }
 
-      const tokenId = Number.isInteger(tokenIdInput) && tokenIdInput > 0 ? tokenIdInput : Math.floor(Math.random() * 500) + 1;
-      const floppyPath = null; // Force random floppy color
+      const tokenId = Number.isInteger(tokenIdInput) && tokenIdInput > 0
+        ? tokenIdInput
+        : Math.floor(Math.random() * 500) + 1;
 
-      const imageBuffer = await buildFloppyCard(contractAddress, tokenId, collectionName, chain, floppyPath);
+      const imageBuffer = await buildFloppyCard(contractAddress, tokenId, collectionName, chain, null);
       const attachment = new AttachmentBuilder(imageBuffer, { name: `floppyflexcard.png` });
 
       await message.channel.send({ files: [attachment] });
