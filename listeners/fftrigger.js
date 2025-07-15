@@ -1,4 +1,4 @@
-// ✅ listeners/fftrigger.js — Patched with flexfloppy logic
+// ✅ listeners/fftrigger.js — Fully patched dual-mode logic (random + specific token ID)
 const { AttachmentBuilder } = require('discord.js');
 const { buildFloppyCard } = require('../utils/canvas/floppyRenderer');
 const path = require('path');
@@ -8,17 +8,25 @@ const ADRIAN_GUILD_ID = process.env.ADRIAN_GUILD_ID;
 
 module.exports = (client) => {
   client.on('messageCreate', async message => {
-    if (message.author.bot) return;
-    if (!message.guild) return;
+    if (message.author.bot || !message.guild) return;
 
     const guildId = message.guild.id;
-    const botOwnerId = BOT_OWNER_ID;
-
     const trigger = message.content.trim().toLowerCase();
     if (!trigger.startsWith('ff-')) return;
 
-    const projectName = trigger.replace('ff-', '').trim();
-    if (!projectName) return;
+    const cleanTrigger = trigger.replace('ff-', '').trim();
+    if (!cleanTrigger) return;
+
+    // ✅ Detect project name and optional token ID
+    let projectName = cleanTrigger;
+    let tokenId = null;
+
+    if (cleanTrigger.includes('-')) {
+      const parts = cleanTrigger.split('-');
+      projectName = parts[0];
+      tokenId = parseInt(parts[1]);
+      if (isNaN(tokenId) || tokenId <= 0) tokenId = null;
+    }
 
     try {
       const pg = client.pg;
@@ -27,11 +35,11 @@ module.exports = (client) => {
         [guildId, projectName]
       );
 
-      if (!result.rows.length && message.author.id !== botOwnerId) {
+      if (!result.rows.length && message.author.id !== BOT_OWNER_ID) {
         return message.reply('❌ Flex project not found. Use `/addflex` first.').catch(() => {});
       }
 
-      if (message.author.id !== botOwnerId && guildId !== ADRIAN_GUILD_ID) {
+      if (message.author.id !== BOT_OWNER_ID && guildId !== ADRIAN_GUILD_ID) {
         return message.reply('🚫 This command is restricted to Adrian server.').catch(() => {});
       }
 
@@ -41,9 +49,10 @@ module.exports = (client) => {
       const chain = network?.toLowerCase() || 'base';
       if (chain !== 'base') return;
 
-      const randomTokenId = Math.floor(Math.random() * 500) + 1;
-      const floppyPath = null; // force random color inside floppyRenderer
-      const imageBuffer = await buildFloppyCard(contractAddress, randomTokenId, collectionName, chain, floppyPath);
+      if (!tokenId) tokenId = Math.floor(Math.random() * 500) + 1;
+
+      const floppyPath = null; // Random color handled inside floppyRenderer
+      const imageBuffer = await buildFloppyCard(contractAddress, tokenId, collectionName, chain, floppyPath);
 
       const attachment = new AttachmentBuilder(imageBuffer, { name: `floppyflexcard.png` });
       await message.channel.send({ files: [attachment] });
