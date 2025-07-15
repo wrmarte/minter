@@ -1,4 +1,4 @@
-// ✅ listeners/fftrigger.js — Fully patched dual-mode logic (random + specific token ID)
+// ✅ listeners/fftrigger.js — Fully patched with validation and restrictions
 const { AttachmentBuilder } = require('discord.js');
 const { buildFloppyCard } = require('../utils/canvas/floppyRenderer');
 const path = require('path');
@@ -8,25 +8,15 @@ const ADRIAN_GUILD_ID = process.env.ADRIAN_GUILD_ID;
 
 module.exports = (client) => {
   client.on('messageCreate', async message => {
-    if (message.author.bot || !message.guild) return;
+    if (message.author.bot) return;
+    if (!message.guild) return;
 
     const guildId = message.guild.id;
     const trigger = message.content.trim().toLowerCase();
     if (!trigger.startsWith('ff-')) return;
 
-    const cleanTrigger = trigger.replace('ff-', '').trim();
-    if (!cleanTrigger) return;
-
-    // ✅ Detect project name and optional token ID
-    let projectName = cleanTrigger;
-    let tokenId = null;
-
-    if (cleanTrigger.includes('-')) {
-      const parts = cleanTrigger.split('-');
-      projectName = parts[0];
-      tokenId = parseInt(parts[1]);
-      if (isNaN(tokenId) || tokenId <= 0) tokenId = null;
-    }
+    const projectName = trigger.replace('ff-', '').trim();
+    if (!projectName) return;
 
     try {
       const pg = client.pg;
@@ -35,7 +25,9 @@ module.exports = (client) => {
         [guildId, projectName]
       );
 
-      if (!result.rows.length && message.author.id !== BOT_OWNER_ID) {
+      const row = result.rows[0];
+
+      if (!row && message.author.id !== BOT_OWNER_ID) {
         return message.reply('❌ Flex project not found. Use `/addflex` first.').catch(() => {});
       }
 
@@ -43,23 +35,32 @@ module.exports = (client) => {
         return message.reply('🚫 This command is restricted to Adrian server.').catch(() => {});
       }
 
-      const { address, display_name, name: storedName, network } = result.rows[0] || {};
+      if (!row) {
+        return message.reply('⚠️ No contract address available for this project.').catch(() => {});
+      }
+
+      const { address, display_name, name: storedName, network } = row;
       const contractAddress = address;
       const collectionName = display_name || storedName || projectName;
       const chain = network?.toLowerCase() || 'base';
-      if (chain !== 'base') return;
 
-      if (!tokenId) tokenId = Math.floor(Math.random() * 500) + 1;
+      if (!contractAddress || chain !== 'base') {
+        return message.reply('⚠️ Invalid contract or unsupported network.').catch(() => {});
+      }
 
-      const floppyPath = null; // Random color handled inside floppyRenderer
-      const imageBuffer = await buildFloppyCard(contractAddress, tokenId, collectionName, chain, floppyPath);
+      const randomTokenId = Math.floor(Math.random() * 500) + 1;
+      const floppyPath = null; // Force random floppy color
 
+      const imageBuffer = await buildFloppyCard(contractAddress, randomTokenId, collectionName, chain, floppyPath);
       const attachment = new AttachmentBuilder(imageBuffer, { name: `floppyflexcard.png` });
+
       await message.channel.send({ files: [attachment] });
     } catch (err) {
       console.error('❌ ff-trigger-command error:', err);
+      message.reply('⚠️ Something went wrong processing that floppy.').catch(() => {});
     }
   });
 };
+
 
 
