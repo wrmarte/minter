@@ -1,6 +1,5 @@
 const { SlashCommandBuilder } = require('discord.js');
 const fetch = require('node-fetch');
-const { getProvider } = require('../services/providerM');
 
 const MORALIS_API_KEY = process.env.MORALIS_API_KEY;
 
@@ -31,21 +30,27 @@ module.exports = {
     const network = project.network || 'base';
 
     let tokenIds = [];
+    let cursor = null;
+    let hasMore = true;
 
-    // Moralis Wallet NFT Fetch
     try {
-      const moralisUrl = `https://deep-index.moralis.io/api/v2/${wallet}/nft?chain=${network}&format=decimal&limit=500`;
-      const moralisRes = await fetch(moralisUrl, {
-        headers: { 'X-API-Key': MORALIS_API_KEY }
-      });
-      const moralisData = await moralisRes.json();
-      if (moralisData.result) {
-        tokenIds = moralisData.result
-          .filter(nft => nft.token_address.toLowerCase() === contract)
-          .map(nft => nft.token_id);
+      while (hasMore) {
+        const moralisUrl = `https://deep-index.moralis.io/api/v2/${wallet}/nft?chain=${network}&format=decimal&limit=500${cursor ? `&cursor=${cursor}` : ''}`;
+        const moralisRes = await fetch(moralisUrl, {
+          headers: { 'X-API-Key': MORALIS_API_KEY }
+        });
+        const moralisData = await moralisRes.json();
+        if (moralisData.result) {
+          const filteredIds = moralisData.result
+            .filter(nft => nft.token_address.toLowerCase() === contract)
+            .map(nft => nft.token_id);
+          tokenIds.push(...filteredIds);
+        }
+        cursor = moralisData.cursor;
+        hasMore = !!cursor;
       }
     } catch (err) {
-      console.warn('⚠️ Moralis fetch failed:', err.message);
+      console.warn('⚠️ Moralis fetch with pagination failed:', err.message);
     }
 
     if (tokenIds.length === 0) {
@@ -57,10 +62,11 @@ module.exports = {
       VALUES ($1, $2, $3, $4, NOW())
       ON CONFLICT (wallet_address, contract_address)
       DO UPDATE SET token_ids = $4, staked_at = NOW()
-    `, [wallet, contract, network, tokenIds]);
+    `, [wallet, contract, network, [...new Set(tokenIds)]]);
 
     return interaction.editReply(`✅ ${tokenIds.length} NFT(s) now actively staked for wallet \`${wallet.slice(0, 6)}...${wallet.slice(-4)}\`.`);
   }
 };
+
 
 
