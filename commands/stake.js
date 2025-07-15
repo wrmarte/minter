@@ -40,10 +40,10 @@ module.exports = {
     let tokenIds = [];
     const scanned = new Set();
 
-    let balance = 0;
     try {
-      balance = await nftContract.balanceOf(wallet);
+      const balance = await nftContract.balanceOf(wallet);
       const count = Number(balance);
+      let tokenOfFail = false;
 
       for (let i = 0; i < count; i++) {
         try {
@@ -55,37 +55,23 @@ module.exports = {
           }
         } catch (e) {
           console.warn(`⚠️ tokenOfOwnerByIndex failed at index ${i}: ${e.message}`);
+          tokenOfFail = true;
+          break;
         }
       }
 
-      if (tokenIds.length < count) {
-        console.warn(`⚠️ tokenIds found (${tokenIds.length}) less than balanceOf count (${count}). Running fallback sweep...`);
-        throw new Error('non-enumerable');
-      }
-
-    } catch (err) {
-      if (err.message === 'non-enumerable') {
-        console.log('🔁 Fallback ownerOf() sweep triggered...');
-
-        let tokenIdRange = [];
-        try {
-          const total = await nftContract.totalSupply();
-          const buffer = 250;
-          const limit = project.scan_limit || Math.min(Number(total) + buffer, 4000);
-          tokenIdRange = Array.from({ length: limit }, (_, i) => i);
-        } catch {
-          console.warn('⚠️ totalSupply() unsupported. Defaulting to 2000 token sweep.');
-          const limit = project.scan_limit || 2000;
-          tokenIdRange = Array.from({ length: limit }, (_, i) => i);
-        }
-
+      if (tokenOfFail || tokenIds.length < count) {
+        console.warn(`⚠️ tokenIds found (${tokenIds.length}) less than balanceOf count (${count}). Running ownerOf() sweep...`);
+        const limit = project.scan_limit || 4000;
         const BATCH_SIZE = 10;
+
         let scannedCount = 0;
         let ownedCount = 0;
         let skippedCount = 0;
+        let progressMsg = await interaction.editReply(`Scanning NFTs... 0 / ${limit} checked.`);
 
-        for (let i = 0; i < tokenIdRange.length; i += BATCH_SIZE) {
-          const batch = tokenIdRange.slice(i, i + BATCH_SIZE);
+        for (let i = 0; i < limit; i += BATCH_SIZE) {
+          const batch = Array.from({ length: BATCH_SIZE }, (_, k) => i + k);
 
           const results = await Promise.all(
             batch.map(async (id) => {
@@ -115,37 +101,33 @@ module.exports = {
             }
           }
 
+          if (i % (BATCH_SIZE * 5) === 0 && progressMsg) {
+            await interaction.editReply(`Scanning NFTs... ${Math.min(i + BATCH_SIZE, limit)} / ${limit} checked. Owned: ${ownedCount}`);
+          }
+
           await new Promise((res) => setTimeout(res, 100));
         }
 
-        console.log(`🧾 Stake fallback scan for ${wallet}:
-Scanned: ${scannedCount}
-Owned:   ${ownedCount}
-Skipped (errors): ${skippedCount}
-✅ Final NFT count: ${tokenIds.length}`);
-      } else {
-        console.error('❌ Unexpected error fetching NFTs:', err);
-        return interaction.editReply(`⚠️ Could not fetch NFT ownership. RPC issue or unsupported contract.`);
+        console.log(`✅ Fallback scan complete: Checked ${scannedCount}, Owned ${ownedCount}, Skipped ${skippedCount}`);
       }
+    } catch (err) {
+      console.error('❌ Unexpected error fetching NFTs:', err);
+      return interaction.editReply(`⚠️ Could not fetch NFT ownership. RPC issue or unsupported contract.`);
     }
 
     if (tokenIds.length === 0) {
       return interaction.editReply(`❌ No NFTs detected in wallet \`${wallet.slice(0, 6)}...${wallet.slice(-4)}\` for this project.`);
     }
 
-    try {
-      await pg.query(`
-        INSERT INTO staked_wallets (wallet_address, contract_address, network, token_ids, staked_at)
-        VALUES ($1, $2, $3, $4, NOW())
-        ON CONFLICT (wallet_address, contract_address)
-        DO UPDATE SET token_ids = $4, staked_at = NOW()
-      `, [wallet, contract, network, tokenIds]);
+    await pg.query(`
+      INSERT INTO staked_wallets (wallet_address, contract_address, network, token_ids, staked_at)
+      VALUES ($1, $2, $3, $4, NOW())
+      ON CONFLICT (wallet_address, contract_address)
+      DO UPDATE SET token_ids = $4, staked_at = NOW()
+    `, [wallet, contract, network, tokenIds]);
 
-      return interaction.editReply(`✅ ${tokenIds.length} NFT(s) now actively staked for wallet \`${wallet.slice(0, 6)}...${wallet.slice(-4)}\`.`);
-    } catch (err) {
-      console.error('❌ Error inserting into staked_wallets:', err);
-      return interaction.editReply(`❌ Failed to stake NFTs due to database error.`);
-    }
+    return interaction.editReply(`✅ ${tokenIds.length} NFT(s) now actively staked for wallet \`${wallet.slice(0, 6)}...${wallet.slice(-4)}\`.`);
   }
 };
+
 
