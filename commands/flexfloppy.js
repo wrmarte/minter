@@ -1,4 +1,4 @@
-// ✅ Clean direct flexfloppy with server restriction logic
+// ✅ Clean direct flexfloppy with server restriction logic + trigger compatibility
 const { SlashCommandBuilder, AttachmentBuilder } = require('discord.js');
 const path = require('path');
 const { buildFloppyCard } = require('../utils/canvas/floppyRenderer');
@@ -49,31 +49,41 @@ module.exports = {
   },
 
   async execute(interaction) {
-    const pg = interaction.client.pg;
-    const userId = interaction.user.id;
-    const guildId = interaction.guild?.id;
+    await module.exports.executeFlex(interaction.client, interaction, {
+      userId: interaction.user.id,
+      guildId: interaction.guild?.id,
+      name: interaction.options.getString('name'),
+      tokenId: interaction.options.getInteger('tokenid'),
+      color: interaction.options.getString('color')?.toLowerCase() || null,
+      deferReply: true,
+      replyMethod: (content) => interaction.reply(content),
+      editReplyMethod: (content) => interaction.editReply(content)
+    });
+  },
+
+  async executeFlex(client, interactionOrMessage, options) {
+    const pg = client.pg;
+    const { userId, guildId, name, tokenId, color, deferReply, replyMethod, editReplyMethod } = options;
 
     if (userId !== BOT_OWNER_ID && guildId !== ADRIAN_GUILD_ID) {
-      return await interaction.reply({
+      return await replyMethod({
         content: '🚫 This command is restricted to Adrian server.',
         ephemeral: true
       });
     }
 
-    const name = interaction.options.getString('name').toLowerCase();
-    const tokenId = interaction.options.getInteger('tokenid');
-    const color = interaction.options.getString('color')?.toLowerCase() || null;
-
     try {
-      await interaction.deferReply({ flags: 0 }).catch(() => {});
+      if (deferReply && interactionOrMessage.deferReply) {
+        await interactionOrMessage.deferReply({ flags: 0 }).catch(() => {});
+      }
 
       const result = await pg.query(
         `SELECT * FROM flex_projects WHERE (guild_id = $1 OR guild_id IS NULL) AND name = $2 AND network = 'base' ORDER BY guild_id DESC LIMIT 1`,
-        [interaction.guild.id, name]
+        [guildId, name.toLowerCase()]
       );
 
       if (!result.rows.length) {
-        return await interaction.editReply('❌ Project not found. Use `/addflex` first.');
+        return await editReplyMethod('❌ Project not found. Use `/addflex` first.');
       }
 
       const { address, display_name, name: storedName, network } = result.rows[0];
@@ -82,22 +92,23 @@ module.exports = {
       const chain = network.toLowerCase();
 
       if (chain !== 'base') {
-        return await interaction.editReply('⚠️ FlexFloppy is only supported for Base network NFTs right now.');
+        return await editReplyMethod('⚠️ FlexFloppy is only supported for Base network NFTs right now.');
       }
 
       const floppyPath = color ? path.resolve(__dirname, `../assets/floppies/floppy-${color}.png`) : null;
       const imageBuffer = await buildFloppyCard(contractAddress, tokenId, collectionName, chain, floppyPath);
 
       const attachment = new AttachmentBuilder(imageBuffer, { name: `floppyflexcard.png` });
-      return await interaction.editReply({ files: [attachment] });
+      return await editReplyMethod({ files: [attachment] });
     } catch (err) {
       console.error('❌ FlexFloppy error:', err);
-      if (!interaction.replied) {
-        await interaction.reply({ content: '❌ Failed to generate FlexFloppy.', flags: 64 }).catch(() => {});
+      if (!interactionOrMessage.replied && replyMethod) {
+        await replyMethod({ content: '❌ Failed to generate FlexFloppy.', flags: 64 }).catch(() => {});
       }
     }
   }
 };
+
 
 
 
