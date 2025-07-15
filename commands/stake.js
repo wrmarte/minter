@@ -34,17 +34,18 @@ module.exports = {
     const provider = getProvider(network);
     const nftContract = new Contract(contract, erc721Abi, provider);
 
-    const scanLimit = project.scan_limit || 5000;
     const BATCH_SIZE = 10;
     let tokenIds = [];
     const scanned = new Set();
     let tokenId = 0;
+    let consecutiveErrors = 0;
+    const maxConsecutiveErrors = 20;
 
-    let progressMsg = await interaction.editReply(`Scanning NFTs... Starting from tokenId 0 up to ${scanLimit}...`);
+    let progressMsg = await interaction.editReply(`Scanning NFTs... Starting from tokenId 0...`);
 
-    while (tokenId < scanLimit) {
+    while (consecutiveErrors < maxConsecutiveErrors) {
       let batch = [];
-      for (let i = 0; i < BATCH_SIZE && tokenId < scanLimit; i++) {
+      for (let i = 0; i < BATCH_SIZE; i++) {
         batch.push(tokenId);
         tokenId++;
       }
@@ -57,7 +58,10 @@ module.exports = {
               return await tempContract.ownerOf(id);
             });
             return { id, owner };
-          } catch {
+          } catch (error) {
+            if (error.code === 'CALL_EXCEPTION') {
+              consecutiveErrors++;
+            }
             return null;
           }
         })
@@ -65,6 +69,7 @@ module.exports = {
 
       for (const res of results) {
         if (!res || !res.owner) continue;
+        consecutiveErrors = 0;
         if (res.owner.toLowerCase() === wallet) {
           const idStr = res.id.toString();
           if (!scanned.has(idStr)) {
@@ -74,7 +79,7 @@ module.exports = {
         }
       }
 
-      await interaction.editReply(`Scanning NFTs... Last checked tokenId: ${tokenId} / ${scanLimit}. Found: ${tokenIds.length}`);
+      await interaction.editReply(`Scanning NFTs... Last checked tokenId: ${tokenId}. Found: ${tokenIds.length}. Consecutive errors: ${consecutiveErrors}/${maxConsecutiveErrors}`);
       await new Promise((res) => setTimeout(res, 100));
     }
 
@@ -92,6 +97,4 @@ module.exports = {
     return interaction.editReply(`✅ ${tokenIds.length} NFT(s) now actively staked for wallet \`${wallet.slice(0, 6)}...${wallet.slice(-4)}\`.`);
   }
 };
-
-
 
