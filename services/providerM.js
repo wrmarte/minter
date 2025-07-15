@@ -6,8 +6,7 @@ const RPCS = {
     'https://mainnet.base.org',
     'https://base.publicnode.com',
     'https://1rpc.io/base',
-    'https://base.llamarpc.com',
-    'https://base.meowrpc.com'
+    'https://base.llamarpc.com'
   ],
   eth: [
     'https://eth.llamarpc.com',
