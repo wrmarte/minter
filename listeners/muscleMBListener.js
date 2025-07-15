@@ -101,7 +101,7 @@ module.exports = (client) => {
         }
       }
 
-      systemPrompt += ` ${randomOverlay}`;
+      systemPrompt += ` ${randomOverlay}. Always keep replies brief and punchy. Maximum 1–2 short sentences.`;
 
       let temperature = 0.7;
       if (currentMode === 'villain') temperature = 0.4;
@@ -117,7 +117,7 @@ module.exports = (client) => {
         body: JSON.stringify({
           model: 'llama3-70b-8192',
           temperature,
-          max_tokens: 180,
+          max_tokens: 100,
           messages: [
             { role: 'system', content: systemPrompt },
             { role: 'user', content: cleanedInput },
