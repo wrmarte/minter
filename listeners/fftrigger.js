@@ -1,49 +1,46 @@
-// ✅ root/listeners/fftrigger.js
-const { buildFloppyCard } = require('../utils/canvas/floppyRenderer');
-const { AttachmentBuilder } = require('discord.js');
-const path = require('path');
-const pg = require('../services/pg'); // Adjust path if needed
-
+// ✅ listeners/fftrigger.js — Clean working version, no unnecessary requires
 module.exports = (client) => {
-  client.on('messageCreate', async (message) => {
+  client.on('messageCreate', async message => {
     if (message.author.bot) return;
+    if (!message.guild) return;
 
-    const content = message.content.trim();
-    const ffMatch = content.match(/^ff-(.+)$/i);
-    if (!ffMatch) return;
+    const guildId = message.guild.id;
+    const botOwnerId = process.env.BOT_OWNER_ID;
 
-    const flexName = ffMatch[1].toLowerCase();
+    const trigger = message.content.trim().toLowerCase();
+    if (!trigger.startsWith('ff-')) return;
+
+    const projectName = trigger.replace('ff-', '').trim();
+    if (!projectName) return;
 
     try {
+      const pg = client.pg;
       const result = await pg.query(
-        `SELECT * FROM flex_projects WHERE name = $1 AND network = 'base' ORDER BY guild_id DESC LIMIT 1`,
-        [flexName]
+        `SELECT * FROM flex_projects WHERE (guild_id = $1 OR guild_id IS NULL) AND name = $2 AND network = 'base' ORDER BY guild_id DESC LIMIT 1`,
+        [guildId, projectName]
       );
 
-      if (!result.rows.length) {
-        return await message.reply('❌ Flex project not found.');
+      if (!result.rows.length && message.author.id !== botOwnerId) {
+        return message.reply('❌ Flex project not found. Use `/addflex` first.').catch(() => {});
       }
 
-      const { address, display_name, name, network } = result.rows[0];
-      const contractAddress = address;
-      const collectionName = display_name || name;
-      const chain = network.toLowerCase();
+      const { address, name } = result.rows[0] || {};
+      const randomTokenId = Math.floor(Math.random() * 500) + 1;
 
-      if (chain !== 'base') {
-        return await message.reply('⚠️ FF trigger only supports Base NFTs.');
+      const flexFloppyCommand = client.commands.get('flexfloppy');
+      if (flexFloppyCommand) {
+        await flexFloppyCommand.executeFakeInteraction(client, message, {
+          name: name || projectName,
+          tokenid: randomTokenId,
+          guildId,
+          authorId: message.author.id
+        });
       }
-
-      const tokenId = Math.floor(Math.random() * 1000) + 1;
-      const floppyPath = null;
-
-      const imageBuffer = await buildFloppyCard(contractAddress, tokenId, collectionName, chain, floppyPath);
-
-      const attachment = new AttachmentBuilder(imageBuffer, { name: `ff-trigger.png` });
-      await message.reply({ files: [attachment] });
 
     } catch (err) {
-      console.error('❌ ff-trigger error:', err);
-      await message.reply('❌ Failed to generate FF trigger floppy.');
+      console.error('❌ ff-trigger-command error:', err);
     }
   });
 };
+
+
