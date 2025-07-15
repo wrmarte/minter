@@ -1,7 +1,10 @@
 const { SlashCommandBuilder } = require('discord.js');
-const fetch = require('node-fetch');
+const { Contract } = require('ethers');
+const { getProvider, safeRpcCall } = require('../services/providerM');
 
-const MORALIS_API_KEY = process.env.MORALIS_API_KEY;
+const erc721Abi = [
+  'function ownerOf(uint256 tokenId) view returns (address)'
+];
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -29,28 +32,57 @@ module.exports = {
     const contract = project.contract_address.toLowerCase();
     const network = project.network || 'base';
 
-    let tokenIds = [];
-    let cursor = null;
-    let hasMore = true;
+    const provider = getProvider(network);
+    const nftContract = new Contract(contract, erc721Abi, provider);
 
-    try {
-      while (hasMore) {
-        const moralisUrl = `https://deep-index.moralis.io/api/v2/${wallet}/nft?chain=${network}&format=decimal&limit=500${cursor ? `&cursor=${cursor}` : ''}`;
-        const moralisRes = await fetch(moralisUrl, {
-          headers: { 'X-API-Key': MORALIS_API_KEY }
-        });
-        const moralisData = await moralisRes.json();
-        if (moralisData.result) {
-          const filteredIds = moralisData.result
-            .filter(nft => nft.token_address.toLowerCase() === contract)
-            .map(nft => nft.token_id);
-          tokenIds.push(...filteredIds);
-        }
-        cursor = moralisData.cursor;
-        hasMore = !!cursor;
+    const BATCH_SIZE = 10;
+    const scanned = new Set();
+    let tokenIds = [];
+    let tokenId = 0;
+    let consecutiveErrors = 0;
+    const maxConsecutiveErrors = 20;
+    const scanLimit = project.scan_limit || 20000;
+
+    await interaction.editReply(`Scanning NFTs... Starting from tokenId 0.`);
+
+    while (tokenId < scanLimit && consecutiveErrors < maxConsecutiveErrors) {
+      let batch = [];
+      for (let i = 0; i < BATCH_SIZE; i++) {
+        batch.push(tokenId);
+        tokenId++;
       }
-    } catch (err) {
-      console.warn('⚠️ Moralis fetch with pagination failed:', err.message);
+
+      const results = await Promise.all(
+        batch.map(async (id) => {
+          try {
+            const owner = await safeRpcCall(network, async (prov) => {
+              const tempContract = new Contract(contract, erc721Abi, prov);
+              return await tempContract.ownerOf(id);
+            });
+            return { id, owner };
+          } catch (error) {
+            if (error.code === 'CALL_EXCEPTION') {
+              consecutiveErrors++;
+            }
+            return null;
+          }
+        })
+      );
+
+      for (const res of results) {
+        if (!res || !res.owner) continue;
+        consecutiveErrors = 0;
+        if (res.owner.toLowerCase() === wallet) {
+          const idStr = res.id.toString();
+          if (!scanned.has(idStr)) {
+            tokenIds.push(idStr);
+            scanned.add(idStr);
+          }
+        }
+      }
+
+      await interaction.editReply(`Scanning NFTs... Last checked tokenId: ${tokenId}. Found: ${tokenIds.length}. Consecutive errors: ${consecutiveErrors}/${maxConsecutiveErrors}`);
+      await new Promise((res) => setTimeout(res, 100));
     }
 
     if (tokenIds.length === 0) {
@@ -62,11 +94,10 @@ module.exports = {
       VALUES ($1, $2, $3, $4, NOW())
       ON CONFLICT (wallet_address, contract_address)
       DO UPDATE SET token_ids = $4, staked_at = NOW()
-    `, [wallet, contract, network, [...new Set(tokenIds)]]);
+    `, [wallet, contract, network, tokenIds]);
 
     return interaction.editReply(`✅ ${tokenIds.length} NFT(s) now actively staked for wallet \`${wallet.slice(0, 6)}...${wallet.slice(-4)}\`.`);
   }
 };
-
 
 
