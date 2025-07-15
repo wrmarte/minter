@@ -147,6 +147,10 @@ module.exports = (client) => {
           .setDescription(`💬 ${aiReply}`)
           .setFooter({ text: `Mode: ${currentMode}${randomOverlay ? ` • ${randomOverlay}` : ''}` });
 
+        // ✅ Animated Typing Delay Logic
+        const delayMs = Math.min(aiReply.length * 40, 5000);
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+
         try {
           await message.reply({ embeds: [embed] });
         } catch (err) {
@@ -164,4 +168,3 @@ module.exports = (client) => {
     }
   });
 };
-
