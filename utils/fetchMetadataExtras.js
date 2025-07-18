@@ -135,7 +135,7 @@ async function fetchMetadataExtras(contractAddress, tokenId, network = 'base') {
     fetchTotalSupply(contractAddress, tokenId, network)
   ]);
 
-  const finalRank = resRank || openseaData.rank || 'Unavailable';
+  const finalRank = resRank || openseaData.rank || 'NA';
   const finalScore = openseaData.score || '—';
   const minted = (typeof mintedRaw === 'string' && mintedRaw.length >= 10) ? mintedRaw : '❌ Not Found';
 
