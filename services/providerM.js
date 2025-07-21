@@ -14,7 +14,6 @@ const RPCS = {
     'https://rpc.ankr.com/eth'
   ],
   ape: [
-    'https://rpc.ankr.com/ape',
     'https://rpc.ape.api.onfinality.io/public',
     'https://ape.rpc.thirdweb.com',
     'https://rpc.apeiron.io'
