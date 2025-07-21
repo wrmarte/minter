@@ -1,4 +1,5 @@
 const { JsonRpcProvider } = require('ethers');
+const https = require('https');
 
 // ✅ RPC lists per chain
 const RPCS = {
@@ -14,8 +15,7 @@ const RPCS = {
     'https://rpc.ankr.com/eth'
   ],
   ape: [
-    'https://rpc.ape.api.onfinality.io/public',
-    'https://ape.rpc.thirdweb.com',
+    'https://apechain.drpc.org',
     'https://rpc.apeiron.io'
   ]
 };
@@ -24,14 +24,41 @@ const RPCS = {
 const providerIndex = {};
 const providers = {};
 
-// ✅ Initialize first provider for each chain
-for (const chain in RPCS) {
-  providerIndex[chain] = 0;
-  providers[chain] = new JsonRpcProvider(
-    RPCS[chain][0],
-    chain === 'ape' ? { name: 'apechain', chainId: 33139 } : undefined
-  );
+// ✅ Helper to test if RPC is alive
+async function isRpcAlive(url) {
+  return new Promise(res => {
+    const req = https.get(url, () => res(true));
+    req.on('error', () => res(false));
+    req.setTimeout(2000, () => {
+      req.destroy();
+      res(false);
+    });
+  });
 }
+
+// ✅ Initialize first provider for each chain
+(async () => {
+  for (const chain in RPCS) {
+    providerIndex[chain] = 0;
+    for (let i = 0; i < RPCS[chain].length; i++) {
+      const url = RPCS[chain][i];
+      const alive = await isRpcAlive(url);
+      if (alive) {
+        providers[chain] = new JsonRpcProvider(
+          url,
+          chain === 'ape' ? { name: 'apechain', chainId: 33139 } : undefined
+        );
+        console.log(`✅ ${chain} initialized with RPC: ${url}`);
+        break;
+      } else {
+        console.warn(`❌ Skipping dead RPC: ${url}`);
+      }
+    }
+    if (!providers[chain]) {
+      console.error(`❌ All ${chain} RPCs failed — using null`);
+    }
+  }
+})();
 
 // ✅ Get current provider for a chain
 function getProvider(chain = 'base') {
@@ -70,14 +97,12 @@ async function rotateProvider(chain = 'base') {
       key === 'ape' ? { name: 'apechain', chainId: 33139 } : undefined
     );
 
-    try {
-      if (key !== 'ape' || await isNetworkReady(tempProvider)) {
-        providers[key] = tempProvider;
-        console.warn(`🔁 Rotated RPC for ${key}: ${url}`);
-        return;
-      }
-    } catch (e) {
-      console.warn(`❌ Skipped ${url} — ${e.message || 'RPC error'}`);
+    if (key !== 'ape' || await isNetworkReady(tempProvider)) {
+      providers[key] = tempProvider;
+      console.warn(`🔁 Rotated RPC for ${key}: ${url}`);
+      return;
+    } else {
+      console.warn(`❌ Skipped ${url} — ${key} RPC not responding`);
     }
   }
 
@@ -100,7 +125,7 @@ async function safeRpcCall(chain, callFn, retries = 4) {
 
       console.warn(`⚠️ [${key}] RPC Error: ${err.message || err.code || 'unknown'}`);
       if (err?.code) console.warn(`🔍 RPC failure code: ${err.code}`);
-      console.warn(`🔻 RPC failed: ${getProvider(key).connection?.url}`);
+      console.warn(`🔻 RPC failed: ${getProvider(key)?.connection?.url}`);
 
       const shouldRotate = (
         msg.includes('no response') ||
@@ -118,8 +143,6 @@ async function safeRpcCall(chain, callFn, retries = 4) {
         msg.includes('503') ||
         msg.includes('Bad Gateway') ||
         msg.includes('Gateway Time-out') ||
-        msg.includes('410 Gone') ||
-        msg.includes('Context cancellation') ||
         isForbidden ||
         isLogBlocked
       );
@@ -135,12 +158,12 @@ async function safeRpcCall(chain, callFn, retries = 4) {
         continue;
       }
 
-      console.warn(`⛔ Unhandled RPC Error: ${msg}`);
+      throw err;
     }
   }
 
   console.error(`❌ All retries failed for ${key}. Returning null.`);
-  return null; // prevent bot crash
+  return null;
 }
 
 // ✅ Max batch size per chain
@@ -154,16 +177,3 @@ module.exports = {
   safeRpcCall,
   getMaxBatchSize
 };
-
-
-
-
-
-
-
-
-
-
-
-
-
