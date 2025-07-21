@@ -14,6 +14,9 @@ const RPCS = {
     'https://rpc.ankr.com/eth'
   ],
   ape: [
+    'https://rpc.ankr.com/ape',
+    'https://rpc.ape.api.onfinality.io/public',
+    'https://ape.rpc.thirdweb.com',
     'https://apechain.drpc.org',
     'https://rpc.apeiron.io'
   ]
@@ -69,12 +72,14 @@ async function rotateProvider(chain = 'base') {
       key === 'ape' ? { name: 'apechain', chainId: 33139 } : undefined
     );
 
-    if (key !== 'ape' || await isNetworkReady(tempProvider)) {
-      providers[key] = tempProvider;
-      console.warn(`🔁 Rotated RPC for ${key}: ${url}`);
-      return;
-    } else {
-      console.warn(`❌ Skipped ${url} — ApeChain RPC not responding`);
+    try {
+      if (key !== 'ape' || await isNetworkReady(tempProvider)) {
+        providers[key] = tempProvider;
+        console.warn(`🔁 Rotated RPC for ${key}: ${url}`);
+        return;
+      }
+    } catch (e) {
+      console.warn(`❌ Skipped ${url} — ${e.message || 'RPC error'}`);
     }
   }
 
@@ -115,6 +120,8 @@ async function safeRpcCall(chain, callFn, retries = 4) {
         msg.includes('503') ||
         msg.includes('Bad Gateway') ||
         msg.includes('Gateway Time-out') ||
+        msg.includes('410 Gone') ||
+        msg.includes('Context cancellation') ||
         isForbidden ||
         isLogBlocked
       );
@@ -130,11 +137,12 @@ async function safeRpcCall(chain, callFn, retries = 4) {
         continue;
       }
 
-      throw err;
+      console.warn(`⛔ Unhandled RPC Error: ${msg}`);
     }
   }
 
-  throw new Error(`❌ All RPCs failed for ${key}`);
+  console.error(`❌ All retries failed for ${key}. Returning null.`);
+  return null; // prevent bot crash
 }
 
 // ✅ Max batch size per chain
