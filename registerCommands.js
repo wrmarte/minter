@@ -42,36 +42,18 @@ const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_BOT_TOKEN)
     }
 
     if (!guildId) {
-      console.warn('⚠️ TEST_GUILD_ID missing — skipping guild deploy.');
+      console.error('❌ TEST_GUILD_ID missing in .env');
+      process.exit(1);
     }
 
-    // ✅ Phase 1: Clear Guild Commands First for Fast Development
-    if (guildId) {
-      console.log(`🗑️ Clearing guild commands for guild ID: ${guildId}...`);
-      await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: [] });
-      console.log('✅ Guild commands cleared.');
-    }
+    // ✅ Phase 1: Clear and Register Guild Commands (instant visibility)
+    console.log(`🗑️ Clearing existing guild commands for guild ID: ${guildId}...`);
+    await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: [] });
+    console.log('✅ Guild commands cleared.');
 
-    // ✅ Phase 2: Clear Global Commands Separately
-    console.log('🗑️ Clearing global commands...');
-    await rest.put(Routes.applicationCommands(clientId), { body: [] });
-    console.log('✅ Global commands cleared.');
-
-    // ✅ Wait briefly for sync
-    console.log('⏳ Waiting 5 seconds to let Discord sync clear operations...');
-    await new Promise(resolve => setTimeout(resolve, 5000));
-
-    // ✅ Phase 3: Register Guild Commands First
-    if (guildId) {
-      console.log(`🔁 Registering ${commands.length} slash commands to guild: ${guildId}...`);
-      await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commands });
-      console.log('✅ Guild slash commands registered successfully!');
-    }
-
-    // ✅ Phase 4: Register Global Commands
-    console.log(`🔁 Registering ${commands.length} global slash commands...`);
-    await rest.put(Routes.applicationCommands(clientId), { body: commands });
-    console.log('✅ Global slash commands registered!');
+    console.log(`🔁 Registering ${commands.length} slash commands to guild: ${guildId}...`);
+    await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commands });
+    console.log('✅ Guild slash commands registered successfully!');
 
   } catch (error) {
     console.error('❌ Error registering slash commands:', error?.rawError || error);
