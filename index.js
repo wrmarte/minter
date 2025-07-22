@@ -27,6 +27,11 @@ muscleMBListener(client);
 const ffTriggerListener = require('./listeners/fftrigger');
 ffTriggerListener(client);
 
+// ✅ Load Welcome Listener
+const welcomeListener = require('./listeners/welcomeListener');
+welcomeListener(client);
+
+
 // ✅ PostgreSQL connection
 const pg = new PgClient({
   connectionString: process.env.DATABASE_URL,
