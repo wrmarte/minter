@@ -1,4 +1,4 @@
-const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
+const { SlashCommandBuilder, PermissionFlagsBits, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require('discord.js');
 
 const BOT_OWNER_ID = process.env.BOT_OWNER_ID;
 
@@ -38,14 +38,24 @@ module.exports = {
         ON CONFLICT (guild_id) DO UPDATE SET enabled = $2, welcome_channel_id = $3
       `, [guildId, enabled, channel.id]);
 
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId('test_welcome_button')
+          .setLabel('🔍 Test Welcome')
+          .setStyle(ButtonStyle.Primary)
+      );
+
       await interaction.reply({
         content: `✅ Welcome messages have been **${enabled ? 'enabled' : 'disabled'}** in <#${channel.id}>.`,
+        components: enabled ? [row] : [],
         ephemeral: true
       });
+
     } catch (err) {
       console.error(`❌ Failed to set welcome config for guild ${guildId}:`, err);
       await interaction.reply({ content: '❌ Failed to save settings.', ephemeral: true });
     }
   }
 };
+
 
