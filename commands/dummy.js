@@ -34,30 +34,22 @@ module.exports = {
 
       const content = res.rows[0].content;
 
-      // 🎨 Dynamic color themes
       const colors = ['#FF8C00', '#7289DA', '#00CED1', '#ADFF2F', '#FF69B4', '#FFD700', '#4B0082'];
-
-      // 🖼️ Optional banner (swap in a real URL if you want one)
-      const bannerImages = [
-        'https://media.discordapp.net/attachments/123/banner1.png',
-        'https://media.discordapp.net/attachments/123/banner2.png',
-        'https://media.discordapp.net/attachments/123/banner3.png'
-      ];
 
       const embed = new EmbedBuilder()
         .setTitle(`📘 ${name.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}`)
         .setDescription(content)
         .setColor(colors[Math.floor(Math.random() * colors.length)])
         .setFooter({
-          text: `Requested by ${interaction.user.username}`,
-          iconURL: interaction.user.displayAvatarURL()
+          text: `Requested by Muscle MB`,
+          iconURL: interaction.client.user.displayAvatarURL()
         })
         .setTimestamp();
 
-      // Optional banner image (uncomment below to use)
-      // embed.setImage(bannerImages[Math.floor(Math.random() * bannerImages.length)]);
+      // 🧼 Clean interaction first (ephemeral + public message)
+      await interaction.deferReply({ ephemeral: true });
 
-      await interaction.reply({
+      await interaction.channel.send({
         content: target ? `📣 ${target}` : null,
         embeds: [embed]
       });
@@ -93,5 +85,6 @@ module.exports = {
     }
   }
 };
+
 
 
