@@ -185,21 +185,24 @@ client.once('ready', async () => {
   const clientId = process.env.CLIENT_ID;
   const guildId = process.env.TEST_GUILD_ID || null;
 
-  const rest = new REST({ version: '10' }).setToken(token);
-  const commands = client.commands.map(cmd => cmd.data.toJSON());
+const rest = new REST({ version: '10' }).setToken(token);
+const commands = client.commands.map(cmd => cmd.data.toJSON());
 
-  try {
-    console.log('⚙️ Auto-registering slash commands on ready...');
-    if (guildId) {
-      await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commands });
-      console.log(`✅ Registered ${commands.length} slash cmds in test guild ${guildId}`);
-    } else {
-      await rest.put(Routes.applicationCommands(clientId), { body: commands });
-      console.log(`✅ Registered ${commands.length} global slash cmds`);
-    }
-  } catch (err) {
-    console.error('❌ Failed to register slash commands:', err);
+try {
+  console.log('⚙️ Auto-registering slash commands on ready...');
+  if (guildId) {
+    // Register commands ONLY in this guild for instant availability
+    await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commands });
+    console.log(`✅ Registered ${commands.length} slash cmds in test guild ${guildId}`);
+  } else {
+    // Register commands globally (can take 1–60 mins to show)
+    await rest.put(Routes.applicationCommands(clientId), { body: commands });
+    console.log(`✅ Registered ${commands.length} global slash cmds`);
   }
+} catch (err) {
+  console.error('❌ Failed to register slash commands:', err);
+}
+
 });
 
 
