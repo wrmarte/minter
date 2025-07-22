@@ -1,4 +1,3 @@
-// ✅ ERC721-only mint processor with dynamic token amount detection
 const { Interface, Contract, ethers } = require('ethers');
 const fetch = require('node-fetch');
 const { getRealDexPriceForToken, getEthPriceFromToken } = require('./price');
@@ -11,6 +10,7 @@ const TOKEN_NAME_TO_ADDRESS = {
 };
 
 const ZERO_ADDRESS = ethers.ZeroAddress;
+const contractListeners = {}; // ✅ Now defined properly
 
 async function trackBaseContracts(client) {
   const pg = client.pg;
@@ -278,5 +278,5 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
 
 module.exports = {
   trackBaseContracts,
-  contractListeners
+  contractListeners // ✅ FIXED: now defined and exported
 };
