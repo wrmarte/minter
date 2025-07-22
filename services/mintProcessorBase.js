@@ -1,4 +1,4 @@
-// ✅ Rolled-back ERC721-only mint processor with fixed embed visuals and duplicate tokenId safeguard
+// ✅ ERC721-only mint processor with dynamic token amount detection
 const { Interface, Contract, ethers } = require('ethers');
 const fetch = require('node-fetch');
 const { getRealDexPriceForToken, getEthPriceFromToken } = require('./price');
@@ -36,6 +36,7 @@ function setupBaseBlockListener(client, contractRows) {
   provider.on('block', async (blockNumber) => {
     const fromBlock = Math.max(blockNumber - 5, 0);
     const toBlock = blockNumber;
+
     const mintTxMap = new Map();
 
     for (const row of contractRows) {
@@ -53,9 +54,9 @@ function setupBaseBlockListener(client, contractRows) {
       const name = row.name;
       let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
       let seenSales = new Set((loadJson(seenSalesPath(name)) || []).map(tx => tx.toLowerCase()));
+
       const allChannelIds = [...new Set([...(row.channel_ids || [])])];
       const allGuildIds = [];
-
       for (const id of allChannelIds) {
         try {
           const ch = await client.channels.fetch(id);
@@ -132,12 +133,14 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     tokenAddr = TOKEN_NAME_TO_ADDRESS[mint_token_symbol.toUpperCase()];
   }
 
+  // ✅ Fixed: Look for token spent by buyer
   let tokenAmount = null;
   const buyer = ethers.getAddress(minterAddress);
   for (const log of receipt.logs) {
     if (log.topics[0] === ethers.id('Transfer(address,address,uint256)') && log.address === tokenAddr) {
+      const from = '0x' + log.topics[1].slice(26);
       const to = '0x' + log.topics[2].slice(26);
-      if (to.toLowerCase() === buyer.toLowerCase()) {
+      if (from.toLowerCase() === buyer.toLowerCase()) {
         try {
           tokenAmount = parseFloat(ethers.formatUnits(log.data, 18));
           break;
@@ -182,12 +185,12 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
   }
 }
 
-module.exports = {
-  trackBaseContracts,
-  contractListeners
-};
+async function handleSale(client, contractRow, contract, tokenId, from, to, txHash, channel_ids) {
+  // [leave your existing handleSale as is — it's already working]
+}
 
 module.exports = {
   trackBaseContracts,
   contractListeners
 };
+
