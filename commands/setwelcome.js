@@ -1,10 +1,11 @@
 const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 
+const BOT_OWNER_ID = process.env.BOT_OWNER_ID;
+
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('setwelcome')
     .setDescription('Enable or disable welcome messages in this server')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
     .addBooleanOption(option =>
       option.setName('enabled')
         .setDescription('Enable or disable welcome messages')
@@ -17,6 +18,14 @@ module.exports = {
     ),
 
   async execute(interaction) {
+    const userId = interaction.user.id;
+    const isOwner = userId === BOT_OWNER_ID;
+    const isAdmin = interaction.member.permissions.has(PermissionFlagsBits.Administrator);
+
+    if (!isOwner && !isAdmin) {
+      return await interaction.reply({ content: '❌ You must be an admin or the bot owner to use this command.', ephemeral: true });
+    }
+
     const enabled = interaction.options.getBoolean('enabled');
     const channel = interaction.options.getChannel('channel');
     const guildId = interaction.guild.id;
@@ -30,7 +39,7 @@ module.exports = {
       `, [guildId, enabled, channel.id]);
 
       await interaction.reply({
-        content: `✅ Welcome messages have been **${enabled ? 'enabled' : 'disabled'}** in <#${channel.id}>`,
+        content: `✅ Welcome messages have been **${enabled ? 'enabled' : 'disabled'}** in <#${channel.id}>.`,
         ephemeral: true
       });
     } catch (err) {
@@ -39,3 +48,4 @@ module.exports = {
     }
   }
 };
+
