@@ -9,6 +9,7 @@ module.exports = {
       opt.setName('name')
         .setDescription('Name of the dummy info to delete')
         .setRequired(true)
+        .setAutocomplete(true)
     ),
 
   async execute(interaction) {
@@ -42,5 +43,31 @@ module.exports = {
       console.error('❌ Failed to delete dummy info:', err);
       await interaction.reply({ content: '❌ Failed to delete dummy info.', ephemeral: true });
     }
+  },
+
+  async autocomplete(interaction) {
+    const focused = interaction.options.getFocused();
+    const pg = interaction.client.pg;
+    const guildId = interaction.guild.id;
+
+    try {
+      const res = await pg.query(
+        'SELECT name FROM dummy_info WHERE guild_id = $1',
+        [guildId]
+      );
+
+      const choices = res.rows
+        .map(r => r.name)
+        .filter(name => name.toLowerCase().includes(focused.toLowerCase()))
+        .slice(0, 25);
+
+      await interaction.respond(
+        choices.map(name => ({ name, value: name }))
+      );
+    } catch (err) {
+      console.error('❌ dummydel autocomplete error:', err);
+      await interaction.respond([]);
+    }
   }
 };
+
