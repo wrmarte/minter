@@ -18,7 +18,7 @@ module.exports = {
 
   async execute(interaction) {
     const name = interaction.options.getString('name');
-    const target = interaction.options.getUser('target'); // optional user mention
+    const target = interaction.options.getUser('target');
     const guildId = interaction.guild.id;
     const pg = interaction.client.pg;
 
@@ -34,17 +34,34 @@ module.exports = {
 
       const content = res.rows[0].content;
 
+      // 🎨 Dynamic color themes
+      const colors = ['#FF8C00', '#7289DA', '#00CED1', '#ADFF2F', '#FF69B4', '#FFD700', '#4B0082'];
+
+      // 🖼️ Optional banner (swap in a real URL if you want one)
+      const bannerImages = [
+        'https://media.discordapp.net/attachments/123/banner1.png',
+        'https://media.discordapp.net/attachments/123/banner2.png',
+        'https://media.discordapp.net/attachments/123/banner3.png'
+      ];
+
       const embed = new EmbedBuilder()
-        .setTitle(`📘 ${name.charAt(0).toUpperCase() + name.slice(1)}`)
+        .setTitle(`📘 ${name.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}`)
         .setDescription(content)
-        .setColor('#5865F2')
-        .setFooter({ text: `Requested by ${interaction.user.username}` })
+        .setColor(colors[Math.floor(Math.random() * colors.length)])
+        .setFooter({
+          text: `Requested by ${interaction.user.username}`,
+          iconURL: interaction.user.displayAvatarURL()
+        })
         .setTimestamp();
+
+      // Optional banner image (uncomment below to use)
+      // embed.setImage(bannerImages[Math.floor(Math.random() * bannerImages.length)]);
 
       await interaction.reply({
         content: target ? `📣 ${target}` : null,
         embeds: [embed]
       });
+
     } catch (err) {
       console.error('❌ Dummy fetch error:', err);
       await interaction.reply({ content: '❌ Failed to fetch dummy info.', ephemeral: true });
@@ -76,4 +93,5 @@ module.exports = {
     }
   }
 };
+
 
