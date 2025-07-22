@@ -2,6 +2,7 @@ const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 const { getProvider } = require('../services/provider');
 const { contractListeners } = require('../services/mintProcessorBase');
 const { statSync } = require('fs');
+const os = require('os');
 const version = require('../package.json').version;
 
 let mintProcessorStartTime = Date.now();
@@ -17,69 +18,75 @@ module.exports = {
 
     await interaction.deferReply();
 
+    // ✅ Database
     let dbStatus = '🔴 Failed';
     try {
       await pg.query('SELECT 1');
       dbStatus = '🟢 Connected';
     } catch {}
 
-    let rpcStatus = '🔴 Failed';
-    let blockNum = 'N/A';
+    // ✅ RPC
+    let rpcStatus = '🔴 Failed', blockNum = 'N/A';
     try {
       const block = await getProvider().getBlockNumber();
       rpcStatus = '🟢 Live';
       blockNum = `#${block}`;
     } catch {}
 
+    // ✅ Discord Gateway
     const discordStatus = client.ws.status === 0 ? '🟢 Connected' : '🔴 Disconnected';
 
-    let mintStatus = '🔴 Inactive';
-    let activeListeners = 0;
-    try {
-      activeListeners = Object.keys(contractListeners || {}).length;
-      mintStatus = activeListeners > 0 ? `🟢 ${activeListeners} Active` : '🟠 No listeners';
-    } catch {}
+    // ✅ Mint Processor
+    const activeListeners = Object.keys(contractListeners || {}).length;
+    const mintStatus = activeListeners > 0 ? `🟢 ${activeListeners} Active` : '🟠 No listeners';
 
-    let commandCount = 0;
+    // ✅ Slash Command Count
+    let slashStatus = '🔴 0';
     try {
       const appCmds = await client.application.commands.fetch();
-      commandCount = appCmds.size;
+      slashStatus = appCmds.size > 0 ? `🟢 ${appCmds.size}` : '🔴 0';
     } catch {}
 
+    // ✅ Guild Count
     const totalGuilds = client.guilds.cache.size;
 
-    let flexProjects = 0;
-    try {
-      const flexRes = await pg.query('SELECT COUNT(*) FROM flex_projects');
-      flexProjects = parseInt(flexRes.rows[0].count);
-    } catch {}
+    // ✅ Flex / Token / Contract Stats
+    const getCount = async (query) => {
+      try {
+        const res = await pg.query(query);
+        return parseInt(res.rows[0].count);
+      } catch { return 0; }
+    };
 
-    let nftContracts = 0;
-    try {
-      const nftRes = await pg.query('SELECT COUNT(*) FROM contract_watchlist');
-      nftContracts = parseInt(nftRes.rows[0].count);
-    } catch {}
+    const [flexProjects, nftContracts, tokensTracked] = await Promise.all([
+      getCount('SELECT COUNT(*) FROM flex_projects'),
+      getCount('SELECT COUNT(*) FROM contract_watchlist'),
+      getCount('SELECT COUNT(*) FROM tracked_tokens')
+    ]);
 
-    let tokensTracked = 0;
-    try {
-      const tokenRes = await pg.query('SELECT COUNT(*) FROM tracked_tokens');
-      tokensTracked = parseInt(tokenRes.rows[0].count);
-    } catch {}
+    // ✅ Uptime
+    const formatUptime = (ms) => {
+      const h = Math.floor(ms / 3600000);
+      const m = Math.floor((ms % 3600000) / 60000);
+      return `${h}h ${m}m`;
+    };
 
-    const uptimeMs = process.uptime() * 1000;
-    const uptime = `${Math.floor(uptimeMs / 3600000)}h ${Math.floor((uptimeMs % 3600000) / 60000)}m`;
+    const uptime = formatUptime(process.uptime() * 1000);
+    const mintUptime = formatUptime(Date.now() - mintProcessorStartTime);
 
-    const mintUptimeMs = Date.now() - mintProcessorStartTime;
-    const mintUptime = `${Math.floor(mintUptimeMs / 3600000)}h ${Math.floor((mintUptimeMs % 3600000) / 60000)}m`;
+    // ✅ Memory
+    const memUsed = (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1);
+    const memTotal = (process.memoryUsage().heapTotal / 1024 / 1024).toFixed(1);
+    const memoryUsage = `${memUsed} MB / ${memTotal} MB`;
 
-    const memoryUsage = `${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1)} MB`;
-
+    // ✅ Last Event
     let lastEventTime = 'N/A';
     try {
       const seenStats = statSync('./data/seen.json');
       lastEventTime = `<t:${Math.floor(seenStats.mtimeMs / 1000)}:R>`;
     } catch {}
 
+    // ✅ Ping
     const ping = Date.now() - interaction.createdTimestamp;
 
     const embed = new EmbedBuilder()
@@ -92,7 +99,7 @@ module.exports = {
         `🤖 **Discord Gateway** — ${discordStatus}`,
         `🧱 **Mint Processor** — ${mintStatus} *(Uptime: ${mintUptime})*`,
         `🌐 **Servers** — ${totalGuilds} Guilds`,
-        `🔑 **Slash Commands** — ${commandCount}`,
+        `🔑 **Slash Commands** — ${slashStatus}`,
         `📦 **NFT Contracts Tracked** — ${nftContracts}`,
         `💰 **Tokens Tracked** — ${tokensTracked}`,
         `🎯 **Flex Projects** — ${flexProjects}`,
@@ -107,6 +114,7 @@ module.exports = {
     await interaction.editReply({ embeds: [embed] });
   }
 };
+
 
 
 
