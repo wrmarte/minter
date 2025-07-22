@@ -94,6 +94,13 @@ pg.query(`CREATE TABLE IF NOT EXISTS server_themes (
   accent_color TEXT DEFAULT '#294f30'
 )`);
 
+pg.query(`CREATE TABLE IF NOT EXISTS welcome_settings (
+  guild_id TEXT PRIMARY KEY,
+  enabled BOOLEAN DEFAULT FALSE,
+  welcome_channel_id TEXT
+)`);
+
+
 // ✅ Load slash & prefix commands
 client.commands = new Collection();
 client.prefixCommands = new Collection();
