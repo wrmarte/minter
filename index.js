@@ -105,6 +105,14 @@ pg.query(`CREATE TABLE IF NOT EXISTS welcome_settings (
   welcome_channel_id TEXT
 )`);
 
+pg.query(`CREATE TABLE IF NOT EXISTS dummy_info (
+  name TEXT NOT NULL,
+  content TEXT NOT NULL,
+  guild_id TEXT NOT NULL,
+  PRIMARY KEY (name, guild_id)
+)`);
+
+
 
 // ✅ Load slash & prefix commands
 client.commands = new Collection();
