@@ -36,7 +36,6 @@ function setupBaseBlockListener(client, contractRows) {
   provider.on('block', async (blockNumber) => {
     const fromBlock = Math.max(blockNumber - 5, 0);
     const toBlock = blockNumber;
-
     const mintTxMap = new Map();
 
     for (const row of contractRows) {
@@ -54,9 +53,9 @@ function setupBaseBlockListener(client, contractRows) {
       const name = row.name;
       let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
       let seenSales = new Set((loadJson(seenSalesPath(name)) || []).map(tx => tx.toLowerCase()));
-
       const allChannelIds = [...new Set([...(row.channel_ids || [])])];
       const allGuildIds = [];
+
       for (const id of allChannelIds) {
         try {
           const ch = await client.channels.fetch(id);
@@ -133,12 +132,10 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     tokenAddr = TOKEN_NAME_TO_ADDRESS[mint_token_symbol.toUpperCase()];
   }
 
-  // ✅ Dynamically detect tokenAmount spent from logs
   let tokenAmount = null;
   const buyer = ethers.getAddress(minterAddress);
   for (const log of receipt.logs) {
     if (log.topics[0] === ethers.id('Transfer(address,address,uint256)') && log.address === tokenAddr) {
-      const from = '0x' + log.topics[1].slice(26);
       const to = '0x' + log.topics[2].slice(26);
       if (to.toLowerCase() === buyer.toLowerCase()) {
         try {
@@ -185,84 +182,10 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
   }
 }
 
-async function handleSale(client, contractRow, contract, tokenId, from, to, txHash, channel_ids) {
-  const { name, mint_token, mint_token_symbol } = contractRow;
-
-  let imageUrl = 'https://via.placeholder.com/400x400.png?text=SOLD';
-  try {
-    let uri = await contract.tokenURI(tokenId);
-    if (uri.startsWith('ipfs://')) uri = uri.replace('ipfs://', 'https://ipfs.io/ipfs/');
-    const meta = await fetch(uri).then(res => res.json());
-    if (meta?.image) {
-      imageUrl = meta.image.startsWith('ipfs://') ? meta.image.replace('ipfs://', 'https://ipfs.io/ipfs/') : meta.image;
-    }
-  } catch {}
-
-  let receipt, tx;
-  try {
-    receipt = await getProvider('base').getTransactionReceipt(txHash);
-    tx = await getProvider('base').getTransaction(txHash);
-    if (!receipt || !tx) return;
-  } catch { return; }
-
-  let tokenAmount = null, ethValue = null, methodUsed = null;
-
-  if (tx.value && tx.value > 0n) {
-    tokenAmount = parseFloat(ethers.formatEther(tx.value));
-    ethValue = tokenAmount;
-    methodUsed = '🔦 ETH';
-  }
-
-  if (!ethValue) {
-    const transferTopic = ethers.id('Transfer(address,address,uint256)');
-    const seller = ethers.getAddress(from);
-
-    for (const log of receipt.logs) {
-      if (log.topics[0] === transferTopic && log.topics.length === 3 && log.address !== contract.address) {
-        try {
-          const toAddr = ethers.getAddress('0x' + log.topics[2].slice(26));
-          if (toAddr.toLowerCase() === seller.toLowerCase()) {
-            const tokenContract = log.address;
-            tokenAmount = parseFloat(ethers.formatUnits(log.data, 18));
-            ethValue = await getRealDexPriceForToken(tokenAmount, tokenContract);
-            if (!ethValue) {
-              const fallback = await getEthPriceFromToken(tokenContract);
-              ethValue = fallback ? tokenAmount * fallback : null;
-            }
-            methodUsed = `🔨 ${mint_token_symbol}`;
-            break;
-          }
-        } catch {}
-      }
-    }
-  }
-
-  if (!tokenAmount || !ethValue) return;
-
-  const embed = {
-    title: `💸 NFT SOLD – ${name} #${tokenId}`,
-    description: `Token \`${tokenId}\` just sold!`,
-    fields: [
-      { name: '👤 Seller', value: shortWalletLink(from), inline: true },
-      { name: '🧑‍💻 Buyer', value: shortWalletLink(to), inline: true },
-      { name: `💰 Paid`, value: `${tokenAmount.toFixed(4)}`, inline: true },
-      { name: `⇄ ETH Value`, value: `${ethValue.toFixed(4)} ETH`, inline: true },
-      { name: `💳 Method`, value: methodUsed || 'Unknown', inline: true }
-    ],
-    thumbnail: { url: imageUrl },
-    color: 0x66cc66,
-    footer: { text: 'Powered by PimpsDev' },
-    timestamp: new Date().toISOString()
-  };
-
-  const sentChannels = new Set();
-  for (const id of channel_ids) {
-    if (sentChannels.has(id)) continue;
-    sentChannels.add(id);
-    const ch = await client.channels.fetch(id).catch(() => null);
-    if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
-  }
-}
+module.exports = {
+  trackBaseContracts,
+  contractListeners
+};
 
 module.exports = {
   trackBaseContracts,
