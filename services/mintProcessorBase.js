@@ -148,31 +148,29 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     }
   }
 
- let ethValue = null;
+let ethValue = null;
 
 if (tokenAmount && tokenAddr) {
   try {
-    // Get 1-token price in ETH
-    const pricePerToken = await getEthPriceFromToken(tokenAddr);
-    if (pricePerToken && !isNaN(pricePerToken)) {
-      ethValue = tokenAmount * pricePerToken;
-    } else {
-      console.warn(`⚠️ Fallback ethUSD invalid or zero for ${tokenAddr}`);
-    }
+    ethValue = await getRealDexPriceForToken(tokenAmount, tokenAddr);
+    if (!ethValue || isNaN(ethValue)) ethValue = null;
   } catch (err) {
-    console.warn(`❌ getEthPriceFromToken error:`, err);
+    console.warn(`❌ Error with DEX price for ${tokenAmount} ${mint_token_symbol}:`, err);
+    ethValue = null;
   }
 
-  if (!ethValue || isNaN(ethValue) || ethValue === 0) {
+  if (!ethValue) {
     try {
-      ethValue = await getRealDexPriceForToken(tokenAmount, tokenAddr);
+      const fallback = await getEthPriceFromToken(tokenAddr);
+      if (fallback && !isNaN(fallback)) {
+        ethValue = tokenAmount * fallback;
+      }
     } catch (err) {
-      console.warn(`❌ getRealDexPriceForToken error:`, err);
+      console.warn(`❌ Fallback price error for ${mint_token_symbol}:`, err);
     }
   }
-
-  if (!ethValue || isNaN(ethValue)) ethValue = null;
 }
+
 
 
   let imageUrl = 'https://via.placeholder.com/400x400.png?text=NFT';
