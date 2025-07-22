@@ -148,24 +148,32 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     }
   }
 
-  let ethValue = null;
-  if (tokenAmount && tokenAddr) {
+ let ethValue = null;
+
+if (tokenAmount && tokenAddr) {
+  try {
+    // Get 1-token price in ETH
+    const pricePerToken = await getEthPriceFromToken(tokenAddr);
+    if (pricePerToken && !isNaN(pricePerToken)) {
+      ethValue = tokenAmount * pricePerToken;
+    } else {
+      console.warn(`⚠️ Fallback ethUSD invalid or zero for ${tokenAddr}`);
+    }
+  } catch (err) {
+    console.warn(`❌ getEthPriceFromToken error:`, err);
+  }
+
+  if (!ethValue || isNaN(ethValue) || ethValue === 0) {
     try {
       ethValue = await getRealDexPriceForToken(tokenAmount, tokenAddr);
-      if (!ethValue || isNaN(ethValue)) ethValue = null;
-    } catch {
-      ethValue = null;
-    }
-
-    if (!ethValue) {
-      try {
-        const fallback = await getEthPriceFromToken(tokenAddr);
-        if (fallback && !isNaN(fallback)) {
-          ethValue = tokenAmount * fallback;
-        }
-      } catch {}
+    } catch (err) {
+      console.warn(`❌ getRealDexPriceForToken error:`, err);
     }
   }
+
+  if (!ethValue || isNaN(ethValue)) ethValue = null;
+}
+
 
   let imageUrl = 'https://via.placeholder.com/400x400.png?text=NFT';
   try {
