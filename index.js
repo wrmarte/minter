@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, Collection } = require('discord.js');
+const { Client, GatewayIntentBits, Collection, REST, Routes } = require('discord.js');
 const { Client: PgClient } = require('pg');
 const fs = require('fs');
 const path = require('path');
@@ -10,7 +10,7 @@ require('./services/logScanner');
 
 console.log("👀 Booting from:", __dirname);
 
-// ✅ Create Discord client (must come first!)
+// ✅ Create Discord client
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -19,18 +19,14 @@ const client = new Client({
   ]
 });
 
-// ✅ Load MuscleMB trigger after client is defined
-const muscleMBListener = require('./listeners/muscleMBListener');
-muscleMBListener(client);
+// ✅ Load MuscleMB trigger
+require('./listeners/muscleMBListener')(client);
 
 // ✅ Load FF Trigger listener
-const ffTriggerListener = require('./listeners/fftrigger');
-ffTriggerListener(client);
+require('./listeners/fftrigger')(client);
 
 // ✅ Load Welcome Listener
-const welcomeListener = require('./listeners/welcomeListener');
-welcomeListener(client);
-
+require('./listeners/welcomeListener')(client);
 
 // ✅ PostgreSQL connection
 const pg = new PgClient({
@@ -41,8 +37,7 @@ pg.connect();
 client.pg = pg;
 
 // ✅ Initialize staking-related tables
-const initStakingTables = require('./db/initStakingTables');
-initStakingTables(pg).catch(console.error);
+require('./db/initStakingTables')(pg).catch(console.error);
 
 // ✅ Core bot tables
 pg.query(`CREATE TABLE IF NOT EXISTS contract_watchlist (
@@ -83,6 +78,7 @@ pg.query(`CREATE TABLE IF NOT EXISTS premium_servers (
   server_id TEXT PRIMARY KEY,
   tier TEXT NOT NULL DEFAULT 'free'
 )`);
+
 pg.query(`CREATE TABLE IF NOT EXISTS premium_users (
   user_id TEXT PRIMARY KEY,
   tier TEXT NOT NULL DEFAULT 'free'
@@ -111,8 +107,6 @@ pg.query(`CREATE TABLE IF NOT EXISTS dummy_info (
   guild_id TEXT NOT NULL,
   PRIMARY KEY (name, guild_id)
 )`);
-
-
 
 // ✅ Load slash & prefix commands
 client.commands = new Collection();
@@ -167,11 +161,10 @@ setInterval(async () => {
 
 // ✅ Auto Reward Payout System
 const autoRewardPayout = require('./services/autoRewardPayout');
-
 setInterval(() => {
   console.log('💸 Running autoRewardPayout...');
   autoRewardPayout(client).catch(console.error);
-}, 24 * 60 * 60 * 1000); // run every 24 hours
+}, 24 * 60 * 60 * 1000); // every 24 hours
 
 // ✅ Conditional Mint Processor Ape Loader
 if (process.env.APE_ENABLED === 'true') {
@@ -185,6 +178,30 @@ if (process.env.APE_ENABLED === 'true') {
 client.login(process.env.DISCORD_BOT_TOKEN)
   .then(() => console.log(`✅ Logged in as ${client.user.tag}`))
   .catch(err => console.error('❌ Discord login failed:', err));
+
+// ✅ Auto-register slash commands on bot ready
+client.once('ready', async () => {
+  const token = process.env.DISCORD_BOT_TOKEN;
+  const clientId = process.env.CLIENT_ID;
+  const guildId = process.env.TEST_GUILD_ID || null;
+
+  const rest = new REST({ version: '10' }).setToken(token);
+  const commands = client.commands.map(cmd => cmd.data.toJSON());
+
+  try {
+    console.log('⚙️ Auto-registering slash commands on ready...');
+    if (guildId) {
+      await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commands });
+      console.log(`✅ Registered ${commands.length} slash cmds in test guild ${guildId}`);
+    } else {
+      await rest.put(Routes.applicationCommands(clientId), { body: commands });
+      console.log(`✅ Registered ${commands.length} global slash cmds`);
+    }
+  } catch (err) {
+    console.error('❌ Failed to register slash commands:', err);
+  }
+});
+
 
 
 
