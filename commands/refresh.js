@@ -4,10 +4,20 @@ const { REST, Routes } = require('discord.js');
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('refresh')
-    .setDescription('🔄 Force refresh slash commands (owner only)'),
+    .setDescription('🔄 Refresh slash commands')
+    .addStringOption(option =>
+      option.setName('scope')
+        .setDescription('Where to refresh commands')
+        .setRequired(true)
+        .addChoices(
+          { name: 'Global', value: 'global' },
+          { name: 'Test Guild Only', value: 'test' },
+          { name: 'Both', value: 'both' }
+        )
+    ),
 
   async execute(interaction) {
-    // ✅ Check owner only
+    // ✅ Restrict to owner
     if (interaction.user.id !== process.env.BOT_OWNER_ID) {
       return interaction.reply({ content: '🚫 You are not authorized to run this command.', ephemeral: true });
     }
@@ -15,27 +25,30 @@ module.exports = {
     const client = interaction.client;
     const token = process.env.DISCORD_BOT_TOKEN;
     const clientId = process.env.CLIENT_ID;
-    const guildId = process.env.TEST_GUILD_ID || null;
+    const guildId = process.env.TEST_GUILD_ID;
 
+    const scope = interaction.options.getString('scope');
     const rest = new REST({ version: '10' }).setToken(token);
     const commands = client.commands.map(cmd => cmd.data.toJSON());
 
-    try {
-      await interaction.reply({ content: '⏳ Refreshing slash commands...', ephemeral: true });
+    await interaction.reply({ content: `⏳ Refreshing commands for \`${scope}\`...`, ephemeral: true });
 
-      if (guildId) {
-        await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commands });
-        console.log(`✅ Refreshed ${commands.length} slash commands in test guild ${guildId}`);
-        await interaction.editReply(`✅ Refreshed ${commands.length} slash commands in test guild.`);
-      } else {
+    try {
+      if (scope === 'global' || scope === 'both') {
         await rest.put(Routes.applicationCommands(clientId), { body: commands });
-        console.log(`✅ Refreshed ${commands.length} global slash commands`);
-        await interaction.editReply(`✅ Refreshed ${commands.length} global slash commands.`);
+        console.log(`✅ Registered ${commands.length} global commands`);
       }
 
+      if ((scope === 'test' || scope === 'both') && guildId) {
+        await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commands });
+        console.log(`✅ Registered ${commands.length} test guild commands to ${guildId}`);
+      }
+
+      await interaction.editReply(`✅ Refreshed commands for \`${scope}\`.`);
     } catch (err) {
-      console.error('❌ Error refreshing slash commands:', err);
-      await interaction.editReply('❌ Failed to refresh commands. See logs.');
+      console.error('❌ Slash refresh failed:', err);
+      await interaction.editReply('❌ Command refresh failed. Check logs.');
     }
   }
 };
+
