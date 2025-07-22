@@ -122,7 +122,7 @@ async function handleMintSingle(client, contractRow, contract, tokenIdStr, txHas
 }
 
 async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, channel_ids, isSingle = false, minterAddress = '') {
-  const { name, mint_price, mint_token, mint_token_symbol } = contractRow;
+  const { name, mint_token, mint_token_symbol } = contractRow;
   const provider = getProvider('base');
   if (!txHash) return;
   const receipt = await provider.getTransactionReceipt(txHash);
@@ -133,11 +133,26 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     tokenAddr = TOKEN_NAME_TO_ADDRESS[mint_token_symbol.toUpperCase()];
   }
 
-  let total = Number(mint_price) * tokenIds.length;
-  let ethValue = await getRealDexPriceForToken(total, tokenAddr);
-  if (!ethValue) {
+  // ✅ Dynamically detect tokenAmount spent from logs
+  let tokenAmount = null;
+  const buyer = ethers.getAddress(minterAddress);
+  for (const log of receipt.logs) {
+    if (log.topics[0] === ethers.id('Transfer(address,address,uint256)') && log.address === tokenAddr) {
+      const from = '0x' + log.topics[1].slice(26);
+      const to = '0x' + log.topics[2].slice(26);
+      if (to.toLowerCase() === buyer.toLowerCase()) {
+        try {
+          tokenAmount = parseFloat(ethers.formatUnits(log.data, 18));
+          break;
+        } catch {}
+      }
+    }
+  }
+
+  let ethValue = tokenAmount ? await getRealDexPriceForToken(tokenAmount, tokenAddr) : null;
+  if (!ethValue && tokenAmount) {
     const fallback = await getEthPriceFromToken(tokenAddr);
-    ethValue = fallback ? total * fallback : null;
+    ethValue = fallback ? tokenAmount * fallback : null;
   }
 
   let imageUrl = 'https://via.placeholder.com/400x400.png?text=NFT';
@@ -154,7 +169,7 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     title: isSingle ? `✨ NEW ${name.toUpperCase()} MINT!` : `✨ BULK ${name.toUpperCase()} MINT (${tokenIds.length})!`,
     description: isSingle ? `Minted Token ID: #${tokenIds[0]}` : `Minted Token IDs: ${tokenIds.map(id => `#${id}`).join(', ')}`,
     fields: [
-      { name: `💰 Total Spent (${mint_token_symbol})`, value: total.toFixed(4), inline: true },
+      { name: `💰 Total Spent (${mint_token_symbol})`, value: tokenAmount ? tokenAmount.toFixed(4) : '0.0000', inline: true },
       { name: `⇄ ETH Value`, value: ethValue ? `${ethValue.toFixed(4)} ETH` : 'N/A', inline: true },
       { name: `👤 Minter`, value: minterAddress ? shortWalletLink(minterAddress) : 'Unknown', inline: true }
     ],
