@@ -183,22 +183,23 @@ client.login(process.env.DISCORD_BOT_TOKEN)
 client.once('ready', async () => {
   const token = process.env.DISCORD_BOT_TOKEN;
   const clientId = process.env.CLIENT_ID;
-  const testGuildIds = process.env.TEST_GUILD_IDS?.split(',').map(id => id.trim()).filter(Boolean);
+
+  const testGuildIds = (process.env.TEST_GUILD_IDS || '')
+    .split(',')
+    .map(id => id.trim())
+    .filter(id => /^\d{17,20}$/.test(id));
+
   const rest = new REST({ version: '10' }).setToken(token);
   const commands = client.commands.map(cmd => cmd.data.toJSON());
 
   try {
     console.log('⚙️ Auto-registering slash commands...');
 
-    // Register to all test guilds instantly
-    if (testGuildIds?.length) {
-      for (const guildId of testGuildIds) {
-        await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commands });
-        console.log(`✅ Registered ${commands.length} slash cmds in test guild (${guildId})`);
-      }
+    for (const guildId of testGuildIds) {
+      await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commands });
+      console.log(`✅ Registered ${commands.length} slash cmds in test guild (${guildId})`);
     }
 
-    // Global registration
     await rest.put(Routes.applicationCommands(clientId), { body: commands });
     console.log(`🌐 Registered ${commands.length} global slash cmds`);
 
