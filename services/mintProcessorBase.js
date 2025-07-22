@@ -137,14 +137,18 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
   let tokenAmount = null;
   const buyer = ethers.getAddress(minterAddress);
   for (const log of receipt.logs) {
-    if (log.topics[0] === ethers.id('Transfer(address,address,uint256)') && log.address === tokenAddr) {
+    if (log.topics[0] === ethers.id('Transfer(address,address,uint256)')) {
       const from = '0x' + log.topics[1].slice(26);
       const to = '0x' + log.topics[2].slice(26);
-      if (from.toLowerCase() === buyer.toLowerCase()) {
+
+      // Check if buyer sent token from their wallet
+      if (from.toLowerCase() === buyer.toLowerCase() && log.address.toLowerCase() === tokenAddr) {
         try {
           tokenAmount = parseFloat(ethers.formatUnits(log.data, 18));
           break;
-        } catch {}
+        } catch (e) {
+          console.warn('❌ Token amount parse error', e);
+        }
       }
     }
   }
