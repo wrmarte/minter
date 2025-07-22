@@ -153,11 +153,29 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     }
   }
 
-  let ethValue = tokenAmount ? await getRealDexPriceForToken(tokenAmount, tokenAddr) : null;
-  if (!ethValue && tokenAmount) {
-    const fallback = await getEthPriceFromToken(tokenAddr);
-    ethValue = fallback ? tokenAmount * fallback : null;
+  let ethValue = null;
+
+if (tokenAmount && tokenAddr) {
+  try {
+    ethValue = await getRealDexPriceForToken(tokenAmount, tokenAddr);
+    if (!ethValue || isNaN(ethValue)) ethValue = null;
+  } catch (err) {
+    console.warn(`❌ Error with DEX price for ${tokenAmount} ${mint_token_symbol}:`, err);
+    ethValue = null;
   }
+
+  if (!ethValue) {
+    try {
+      const fallback = await getEthPriceFromToken(tokenAddr);
+      if (fallback && !isNaN(fallback)) {
+        ethValue = tokenAmount * fallback;
+      }
+    } catch (err) {
+      console.warn(`❌ Fallback price error for ${mint_token_symbol}:`, err);
+    }
+  }
+}
+
 
   let imageUrl = 'https://via.placeholder.com/400x400.png?text=NFT';
   try {
