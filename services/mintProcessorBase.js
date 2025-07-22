@@ -1,4 +1,4 @@
-// ✅ ERC721-only mint processor with dynamic token amount detection and multi-server support
+// ✅ ERC721-only mint processor with fixed deduplication and per-server notifications
 const { Interface, Contract, ethers } = require('ethers');
 const fetch = require('node-fetch');
 const { getRealDexPriceForToken, getEthPriceFromToken } = require('./price');
@@ -30,10 +30,11 @@ function setupBaseBlockListener(client, contractRows) {
     'function tokenURI(uint256 tokenId) view returns (string)'
   ]);
 
+  const globalSeen = new Set();
+
   provider.on('block', async (blockNumber) => {
     const fromBlock = Math.max(blockNumber - 5, 0);
     const toBlock = blockNumber;
-
     const mintTxMap = new Map();
 
     for (const row of contractRows) {
@@ -49,48 +50,62 @@ function setupBaseBlockListener(client, contractRows) {
 
       const contract = new Contract(row.address, iface.fragments, provider);
       const name = row.name;
-      let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
-      let seenSales = new Set((loadJson(seenSalesPath(name)) || []).map(tx => tx.toLowerCase()));
+      const seenTokenIds = new Set(loadJson(seenPath(name)) || []);
+      const seenSales = new Set((loadJson(seenSalesPath(name)) || []).map(tx => tx.toLowerCase()));
+      const allChannelIds = [...new Set(row.channel_ids || [])];
+      const guildMap = {};
+
+      for (const chId of allChannelIds) {
+        try {
+          const ch = await client.channels.fetch(chId);
+          if (ch?.guildId) {
+            if (!guildMap[ch.guildId]) guildMap[ch.guildId] = [];
+            guildMap[ch.guildId].push(chId);
+          }
+        } catch {}
+      }
 
       for (const log of logs) {
         if (log.topics[0] !== ethers.id('Transfer(address,address,uint256)')) continue;
         let parsed;
         try { parsed = iface.parseLog(log); } catch { continue; }
+
         const { from, to, tokenId } = parsed.args;
         const tokenIdStr = tokenId.toString();
         const txHash = log.transactionHash?.toLowerCase();
         if (!txHash) continue;
-        const mintKey = `${log.address}-${tokenIdStr}`;
+        const globalKey = `${txHash}-${tokenIdStr}-${row.address.toLowerCase()}`;
+
+        if (globalSeen.has(globalKey)) continue;
+        globalSeen.add(globalKey);
 
         if (from === ZERO_ADDRESS) {
           if (seenTokenIds.has(tokenIdStr)) continue;
           seenTokenIds.add(tokenIdStr);
-          if (!mintTxMap.has(txHash)) mintTxMap.set(txHash, []);
-          mintTxMap.get(txHash).push({ row, contract, tokenId: tokenIdStr, to });
+
+          if (!mintTxMap.has(txHash)) mintTxMap.set(txHash, { row, contract, tokenIds: new Set(), to });
+          mintTxMap.get(txHash).tokenIds.add(tokenIdStr);
           saveJson(seenPath(name), [...seenTokenIds]);
         } else {
           if (seenSales.has(txHash)) continue;
           seenSales.add(txHash);
-          await handleSale(client, row, contract, tokenId, from, to, txHash, row.channel_ids);
+          await handleSale(client, row, contract, tokenId, from, to, txHash, allChannelIds);
           saveJson(seenSalesPath(name), [...seenSales]);
         }
       }
-    }
 
-    for (const [txHash, mintList] of mintTxMap.entries()) {
-      const grouped = {};
-      for (const { row, contract, tokenId, to } of mintList) {
-        const key = `${row.address}_${to}`;
-        if (!grouped[key]) grouped[key] = { row, contract, tokenIds: [], to };
-        grouped[key].tokenIds.push(tokenId);
-      }
+      // Send mint notifications per guild (not per channel)
+      for (const [txHash, { row, contract, tokenIds, to }] of mintTxMap.entries()) {
+        if (!txHash) continue;
+        const uniqueTokenIds = [...new Set(Array.from(tokenIds))];
 
-      for (const group of Object.values(grouped)) {
-        const { row, contract, tokenIds, to } = group;
-        if (tokenIds.length === 1) {
-          await handleMintSingle(client, row, contract, tokenIds[0], txHash, row.channel_ids, to);
-        } else {
-          await handleMintBulk(client, row, contract, tokenIds, txHash, row.channel_ids, false, to);
+        for (const [guildId, chIds] of Object.entries(guildMap)) {
+          const targetCh = chIds[0];
+          if (uniqueTokenIds.length === 1) {
+            await handleMintSingle(client, row, contract, uniqueTokenIds[0], txHash, [targetCh], to);
+          } else {
+            await handleMintBulk(client, row, contract, uniqueTokenIds, txHash, [targetCh], false, to);
+          }
         }
       }
     }
@@ -123,9 +138,7 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
         try {
           tokenAmount = parseFloat(ethers.formatUnits(log.data, 18));
           break;
-        } catch (e) {
-          console.warn('❌ Token amount parse error', e);
-        }
+        } catch {}
       }
     }
   }
@@ -135,20 +148,14 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     try {
       ethValue = await getRealDexPriceForToken(tokenAmount, tokenAddr);
       if (!ethValue || isNaN(ethValue)) ethValue = null;
-    } catch (err) {
-      console.warn(`❌ Error with DEX price for ${tokenAmount} ${mint_token_symbol}:`, err);
-      ethValue = null;
-    }
-
+    } catch {}
     if (!ethValue) {
       try {
         const fallback = await getEthPriceFromToken(tokenAddr);
         if (fallback && !isNaN(fallback)) {
           ethValue = tokenAmount * fallback;
         }
-      } catch (err) {
-        console.warn(`❌ Fallback price error for ${mint_token_symbol}:`, err);
-      }
+      } catch {}
     }
   }
 
@@ -176,7 +183,7 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     timestamp: new Date().toISOString()
   };
 
-  for (const id of [...new Set(channel_ids)]) {
+  for (const id of channel_ids) {
     const ch = await client.channels.fetch(id).catch(() => null);
     if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
   }
