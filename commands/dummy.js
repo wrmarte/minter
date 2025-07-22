@@ -9,10 +9,16 @@ module.exports = {
         .setDescription('The name of the dummy info to fetch')
         .setRequired(true)
         .setAutocomplete(true)
+    )
+    .addUserOption(opt =>
+      opt.setName('target')
+        .setDescription('Optionally tag a user in the dummy response')
+        .setRequired(false)
     ),
 
   async execute(interaction) {
     const name = interaction.options.getString('name');
+    const target = interaction.options.getUser('target'); // optional user mention
     const guildId = interaction.guild.id;
     const pg = interaction.client.pg;
 
@@ -35,7 +41,10 @@ module.exports = {
         .setFooter({ text: `Requested by ${interaction.user.username}` })
         .setTimestamp();
 
-      await interaction.reply({ embeds: [embed] });
+      await interaction.reply({
+        content: target ? `📣 ${target}` : null,
+        embeds: [embed]
+      });
     } catch (err) {
       console.error('❌ Dummy fetch error:', err);
       await interaction.reply({ content: '❌ Failed to fetch dummy info.', ephemeral: true });
