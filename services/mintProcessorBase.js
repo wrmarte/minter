@@ -1,4 +1,4 @@
-// ✅ ERC721-only mint processor with dynamic token amount detection
+// ✅ ERC721-only mint processor with dynamic token amount detection and multi-server support
 const { Interface, Contract, ethers } = require('ethers');
 const fetch = require('node-fetch');
 const { getRealDexPriceForToken, getEthPriceFromToken } = require('./price');
@@ -30,9 +30,6 @@ function setupBaseBlockListener(client, contractRows) {
     'function tokenURI(uint256 tokenId) view returns (string)'
   ]);
 
-  const globalSeenSales = new Set();
-  const globalSeenMints = new Set();
-
   provider.on('block', async (blockNumber) => {
     const fromBlock = Math.max(blockNumber - 5, 0);
     const toBlock = blockNumber;
@@ -55,15 +52,6 @@ function setupBaseBlockListener(client, contractRows) {
       let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
       let seenSales = new Set((loadJson(seenSalesPath(name)) || []).map(tx => tx.toLowerCase()));
 
-      const allChannelIds = [...new Set([...(row.channel_ids || [])])];
-      const allGuildIds = [];
-      for (const id of allChannelIds) {
-        try {
-          const ch = await client.channels.fetch(id);
-          if (ch.guildId) allGuildIds.push(ch.guildId);
-        } catch {}
-      }
-
       for (const log of logs) {
         if (log.topics[0] !== ethers.id('Transfer(address,address,uint256)')) continue;
         let parsed;
@@ -75,43 +63,35 @@ function setupBaseBlockListener(client, contractRows) {
         const mintKey = `${log.address}-${tokenIdStr}`;
 
         if (from === ZERO_ADDRESS) {
-          let shouldSend = false;
-          for (const gid of allGuildIds) {
-            const dedupeKey = `${gid}-${mintKey}`;
-            if (globalSeenMints.has(dedupeKey)) continue;
-            globalSeenMints.add(dedupeKey);
-            shouldSend = true;
-          }
-          if (!shouldSend || seenTokenIds.has(tokenIdStr)) continue;
+          if (seenTokenIds.has(tokenIdStr)) continue;
           seenTokenIds.add(tokenIdStr);
-
-          if (!mintTxMap.has(txHash)) mintTxMap.set(txHash, { row, contract, tokenIds: new Set(), to });
-          mintTxMap.get(txHash).tokenIds.add(tokenIdStr);
-
+          if (!mintTxMap.has(txHash)) mintTxMap.set(txHash, []);
+          mintTxMap.get(txHash).push({ row, contract, tokenId: tokenIdStr, to });
           saveJson(seenPath(name), [...seenTokenIds]);
         } else {
-          let shouldSend = false;
-          for (const gid of allGuildIds) {
-            const dedupeKey = `${gid}-${txHash}`;
-            if (globalSeenSales.has(dedupeKey)) continue;
-            globalSeenSales.add(dedupeKey);
-            shouldSend = true;
-          }
-          if (!shouldSend || seenSales.has(txHash)) continue;
+          if (seenSales.has(txHash)) continue;
           seenSales.add(txHash);
-          await handleSale(client, row, contract, tokenId, from, to, txHash, allChannelIds);
+          await handleSale(client, row, contract, tokenId, from, to, txHash, row.channel_ids);
           saveJson(seenSalesPath(name), [...seenSales]);
         }
       }
     }
 
-    for (const [txHash, { row, contract, tokenIds, to }] of mintTxMap.entries()) {
-      if (!txHash) continue;
-      const tokenIdArray = Array.from(tokenIds);
-      if (tokenIdArray.length === 1) {
-        await handleMintSingle(client, row, contract, tokenIdArray[0], txHash, row.channel_ids, to);
-      } else {
-        await handleMintBulk(client, row, contract, tokenIdArray, txHash, row.channel_ids, false, to);
+    for (const [txHash, mintList] of mintTxMap.entries()) {
+      const grouped = {};
+      for (const { row, contract, tokenId, to } of mintList) {
+        const key = `${row.address}_${to}`;
+        if (!grouped[key]) grouped[key] = { row, contract, tokenIds: [], to };
+        grouped[key].tokenIds.push(tokenId);
+      }
+
+      for (const group of Object.values(grouped)) {
+        const { row, contract, tokenIds, to } = group;
+        if (tokenIds.length === 1) {
+          await handleMintSingle(client, row, contract, tokenIds[0], txHash, row.channel_ids, to);
+        } else {
+          await handleMintBulk(client, row, contract, tokenIds, txHash, row.channel_ids, false, to);
+        }
       }
     }
   });
@@ -133,15 +113,12 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     tokenAddr = TOKEN_NAME_TO_ADDRESS[mint_token_symbol.toUpperCase()];
   }
 
-  // ✅ Fixed: Look for token spent by buyer
   let tokenAmount = null;
   const buyer = ethers.getAddress(minterAddress);
   for (const log of receipt.logs) {
     if (log.topics[0] === ethers.id('Transfer(address,address,uint256)')) {
       const from = '0x' + log.topics[1].slice(26);
       const to = '0x' + log.topics[2].slice(26);
-
-      // Check if buyer sent token from their wallet
       if (from.toLowerCase() === buyer.toLowerCase() && log.address.toLowerCase() === tokenAddr) {
         try {
           tokenAmount = parseFloat(ethers.formatUnits(log.data, 18));
@@ -154,28 +131,26 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
   }
 
   let ethValue = null;
-
-if (tokenAmount && tokenAddr) {
-  try {
-    ethValue = await getRealDexPriceForToken(tokenAmount, tokenAddr);
-    if (!ethValue || isNaN(ethValue)) ethValue = null;
-  } catch (err) {
-    console.warn(`❌ Error with DEX price for ${tokenAmount} ${mint_token_symbol}:`, err);
-    ethValue = null;
-  }
-
-  if (!ethValue) {
+  if (tokenAmount && tokenAddr) {
     try {
-      const fallback = await getEthPriceFromToken(tokenAddr);
-      if (fallback && !isNaN(fallback)) {
-        ethValue = tokenAmount * fallback;
-      }
+      ethValue = await getRealDexPriceForToken(tokenAmount, tokenAddr);
+      if (!ethValue || isNaN(ethValue)) ethValue = null;
     } catch (err) {
-      console.warn(`❌ Fallback price error for ${mint_token_symbol}:`, err);
+      console.warn(`❌ Error with DEX price for ${tokenAmount} ${mint_token_symbol}:`, err);
+      ethValue = null;
+    }
+
+    if (!ethValue) {
+      try {
+        const fallback = await getEthPriceFromToken(tokenAddr);
+        if (fallback && !isNaN(fallback)) {
+          ethValue = tokenAmount * fallback;
+        }
+      } catch (err) {
+        console.warn(`❌ Fallback price error for ${mint_token_symbol}:`, err);
+      }
     }
   }
-}
-
 
   let imageUrl = 'https://via.placeholder.com/400x400.png?text=NFT';
   try {
