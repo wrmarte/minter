@@ -161,6 +161,40 @@ client.on('interactionCreate', async interaction => {
         console.error('❌ Autocomplete error:', err);
       }
     }
+  if (interaction.isButton() && interaction.customId === 'test_welcome_button') {
+  const pg = interaction.client.pg;
+  const guild = interaction.guild;
+  const member = interaction.member;
+
+  try {
+    const res = await pg.query(
+      'SELECT * FROM welcome_settings WHERE guild_id = $1 AND enabled = true',
+      [guild.id]
+    );
+
+    if (res.rowCount === 0) return await interaction.reply({ content: '❌ Welcome is not enabled.', ephemeral: true });
+
+    const row = res.rows[0];
+    const channel = await guild.channels.fetch(row.welcome_channel_id).catch(() => null);
+    if (!channel) return await interaction.reply({ content: '❌ Channel not found.', ephemeral: true });
+
+    const embed = new EmbedBuilder()
+      .setTitle(`👋 Welcome to ${guild.name}`)
+      .setDescription(`Hey ${member}, welcome to the guild! 🎉`)
+      .setThumbnail(member.user.displayAvatarURL())
+      .setColor('#00FF99')
+      .setFooter({ text: 'Make yourself at home, legend.' })
+      .setTimestamp();
+
+    await channel.send({ content: `🎉 Welcome <@${member.id}> (test)`, embeds: [embed] });
+
+    await interaction.reply({ content: `✅ Test welcome sent to <#${channel.id}>`, ephemeral: true });
+  } catch (err) {
+    console.error('❌ Error sending test welcome:', err);
+    await interaction.reply({ content: '❌ Failed to send test welcome.', ephemeral: true });
+  }
+}
+
 
     // CHAT INPUT COMMAND HANDLER
     if (!interaction.isChatInputCommand()) return;
