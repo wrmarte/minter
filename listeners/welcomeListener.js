@@ -11,6 +11,18 @@ module.exports = (client) => {
     const guild = message.guild;
     const member = message.member;
 
+    const colors = ['#00FF99', '#FF69B4', '#FFD700', '#7289DA', '#FF4500', '#00BFFF', '#8A2BE2'];
+    const emojis = ['🌀', '🎯', '🔥', '👑', '🛸', '🚀', '💀', '😈', '🍄', '🎮'];
+    const welcomeLines = [
+      `Welcome to the lair, ${member}! ${emojis[Math.floor(Math.random() * emojis.length)]}`,
+      `They made it! ${member} just landed 🛬`,
+      `🎉 Fresh meat has arrived: ${member}`,
+      `⚔️ ${member} enters the arena. Let the games begin.`,
+      `👾 Welcome ${member}, may the gas be ever in your favor.`,
+      `💥 ${member} just joined the most degen guild on Discord.`,
+      `📦 ${member} dropped in with the alpha. Give 'em love.`,
+    ];
+
     try {
       const res = await pg.query(
         'SELECT * FROM welcome_settings WHERE guild_id = $1 AND enabled = true',
@@ -24,11 +36,12 @@ module.exports = (client) => {
       if (!channel) return;
 
       const embed = new EmbedBuilder()
-        .setTitle(`👋 Welcome to ${guild.name}`)
-        .setDescription(`Hey ${member}, welcome to the guild! 🎉`)
+        .setTitle(`🌊 A New Member Has Surfaced`)
+        .setDescription(welcomeLines[Math.floor(Math.random() * welcomeLines.length)])
+        .setColor(colors[Math.floor(Math.random() * colors.length)])
         .setThumbnail(member.user.displayAvatarURL())
-        .setColor('#00FF99')
-        .setFooter({ text: 'Make yourself at home, legend.' })
+        // .setImage('https://yourcdn.com/welcome-banner.png') // optional banner
+        .setFooter({ text: 'Powered by Muscle MB • No mercy, only vibes.' })
         .setTimestamp();
 
       await channel.send({ content: `🎉 Welcome <@${member.id}> (trigger test)`, embeds: [embed] });
@@ -37,4 +50,3 @@ module.exports = (client) => {
     }
   });
 };
-
