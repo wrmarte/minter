@@ -1,5 +1,5 @@
 // interactionCreate.js FULL PATCHED + LABELS
-
+const { EmbedBuilder } = require('discord.js');
 const { flavorMap } = require('../utils/flavorMap');
 const { Contract } = require('ethers');
 const fetch = require('node-fetch');
