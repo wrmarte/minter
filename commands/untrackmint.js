@@ -14,6 +14,7 @@ module.exports = {
   async autocomplete(interaction) {
     const pg = interaction.client.pg;
     const focused = interaction.options.getFocused();
+    const guildId = interaction.guild?.id;
 
     try {
       const res = await pg.query(`SELECT name, address, chain, channel_ids FROM contract_watchlist`);
@@ -29,6 +30,17 @@ module.exports = {
         const channels = Array.isArray(row.channel_ids)
           ? row.channel_ids
           : (row.channel_ids || '').toString().split(',').filter(Boolean);
+
+        // ✅ Only show if this guild tracks it
+        const trackedInGuild = channels.some(cid => {
+          try {
+            return interaction.client.channels.cache.get(cid)?.guildId === guildId;
+          } catch {
+            return false;
+          }
+        });
+
+        if (!trackedInGuild) continue;
 
         const emoji = chain === 'base' ? '🟦' : chain === 'eth' ? '🟧' : chain === 'ape' ? '🐵' : '❓';
         const shortAddr = `${address.slice(0, 6)}...${address.slice(-4)}`;
@@ -86,5 +98,6 @@ module.exports = {
     }
   }
 };
+
 
 
