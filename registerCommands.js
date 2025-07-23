@@ -34,7 +34,7 @@ const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_BOT_TOKEN)
 (async () => {
   try {
     const clientId = process.env.CLIENT_ID;
-    const testGuildIds = process.env.TEST_GUILD_ID?.split(',').map(id => id.trim()).filter(Boolean);
+    const testGuildIds = process.env.TEST_GUILD_IDS?.split(',').map(id => id.trim()).filter(Boolean);
 
     if (!clientId) {
       console.error('❌ CLIENT_ID missing in .env');
