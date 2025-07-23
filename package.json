@@ -7,8 +7,7 @@
     "start": "node --no-deprecation index.js",
     "deploy": "node registerCommands.js",
     "build": "npm install",
-    "preinstall": "npm config set legacy-peer-deps true",
-    "postinstall": "npm rebuild && npm dedupe"
+    "preinstall": "npm config set legacy-peer-deps true"
   },
   "engines": {
     "node": ">=18.0.0"
@@ -28,4 +27,5 @@
     "node-cache": "^5.1.2"
   }
 }
+
 
