@@ -4,10 +4,11 @@
   "description": "A Discord bot that tracks CryptoPimps mints.",
   "main": "index.js",
   "scripts": {
-    "start": "node --no-deprecation --max-old-space-size=3072 index.js",
+    "start": "node --no-deprecation index.js",
     "deploy": "node registerCommands.js",
     "build": "npm install",
-    "preinstall": "npm config set legacy-peer-deps true"
+    "preinstall": "npm config set legacy-peer-deps true",
+    "postinstall": "npm rebuild && npm dedupe"
   },
   "engines": {
     "node": ">=18.0.0"
@@ -27,3 +28,4 @@
     "node-cache": "^5.1.2"
   }
 }
+
