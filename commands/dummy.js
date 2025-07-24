@@ -30,30 +30,38 @@ module.exports = {
 
       if (res.rowCount === 0) {
         return await interaction.reply({
-          content: `❌ No dummy info found with name **${name}**`,
+          content: `❌ No dummy info found with name "**${name}**"`,
           ephemeral: true
         });
       }
 
-      const content = res.rows[0].content;
+      const rawContent = res.rows[0].content;
 
+      // 🔗 Detect & replace links
+      let linkCount = 0;
+      const processedContent = rawContent.replace(
+        /(https?:\/\/[^\s]+)/gi,
+        (url) => {
+          linkCount++;
+          return `🔗 [Link ${linkCount}](${url})`;
+        }
+      );
+
+      // 🎨 Styling
       const colors = ['#FF8C00', '#7289DA', '#00CED1', '#ADFF2F', '#FF69B4', '#FFD700', '#4B0082'];
-      const title = `📘 ${name.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}`;
+      const title = name.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
 
       const embed = new EmbedBuilder()
-        .setTitle(title)
-        .setDescription(`\`\`\`\n${content.trim()}\n\`\`\``)
+        .setTitle(`📘 ${title}`)
+        .setDescription("```markdown\n" + processedContent + "\n```")
         .setColor(colors[Math.floor(Math.random() * colors.length)])
-        .setTimestamp()
-        .setFooter({
-          text: 'Muscle MB • Auto Notice',
-          iconURL: interaction.client.user.displayAvatarURL()
-        });
+        .setFooter({ text: 'Muscle MB — Dummy Info' })
+        .setTimestamp();
 
-      // Silent defer to avoid "Bot is thinking..."
-      await interaction.deferReply({ ephemeral: true });
+      // 🚀 Send immediately, no "thinking..."
+      await interaction.reply({ content: '✅', ephemeral: true });
 
-      // Send message directly to the channel
+      // 📢 Public embed response
       await interaction.channel.send({
         content: target ? `📣 ${target}` : null,
         embeds: [embed]
@@ -61,7 +69,8 @@ module.exports = {
 
     } catch (err) {
       console.error('❌ Dummy fetch error:', err);
-      await interaction.reply({ content: '❌ Failed to fetch dummy info.', ephemeral: true });
+      if (!interaction.replied)
+        await interaction.reply({ content: '❌ Failed to fetch dummy info.', ephemeral: true });
     }
   },
 
