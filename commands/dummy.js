@@ -36,23 +36,27 @@ module.exports = {
       }
 
       let rawContent = res.rows[0].content;
-
-      // 🔗 Extract links and replace in dark markdown block
       const enrichedLinks = [];
       let linkCount = 1;
 
-      const markdownSafe = rawContent.replace(/```/g, '`\u200B``'); // avoid breaking code block
-      const contentWithLinks = markdownSafe.replace(
+      // Extract links from content
+      rawContent = rawContent.replace(
         /(https?:\/\/[^\s]+)/gi,
         (url) => {
           const label = `Link ${linkCount++}`;
           enrichedLinks.push(`🔗 [${label}](${url})`);
-          return url;
+          return ''; // remove raw URL from main content
         }
       );
 
-      const finalContent = `\`\`\`\n${contentWithLinks}\n\`\`\`` +
-        (enrichedLinks.length ? `\n\n${enrichedLinks.join('\n')}` : '');
+      const bullets = rawContent
+        .split('\n')
+        .map(line => line.trim())
+        .filter(line => line.length > 0)
+        .map(line => `• ${line}`)
+        .join('\n');
+
+      const finalContent = `${bullets}${enrichedLinks.length > 0 ? `\n\n${enrichedLinks.join('\n')}` : ''}`;
 
       const colors = ['#FF8C00', '#7289DA', '#00CED1', '#ADFF2F', '#FF69B4', '#FFD700', '#4B0082'];
       const embed = new EmbedBuilder()
@@ -62,11 +66,11 @@ module.exports = {
         .setFooter({ text: 'Muscle MB — Dummy Info' })
         .setTimestamp();
 
-      // Hide "bot is thinking..."
+      // 🧼 Silent defer to avoid “thinking”
       await interaction.deferReply({ ephemeral: true });
       await interaction.deleteReply();
 
-      // Send clean embed
+      // 📣 Send public embed (no user trace)
       await interaction.channel.send({
         content: target ? `📣 ${target}` : null,
         embeds: [embed]
@@ -74,9 +78,8 @@ module.exports = {
 
     } catch (err) {
       console.error('❌ Dummy fetch error:', err);
-      if (!interaction.replied) {
+      if (!interaction.replied)
         await interaction.reply({ content: '❌ Failed to fetch dummy info.', ephemeral: true });
-      }
     }
   },
 
@@ -105,6 +108,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
