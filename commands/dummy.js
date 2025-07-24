@@ -8,7 +8,6 @@ module.exports = {
       opt.setName('name')
         .setDescription('The name of the dummy info to fetch')
         .setRequired(true)
-        .setAutocomplete(true)
     )
     .addUserOption(opt =>
       opt.setName('target')
@@ -35,32 +34,40 @@ module.exports = {
         });
       }
 
-      const rawContent = res.rows[0].content;
+      let rawContent = res.rows[0].content;
 
-      // 🔗 Convert raw links to clickable markdown links
-      let linkCount = 0;
-      const content = rawContent.replace(
+      // 🔗 Find all raw links and enhance them visually
+      const enrichedLinks = [];
+      let linkCount = 1;
+
+      rawContent = rawContent.replace(
         /(https?:\/\/[^\s]+)/gi,
         (url) => {
-          linkCount++;
-          return `🔗 [Link ${linkCount}](${url})`;
+          const label = `Link ${linkCount++}`;
+          enrichedLinks.push(`🔗 [${label}](${url})`);
+          return url;
         }
       );
 
-      // 🎨 Embed styling
+      // Final rich content
+      const finalContent = enrichedLinks.length > 0
+        ? `${rawContent}\n\n${enrichedLinks.join('\n')}`
+        : rawContent;
+
+      // 🎨 Fancy embed
       const colors = ['#FF8C00', '#7289DA', '#00CED1', '#ADFF2F', '#FF69B4', '#FFD700', '#4B0082'];
       const embed = new EmbedBuilder()
         .setTitle(`📘 ${name.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}`)
-        .setDescription(content)
+        .setDescription(finalContent)
         .setColor(colors[Math.floor(Math.random() * colors.length)])
         .setFooter({ text: 'Muscle MB — Dummy Info' })
         .setTimestamp();
 
-      // 🧼 Just acknowledge and delete trigger
+      // 🧼 Acknowledge silently
       await interaction.deferReply({ ephemeral: true });
       await interaction.deleteReply();
 
-      // 📢 Bot sends clean embed to channel
+      // 🧾 Bot sends final result
       await interaction.channel.send({
         content: target ? `📣 ${target}` : null,
         embeds: [embed]
@@ -98,6 +105,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
