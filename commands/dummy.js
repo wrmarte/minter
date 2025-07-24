@@ -63,7 +63,7 @@ module.exports = {
         .setTitle(`📘 ${name.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}`)
         .setDescription(finalContent)
         .setColor(colors[Math.floor(Math.random() * colors.length)])
-        .setFooter({ text: 'Muscle MB — Dummy Info' })
+        .setFooter({ text: 'Muscle MB • Auto Notice •' })
         .setTimestamp();
 
       // 🧼 Silent defer to avoid “thinking”
