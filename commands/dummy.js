@@ -16,7 +16,6 @@ module.exports = {
         .setRequired(false)
     ),
 
-
   async execute(interaction) {
     const name = interaction.options.getString('name');
     const target = interaction.options.getUser('target');
@@ -38,11 +37,12 @@ module.exports = {
 
       let rawContent = res.rows[0].content;
 
-      // 🔗 Find all raw links and enhance them visually
+      // 🔗 Extract links and replace in dark markdown block
       const enrichedLinks = [];
       let linkCount = 1;
 
-      rawContent = rawContent.replace(
+      const markdownSafe = rawContent.replace(/```/g, '`\u200B``'); // avoid breaking code block
+      const contentWithLinks = markdownSafe.replace(
         /(https?:\/\/[^\s]+)/gi,
         (url) => {
           const label = `Link ${linkCount++}`;
@@ -51,12 +51,9 @@ module.exports = {
         }
       );
 
-      // Final rich content
-      const finalContent = enrichedLinks.length > 0
-        ? `${rawContent}\n\n${enrichedLinks.join('\n')}`
-        : rawContent;
+      const finalContent = `\`\`\`\n${contentWithLinks}\n\`\`\`` +
+        (enrichedLinks.length ? `\n\n${enrichedLinks.join('\n')}` : '');
 
-      // 🎨 Fancy embed
       const colors = ['#FF8C00', '#7289DA', '#00CED1', '#ADFF2F', '#FF69B4', '#FFD700', '#4B0082'];
       const embed = new EmbedBuilder()
         .setTitle(`📘 ${name.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}`)
@@ -65,11 +62,11 @@ module.exports = {
         .setFooter({ text: 'Muscle MB — Dummy Info' })
         .setTimestamp();
 
-      // 🧼 Acknowledge silently
+      // Hide "bot is thinking..."
       await interaction.deferReply({ ephemeral: true });
       await interaction.deleteReply();
 
-      // 🧾 Bot sends final result
+      // Send clean embed
       await interaction.channel.send({
         content: target ? `📣 ${target}` : null,
         embeds: [embed]
@@ -77,8 +74,9 @@ module.exports = {
 
     } catch (err) {
       console.error('❌ Dummy fetch error:', err);
-      if (!interaction.replied)
+      if (!interaction.replied) {
         await interaction.reply({ content: '❌ Failed to fetch dummy info.', ephemeral: true });
+      }
     }
   },
 
@@ -107,6 +105,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
