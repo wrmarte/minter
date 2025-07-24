@@ -46,12 +46,11 @@ module.exports = {
         })
         .setTimestamp();
 
-      // 🧼 Clean interaction first (ephemeral + public message)
-      await interaction.deferReply({ ephemeral: true });
-
-      await interaction.channel.send({
+      // ✅ Reply immediately, no deferReply
+      await interaction.reply({
         content: target ? `📣 ${target}` : null,
-        embeds: [embed]
+        embeds: [embed],
+        ephemeral: false
       });
 
     } catch (err) {
@@ -85,3 +84,4 @@ module.exports = {
     }
   }
 };
+
