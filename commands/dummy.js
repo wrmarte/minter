@@ -37,9 +37,9 @@ module.exports = {
 
       const rawContent = res.rows[0].content;
 
-      // 🔗 Detect & replace links
+      // 🔗 Convert raw links to clickable markdown links
       let linkCount = 0;
-      const processedContent = rawContent.replace(
+      const content = rawContent.replace(
         /(https?:\/\/[^\s]+)/gi,
         (url) => {
           linkCount++;
@@ -47,21 +47,20 @@ module.exports = {
         }
       );
 
-      // 🎨 Styling
+      // 🎨 Embed styling
       const colors = ['#FF8C00', '#7289DA', '#00CED1', '#ADFF2F', '#FF69B4', '#FFD700', '#4B0082'];
-      const title = name.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
-
       const embed = new EmbedBuilder()
-        .setTitle(`📘 ${title}`)
-        .setDescription("```markdown\n" + processedContent + "\n```")
+        .setTitle(`📘 ${name.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}`)
+        .setDescription(content)
         .setColor(colors[Math.floor(Math.random() * colors.length)])
         .setFooter({ text: 'Muscle MB — Dummy Info' })
         .setTimestamp();
 
-      // 🚀 Send immediately, no "thinking..."
-      await interaction.reply({ content: '✅', ephemeral: true });
+      // 🧼 Just acknowledge and delete trigger
+      await interaction.deferReply({ ephemeral: true });
+      await interaction.deleteReply();
 
-      // 📢 Public embed response
+      // 📢 Bot sends clean embed to channel
       await interaction.channel.send({
         content: target ? `📣 ${target}` : null,
         embeds: [embed]
@@ -99,5 +98,6 @@ module.exports = {
     }
   }
 };
+
 
 
