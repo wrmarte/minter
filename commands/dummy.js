@@ -29,28 +29,34 @@ module.exports = {
       );
 
       if (res.rowCount === 0) {
-        return await interaction.reply({ content: `❌ No dummy info found with name "${name}"`, ephemeral: true });
+        return await interaction.reply({
+          content: `❌ No dummy info found with name **${name}**`,
+          ephemeral: true
+        });
       }
 
       const content = res.rows[0].content;
 
       const colors = ['#FF8C00', '#7289DA', '#00CED1', '#ADFF2F', '#FF69B4', '#FFD700', '#4B0082'];
+      const title = `📘 ${name.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}`;
 
       const embed = new EmbedBuilder()
-        .setTitle(`📘 ${name.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}`)
-        .setDescription(content)
+        .setTitle(title)
+        .setDescription(`\`\`\`\n${content.trim()}\n\`\`\``)
         .setColor(colors[Math.floor(Math.random() * colors.length)])
+        .setTimestamp()
         .setFooter({
-          text: `Requested by Muscle MB`,
+          text: 'Muscle MB • Auto Notice',
           iconURL: interaction.client.user.displayAvatarURL()
-        })
-        .setTimestamp();
+        });
 
-      // ✅ Reply immediately, no deferReply
-      await interaction.reply({
+      // Silent defer to avoid "Bot is thinking..."
+      await interaction.deferReply({ ephemeral: true });
+
+      // Send message directly to the channel
+      await interaction.channel.send({
         content: target ? `📣 ${target}` : null,
-        embeds: [embed],
-        ephemeral: false
+        embeds: [embed]
       });
 
     } catch (err) {
@@ -84,4 +90,5 @@ module.exports = {
     }
   }
 };
+
 
