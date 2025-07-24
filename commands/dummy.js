@@ -8,12 +8,14 @@ module.exports = {
       opt.setName('name')
         .setDescription('The name of the dummy info to fetch')
         .setRequired(true)
+        .setAutocomplete(true)
     )
     .addUserOption(opt =>
       opt.setName('target')
         .setDescription('Optionally tag a user in the dummy response')
         .setRequired(false)
     ),
+
 
   async execute(interaction) {
     const name = interaction.options.getString('name');
