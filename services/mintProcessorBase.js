@@ -285,6 +285,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
 }
 
 module.exports = {
-  trackApeContracts,
-  contractListeners
+  trackBaseContracts,
+  contractListeners // ✅ if you use it elsewhere
 };
+
