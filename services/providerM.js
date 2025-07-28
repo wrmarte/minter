@@ -24,7 +24,6 @@ const RPCS = {
   ]
 };
 
-// ✅ Track current index per chain
 const providerIndex = {};
 const providers = {};
 
@@ -84,7 +83,7 @@ async function isNetworkReady(provider) {
   }
 }
 
-// ✅ Rotate to next provider (Ape patch included)
+// ✅ Rotate to next provider
 async function rotateProvider(chain = 'base') {
   const key = chain.toLowerCase();
 
@@ -114,7 +113,7 @@ async function rotateProvider(chain = 'base') {
   console.error(`❌ All ${key} RPCs failed — provider set to null`);
 }
 
-// ✅ Failover-safe RPC call — now 100% crash-proof
+// ✅ Failover-safe RPC call
 async function safeRpcCall(chain, callFn, retries = 4) {
   const key = chain.toLowerCase();
 
@@ -133,9 +132,10 @@ async function safeRpcCall(chain, callFn, retries = 4) {
       const isForbidden = msg.includes('403') || msg.includes('API key is not allowed');
       const isLogBlocked = msg.includes("'eth_getLogs' is unavailable");
 
+      const failUrl = getProvider(key)?.connection?.url || 'unknown';
       console.warn(`⚠️ [${key}] RPC Error: ${err.message || err.code || 'unknown'}`);
       if (err?.code) console.warn(`🔍 RPC failure code: ${err.code}`);
-      console.warn(`🔻 RPC failed: ${getProvider(key)?.connection?.url}`);
+      console.warn(`🔻 RPC failed [${key}]: ${failUrl}`);
 
       const shouldRotate = (
         msg.includes('no response') ||
@@ -187,5 +187,6 @@ module.exports = {
   safeRpcCall,
   getMaxBatchSize
 };
+
 
 
