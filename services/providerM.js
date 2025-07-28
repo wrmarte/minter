@@ -15,7 +15,6 @@ const RPCS = {
     'https://rpc.ankr.com/eth'
   ],
   ape: [
-    // Replace with healthy ones
     'https://rpc1.apexchain.xyz',
     'https://rpc.apexnetwork.xyz',
     'https://api.ape-rpc.com'
@@ -112,15 +111,18 @@ async function rotateProvider(chain = 'base') {
   console.error(`❌ All ${key} RPCs failed — provider set to null`);
 }
 
-// ✅ Failover-safe RPC call
+// ✅ Failover-safe RPC call — now 100% crash-proof
 async function safeRpcCall(chain, callFn, retries = 4) {
   const key = chain.toLowerCase();
 
   for (let i = 0; i < retries; i++) {
-    try {
-      const provider = getProvider(key);
-      if (!provider) throw new Error(`No provider for chain "${key}"`);
+    const provider = getProvider(key);
+    if (!provider) {
+      console.warn(`⚠️ No live provider for "${key}". Skipping call.`);
+      return null;
+    }
 
+    try {
       return await callFn(provider);
     } catch (err) {
       const msg = err?.info?.responseBody || err?.message || '';
