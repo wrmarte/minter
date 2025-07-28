@@ -15,7 +15,7 @@ const RPCS = {
     'https://rpc.ankr.com/eth'
   ],
   ape: [
-    'https://apechain.drpc.org',
+    // You can remove or comment out bad ones
     'https://rpc.apeiron.io'
   ]
 };
@@ -64,8 +64,8 @@ async function isRpcAlive(url) {
 function getProvider(chain = 'base') {
   const key = chain.toLowerCase();
   if (!providers[key]) {
-    console.warn(`⚠️ Unknown chain "${key}" — defaulting to Base`);
-    return providers['base'];
+    console.warn(`⚠️ No live provider for "${key}". Returning null.`);
+    return null;
   }
   return providers[key];
 }
@@ -85,7 +85,7 @@ async function rotateProvider(chain = 'base') {
   const key = chain.toLowerCase();
 
   if (!RPCS[key] || RPCS[key].length <= 1) {
-    console.warn(`⛔ No rotation available for ${key} (using static RPC)`);
+    console.warn(`⛔ No rotation available for ${key} (static RPC only)`);
     return;
   }
 
@@ -106,7 +106,8 @@ async function rotateProvider(chain = 'base') {
     }
   }
 
-  console.error(`❌ All ${key} RPCs failed network check`);
+  providers[key] = null;
+  console.error(`❌ All ${key} RPCs failed — provider set to null`);
 }
 
 // ✅ Failover-safe RPC call
@@ -116,6 +117,8 @@ async function safeRpcCall(chain, callFn, retries = 4) {
   for (let i = 0; i < retries; i++) {
     try {
       const provider = getProvider(key);
+      if (!provider) throw new Error(`No provider for chain "${key}"`);
+
       return await callFn(provider);
     } catch (err) {
       const msg = err?.info?.responseBody || err?.message || '';
