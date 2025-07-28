@@ -12,16 +12,16 @@ const TOKEN_NAME_TO_ADDRESS = {
 const ZERO_ADDRESS = ethers.ZeroAddress;
 const contractListeners = {};
 
-async function trackApeContracts(client) {
+async function trackBaseContracts(client) {
   const pg = client.pg;
-  const res = await pg.query("SELECT * FROM contract_watchlist WHERE chain = 'ape'");
+  const res = await pg.query("SELECT * FROM contract_watchlist WHERE chain = 'base'");
   const contracts = res.rows;
-  setupApeBlockListener(client, contracts);
+  setupBaseBlockListener(client, contracts);
 }
 
-function setupApeBlockListener(client, contractRows) {
-  if (global._ape_block_listener) return;
-  global._ape_block_listener = true;
+function setupBaseBlockListener(client, contractRows) {
+  if (global._base_block_listener) return;
+  global._base_block_listener = true;
 
   const iface = new Interface([
     'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
@@ -32,7 +32,7 @@ function setupApeBlockListener(client, contractRows) {
   const globalSeenMints = new Set();
 
   setInterval(async () => {
-    const provider = await safeRpcCall('ape', p => p);
+    const provider = await safeRpcCall('base', p => p);
     if (!provider) return;
 
     const blockNumber = await provider.getBlockNumber().catch(() => null);
