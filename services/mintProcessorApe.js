@@ -1,6 +1,6 @@
 const { Interface, Contract, id, ZeroAddress } = require('ethers');
 const fetch = require('node-fetch');
-const { safeRpcCall } = require('../services/providerM');
+const { safeRpcCall, getProvider } = require('../services/providerM');
 const { shortWalletLink, loadJson, saveJson, seenPath, seenSalesPath } = require('../utils/helpers');
 const delay = ms => new Promise(res => setTimeout(res, ms));
 
@@ -32,6 +32,7 @@ function setupApeBlockListener(client, contractRows) {
 
   setInterval(async () => {
     const block = await safeRpcCall('ape', p => p.getBlockNumber());
+    if (!block) return;
     const fromBlock = Math.max(block - 3, 0);
     const toBlock = block;
 
@@ -48,17 +49,13 @@ function setupApeBlockListener(client, contractRows) {
 
       await delay(200);
 
-      let logs = [];
-      try {
-        logs = await safeRpcCall('ape', p => p.getLogs(filter));
-      } catch (err) {
-        console.warn(`[${name}] Ape log fetch error: ${err.message}`);
-        continue;
-      }
+      let logs = await safeRpcCall('ape', p => p.getLogs(filter)).catch(() => []);
+      if (!Array.isArray(logs)) logs = [];
 
-      const provider = require('../services/providerM').getProvider('ape');
+      const provider = getProvider('ape');
+      if (!provider) continue;
+
       const contract = new Contract(address, iface.fragments, provider);
-
       const seenTokenIds = new Set(loadJson(seenPath(name)) || []);
       const seenSales = new Set((loadJson(seenSalesPath(name)) || []).map(tx => tx.toLowerCase()));
 
@@ -72,7 +69,8 @@ function setupApeBlockListener(client, contractRows) {
 
         const { from, to, tokenId } = parsed.args;
         const tokenIdStr = tokenId.toString();
-        const txHash = log.transactionHash.toLowerCase();
+        const txHash = log.transactionHash?.toLowerCase();
+        if (!txHash) continue;
 
         const allChannelIds = [...new Set([...(row.channel_ids || [])])];
         const allGuildIds = [];
@@ -118,7 +116,6 @@ function setupApeBlockListener(client, contractRows) {
                 ]).parseLog(log);
 
                 const toLog = parsedLog.args.to?.toLowerCase?.();
-
                 if (
                   ROUTERS.includes(toLog) ||
                   toLog === from.toLowerCase() ||
