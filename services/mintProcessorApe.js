@@ -30,21 +30,30 @@ function setupApeBlockListener(client, contractRows) {
   const globalSeenSales = new Set();
   const globalSeenMints = new Set();
 
-  let apeCooldown = false;
+let apeCooldown = false;
 
 setInterval(async () => {
   if (apeCooldown) return;
 
-  const block = await safeRpcCall('ape', p => p.getBlockNumber());
-
-  if (!block) {
+  const provider = require('../services/providerM').getProvider('ape');
+  if (!provider) {
     console.warn(`⛔ ApeChain is still offline. Cooling down checks for 60 seconds.`);
     apeCooldown = true;
     setTimeout(() => {
       apeCooldown = false;
-    }, 60000); // 60 sec cooldown before retrying
+    }, 60000);
     return;
   }
+
+  const block = await safeRpcCall('ape', p => p.getBlockNumber());
+  if (!block) return;
+
+  const fromBlock = Math.max(block - 3, 0);
+  const toBlock = block;
+
+  for (const row of contractRows) {
+    ...
+
 
     const fromBlock = Math.max(block - 3, 0);
     const toBlock = block;
