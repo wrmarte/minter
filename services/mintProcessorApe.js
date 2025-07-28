@@ -10,6 +10,7 @@ const ROUTERS = [
 
 const DEAD_ADDRESS = '0x000000000000000000000000000000000000dead';
 const contractListeners = {};
+let apeCooldown = false;
 
 async function trackApeContracts(client) {
   const pg = client.pg;
@@ -30,17 +31,27 @@ function setupApeBlockListener(client, contractRows) {
   const globalSeenSales = new Set();
   const globalSeenMints = new Set();
 
-  let apeCooldown = false;
+  global.apeOfflineNotified = false;
 
   setInterval(async () => {
     if (apeCooldown) return;
 
     const provider = getProvider('ape');
     if (!provider) {
-      console.warn(`⛔ ApeChain is still offline. Cooling down checks for 60 seconds.`);
+      if (!global.apeOfflineNotified) {
+        console.warn(`⛔ ApeChain is offline. Will retry silently.`);
+        global.apeOfflineNotified = true;
+      }
       apeCooldown = true;
-      setTimeout(() => { apeCooldown = false; }, 60000);
+      setTimeout(() => {
+        apeCooldown = false;
+      }, 90000); // ⏱️ Cooldown: 90 seconds
       return;
+    }
+
+    if (global.apeOfflineNotified) {
+      console.log(`✅ ApeChain is back online.`);
+      global.apeOfflineNotified = false;
     }
 
     const block = await safeRpcCall('ape', p => p.getBlockNumber());
@@ -64,9 +75,6 @@ function setupApeBlockListener(client, contractRows) {
 
       let logs = await safeRpcCall('ape', p => p.getLogs(filter)).catch(() => []);
       if (!Array.isArray(logs)) logs = [];
-
-      const provider = getProvider('ape');
-      if (!provider) continue;
 
       const contract = new Contract(address, iface.fragments, provider);
       const seenTokenIds = new Set(loadJson(seenPath(name)) || []);
@@ -286,6 +294,7 @@ module.exports = {
   trackApeContracts,
   contractListeners
 };
+
 
 
 
