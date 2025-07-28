@@ -36,7 +36,9 @@ module.exports = {
     const userMention = `<@${targetUser.id}>`;
     const guildId = interaction.guild?.id ?? null;
 
-    await interaction.deferReply({ ephemeral: true });
+   await interaction.deferReply({ ephemeral: true });
+await interaction.deleteReply().catch(() => {});
+
 
     let res = { rows: [] };
     try {
