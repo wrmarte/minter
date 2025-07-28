@@ -2,7 +2,7 @@ const { Interface, Contract, ethers } = require('ethers');
 const fetch = require('node-fetch');
 const { getRealDexPriceForToken, getEthPriceFromToken } = require('./price');
 const { shortWalletLink, loadJson, saveJson, seenPath, seenSalesPath } = require('../utils/helpers');
-const { getProvider } = require('./providerM');
+const { safeRpcCall } = require('./providerM');
 const delay = ms => new Promise(res => setTimeout(res, ms));
 
 const TOKEN_NAME_TO_ADDRESS = {
@@ -10,19 +10,18 @@ const TOKEN_NAME_TO_ADDRESS = {
 };
 
 const ZERO_ADDRESS = ethers.ZeroAddress;
-const contractListeners = {}; // ✅ Now defined properly
+const contractListeners = {};
 
-async function trackBaseContracts(client) {
+async function trackApeContracts(client) {
   const pg = client.pg;
-  const res = await pg.query("SELECT * FROM contract_watchlist WHERE chain = 'base'");
+  const res = await pg.query("SELECT * FROM contract_watchlist WHERE chain = 'ape'");
   const contracts = res.rows;
-  setupBaseBlockListener(client, contracts);
+  setupApeBlockListener(client, contracts);
 }
 
-function setupBaseBlockListener(client, contractRows) {
-  const provider = getProvider('base');
-  if (provider._global_block_listener_base) return;
-  provider._global_block_listener_base = true;
+function setupApeBlockListener(client, contractRows) {
+  if (global._ape_block_listener) return;
+  global._ape_block_listener = true;
 
   const iface = new Interface([
     'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
@@ -32,10 +31,15 @@ function setupBaseBlockListener(client, contractRows) {
   const globalSeenSales = new Set();
   const globalSeenMints = new Set();
 
-  provider.on('block', async (blockNumber) => {
+  setInterval(async () => {
+    const provider = await safeRpcCall('ape', p => p);
+    if (!provider) return;
+
+    const blockNumber = await provider.getBlockNumber().catch(() => null);
+    if (!blockNumber) return;
+
     const fromBlock = Math.max(blockNumber - 5, 0);
     const toBlock = blockNumber;
-
     const mintTxMap = new Map();
 
     for (const row of contractRows) {
@@ -118,14 +122,14 @@ function setupBaseBlockListener(client, contractRows) {
         await handleMintBulk(client, row, contract, tokenIdArray, txHash, channels, isSingle, to);
       }
     }
-  });
+  }, 8000);
 }
 
 async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, channel_ids, isSingle = false, minterAddress = '') {
   const { name, mint_token, mint_token_symbol } = contractRow;
-  const provider = getProvider('base');
-  if (!txHash) return;
-  const receipt = await provider.getTransactionReceipt(txHash);
+  const provider = await safeRpcCall('ape', p => p);
+  if (!provider || !txHash) return;
+  const receipt = await provider.getTransactionReceipt(txHash).catch(() => null);
   if (!receipt) return;
 
   let tokenAddr = mint_token?.toLowerCase?.() || '';
@@ -148,30 +152,25 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     }
   }
 
-let ethValue = null;
+  let ethValue = null;
 
-if (tokenAmount && tokenAddr) {
-  try {
-    ethValue = await getRealDexPriceForToken(tokenAmount, tokenAddr);
-    if (!ethValue || isNaN(ethValue)) ethValue = null;
-  } catch (err) {
-    console.warn(`❌ Error with DEX price for ${tokenAmount} ${mint_token_symbol}:`, err);
-    ethValue = null;
-  }
-
-  if (!ethValue) {
+  if (tokenAmount && tokenAddr) {
     try {
-      const fallback = await getEthPriceFromToken(tokenAddr);
-      if (fallback && !isNaN(fallback)) {
-        ethValue = tokenAmount * fallback;
-      }
-    } catch (err) {
-      console.warn(`❌ Fallback price error for ${mint_token_symbol}:`, err);
+      ethValue = await getRealDexPriceForToken(tokenAmount, tokenAddr);
+      if (!ethValue || isNaN(ethValue)) ethValue = null;
+    } catch {
+      ethValue = null;
+    }
+
+    if (!ethValue) {
+      try {
+        const fallback = await getEthPriceFromToken(tokenAddr);
+        if (fallback && !isNaN(fallback)) {
+          ethValue = tokenAmount * fallback;
+        }
+      } catch {}
     }
   }
-}
-
-
 
   let imageUrl = 'https://via.placeholder.com/400x400.png?text=NFT';
   try {
@@ -193,7 +192,7 @@ if (tokenAmount && tokenAddr) {
     ],
     thumbnail: { url: imageUrl },
     color: 219139,
-    footer: { text: 'Live on Base • Powered by PimpsDev' },
+    footer: { text: 'Live on ApeChain • Powered by PimpsDev' },
     timestamp: new Date().toISOString()
   };
 
@@ -204,7 +203,7 @@ if (tokenAmount && tokenAddr) {
 }
 
 async function handleSale(client, contractRow, contract, tokenId, from, to, txHash, channel_ids) {
- const { name, mint_token, mint_token_symbol } = contractRow;
+  const { name, mint_token_symbol } = contractRow;
 
   let imageUrl = 'https://via.placeholder.com/400x400.png?text=SOLD';
   try {
@@ -216,10 +215,13 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     }
   } catch {}
 
+  const provider = await safeRpcCall('ape', p => p);
+  if (!provider) return;
+
   let receipt, tx;
   try {
-    receipt = await getProvider('base').getTransactionReceipt(txHash);
-    tx = await getProvider('base').getTransaction(txHash);
+    receipt = await provider.getTransactionReceipt(txHash);
+    tx = await provider.getTransaction(txHash);
     if (!receipt || !tx) return;
   } catch { return; }
 
@@ -228,7 +230,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
   if (tx.value && tx.value > 0n) {
     tokenAmount = parseFloat(ethers.formatEther(tx.value));
     ethValue = tokenAmount;
-    methodUsed = '🔦 ETH';
+    methodUsed = '🟦 ETH';
   }
 
   if (!ethValue) {
@@ -247,7 +249,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
               const fallback = await getEthPriceFromToken(tokenContract);
               ethValue = fallback ? tokenAmount * fallback : null;
             }
-            methodUsed = `🔨 ${mint_token_symbol}`;
+            methodUsed = `🟨 ${mint_token_symbol}`;
             break;
           }
         } catch {}
@@ -283,6 +285,6 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
 }
 
 module.exports = {
-  trackBaseContracts,
-  contractListeners // ✅ FIXED: now defined and exported
+  trackApeContracts,
+  contractListeners
 };
