@@ -59,15 +59,6 @@ const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_BOT_TOKEN)
     console.log('⏳ Waiting 5 seconds for Discord sync...');
     await new Promise(resolve => setTimeout(resolve, 5000));
 
-    // ✅ Register Guild Commands
-    if (testGuildIds?.length) {
-      for (const guildId of testGuildIds) {
-        console.log(`📥 Registering ${commands.length} commands to guild ${guildId}...`);
-        await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commands });
-        console.log(`✅ Guild slash commands registered to ${guildId}`);
-      }
-    }
-
     // ✅ Register Global Commands
     console.log(`📥 Registering ${commands.length} global slash commands...`);
     await rest.put(Routes.applicationCommands(clientId), { body: commands });
