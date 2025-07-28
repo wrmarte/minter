@@ -17,7 +17,10 @@ const RPCS = {
   ape: [
     'https://rpc1.apexchain.xyz',
     'https://rpc.apexnetwork.xyz',
-    'https://api.ape-rpc.com'
+    'https://api.ape-rpc.com',
+    'https://apex.rpc.thirdweb.com',
+    'https://apexchain.alt.technology',
+    'https://apex-mainnet.rpc.karzay.com'
   ]
 };
 
@@ -184,4 +187,5 @@ module.exports = {
   safeRpcCall,
   getMaxBatchSize
 };
+
 
