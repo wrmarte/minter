@@ -36,8 +36,9 @@ module.exports = {
     const userMention = `<@${targetUser.id}>`;
     const guildId = interaction.guild?.id ?? null;
 
-    let res = { rows: [] };
+    await interaction.deferReply({ ephemeral: true });
 
+    let res = { rows: [] };
     try {
       if (pg) {
         if (isOwner) {
@@ -51,16 +52,15 @@ module.exports = {
     }
 
     if (!res.rows.length && !flavorMap[name]) {
-      await interaction.deferReply();
       try {
         const aiResponse = await smartAIResponse(name, userMention);
         const embed = new EmbedBuilder()
           .setDescription(`💬 ${aiResponse}`)
           .setColor(getRandomColor());
-        return await interaction.editReply({ embeds: [embed] });
+        return await interaction.channel.send({ embeds: [embed] });
       } catch (err) {
         console.error('❌ AI error in /exp:', err);
-        return await interaction.editReply('❌ AI failed.');
+        return await interaction.channel.send('❌ AI failed to respond.');
       }
     }
 
@@ -75,21 +75,22 @@ module.exports = {
           const imageRes = await fetch(exp.content);
           if (!imageRes.ok) throw new Error(`Image failed to load: ${imageRes.status}`);
           const file = new AttachmentBuilder(exp.content);
-          return await interaction.reply({ content: customMessage, files: [file] });
+          return await interaction.channel.send({ content: customMessage, files: [file] });
         } catch (err) {
-          return await interaction.reply({ content: `⚠️ Image broken, but:\n${customMessage}` });
+          return await interaction.channel.send({ content: `⚠️ Image broken, but:\n${customMessage}` });
         }
       }
 
       const embed = new EmbedBuilder().setDescription(customMessage).setColor(getRandomColor());
-      return interaction.reply({ embeds: [embed] });
+      return interaction.channel.send({ embeds: [embed] });
     }
 
     const builtIn = getRandomFlavor(name, userMention);
     const embed = new EmbedBuilder()
       .setDescription(builtIn || `💥 ${userMention} is experiencing "${name}" energy today!`)
       .setColor(getRandomColor());
-    return interaction.reply({ embeds: [embed] });
+
+    return interaction.channel.send({ embeds: [embed] });
   },
 
   async autocomplete(interaction, { pg }) {
@@ -214,6 +215,7 @@ async function getOpenAI(keyword, userMention) {
 function cleanQuotes(text) {
   return text.replace(/^"(.*)"$/, '$1').trim();
 }
+
 
 
 
