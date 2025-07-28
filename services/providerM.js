@@ -1,4 +1,3 @@
-
 const { JsonRpcProvider } = require('ethers');
 const https = require('https');
 
@@ -16,8 +15,10 @@ const RPCS = {
     'https://rpc.ankr.com/eth'
   ],
   ape: [
-    // You can remove or comment out bad ones
-    'https://rpc.apeiron.io'
+    // Replace with healthy ones
+    'https://rpc1.apexchain.xyz',
+    'https://rpc.apexnetwork.xyz',
+    'https://api.ape-rpc.com'
   ]
 };
 
@@ -181,3 +182,4 @@ module.exports = {
   safeRpcCall,
   getMaxBatchSize
 };
+
