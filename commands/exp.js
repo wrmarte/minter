@@ -1,11 +1,9 @@
-// 📦 Imports
 const { SlashCommandBuilder, AttachmentBuilder, EmbedBuilder } = require('discord.js');
 const fetch = require('node-fetch');
 const { flavorMap, getRandomFlavor } = require('../utils/flavorMap');
 
 const guildNameCache = new Map();
 
-// 🎨 Helper: Random color for embeds
 function getRandomColor() {
   const colors = [
     0xFFD700, 0x66CCFF, 0xFF66CC, 0xFF4500,
@@ -14,7 +12,6 @@ function getRandomColor() {
   return colors[Math.floor(Math.random() * colors.length)];
 }
 
-// ✅ Main Export
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('exp')
@@ -31,7 +28,6 @@ module.exports = {
         .setRequired(false)
     ),
 
-  // ✅ Slash Command Logic
   async execute(interaction, { pg }) {
     const ownerId = process.env.BOT_OWNER_ID;
     const isOwner = interaction.user.id === ownerId;
@@ -40,23 +36,30 @@ module.exports = {
     const userMention = `<@${targetUser.id}>`;
     const guildId = interaction.guild?.id ?? null;
 
-    let res;
-    if (isOwner) {
-      res = await pg.query(`SELECT * FROM expressions WHERE name = $1 ORDER BY RANDOM() LIMIT 1`, [name]);
-    } else {
-      res = await pg.query(`SELECT * FROM expressions WHERE name = $1 AND (guild_id = $2 OR guild_id IS NULL) ORDER BY RANDOM() LIMIT 1`, [name, guildId]);
+    let res = { rows: [] };
+
+    try {
+      if (pg) {
+        if (isOwner) {
+          res = await pg.query(`SELECT * FROM expressions WHERE name = $1 ORDER BY RANDOM() LIMIT 1`, [name]);
+        } else {
+          res = await pg.query(`SELECT * FROM expressions WHERE name = $1 AND (guild_id = $2 OR guild_id IS NULL) ORDER BY RANDOM() LIMIT 1`, [name, guildId]);
+        }
+      }
+    } catch (err) {
+      console.error('❌ DB error in /exp:', err);
     }
 
     if (!res.rows.length && !flavorMap[name]) {
       await interaction.deferReply();
       try {
-        let aiResponse = await smartAIResponse(name, userMention);
+        const aiResponse = await smartAIResponse(name, userMention);
         const embed = new EmbedBuilder()
           .setDescription(`💬 ${aiResponse}`)
           .setColor(getRandomColor());
         return await interaction.editReply({ embeds: [embed] });
       } catch (err) {
-        console.error('❌ AI error:', err);
+        console.error('❌ AI error in /exp:', err);
         return await interaction.editReply('❌ AI failed.');
       }
     }
@@ -89,7 +92,6 @@ module.exports = {
     return interaction.reply({ embeds: [embed] });
   },
 
-  // ✅ Autocomplete Handler
   async autocomplete(interaction, { pg }) {
     const focused = interaction.options.getFocused();
     const guildId = interaction.guild?.id ?? null;
@@ -103,23 +105,30 @@ module.exports = {
       value: name
     }));
 
-    let query, params;
-    if (isOwner) {
-      query = `SELECT DISTINCT name, guild_id FROM expressions`;
-      params = [];
-    } else {
-      query = `SELECT DISTINCT name, guild_id FROM expressions WHERE guild_id = $1 OR guild_id IS NULL`;
-      params = [guildId];
+    let query, params, res = { rows: [] };
+    try {
+      if (pg) {
+        if (isOwner) {
+          query = `SELECT DISTINCT name, guild_id FROM expressions`;
+          params = [];
+        } else {
+          query = `SELECT DISTINCT name, guild_id FROM expressions WHERE guild_id = $1 OR guild_id IS NULL`;
+          params = [guildId];
+        }
+        res = await pg.query(query, params);
+      }
+    } catch (err) {
+      console.error('❌ Autocomplete DB error for exp:', err);
     }
-
-    const res = await pg.query(query, params);
 
     const thisServer = [], global = [], otherServers = [];
     for (const row of res.rows) {
       if (!row.name) continue;
-      if (row.guild_id === null) global.push({ name: `🌐 ${row.name} (Global)`, value: row.name });
-      else if (row.guild_id === guildId) thisServer.push({ name: `🏠 ${row.name} (This Server)`, value: row.name });
-      else {
+      if (row.guild_id === null) {
+        global.push({ name: `🌐 ${row.name} (Global)`, value: row.name });
+      } else if (row.guild_id === guildId) {
+        thisServer.push({ name: `🏠 ${row.name} (This Server)`, value: row.name });
+      } else {
         let guildName = guildNameCache.get(row.guild_id);
         if (!guildName) {
           const guild = await client.guilds.fetch(row.guild_id).catch(() => null);
@@ -151,7 +160,6 @@ async function smartAIResponse(keyword, userMention) {
   }
 }
 
-// ✅ Groq API Handler
 async function getGroqAI(keyword, userMention) {
   const url = 'https://api.groq.com/openai/v1/chat/completions';
   const apiKey = process.env.GROQ_API_KEY;
@@ -179,7 +187,6 @@ async function getGroqAI(keyword, userMention) {
   return cleanQuotes(rawReply.replace(/{user}/gi, userMention));
 }
 
-// ✅ OpenAI API Handler
 async function getOpenAI(keyword, userMention) {
   const res = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
@@ -204,7 +211,6 @@ async function getOpenAI(keyword, userMention) {
   return cleanQuotes(rawReply).replace(/{user}/gi, userMention);
 }
 
-// ✅ Clean Quote Helper
 function cleanQuotes(text) {
   return text.replace(/^"(.*)"$/, '$1').trim();
 }
