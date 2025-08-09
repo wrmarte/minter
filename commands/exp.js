@@ -36,29 +36,50 @@ module.exports = {
     const userMention = `<@${targetUser.id}>`;
     const guildId = interaction.guild?.id ?? null;
 
-   await interaction.deferReply({ ephemeral: true });
-await interaction.deleteReply().catch(() => {});
+    await interaction.deferReply({ ephemeral: true });
+    await interaction.deleteReply().catch(() => {});
 
+    // Friendly identity for embeds
+    const guildName = interaction.guild?.name || 'this server';
+    const displayTarget = interaction.guild?.members.cache.get(targetUser.id)?.displayName || targetUser.username;
+    const avatar = targetUser.displayAvatarURL({ size: 256 });
 
     let res = { rows: [] };
     try {
       if (pg) {
         if (isOwner) {
-          res = await pg.query(`SELECT * FROM expressions WHERE name = $1 ORDER BY RANDOM() LIMIT 1`, [name]);
+          res = await pg.query(
+            `SELECT * FROM expressions WHERE name = $1 ORDER BY RANDOM() LIMIT 1`,
+            [name]
+          );
         } else {
-          res = await pg.query(`SELECT * FROM expressions WHERE name = $1 AND (guild_id = $2 OR guild_id IS NULL) ORDER BY RANDOM() LIMIT 1`, [name, guildId]);
+          res = await pg.query(
+            `SELECT * FROM expressions WHERE name = $1 AND (guild_id = $2 OR guild_id IS NULL) ORDER BY RANDOM() LIMIT 1`,
+            [name, guildId]
+          );
         }
       }
     } catch (err) {
       console.error('❌ DB error in /exp:', err);
     }
 
+    // If nothing in DB and no built-in, ask AI (with context + mode awareness)
     if (!res.rows.length && !flavorMap[name]) {
       try {
-        const aiResponse = await smartAIResponse(name, userMention);
+        const mode = await getMbMode(pg, guildId);
+        const recentContext = await getRecentContext(interaction);
+        const aiResponse = await smartAIResponse(name, userMention, {
+          mode,
+          recentContext,
+          guildName,
+          displayTarget
+        });
+
         const embed = new EmbedBuilder()
-          .setDescription(`💬 ${aiResponse}`)
-          .setColor(getRandomColor());
+          .setColor(getRandomColor())
+          .setAuthor({ name: `For ${displayTarget} @ ${guildName}`, iconURL: avatar })
+          .setDescription(`💬 ${aiResponse}`);
+
         return await interaction.channel.send({ embeds: [embed] });
       } catch (err) {
         console.error('❌ AI error in /exp:', err);
@@ -66,6 +87,7 @@ await interaction.deleteReply().catch(() => {});
       }
     }
 
+    // If we got a DB row
     if (res.rows.length) {
       const exp = res.rows[0];
       const customMessage = exp?.content?.includes('{user}')
@@ -73,6 +95,7 @@ await interaction.deleteReply().catch(() => {});
         : `💥 ${userMention} is experiencing "${name}" energy today!`;
 
       if (exp?.type === 'image') {
+        // keep original image behavior (per your request)
         try {
           const imageRes = await fetch(exp.content);
           if (!imageRes.ok) throw new Error(`Image failed to load: ${imageRes.status}`);
@@ -83,14 +106,20 @@ await interaction.deleteReply().catch(() => {});
         }
       }
 
-      const embed = new EmbedBuilder().setDescription(customMessage).setColor(getRandomColor());
+      const embed = new EmbedBuilder()
+        .setColor(getRandomColor())
+        .setAuthor({ name: `For ${displayTarget} @ ${guildName}`, iconURL: avatar })
+        .setDescription(customMessage);
+
       return interaction.channel.send({ embeds: [embed] });
     }
 
+    // Built-in fallback
     const builtIn = getRandomFlavor(name, userMention);
     const embed = new EmbedBuilder()
-      .setDescription(builtIn || `💥 ${userMention} is experiencing "${name}" energy today!`)
-      .setColor(getRandomColor());
+      .setColor(getRandomColor())
+      .setAuthor({ name: `For ${displayTarget} @ ${guildName}`, iconURL: avatar })
+      .setDescription(builtIn || `💥 ${userMention} is experiencing "${name}" energy today!`);
 
     return interaction.channel.send({ embeds: [embed] });
   },
@@ -143,37 +172,116 @@ await interaction.deleteReply().catch(() => {});
     }
 
     const combined = [...builtInChoices, ...thisServer, ...global, ...otherServers];
-    const filtered = combined.filter(c => c.name.toLowerCase().includes(focused.toLowerCase())).slice(0, 25);
-    await interaction.respond(filtered);
+
+    // Smarter ranking: exact > prefix > substring
+    const norm = (s) => (s || '').toLowerCase();
+    const q = norm(focused || '');
+    const scored = combined.map(c => {
+      const label = norm(c.name);
+      let score = 0;
+      if (label.includes(q)) score += 1;
+      if (label.startsWith(q)) score += 2;
+      if (label === q) score += 3;
+      return { ...c, _score: score };
+    });
+
+    const filtered = scored
+      .filter(c => q ? c._score > 0 : true)
+      .sort((a, b) => b._score - a._score)
+      .slice(0, 25)
+      .map(({ name, value }) => ({ name, value }));
+
+    await interaction.respond(filtered.length ? filtered : combined.slice(0, 25));
   }
 };
 
-// ✅ Smart AI with Fallback Logic
-async function smartAIResponse(keyword, userMention) {
+/* ============================= Helpers ============================= */
+
+// Pull a short, recent, non-bot context window from the channel
+async function getRecentContext(interaction, limit = 6) {
   try {
-    return await getGroqAI(keyword, userMention);
+    const fetched = await interaction.channel.messages.fetch({ limit: 10 });
+    const lines = [];
+    for (const [, m] of fetched) {
+      if (m.author?.bot) continue;
+      const txt = (m.content || '').trim();
+      if (!txt) continue;
+      const one = txt.replace(/\s+/g, ' ').slice(0, 160);
+      lines.push(`${m.member?.displayName || m.author.username}: ${one}`);
+      if (lines.length >= limit) break;
+    }
+    return lines.length ? `Recent context:\n${lines.join('\n')}` : '';
+  } catch {
+    return '';
+  }
+}
+
+// Read mb mode for tone alignment
+async function getMbMode(pg, guildId) {
+  if (!pg || !guildId) return 'default';
+  try {
+    const r = await pg.query(`SELECT mode FROM mb_modes WHERE server_id = $1 LIMIT 1`, [guildId]);
+    return r.rows[0]?.mode || 'default';
+  } catch {
+    return 'default';
+  }
+}
+
+function modeSystemFlavor(mode) {
+  switch (mode) {
+    case 'chill':
+      return 'Tone: chill, friendly, supportive. Keep it positive.';
+    case 'villain':
+      return 'Tone: theatrical villain, playful ominous swagger.';
+    case 'motivator':
+      return 'Tone: alpha motivator, gym metaphors, high energy.';
+    default:
+      return 'Tone: sharp, witty, degen-savvy but kind by default.';
+  }
+}
+
+function buildSystemPromptBase(mode, recentContext, guildName) {
+  return [
+    `You generate a short, stylish "expression vibe" for a Discord server (${guildName}).`,
+    modeSystemFlavor(mode),
+    'Keep it to 1 sentence. Use Discord/Web3 slang tastefully. Avoid insults; be fun.',
+    recentContext ? recentContext : ''
+  ].filter(Boolean).join('\n\n');
+}
+
+// ✅ Smart AI with Fallback Logic (context + mode aware)
+async function smartAIResponse(keyword, userMention, opts = {}) {
+  const {
+    mode = 'default',
+    recentContext = '',
+    guildName = 'this server',
+    displayTarget = userMention
+  } = opts;
+
+  try {
+    return await getGroqAI(keyword, displayTarget, { mode, recentContext, guildName });
   } catch {
     console.warn('❌ Groq failed, trying OpenAI');
     try {
-      return await getOpenAI(keyword, userMention);
+      return await getOpenAI(keyword, displayTarget, { mode, recentContext, guildName });
     } catch {
       console.warn('❌ OpenAI failed');
-      return `🧠 ${userMention} tried to flex "${keyword}" but confused every AI out there.`;
+      return `🧠 ${displayTarget} tried to flex "${keyword}" but confused every AI out there.`;
     }
   }
 }
 
-async function getGroqAI(keyword, userMention) {
+async function getGroqAI(keyword, userMention, { mode, recentContext, guildName }) {
   const url = 'https://api.groq.com/openai/v1/chat/completions';
   const apiKey = process.env.GROQ_API_KEY;
 
   const body = {
     model: 'llama3-70b-8192',
     messages: [
-      { role: 'system', content: 'You are a savage Discord bot AI expression generator.' },
-      { role: 'user', content: `Someone typed "${keyword}". Generate a savage one-liner. Insert {user} where you want to mention the user. Use Discord/Web3 slang. Max 1 sentence.` }
+      { role: 'system', content: buildSystemPromptBase(mode, recentContext, guildName) },
+      { role: 'user', content: `Expression: "${keyword}". Output a single, punchy line. Mention {user} once.` }
     ],
-    max_tokens: 50,
+    max_tokens: 60,
     temperature: 0.9
   };
 
@@ -190,7 +298,7 @@ async function getGroqAI(keyword, userMention) {
   return cleanQuotes(rawReply.replace(/{user}/gi, userMention));
 }
 
-async function getOpenAI(keyword, userMention) {
+async function getOpenAI(keyword, userMention, { mode, recentContext, guildName }) {
   const res = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -200,11 +308,11 @@ async function getOpenAI(keyword, userMention) {
     body: JSON.stringify({
       model: 'gpt-3.5-turbo',
       messages: [
-        { role: 'system', content: 'You are a witty and sarcastic Discord bot that talks like a Web3 degenerate.' },
-        { role: 'user', content: `Make a short sharp comment for someone expressing "${keyword}". Mention {user}.` }
+        { role: 'system', content: buildSystemPromptBase(mode, recentContext, guildName) },
+        { role: 'user', content: `Expression: "${keyword}". Output a single, punchy line. Mention {user} once.` }
       ],
       max_tokens: 60,
-      temperature: 1.1
+      temperature: 1.0
     })
   });
 
@@ -217,6 +325,7 @@ async function getOpenAI(keyword, userMention) {
 function cleanQuotes(text) {
   return text.replace(/^"(.*)"$/, '$1').trim();
 }
+
 
 
 
