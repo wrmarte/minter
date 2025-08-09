@@ -1,5 +1,6 @@
 // globalProcessor.js — enhanced (kept logic), decimals-aware amounts, caching, channel fallback
 // + Fix: smart display scaling for "Got/Sold" so amounts aren't off by 10x/100x/1000x.
+// + Performance: use cached price for scaling; defer HTTP fetches until we know we’ll send.
 
 const { Interface, formatUnits, ethers } = require('ethers');
 const fetch = require('node-fetch');
@@ -156,22 +157,23 @@ async function handleTokenLog(client, tokenRows, log) {
   // ❌ Skip tiny tax reroutes (no value + tiny size)
   if (usdSpent === 0 && ethSpent === 0 && tokenAmountRaw < 5) return;
 
-  // Pull price/mcap early so we can use price for scaling
-  const tokenPrice = await getTokenPriceUSD(tokenAddress);
-  const marketCap = await getMarketCapUSD(tokenAddress);
-
   // ----- Smart display scaling (fixes 10x/100x/1000x under/over-count) -----
+  // IMPORTANT: use cached price only (no new HTTP here) to avoid blocking other processors.
   let displayAmount = tokenAmountRaw;
   try {
-    if (tokenPrice > 0 && usdSpent > 0 && tokenAmountRaw > 0) {
-      const implied = usdSpent / tokenPrice; // tokens implied by USD/price
+    const key = tokenAddress;
+    const cached = _gtPriceCache.get(key);
+    const cachedFresh = cached && (nowSec() - cached.ts) < 20;
+    const tokenPriceForScaling = cachedFresh ? (cached.price || 0) : 0;
+
+    if (tokenPriceForScaling > 0 && usdSpent > 0 && tokenAmountRaw > 0) {
+      const implied = usdSpent / tokenPriceForScaling; // tokens implied by USD/price
       const candidates = [0.001, 0.01, 0.1, 1, 10, 100, 1000];
       let best = 1, bestErr = Infinity;
       for (const c of candidates) {
         const err = Math.abs((tokenAmountRaw * c) - implied) / Math.max(1, implied);
         if (err < bestErr) { bestErr = err; best = c; }
       }
-      // Only apply if it's clearly a power-of-10 mismatch (within 10% error and factor != 1)
       if (best !== 1 && bestErr < 0.1) {
         displayAmount = tokenAmountRaw * best;
       }
@@ -229,6 +231,10 @@ async function handleTokenLog(client, tokenRows, log) {
       channel = guild.channels.cache.find(c => c.isTextBased && c.isTextBased() && c.permissionsFor(guild.members.me)?.has('SendMessages'));
     }
     if (!channel) continue;
+
+    // Fetch price + mcap only now (we know we’ll send)
+    const tokenPrice = await getTokenPriceUSD(tokenAddress);
+    const marketCap = await getMarketCapUSD(tokenAddress);
 
     const usdLine = isFinite(usdSpent) ? usdSpent.toFixed(4) : '0.0000';
     const ethLine = isFinite(ethSpent) ? ethSpent.toFixed(4) : '0.0000';
