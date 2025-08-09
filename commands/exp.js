@@ -63,22 +63,24 @@ module.exports = {
       console.error('❌ DB error in /exp:', err);
     }
 
-    // If nothing in DB and no built-in, ask AI (with context + mode awareness)
+    // If nothing in DB and no built-in, ask AI (with context + mode awareness) — now returns 3 variants and we pick one
     if (!res.rows.length && !flavorMap[name]) {
       try {
         const mode = await getMbMode(pg, guildId);
         const recentContext = await getRecentContext(interaction);
-        const aiResponse = await smartAIResponse(name, userMention, {
+        const aiMulti = await smartAIResponse(name, userMention, {
           mode,
           recentContext,
           guildName,
-          displayTarget
+          displayTarget,
+          wantVariants: true  // ← ask AI for 3 variants
         });
+        const aiPicked = pickVariant(aiMulti, userMention);
 
         const embed = new EmbedBuilder()
           .setColor(getRandomColor())
           .setAuthor({ name: `For ${displayTarget} @ ${guildName}`, iconURL: avatar })
-          .setDescription(`💬 ${aiResponse}`);
+          .setDescription(`💬 ${aiPicked}`);
 
         return await interaction.channel.send({ embeds: [embed] });
       } catch (err) {
@@ -87,34 +89,42 @@ module.exports = {
       }
     }
 
-    // If we got a DB row
+    // If we got a DB row (support multi-variant content via "||" or "\n---\n")
     if (res.rows.length) {
       const exp = res.rows[0];
-      const customMessage = exp?.content?.includes('{user}')
-        ? exp.content.replace('{user}', userMention)
-        : `💥 ${userMention} is experiencing "${name}" energy today!`;
 
       if (exp?.type === 'image') {
-        // keep original image behavior (per your request)
+        // keep original image behavior
         try {
           const imageRes = await fetch(exp.content);
           if (!imageRes.ok) throw new Error(`Image failed to load: ${imageRes.status}`);
           const file = new AttachmentBuilder(exp.content);
-          return await interaction.channel.send({ content: customMessage, files: [file] });
+          const fallbackMsg = exp?.content_text?.includes?.('{user}')
+            ? exp.content_text.replace('{user}', userMention)
+            : `💥 ${userMention} is experiencing "${name}" energy today!`;
+          return await interaction.channel.send({ content: fallbackMsg, files: [file] });
         } catch (err) {
-          return await interaction.channel.send({ content: `⚠️ Image broken, but:\n${customMessage}` });
+          const fallbackMsg = exp?.content_text?.includes?.('{user}')
+            ? exp.content_text.replace('{user}', userMention)
+            : `⚠️ Image broken, but ${userMention} still channels "${name}" energy!`;
+          return await interaction.channel.send({ content: fallbackMsg });
         }
       }
+
+      // Text or other types: allow multi-variants in exp.content separated by || or \n---\n
+      const customPrepared = prepareVariants(exp?.content || '', userMention);
+      const picked = pickVariant(customPrepared, userMention) ||
+        `💥 ${userMention} is experiencing "${name}" energy today!`;
 
       const embed = new EmbedBuilder()
         .setColor(getRandomColor())
         .setAuthor({ name: `For ${displayTarget} @ ${guildName}`, iconURL: avatar })
-        .setDescription(customMessage);
+        .setDescription(picked);
 
       return interaction.channel.send({ embeds: [embed] });
     }
 
-    // Built-in fallback
+    // Built-in fallback (single line kept as-is)
     const builtIn = getRandomFlavor(name, userMention);
     const embed = new EmbedBuilder()
       .setColor(getRandomColor())
@@ -240,30 +250,58 @@ function modeSystemFlavor(mode) {
   }
 }
 
-function buildSystemPromptBase(mode, recentContext, guildName) {
-  return [
+function buildSystemPromptBase(mode, recentContext, guildName, wantVariants = false) {
+  const base = [
     `You generate a short, stylish "expression vibe" for a Discord server (${guildName}).`,
     modeSystemFlavor(mode),
     'Keep it to 1 sentence. Use Discord/Web3 slang tastefully. Avoid insults; be fun.',
     recentContext ? recentContext : ''
   ].filter(Boolean).join('\n\n');
+
+  if (!wantVariants) return base;
+
+  // Ask for 3 distinct variants; we’ll split on \n---\n later
+  return base + `
+
+Return EXACTLY 3 distinct one-line variants, each under 160 characters.
+Separate variants with a single line containing three dashes exactly:
+---
+Do not number them. Include {user} in each line where the mention should go.`;
 }
 
-// ✅ Smart AI with Fallback Logic (context + mode aware)
+// Prepare multi-variant content strings (DB custom): split by || or \n---\n
+function prepareVariants(content, userMention) {
+  if (!content) return '';
+  const parts = content.split(/\n---\n|\|\|/g).map(s => cleanQuotes(s.trim())).filter(Boolean);
+  if (!parts.length) return cleanQuotes(content).replace(/{user}/gi, userMention);
+  return parts.map(p => p.replace(/{user}/gi, userMention)).join('\n---\n');
+}
+
+function pickVariant(textOrGrouped, userMention) {
+  if (!textOrGrouped) return '';
+  const parts = textOrGrouped.split(/\n---\n/g).map(s => cleanQuotes(s.trim())).filter(Boolean);
+  if (!parts.length) return cleanQuotes(textOrGrouped).replace(/{user}/gi, userMention);
+  const chosen = parts[Math.floor(Math.random() * parts.length)];
+  // final safety: user mention replacement if not already done
+  return chosen.replace(/{user}/gi, userMention).slice(0, 240);
+}
+
+// ✅ Smart AI with Fallback Logic (context + mode aware, variant-capable)
 async function smartAIResponse(keyword, userMention, opts = {}) {
   const {
     mode = 'default',
     recentContext = '',
     guildName = 'this server',
-    displayTarget = userMention
+    displayTarget = userMention,
+    wantVariants = false
   } = opts;
 
   try {
-    return await getGroqAI(keyword, displayTarget, { mode, recentContext, guildName });
+    return await getGroqAI(keyword, displayTarget, { mode, recentContext, guildName, wantVariants });
   } catch {
     console.warn('❌ Groq failed, trying OpenAI');
     try {
-      return await getOpenAI(keyword, displayTarget, { mode, recentContext, guildName });
+      return await getOpenAI(keyword, displayTarget, { mode, recentContext, guildName, wantVariants });
     } catch {
       console.warn('❌ OpenAI failed');
       return `🧠 ${displayTarget} tried to flex "${keyword}" but confused every AI out there.`;
@@ -271,17 +309,19 @@ async function smartAIResponse(keyword, userMention, opts = {}) {
   }
 }
 
-async function getGroqAI(keyword, userMention, { mode, recentContext, guildName }) {
+async function getGroqAI(keyword, userMention, { mode, recentContext, guildName, wantVariants }) {
   const url = 'https://api.groq.com/openai/v1/chat/completions';
   const apiKey = process.env.GROQ_API_KEY;
 
   const body = {
     model: 'llama3-70b-8192',
     messages: [
-      { role: 'system', content: buildSystemPromptBase(mode, recentContext, guildName) },
-      { role: 'user', content: `Expression: "${keyword}". Output a single, punchy line. Mention {user} once.` }
+      { role: 'system', content: buildSystemPromptBase(mode, recentContext, guildName, wantVariants) },
+      { role: 'user', content: wantVariants
+          ? `Expression: "${keyword}". Give 3 variants separated by '---' lines. Mention {user} in each.`
+          : `Expression: "${keyword}". Output a single, punchy line. Mention {user} once.` }
     ],
-    max_tokens: 60,
+    max_tokens: wantVariants ? 160 : 60,
     temperature: 0.9
   };
 
@@ -295,10 +335,10 @@ async function getGroqAI(keyword, userMention, { mode, recentContext, guildName 
   const rawReply = data?.choices?.[0]?.message?.content?.trim();
   if (!rawReply) throw new Error('Empty AI response');
 
-  return cleanQuotes(rawReply.replace(/{user}/gi, userMention));
+  return cleanQuotes(rawReply);
 }
 
-async function getOpenAI(keyword, userMention, { mode, recentContext, guildName }) {
+async function getOpenAI(keyword, userMention, { mode, recentContext, guildName, wantVariants }) {
   const res = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -308,10 +348,12 @@ async function getOpenAI(keyword, userMention, { mode, recentContext, guildName 
     body: JSON.stringify({
       model: 'gpt-3.5-turbo',
       messages: [
-        { role: 'system', content: buildSystemPromptBase(mode, recentContext, guildName) },
-        { role: 'user', content: `Expression: "${keyword}". Output a single, punchy line. Mention {user} once.` }
+        { role: 'system', content: buildSystemPromptBase(mode, recentContext, guildName, wantVariants) },
+        { role: 'user', content: wantVariants
+            ? `Expression: "${keyword}". Give 3 variants separated by '---' lines. Mention {user} in each.`
+            : `Expression: "${keyword}". Output a single, punchy line. Mention {user} once.` }
       ],
-      max_tokens: 60,
+      max_tokens: wantVariants ? 160 : 60,
       temperature: 1.0
     })
   });
@@ -319,11 +361,11 @@ async function getOpenAI(keyword, userMention, { mode, recentContext, guildName 
   const json = await res.json();
   const rawReply = json?.choices?.[0]?.message?.content;
   if (!rawReply) throw new Error('OpenAI gave no response');
-  return cleanQuotes(rawReply).replace(/{user}/gi, userMention);
+  return cleanQuotes(rawReply);
 }
 
 function cleanQuotes(text) {
-  return text.replace(/^"(.*)"$/, '$1').trim();
+  return (text || '').replace(/^"(.*)"$/, '$1').trim();
 }
 
 
