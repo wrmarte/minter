@@ -19,7 +19,7 @@ module.exports = {
   async autocomplete(interaction) {
     try {
       const pg = interaction.client.pg;
-      const guildId = interaction.guildId; // available in autocomplete context
+      const guildId = interaction.guildId;
       const focused = (interaction.options.getFocused() || '').toLowerCase();
 
       const res = await pg.query(
@@ -34,16 +34,15 @@ module.exports = {
           if (!focused) return true;
           return n.includes(focused) || a.includes(focused);
         })
-        .slice(0, 25) // Discord limit
+        .slice(0, 25)
         .map(row => ({
           name: `${(row.name || 'Unknown').toUpperCase()} — ${shortAddr(row.address)}`,
-          value: row.address || row.name // prefer address when present
+          value: row.address || row.name
         }));
 
       await interaction.respond(choices);
     } catch (err) {
       console.error('❌ Autocomplete error (/untracktoken):', err);
-      // On error, respond with empty list so UI doesn't spin
       try { await interaction.respond([]); } catch (_) {}
     }
   },
@@ -54,15 +53,45 @@ module.exports = {
     const input = (inputRaw || '').toLowerCase();
 
     try {
-      // Delete match by address OR name (case-insensitive)
-      const del = await pg.query(
-        `DELETE FROM tracked_tokens
+      // Fetch the token first so we always know its name/address before deleting
+      const toDelete = await pg.query(
+        `SELECT name, address FROM tracked_tokens
          WHERE guild_id = $1 AND (LOWER(address) = $2 OR LOWER(name) = $2)
-         RETURNING *`,
+         LIMIT 1`,
         [guildId, input]
       );
 
-      // Fetch current list AFTER attempted delete so we can always display what's tracked now
+      if (toDelete.rowCount === 0) {
+        // No match, just show current list
+        const remaining = await pg.query(
+          `SELECT name, address FROM tracked_tokens WHERE guild_id = $1 ORDER BY name NULLS LAST`,
+          [guildId]
+        );
+
+        const list = remaining.rowCount === 0
+          ? '🧼 No tokens are currently being tracked.'
+          : '📡 Currently tracking:\n' + remaining.rows
+              .map(r => `• **${(r.name || 'Unknown').toUpperCase()}** — \`${shortAddr(r.address)}\``)
+              .join('\n');
+
+        await interaction.reply({
+          content: `❌ No tracked token found for \`${inputRaw}\` in this server.\n\n${list}`,
+          ephemeral: true
+        });
+        return;
+      }
+
+      const tokenInfo = toDelete.rows[0];
+      const removedName = (tokenInfo.name || tokenInfo.address || inputRaw).toUpperCase();
+
+      // Now delete it
+      await pg.query(
+        `DELETE FROM tracked_tokens
+         WHERE guild_id = $1 AND (LOWER(address) = $2 OR LOWER(name) = $2)`,
+        [guildId, input]
+      );
+
+      // Fetch remaining list
       const remaining = await pg.query(
         `SELECT name, address FROM tracked_tokens WHERE guild_id = $1 ORDER BY name NULLS LAST`,
         [guildId]
@@ -73,19 +102,6 @@ module.exports = {
         : '📡 Currently tracking:\n' + remaining.rows
             .map(r => `• **${(r.name || 'Unknown').toUpperCase()}** — \`${shortAddr(r.address)}\``)
             .join('\n');
-
-      if (del.rowCount === 0) {
-        // Nothing deleted; show notice + full list
-        await interaction.reply({
-          content: `❌ No tracked token found for \`${inputRaw}\` in this server.\n\n${list}`,
-          ephemeral: true
-        });
-        return;
-      }
-
-      // Successful delete; show what was removed + full list
-      const deleted = del.rows[0];
-      const removedName = (deleted.name || deleted.address || inputRaw || '').toString().toUpperCase();
 
       await interaction.reply({
         content: `🗑️ Untracked **${removedName}** from this server.\n\n${list}`,
@@ -101,5 +117,6 @@ module.exports = {
     }
   }
 };
+
 
 
