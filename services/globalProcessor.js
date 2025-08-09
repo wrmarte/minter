@@ -1,4 +1,6 @@
-// globalProcessor.js — enhanced (kept logic), safer fetches, decimals-aware amounts, light caching, better channel fallback
+// globalProcessor.js — enhanced (kept logic), decimals-aware amounts, caching, channel fallback
+// + Fix: smart display scaling for "Got/Sold" so amounts aren't off by 10x/100x/1000x.
+
 const { Interface, formatUnits, ethers } = require('ethers');
 const fetch = require('node-fetch');
 const { fetchLogs } = require('./logScanner');
@@ -7,8 +9,8 @@ const { shortWalletLink } = require('../utils/helpers');
 
 /** Known router addresses across chains (lowercased at runtime) */
 const ROUTERS = [
-  '0x327Df1E6de05895d2ab08513aaDD9313Fe505d86', // Base: Uniswap v3?
-  '0x420dd381b31aef6683e2c581f93b119eee7e3f4d', // ApeChain: Magic Eden router
+  '0x327Df1E6de05895d2ab08513aaDD9313Fe505d86',
+  '0x420dd381b31aef6683e2c581f93b119eee7e3f4d',
   '0xfbeef911dc5821886e1dda23b3e4f3eaffdd7930',
   '0x812e79c9c37eD676fdbdd1212D6a4e47EFfC6a42',
   '0xa5e0829CaCEd8fFDD4De3c43696c57F7D7A678ff',
@@ -129,14 +131,11 @@ async function handleTokenLog(client, tokenRows, log) {
   // ⛔ Skip contract sell sources (likely router/contract accounting)
   if (isSell) {
     try {
-      if (await isContractAddress(fromAddr)) {
-        // console.log(`⛔ Skipping contract sell from ${fromAddr}`);
-        return;
-      }
+      if (await isContractAddress(fromAddr)) return;
     } catch {}
   }
 
-  // 💰 Value tracking (tx.value only) — best-effort; token amount in embed is from Transfer event
+  // 💰 Value tracking (tx.value only)
   let usdSpent = 0, ethSpent = 0;
   try {
     const tx = await getProvider().getTransaction(log.transactionHash);
@@ -157,6 +156,28 @@ async function handleTokenLog(client, tokenRows, log) {
   // ❌ Skip tiny tax reroutes (no value + tiny size)
   if (usdSpent === 0 && ethSpent === 0 && tokenAmountRaw < 5) return;
 
+  // Pull price/mcap early so we can use price for scaling
+  const tokenPrice = await getTokenPriceUSD(tokenAddress);
+  const marketCap = await getMarketCapUSD(tokenAddress);
+
+  // ----- Smart display scaling (fixes 10x/100x/1000x under/over-count) -----
+  let displayAmount = tokenAmountRaw;
+  try {
+    if (tokenPrice > 0 && usdSpent > 0 && tokenAmountRaw > 0) {
+      const implied = usdSpent / tokenPrice; // tokens implied by USD/price
+      const candidates = [0.001, 0.01, 0.1, 1, 10, 100, 1000];
+      let best = 1, bestErr = Infinity;
+      for (const c of candidates) {
+        const err = Math.abs((tokenAmountRaw * c) - implied) / Math.max(1, implied);
+        if (err < bestErr) { bestErr = err; best = c; }
+      }
+      // Only apply if it's clearly a power-of-10 mismatch (within 10% error and factor != 1)
+      if (best !== 1 && bestErr < 0.1) {
+        displayAmount = tokenAmountRaw * best;
+      }
+    }
+  } catch {}
+
   // ⛔ LP removal filter: treat zero-value "buys" with pre-existing balance as LP moves
   if (isBuy && usdSpent === 0 && ethSpent === 0) {
     try {
@@ -165,16 +186,13 @@ async function handleTokenLog(client, tokenRows, log) {
       const prevBalanceBN = await contract.balanceOf(toAddr, { blockTag: log.blockNumber - 1 });
       const decimals = await getDecimals(tokenAddress);
       const prevBalance = Number(formatUnits(prevBalanceBN, decimals));
-      if (prevBalance > 0) {
-        // console.log(`⛔ Skipping LP removal pretending to be a buy [${toAddr}]`);
-        return;
-      }
+      if (prevBalance > 0) return;
     } catch (err) {
       console.warn(`⚠️ LP filter failed: ${err.message}`);
     }
   }
 
-  const tokenAmountFormatted = tokenAmountRaw.toLocaleString(undefined, {
+  const tokenAmountFormatted = displayAmount.toLocaleString(undefined, {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2
   });
@@ -189,16 +207,13 @@ async function handleTokenLog(client, tokenRows, log) {
       const decimals = await getDecimals(tokenAddress);
       const prevBalance = Number(formatUnits(prevBalanceBN, decimals));
       if (prevBalance > 0) {
-        const percentChange = prevBalance > 0 ? ((tokenAmountRaw / prevBalance) * 100).toFixed(1) : '0.0';
+        const percentChange = prevBalance > 0 ? ((displayAmount / prevBalance) * 100).toFixed(1) : '0.0';
         buyLabel = `🔁 +${percentChange}%`;
       }
     }
   } catch {}
 
-  const tokenPrice = await getTokenPriceUSD(tokenAddress);
-  const marketCap = await getMarketCapUSD(tokenAddress);
-
-  const repeatFactor = Math.max(1, Math.floor(tokenAmountRaw / 100));
+  const repeatFactor = Math.max(1, Math.floor(displayAmount / 100));
   const emojiLine = isBuy ? '🟥🟦🚀'.repeat(repeatFactor) : '🔻💀🔻'.repeat(repeatFactor);
   const getColorByUsd = (usd) => isBuy
     ? (usd < 10 ? 0xff0000 : usd < 20 ? 0x3498db : 0x00cc66)
@@ -211,7 +226,6 @@ async function handleTokenLog(client, tokenRows, log) {
 
     let channel = token.channel_id ? guild.channels.cache.get(token.channel_id) : null;
     if (!channel || !channel.isTextBased() || !channel.permissionsFor(guild.members.me)?.has('SendMessages')) {
-      // find any text channel we can speak in
       channel = guild.channels.cache.find(c => c.isTextBased && c.isTextBased() && c.permissionsFor(guild.members.me)?.has('SendMessages'));
     }
     if (!channel) continue;
@@ -246,7 +260,7 @@ async function handleTokenLog(client, tokenRows, log) {
         { name: '💵 Price', value: priceLine, inline: true },
         { name: '📊 MCap', value: mcapLine, inline: true }
       ],
-      url: `https://www.geckoterminal.com/base/pools/${tokenAddress}`, // keeping your existing link format
+      url: `https://www.geckoterminal.com/base/pools/${tokenAddress}`, // kept
       color: getColorByUsd(usdSpent),
       footer: { text: 'Live on Base • Powered by PimpsDev' },
       timestamp: new Date().toISOString()
@@ -309,4 +323,5 @@ async function getMarketCapUSD(address) {
     return cached?.mcap || 0;
   }
 }
+
 
