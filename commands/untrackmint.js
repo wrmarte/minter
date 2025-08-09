@@ -1,103 +1,99 @@
-const { SlashCommandBuilder, PermissionsBitField } = require('discord.js');
+const { SlashCommandBuilder, PermissionsBitField, ChannelType } = require('discord.js');
+
+function shortAddr(addr = '') {
+  return addr ? `${addr.slice(0, 6)}...${addr.slice(-4)}` : '';
+}
+
+function chainEmoji(chain) {
+  const c = (chain || '').toLowerCase();
+  if (c === 'base') return '🟦';
+  if (c === 'eth' || c === 'ethereum') return '🟧';
+  if (c === 'ape' || c === 'apechain') return '🐵';
+  return '❓';
+}
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('untrackmintplus')
-    .setDescription('🛑 Stop tracking a mint/sale contract')
-    .addStringOption(opt =>
-      opt.setName('contract')
-        .setDescription('Tracked contract to stop')
-        .setRequired(true)
-        .setAutocomplete(true)
-    ),
-
-  async autocomplete(interaction) {
-    const pg = interaction.client.pg;
-    const focused = interaction.options.getFocused();
-    const guildId = interaction.guild?.id;
-
-    try {
-      const res = await pg.query(`SELECT name, address, chain, channel_ids FROM contract_watchlist`);
-      const options = [];
-
-      for (const row of res.rows) {
-        if (!row.name || typeof row.name !== 'string') continue;
-        if (!row.name.toLowerCase().includes(focused.toLowerCase())) continue;
-
-        const address = row.address || '0x000000';
-        const chain = row.chain || 'unknown';
-
-        const channels = Array.isArray(row.channel_ids)
-          ? row.channel_ids
-          : (row.channel_ids || '').toString().split(',').filter(Boolean);
-
-        // ✅ Only show if this guild tracks it
-        const trackedInGuild = channels.some(cid => {
-          try {
-            return interaction.client.channels.cache.get(cid)?.guildId === guildId;
-          } catch {
-            return false;
-          }
-        });
-
-        if (!trackedInGuild) continue;
-
-        const emoji = chain === 'base' ? '🟦' : chain === 'eth' ? '🟧' : chain === 'ape' ? '🐵' : '❓';
-        const shortAddr = `${address.slice(0, 6)}...${address.slice(-4)}`;
-        const channelInfo = channels.length === 1 ? '1 channel' : `${channels.length} channels`;
-
-        const label = `${emoji} ${row.name} • ${shortAddr} • ${channelInfo} • ${chain}`;
-        const value = `${row.name}|${chain}`;
-
-        if (label && value) {
-          options.push({ name: label.slice(0, 100), value });
-        }
-
-        if (options.length >= 25) break;
-      }
-
-      await interaction.respond(options);
-    } catch (err) {
-      console.error('❌ Autocomplete error in /untrackmintplus:', err);
-      await interaction.respond([]);
-    }
-  },
+    .setDescription('Show all mint/sale contracts tracked in this server (admins/bot owner only)'),
 
   async execute(interaction) {
     const pg = interaction.client.pg;
-    const { member, options, user } = interaction;
-
+    const guild = interaction.guild;
     const ownerId = process.env.BOT_OWNER_ID;
-    const raw = options.getString('contract');
-    const [name, chain] = raw.split('|');
 
-    // ✅ Allow Admins OR Bot Owner
-    const isAdmin = member?.permissions?.has(PermissionsBitField.Flags.Administrator);
-    const isOwner = user.id === ownerId;
-
+    // ✅ Allow Admins OR Bot Owner only
+    const isAdmin = interaction.member?.permissions?.has(PermissionsBitField.Flags.Administrator);
+    const isOwner = interaction.user?.id === ownerId;
     if (!isAdmin && !isOwner) {
-      return interaction.reply({ content: '❌ Only server admins or the bot owner can use this command.', ephemeral: true });
+      return interaction.reply({
+        content: '❌ Only server admins or the bot owner can use this command.',
+        ephemeral: true
+      });
     }
 
-    await interaction.deferReply({ ephemeral: true });
-
     try {
-      const result = await pg.query(
-        `DELETE FROM contract_watchlist WHERE name = $1 AND chain = $2 RETURNING *`,
-        [name, chain]
+      await interaction.deferReply({ ephemeral: true });
+
+      const res = await pg.query(
+        `SELECT name, address, chain, channel_ids
+         FROM contract_watchlist
+         ORDER BY name NULLS LAST`
       );
 
-      if (!result.rowCount) {
-        return interaction.editReply(`❌ No tracked contract named **${name}** on \`${chain}\`.`);
+      const lines = [];
+
+      for (const row of res.rows) {
+        const address = row.address || '';
+        const name = row.name || 'Unknown';
+        const chain = row.chain || 'unknown';
+
+        // Normalize channel_ids to an array of strings
+        const channels = Array.isArray(row.channel_ids)
+          ? row.channel_ids
+          : (row.channel_ids || '')
+              .toString()
+              .split(',')
+              .map(s => s.trim())
+              .filter(Boolean);
+
+        // Filter to channels that belong to THIS guild
+        const guildChannelIds = channels.filter(cid => {
+          const ch = interaction.client.channels.cache.get(cid);
+          return ch && ch.guildId === guild.id;
+        });
+
+        if (guildChannelIds.length === 0) continue;
+
+        // Channel mentions (limit to first 3)
+        const mentions = [];
+        for (const cid of guildChannelIds.slice(0, 3)) {
+          const ch = interaction.client.channels.cache.get(cid);
+          if (ch && (ch.type === ChannelType.GuildText || ch.type === ChannelType.GuildAnnouncement)) {
+            mentions.push(`<#${cid}>`);
+          }
+        }
+        const extra = guildChannelIds.length > 3 ? ` +${guildChannelIds.length - 3} more` : '';
+        const channelsDisplay = mentions.length ? mentions.join(' ') : `${guildChannelIds.length} channel(s)`;
+
+        const label = `${chainEmoji(chain)} **${name}** • \`${shortAddr(address)}\` • ${channelsDisplay}${extra} • ${chain}`;
+        lines.push(label);
       }
 
-      return interaction.editReply(`🛑 Successfully untracked **${name}** on \`${chain}\`.`);
+      if (lines.length === 0) {
+        return interaction.editReply('🧼 No mint/sale contracts are currently tracked in this server.');
+      }
+
+      lines.sort((a, b) => a.localeCompare(b));
+      const msg = `📡 **Tracked contracts in this server**\n` + lines.map(l => `• ${l}`).join('\n');
+      return interaction.editReply(msg);
     } catch (err) {
-      console.error('❌ Error in /untrackmintplus:', err);
-      return interaction.editReply('⚠️ Failed to execute `/untrackmintplus`.');
+      console.error('❌ Error in /untrackmintplus (list-only):', err);
+      return interaction.editReply('⚠️ Failed to fetch the tracked contracts for this server.');
     }
   }
 };
+
 
 
 
