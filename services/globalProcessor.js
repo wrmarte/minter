@@ -62,9 +62,7 @@ async function handleTokenLog(client, tokenRows, log) {
   ];
 
   // ❌ Skip router-to-router or known tax/burn
-  if (
-    ROUTERS_LOWER.includes(fromAddr) && ROUTERS_LOWER.includes(toAddr)
-  ) return;
+  if (ROUTERS_LOWER.includes(fromAddr) && ROUTERS_LOWER.includes(toAddr)) return;
   if (taxOrBurn.includes(toAddr) || taxOrBurn.includes(fromAddr)) return;
 
   // ✅ Detect type
@@ -113,11 +111,6 @@ async function handleTokenLog(client, tokenRows, log) {
     }
   }
 
-  const tokenAmountFormatted = (tokenAmountRaw * 1000).toLocaleString(undefined, {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2
-  });
-
   // 🧠 Buy label
   let buyLabel = isBuy ? '🆕 New Buy' : '💥 Sell';
   try {
@@ -136,7 +129,26 @@ async function handleTokenLog(client, tokenRows, log) {
   const tokenPrice = await getTokenPriceUSD(tokenAddress);
   const marketCap = await getMarketCapUSD(tokenAddress);
 
-  const emojiLine = isBuy ? '🟥🟦🚀'.repeat(Math.max(1, Math.floor(tokenAmountRaw / 100))) : '🔻💀🔻'.repeat(Math.max(1, Math.floor(tokenAmountRaw / 100)));
+  // 🔧 Display amount: keep your original ×1000, but if USD+price imply ~1000×, show implied instead
+  let displayAmount = tokenAmountRaw * 1000; // original behavior
+  try {
+    if (usdSpent > 0 && tokenPrice > 0 && tokenAmountRaw > 0) {
+      const implied = usdSpent / tokenPrice;          // tokens implied by USD/price
+      const ratio = implied / tokenAmountRaw;         // how many times raw
+      if (ratio > 800 && ratio < 1200) {              // roughly 1000× (±20%)
+        displayAmount = implied;
+      }
+    }
+  } catch {}
+  const tokenAmountFormatted = displayAmount.toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  });
+
+  const emojiLine = isBuy
+    ? '🟥🟦🚀'.repeat(Math.max(1, Math.floor(tokenAmountRaw / 100)))
+    : '🔻💀🔻'.repeat(Math.max(1, Math.floor(tokenAmountRaw / 100)));
+
   const getColorByUsd = (usd) => isBuy
     ? (usd < 10 ? 0xff0000 : usd < 20 ? 0x3498db : 0x00cc66)
     : (usd < 10 ? 0x999999 : usd < 50 ? 0xff6600 : 0xff0000);
@@ -188,8 +200,6 @@ async function handleTokenLog(client, tokenRows, log) {
   }
 }
 
-
-
 async function getETHPrice() {
   try {
     const res = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd');
@@ -214,6 +224,7 @@ async function getMarketCapUSD(address) {
     return parseFloat(data?.data?.attributes?.fdv_usd || data?.data?.attributes?.market_cap_usd || '0');
   } catch { return 0; }
 }
+
 
 
 
