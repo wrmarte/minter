@@ -91,6 +91,23 @@ async function formatErc20(provider, tokenAddr, rawDataHex) {
   }
 }
 
+/* Resolve ERC-20 name/symbol */
+async function getErc20NameSymbol(provider, tokenAddr) {
+  try {
+    const erc20 = new Contract(tokenAddr, [
+      'function name() view returns (string)',
+      'function symbol() view returns (string)'
+    ], provider);
+    const [nm, sym] = await Promise.all([
+      erc20.name().catch(() => null),
+      erc20.symbol().catch(() => null)
+    ]);
+    return { name: nm || null, symbol: sym || null };
+  } catch {
+    return { name: null, symbol: null };
+  }
+}
+
 /* ===================== LISTENER BOOTSTRAP ===================== */
 
 const contractListeners = {};
@@ -219,8 +236,8 @@ function setupBaseBlockListener(client, contractRows) {
 /* ===================== MINT HANDLER ===================== */
 
 async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, channel_ids, isSingle = false, minterAddress = '') {
-  const { name, mint_token, mint_token_symbol } = contractRow;
-  const provider = await safeRpcCall('base', p => p); // ✅ base, not ape
+  let { name, mint_token, mint_token_symbol, address: nftAddress } = contractRow;
+  const provider = await safeRpcCall('base', p => p); // ✅ base
   if (!provider || !txHash) return;
 
   const receipt = await provider.getTransactionReceipt(txHash).catch(() => null);
@@ -244,7 +261,6 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
   let inferredTokenAddr = tokenAddr;
 
   if (buyer) {
-    // helper to check topic to/from
     const addrEq = (a, b) => (a || '').toLowerCase() === (b || '').toLowerCase();
 
     if (tokenAddr) {
@@ -283,17 +299,47 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     }
   }
 
+  // 🔹 If we have a token address but no known name/symbol, fetch from chain
+  let displayTokenSymbol = mint_token_symbol || 'TOKEN';
+  let displayTokenName = mint_token || null;
+
+  const tokenToDescribe = inferredTokenAddr || tokenAddr;
+  if (tokenToDescribe && (!mint_token_symbol || !mint_token)) {
+    const { name: chainName, symbol: chainSym } = await getErc20NameSymbol(provider, tokenToDescribe);
+    if (chainSym) displayTokenSymbol = chainSym;
+    if (chainName) displayTokenName = chainName;
+
+    // Optional: persist to DB so we don't fetch again next time
+    try {
+      const pg = client.pg;
+      if (pg && (chainSym || chainName)) {
+        await pg.query(
+          `UPDATE contract_watchlist
+           SET mint_token = COALESCE(NULLIF($1,''), mint_token),
+               mint_token_symbol = COALESCE(NULLIF($2,''), mint_token_symbol)
+           WHERE address = $3 AND chain = 'base'`,
+          [chainName || '', chainSym || '', nftAddress]
+        );
+        // also update local row so future messages in this run use it
+        contractRow.mint_token = contractRow.mint_token || chainName || null;
+        contractRow.mint_token_symbol = contractRow.mint_token_symbol || chainSym || null;
+      }
+    } catch (e) {
+      // silent: DB update is best-effort
+    }
+  }
+
   // Compute ETH value from token via DEX/price fallbacks
   let ethValue = null;
-  if (tokenAmount && inferredTokenAddr) {
+  if (tokenAmount && tokenToDescribe) {
     try {
-      ethValue = await getRealDexPriceForToken(tokenAmount, inferredTokenAddr);
+      ethValue = await getRealDexPriceForToken(tokenAmount, tokenToDescribe);
       if (!ethValue || isNaN(ethValue)) ethValue = null;
     } catch { ethValue = null; }
 
     if (!ethValue) {
       try {
-        const fallback = await getEthPriceFromToken(inferredTokenAddr);
+        const fallback = await getEthPriceFromToken(tokenToDescribe);
         if (fallback && !isNaN(fallback)) ethValue = tokenAmount * fallback;
       } catch {}
     }
@@ -315,7 +361,7 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     title: isSingle ? `✨ NEW ${String(name || '').toUpperCase()} MINT!` : `✨ BULK ${String(name || '').toUpperCase()} MINT (${tokenIds.length})!`,
     description: isSingle ? `Minted Token ID: #${tokenIds[0]}` : `Minted Token IDs: ${tokenIds.map(id => `#${id}`).join(', ')}`,
     fields: [
-      { name: `💰 Total Spent (${mint_token_symbol || 'TOKEN'})`, value: tokenAmount ? tokenAmount.toFixed(4) : '0.0000', inline: true },
+      { name: `💰 Total Spent (${displayTokenSymbol})`, value: tokenAmount ? tokenAmount.toFixed(4) : '0.0000', inline: true },
       { name: `⇄ ETH Value`, value: ethValue ? `${ethValue.toFixed(4)} ETH` : 'N/A', inline: true },
       { name: `👤 Minter`, value: buyer ? shortWalletLink(buyer) : (minterAddress ? shortWalletLink(minterAddress) : 'Unknown'), inline: true }
     ],
@@ -351,7 +397,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     }
   } catch {}
 
-  const provider = await safeRpcCall('base', p => p); // ✅ base, not ape
+  const provider = await safeRpcCall('base', p => p); // ✅ base
   if (!provider) return;
 
   let receipt, tx;
@@ -439,5 +485,6 @@ module.exports = {
   trackBaseContracts,
   contractListeners
 };
+
 
 
