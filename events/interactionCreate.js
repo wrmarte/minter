@@ -1,4 +1,4 @@
-// interactionCreate.js FULL PATCHED + LABELS
+// interactionCreate.js FULL PATCHED + LABELS + UNTRACKMINTPLUS BUTTON ROUTER
 const { EmbedBuilder } = require('discord.js');
 const { flavorMap } = require('../utils/flavorMap');
 const { Contract } = require('ethers');
@@ -11,56 +11,66 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 module.exports = (client, pg) => {
   const guildNameCache = new Map();
 
-// INTERACTION HANDLER
-client.on('interactionCreate', async interaction => {
-  // BLOCK 1: Check if autocomplete command exists first (modular check)
-  if (interaction.isAutocomplete()) {
-    const command = client.commands.get(interaction.commandName);
-    if (command && typeof command.autocomplete === 'function') {
-      try {
-        if (command.autocomplete.length > 1) {
-          await command.autocomplete(interaction, client.pg);
-        } else {
-          await command.autocomplete(interaction);
+  // INTERACTION HANDLER
+  client.on('interactionCreate', async interaction => {
+    // BLOCK 1: Check if autocomplete command exists first (modular check)
+    if (interaction.isAutocomplete()) {
+      const command = client.commands.get(interaction.commandName);
+      if (command && typeof command.autocomplete === 'function') {
+        try {
+          if (command.autocomplete.length > 1) {
+            await command.autocomplete(interaction, client.pg);
+          } else {
+            await command.autocomplete(interaction);
+          }
+        } catch (err) {
+          console.error(`❌ Autocomplete error for ${interaction.commandName}:`, err);
         }
-      } catch (err) {
-        console.error(`❌ Autocomplete error for ${interaction.commandName}:`, err);
+        return;
       }
-      return;
-    }
-    // BLOCK 2: Fallback autocomplete logic
-    const { commandName, options } = interaction;
-    const focused = options.getFocused(true);
-    const guildId = interaction.guild?.id;
-    const userId = interaction.user.id;
-    const ownerId = process.env.BOT_OWNER_ID;
-    const isOwner = userId === ownerId;
 
-    const safeRespond = async (choices) => {
+      // BLOCK 2: Fallback autocomplete logic
+      const { commandName, options } = interaction;
+      const focused = options.getFocused(true);
+      const guildId = interaction.guild?.id;
+      const userId = interaction.user.id;
+      const ownerId = process.env.BOT_OWNER_ID;
+      const isOwner = userId === ownerId;
+
+      const safeRespond = async (choices) => {
+        try {
+          if (!interaction.responded) await interaction.respond(choices);
+        } catch (err) {
+          if (err.code === 10062) console.warn('⚠️ Autocomplete expired');
+          else if (err.code === 40060) console.warn('⚠️ Already acknowledged');
+          else console.error('❌ Autocomplete respond error:', err);
+        }
+      };
+
       try {
-        if (!interaction.responded) await interaction.respond(choices);
-      } catch (err) {
-        if (err.code === 10062) console.warn('⚠️ Autocomplete expired');
-        else if (err.code === 40060) console.warn('⚠️ Already acknowledged');
-        else console.error('❌ Autocomplete respond error:', err);
-      }
-    };
-
-    try {
-      const subcommand = interaction.options.getSubcommand(false);
-
+        const subcommand = interaction.options.getSubcommand(false);
 
         // FLEX AUTOCOMPLETE BLOCK
         if (commandName === 'flex') {
           if (subcommand === 'duo' && focused.name === 'name') {
             const res = await pg.query(`SELECT name FROM flex_duo WHERE guild_id = $1`, [guildId]);
-            const choices = res.rows.map(r => r.name).filter(Boolean).filter(n => n.toLowerCase().includes(focused.value.toLowerCase())).slice(0, 25).map(name => ({ name, value: name }));
+            const choices = res.rows
+              .map(r => r.name)
+              .filter(Boolean)
+              .filter(n => n.toLowerCase().includes(focused.value.toLowerCase()))
+              .slice(0, 25)
+              .map(name => ({ name, value: name }));
             return await safeRespond(choices);
           }
 
           if (['random', 'card', 'plus'].includes(subcommand) && focused.name === 'name') {
             const res = await pg.query(`SELECT name FROM flex_projects WHERE guild_id = $1`, [guildId]);
-            const choices = res.rows.map(r => r.name).filter(Boolean).filter(n => n.toLowerCase().includes(focused.value.toLowerCase())).slice(0, 25).map(name => ({ name, value: name }));
+            const choices = res.rows
+              .map(r => r.name)
+              .filter(Boolean)
+              .filter(n => n.toLowerCase().includes(focused.value.toLowerCase()))
+              .slice(0, 25)
+              .map(name => ({ name, value: name }));
             return await safeRespond(choices);
           }
 
@@ -87,7 +97,10 @@ client.on('interactionCreate', async interaction => {
                 tokenIds = Array.from({ length: Math.min(100, totalNum) }, (_, i) => (i + 1).toString());
               } catch { tokenIds = []; }
             }
-            const filtered = tokenIds.filter(id => id.includes(focused.value)).slice(0, 25).map(id => ({ name: `#${id}`, value: parseInt(id) }));
+            const filtered = tokenIds
+              .filter(id => id.includes(focused.value))
+              .slice(0, 25)
+              .map(id => ({ name: `#${id}`, value: parseInt(id) }));
             return await safeRespond(filtered);
           }
         }
@@ -95,7 +108,12 @@ client.on('interactionCreate', async interaction => {
         // FLEXDEV AUTOCOMPLETE BLOCK
         if (commandName === 'flexdev' && focused.name === 'name') {
           const res = await pg.query(`SELECT name FROM flex_projects WHERE guild_id = $1`, [guildId]);
-          const choices = res.rows.map(r => r.name).filter(Boolean).filter(n => n.toLowerCase().includes(focused.value.toLowerCase())).slice(0, 25).map(name => ({ name, value: name }));
+          const choices = res.rows
+            .map(r => r.name)
+            .filter(Boolean)
+            .filter(n => n.toLowerCase().includes(focused.value.toLowerCase()))
+            .slice(0, 25)
+            .map(name => ({ name, value: name }));
           return await safeRespond(choices);
         }
 
@@ -125,11 +143,13 @@ client.on('interactionCreate', async interaction => {
             }
           }
           const combined = [...builtInChoices, ...thisServer, ...global, ...otherServers];
-          const filtered = combined.filter(c => c.name.toLowerCase().includes(focused.value.toLowerCase())).slice(0, 25);
+          const filtered = combined
+            .filter(c => c.name.toLowerCase().includes(focused.value.toLowerCase()))
+            .slice(0, 25);
           return await safeRespond(filtered);
         }
 
-        // UNTRACKMINTPLUS AUTOCOMPLETE BLOCK
+        // UNTRACKMINTPLUS AUTOCOMPLETE BLOCK (kept for compatibility; command now uses buttons)
         if (commandName === 'untrackmintplus' && focused.name === 'contract') {
           const res = await pg.query(`SELECT name, address, chain, channel_ids FROM contract_watchlist`);
           const options = [];
@@ -137,8 +157,15 @@ client.on('interactionCreate', async interaction => {
             if (!row.name || !row.name.toLowerCase().includes(focused.value.toLowerCase())) continue;
             const chain = row.chain || 'unknown';
             const emoji = chain === 'base' ? '🟦' : chain === 'eth' ? '🟧' : chain === 'ape' ? '🐵' : '❓';
-            const icon = row.name.toLowerCase().includes('ghost') ? '👻' : row.name.toLowerCase().includes('brother') ? '👑' : row.name.toLowerCase().includes('adrian') ? '💀' : row.name.toLowerCase().includes('dz') ? '🎯' : row.name.toLowerCase().includes('crypto') ? '🖼️' : '📦';
-            const channels = Array.isArray(row.channel_ids) ? row.channel_ids : (row.channel_ids || '').toString().split(',').filter(Boolean);
+            const icon = row.name.toLowerCase().includes('ghost') ? '👻'
+              : row.name.toLowerCase().includes('brother') ? '👑'
+              : row.name.toLowerCase().includes('adrian') ? '💀'
+              : row.name.toLowerCase().includes('dz') ? '🎯'
+              : row.name.toLowerCase().includes('crypto') ? '🖼️'
+              : '📦';
+            const channels = Array.isArray(row.channel_ids)
+              ? row.channel_ids
+              : (row.channel_ids || '').toString().split(',').filter(Boolean);
             let matchedChannel = null;
             for (const cid of channels) {
               const channel = interaction.client.channels.cache.get(cid);
@@ -154,47 +181,74 @@ client.on('interactionCreate', async interaction => {
             options.push({ name: display.slice(0, 100), value, _sortChain: chain === 'base' ? 0 : chain === 'eth' ? 1 : 2 });
             if (options.length >= 50) break;
           }
-          const sorted = options.sort((a, b) => a._sortChain - b._sortChain).slice(0, 25).map(({ name, value }) => ({ name, value }));
+          const sorted = options
+            .sort((a, b) => a._sortChain - b._sortChain)
+            .slice(0, 25)
+            .map(({ name, value }) => ({ name, value }));
           return await safeRespond(sorted);
         }
       } catch (err) {
         console.error('❌ Autocomplete error:', err);
       }
     }
-  if (interaction.isButton() && interaction.customId === 'test_welcome_button') {
-  const pg = interaction.client.pg;
-  const guild = interaction.guild;
-  const member = interaction.member;
 
-  try {
-    const res = await pg.query(
-      'SELECT * FROM welcome_settings WHERE guild_id = $1 AND enabled = true',
-      [guild.id]
-    );
+    // BUTTON HANDLERS
+    // ✅ UntrackMintPlus button router (clickable Untrack buttons)
+    if (interaction.isButton() && interaction.customId.startsWith('untrackmintplus:')) {
+      try {
+        const mod = interaction.client.commands.get('untrackmintplus');
+        if (mod && typeof mod.handleButton === 'function') {
+          await mod.handleButton(interaction);
+        } else {
+          await interaction.reply({ content: '⚠️ Button handler not available.', ephemeral: true });
+        }
+      } catch (err) {
+        console.error('❌ Button handler error (untrackmintplus):', err);
+        try {
+          if (interaction.deferred || interaction.replied) {
+            await interaction.editReply('⚠️ Failed to process button.');
+          } else {
+            await interaction.reply({ content: '⚠️ Failed to process button.', ephemeral: true });
+          }
+        } catch {}
+      }
+      return; // ensure we don’t fall through to command handler
+    }
 
-    if (res.rowCount === 0) return await interaction.reply({ content: '❌ Welcome is not enabled.', ephemeral: true });
+    if (interaction.isButton() && interaction.customId === 'test_welcome_button') {
+      const pg = interaction.client.pg;
+      const guild = interaction.guild;
+      const member = interaction.member;
 
-    const row = res.rows[0];
-    const channel = await guild.channels.fetch(row.welcome_channel_id).catch(() => null);
-    if (!channel) return await interaction.reply({ content: '❌ Channel not found.', ephemeral: true });
+      try {
+        const res = await pg.query(
+          'SELECT * FROM welcome_settings WHERE guild_id = $1 AND enabled = true',
+          [guild.id]
+        );
 
-    const embed = new EmbedBuilder()
-      .setTitle(`👋 Welcome to ${guild.name}`)
-      .setDescription(`Hey ${member}, welcome to the guild! 🎉`)
-      .setThumbnail(member.user.displayAvatarURL())
-      .setColor('#00FF99')
-      .setFooter({ text: 'Make yourself at home, legend.' })
-      .setTimestamp();
+        if (res.rowCount === 0) return await interaction.reply({ content: '❌ Welcome is not enabled.', ephemeral: true });
 
-    await channel.send({ content: `🎉 Welcome <@${member.id}> (test)`, embeds: [embed] });
+        const row = res.rows[0];
+        const channel = await guild.channels.fetch(row.welcome_channel_id).catch(() => null);
+        if (!channel) return await interaction.reply({ content: '❌ Channel not found.', ephemeral: true });
 
-    await interaction.reply({ content: `✅ Test welcome sent to <#${channel.id}>`, ephemeral: true });
-  } catch (err) {
-    console.error('❌ Error sending test welcome:', err);
-    await interaction.reply({ content: '❌ Failed to send test welcome.', ephemeral: true });
-  }
-}
+        const embed = new EmbedBuilder()
+          .setTitle(`👋 Welcome to ${guild.name}`)
+          .setDescription(`Hey ${member}, welcome to the guild! 🎉`)
+          .setThumbnail(member.user.displayAvatarURL())
+          .setColor('#00FF99')
+          .setFooter({ text: 'Make yourself at home, legend.' })
+          .setTimestamp();
 
+        await channel.send({ content: `🎉 Welcome <@${member.id}> (test)`, embeds: [embed] });
+
+        await interaction.reply({ content: `✅ Test welcome sent to <#${channel.id}>`, ephemeral: true });
+      } catch (err) {
+        console.error('❌ Error sending test welcome:', err);
+        await interaction.reply({ content: '❌ Failed to send test welcome.', ephemeral: true });
+      }
+      return;
+    }
 
     // CHAT INPUT COMMAND HANDLER
     if (!interaction.isChatInputCommand()) return;
@@ -253,6 +307,7 @@ client.on('interactionCreate', async interaction => {
     }
   });
 };
+
 
 
 
