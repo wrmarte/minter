@@ -3,6 +3,8 @@ const { SlashCommandBuilder, AttachmentBuilder, EmbedBuilder } = require('discor
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
 const { Contract, Interface, ethers } = require('ethers');
 const fetch = require('node-fetch');
+const http = require('http');
+const https = require('https');
 const { safeRpcCall, getProvider } = require('../services/providerM');
 
 /* ===================== Config ===================== */
@@ -13,7 +15,7 @@ const GRID_PRESETS = [
   { max: 64,  cols: 8,  tile: 110 },
   { max: 81,  cols: 9,  tile: 100 },
   { max: 100, cols: 10, tile: 96 },
-  { max: 144, cols: 12, tile: 84 },
+  { max: 144, cols: 12, tile: 84 },   // extra dense if you bump MATRIX_MAX_AUTO
   { max: 196, cols: 14, tile: 74 },
   { max: 225, cols: 15, tile: 70 },
   { max: 256, cols: 16, tile: 64 },
@@ -22,6 +24,33 @@ const GRID_PRESETS = [
 const GAP = 8;
 const BG = '#0f1115';
 const BORDER = '#1f2230';
+
+/* ===================== Keep-Alive Agents ===================== */
+const keepAliveHttp = new http.Agent({ keepAlive: true, maxSockets: 128 });
+const keepAliveHttps = new https.Agent({ keepAlive: true, maxSockets: 128 });
+
+/* ===================== Small Utils ===================== */
+function throttle(ms) {
+  let last = 0;
+  return async (fn) => {
+    const now = Date.now();
+    if (now - last >= ms) { last = now; await fn(); }
+  };
+}
+
+async function runPool(limit, items, worker) {
+  const ret = new Array(items.length);
+  let i = 0;
+  const next = async () => {
+    const idx = i++;
+    if (idx >= items.length) return;
+    try { ret[idx] = await worker(items[idx], idx); }
+    catch { ret[idx] = null; }
+    return next();
+  };
+  await Promise.all(new Array(Math.min(limit, items.length)).fill(0).map(next));
+  return ret;
+}
 
 /* ===================== IPFS helpers ===================== */
 const IPFS_GATES = [
@@ -41,7 +70,8 @@ async function fetchJsonWithFallback(urlOrList, timeoutMs = 7000) {
     try {
       const ctrl = new AbortController();
       const t = setTimeout(() => ctrl.abort(), timeoutMs);
-      const res = await fetch(u, { signal: ctrl.signal });
+      const agent = u.startsWith('http:') ? keepAliveHttp : keepAliveHttps;
+      const res = await fetch(u, { signal: ctrl.signal, agent });
       clearTimeout(t);
       if (!res.ok) continue;
       const data = await res.json().catch(() => null);
@@ -86,7 +116,9 @@ async function tryResolveWithFallbacks(name) {
 }
 /** Returns { address, display } where display is the original ENS if provided */
 async function resolveWalletInput(input) {
+  // already an address?
   try { return { address: ethers.getAddress(input), display: null }; } catch {}
+  // ENS?
   if (typeof input === 'string' && input.toLowerCase().endsWith('.eth')) {
     const key = input.toLowerCase();
     const cached = ENS_CACHE.get(key);
@@ -172,7 +204,7 @@ async function fetchOwnerTokensOnchainRolling({ chain, contract, owner, maxWant 
   // Tuned for Base so we look farther back than a few hours
   const isBase = chain === 'base';
   const WINDOW = isBase ? 50000 : 15000;
-  const MAX_WINDOWS = isBase ? 80 : 12; // ~4M blocks on Base (~months), ~180k elsewhere
+  const MAX_WINDOWS = isBase ? 80 : 12; // ~4M blocks on Base, ~180k elsewhere
 
   const owned = new Set();
 
@@ -240,28 +272,80 @@ function dedupeByTokenId(list) {
   return out;
 }
 
-/* ===================== Image composition ===================== */
-async function downloadImage(url, timeoutMs = 8000) {
-  const urls = Array.isArray(url) ? url : [url];
-  for (const u of urls) {
-    if (!u) continue;
-    try {
+/* ===================== Faster image path ===================== */
+// Race multiple gateway URLs per image. First successful response wins.
+async function downloadImage(urlOrList, timeoutMs = 8000) {
+  const urls = (Array.isArray(urlOrList) ? urlOrList : [urlOrList]).filter(Boolean);
+  if (!urls.length) return null;
+
+  return await new Promise(async (resolve) => {
+    let settled = false;
+    const controllers = [];
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      controllers.forEach(c => c.abort());
+      resolve(null);
+    }, timeoutMs);
+
+    let remaining = urls.length;
+
+    const onDone = (buf) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      controllers.forEach(c => c.abort());
+      resolve(buf || null);
+    };
+
+    urls.forEach((u) => {
       const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), timeoutMs);
-      const res = await fetch(u, { signal: ctrl.signal });
-      clearTimeout(t);
-      if (!res.ok) continue;
-      const buf = await res.arrayBuffer();
-      return Buffer.from(buf);
-    } catch {}
-  }
-  return null;
+      controllers.push(ctrl);
+      const agent = u.startsWith('http:') ? keepAliveHttp : keepAliveHttps;
+      fetch(u, { signal: ctrl.signal, agent, headers: { 'Accept': 'image/*' } })
+        .then(async res => {
+          if (!res.ok) return null;
+          const ab = await res.arrayBuffer();
+          return Buffer.from(ab);
+        })
+        .then(buf => {
+          if (buf) onDone(buf);
+          else if (--remaining === 0) onDone(null);
+        })
+        .catch(() => {
+          if (--remaining === 0) onDone(null);
+        });
+    });
+  });
 }
+
+// Preload images in parallel with a small pool and optional progress callback
+async function preloadImages(items, onProgress) {
+  let done = 0;
+  const update = onProgress || (() => Promise.resolve());
+
+  const bufs = await runPool(8, items, async (it) => {
+    if (!it.image) { done++; await update(done, items.length); return null; }
+    const src = it.image.startsWith('ipfs://') ? toHttp(it.image) : [it.image];
+    const buf = await downloadImage(src);
+    done++; await update(done, items.length);
+    return buf;
+  });
+
+  const imgs = await runPool(8, bufs, async (buf) => {
+    if (!buf) return null;
+    try { return await loadImage(buf); } catch { return null; }
+  });
+
+  return imgs; // index-aligned with items
+}
+
+/* ===================== Image composition ===================== */
 function pickPreset(count) {
   for (const p of GRID_PRESETS) if (count <= p.max) return p;
   return GRID_PRESETS[GRID_PRESETS.length - 1];
 }
-async function composeGrid(items) {
+async function composeGrid(items, preloadedImgs) {
   const count = items.length;
   const preset = pickPreset(count);
   const cols = preset.cols;
@@ -284,8 +368,8 @@ async function composeGrid(items) {
     ctx.fillStyle = BORDER;
     ctx.fillRect(x - 1, y - 1, tile + 2, tile + 2);
 
-    const imgUrl = items[i].image;
-    if (!imgUrl) {
+    const img = preloadedImgs?.[i];
+    if (!img) {
       ctx.fillStyle = '#161a24'; ctx.fillRect(x, y, tile, tile);
       ctx.fillStyle = '#4b4f63';
       ctx.font = `bold ${Math.max(14, Math.round(tile * 0.12))}px sans-serif`;
@@ -294,26 +378,14 @@ async function composeGrid(items) {
       continue;
     }
 
-    try {
-      const buf = await downloadImage(imgUrl);
-      if (!buf) throw new Error('img dl fail');
-      const img = await loadImage(buf);
-      const ratio = Math.max(tile / img.width, tile / img.height);
-      const w = Math.round(img.width * ratio);
-      const h = Math.round(img.height * ratio);
-      const ox = Math.floor((w - tile) / 2);
-      const oy = Math.floor((h - tile) / 2);
-      const tmp = createCanvas(w, h);
-      const tctx = tmp.getContext('2d');
-      tctx.drawImage(img, 0, 0, w, h);
-      ctx.drawImage(tmp, -ox, -oy, w, h, x, y, tile, tile);
-    } catch {
-      ctx.fillStyle = '#161a24'; ctx.fillRect(x, y, tile, tile);
-      ctx.fillStyle = '#4b4f63';
-      ctx.font = `bold ${Math.max(14, Math.round(tile * 0.12))}px sans-serif`;
-      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText(`#${items[i].tokenId}`, x + tile / 2, y + tile / 2);
-    }
+    // cover-fit crop math (no temp canvas)
+    const scale = Math.max(tile / img.width, tile / img.height);
+    const sw = Math.floor(tile / scale);
+    const sh = Math.floor(tile / scale);
+    const sx = Math.floor((img.width  - sw) / 2);
+    const sy = Math.floor((img.height - sh) / 2);
+
+    ctx.drawImage(img, sx, sy, sw, sh, x, y, tile, tile);
   }
 
   return canvas.toBuffer('image/png');
@@ -421,6 +493,9 @@ module.exports = {
 
     await interaction.deferReply({ ephemeral: false });
 
+    // Initial status
+    await interaction.editReply({ content: '⏳ Resolving wallet…' });
+
     // ENS or address
     let owner, ownerDisplay;
     try {
@@ -430,6 +505,8 @@ module.exports = {
     } catch (e) {
       return interaction.editReply(`❌ ${e.message}`);
     }
+
+    await interaction.editReply({ content: '🔎 Fetching tokens…' });
 
     // resolve project ONLY if tracked by this server
     const { project, error } = await resolveProjectForGuild(pg, interaction.client, guildId, projectInput);
@@ -451,7 +528,6 @@ module.exports = {
     // If Reservoir looks partial (e.g., Base returns just a few), fill from on-chain
     if ((chain === 'base' || chain === 'eth') && items.length < maxWant) {
       const onch = await fetchOwnerTokensOnchainRolling({ chain, contract, owner, maxWant });
-      // merge & dedupe by tokenId, prefer images we already have
       const byId = new Map();
       for (const it of items) byId.set(String(it.tokenId), it);
       for (const it of onch.items) {
@@ -478,8 +554,19 @@ module.exports = {
       items = await enrichImagesViaTokenURI({ chain, contract, items });
     }
 
+    // Progress updates during image preloading
+    const throttled = throttle(1200);
+    await interaction.editReply({ content: `🖼️ Rendering ${items.length} tiles… 0%` });
+
+    const preloadedImgs = await preloadImages(items, async (done, total) => {
+      const pct = Math.max(0, Math.min(100, Math.floor((done / total) * 100)));
+      await throttled(async () => {
+        await interaction.editReply({ content: `🖼️ Rendering ${total} tiles… ${pct}%` });
+      });
+    });
+
     // Compose adaptive grid
-    const gridBuf = await composeGrid(items);
+    const gridBuf = await composeGrid(items, preloadedImgs);
     const file = new AttachmentBuilder(gridBuf, { name: `matrix_${project.name}_${owner.slice(0,6)}.png` });
 
     const desc = [
@@ -497,9 +584,10 @@ module.exports = {
       .setFooter({ text: `Matrix view • Powered by PimpsDev (ENS + auto-dense up to ${ENV_MAX})` })
       .setTimestamp();
 
-    await interaction.editReply({ embeds: [embed], files: [file] });
+    await interaction.editReply({ content: null, embeds: [embed], files: [file] });
   }
 };
+
 
 
 
