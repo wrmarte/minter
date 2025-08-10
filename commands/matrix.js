@@ -71,23 +71,8 @@ const IPFS_GATES = [
 function toHttp(url) {
   if (!url || typeof url !== 'string') return url;
   if (!url.startsWith('ipfs://')) return url;
-  const cid = url.replace('ipfs://', '');
-  return IPFS_GATES.map(g => g + cid);
-}
-function expandImageCandidates(u) {
-  if (!u || typeof u !== 'string') return [];
-  if (u.startsWith('ipfs://')) return toHttp(u);
-  const variants = [u];
-  try {
-    const url = new URL(u);
-    if ((/ipfs/i).test(url.hostname) && url.pathname.includes('/ipfs/')) {
-      const cidPath = url.pathname.slice(url.pathname.indexOf('/ipfs/') + 6);
-      for (const g of IPFS_GATES) {
-        try { variants.push(new URL(cidPath, g).href); } catch {}
-      }
-    }
-  } catch {}
-  return Array.from(new Set(variants));
+  const cidAndPath = url.replace('ipfs://', ''); // CID or CID/path
+  return IPFS_GATES.map(g => g + cidAndPath);
 }
 function isDataUrl(u) { return typeof u === 'string' && u.startsWith('data:'); }
 function parseDataUrl(u) {
@@ -101,7 +86,23 @@ function parseDataUrl(u) {
     return { mime, buffer: buf };
   } catch { return null; }
 }
-// lightweight magic-bytes check
+function expandImageCandidates(u) {
+  if (!u || typeof u !== 'string') return [];
+  if (isDataUrl(u)) return [u]; // ✅ keep data: images
+  if (u.startsWith('ipfs://')) return toHttp(u);
+  const variants = [u];
+  try {
+    const url = new URL(u);
+    if ((/ipfs/i).test(url.hostname) && url.pathname.includes('/ipfs/')) {
+      const cidPath = url.pathname.slice(url.pathname.indexOf('/ipfs/') + 6);
+      for (const g of IPFS_GATES) {
+        try { variants.push(new URL(cidPath, g).href); } catch {}
+      }
+    }
+  } catch {}
+  return Array.from(new Set(variants));
+}
+// very light magic-bytes check for common image types
 function looksLikeImage(buf) {
   if (!Buffer.isBuffer(buf) || buf.length < 8) return false;
   const sig = buf.slice(0, 12).toString('hex');
@@ -174,8 +175,7 @@ async function fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant = 
 
   const headers = {
     'Content-Type': 'application/json',
-    'x-reservoir-chain': chainHeader,
-    'User-Agent': 'MatrixBot/1.0 (+discord)'
+    'x-reservoir-chain': chainHeader
   };
   if (process.env.RESERVOIR_API_KEY) headers['x-api-key'] = process.env.RESERVOIR_API_KEY;
 
@@ -375,8 +375,7 @@ async function backfillImagesFromReservoir({ chain, contract, items, onProgress 
   if (!chainHeader) return items;
   const headers = {
     'Content-Type': 'application/json',
-    'x-reservoir-chain': chainHeader,
-    'User-Agent': 'MatrixBot/1.0 (+discord)'
+    'x-reservoir-chain': chainHeader
   };
   if (process.env.RESERVOIR_API_KEY) headers['x-api-key'] = process.env.RESERVOIR_API_KEY;
 
@@ -417,71 +416,9 @@ async function backfillImagesFromReservoir({ chain, contract, items, onProgress 
 }
 
 /* ===================== Robust image loading ===================== */
-async function downloadImage(urlOrList, timeoutMs = 9000) {
-  const urls = (Array.isArray(urlOrList) ? urlOrList : [urlOrList]).filter(Boolean);
-  if (!urls.length) return null;
-
-  // data:image/*;base64 — handle locally
-  if (urls.length === 1 && isDataUrl(urls[0])) {
-    const parsed = parseDataUrl(urls[0]);
-    if (parsed && /^image\//.test(parsed.mime)) return parsed.buffer;
-    return null;
-  }
-
-  return await new Promise(async (resolve) => {
-    let settled = false;
-    const controllers = [];
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      controllers.forEach(c => c.abort());
-      resolve(null);
-    }, timeoutMs);
-
-    let remaining = urls.length;
-
-    const onDone = (buf) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      controllers.forEach(c => c.abort());
-      resolve(buf || null);
-    };
-
-    urls.forEach((u) => {
-      const ctrl = new AbortController();
-      controllers.push(ctrl);
-      const agent = u.startsWith('http:') ? keepAliveHttp : keepAliveHttps;
-      fetch(u, {
-        signal: ctrl.signal,
-        agent,
-        headers: { 'Accept': 'image/*', 'User-Agent': 'MatrixBot/1.0 (+discord)' }
-      })
-        .then(async res => {
-          if (!res.ok) return null;
-          const ct = (res.headers.get('content-type') || '').toLowerCase();
-          const ab = await res.arrayBuffer();
-          const buf = Buffer.from(ab);
-          if (ct && !ct.startsWith('image/') && !looksLikeImage(buf)) return null;
-          return buf;
-        })
-        .then(buf => { if (buf) onDone(buf); else if (--remaining === 0) onDone(null); })
-        .catch(() => { if (--remaining === 0) onDone(null); });
-    });
-  });
-}
-
-// Try decode via buffer first, then fall back to loadImage(URL) with a timeout per candidate.
-async function loadImageWithCandidates(candidates, perTryMs = 6000) {
-  // 1) buffer route (fast, with parallel IPFS races)
-  const buf = await downloadImage(candidates, perTryMs);
-  if (buf) {
-    try {
-      const img = await loadImage(buf);
-      if (img && img.width > 0 && img.height > 0) return img;
-    } catch {}
-  }
-  // 2) URL route (some CDNs behave better with direct URL decoding)
+// Try direct URL decode first (often better for CDNs), then race gateways via buffer fetch.
+async function loadImageWithCandidates(candidates, perTryMs = 8000) {
+  // 1) URL route with per-URL timeout
   for (const u of candidates) {
     try {
       const img = await Promise.race([
@@ -491,13 +428,67 @@ async function loadImageWithCandidates(candidates, perTryMs = 6000) {
       if (img && img.width > 0 && img.height > 0) return img;
     } catch {}
   }
+  // 2) Buffer fetch (races gateways)
+  const buf = await (async () => {
+    let settled = false;
+    const controllers = [];
+    const agentFor = (u) => u.startsWith('http:') ? keepAliveHttp : keepAliveHttps;
+
+    return await new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        controllers.forEach(c => c.abort());
+        resolve(null);
+      }, perTryMs);
+
+      let remaining = candidates.length;
+      const finish = (b) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        controllers.forEach(c => c.abort());
+        resolve(b || null);
+      };
+
+      for (const u of candidates) {
+        if (isDataUrl(u)) {
+          const parsed = parseDataUrl(u);
+          if (parsed && /^image\//.test(parsed.mime)) return finish(parsed.buffer);
+          if (--remaining === 0) finish(null);
+          continue;
+        }
+        const ctrl = new AbortController();
+        controllers.push(ctrl);
+        fetch(u, { signal: ctrl.signal, agent: agentFor(u), headers: { 'Accept': 'image/*' } })
+          .then(async res => {
+            if (!res.ok) return null;
+            const ab = await res.arrayBuffer();
+            const buf = Buffer.from(ab);
+            if (!looksLikeImage(buf)) return null;
+            return buf;
+          })
+          .then(b => { if (b) finish(b); else if (--remaining === 0) finish(null); })
+          .catch(() => { if (--remaining === 0) finish(null); });
+      }
+    });
+  })();
+
+  if (buf) {
+    try {
+      const img = await loadImage(buf);
+      if (img && img.width > 0 && img.height > 0) return img;
+    } catch {}
+  }
   return null;
 }
 
 async function preloadImages(items, onProgress) {
   let done = 0;
   const imgs = await runPool(8, items, async (it) => {
-    const candidates = Array.isArray(it.image) ? it.image : expandImageCandidates(it.image);
+    const candidates =
+      Array.isArray(it.image) ? it.image :
+      (typeof it.image === 'string' ? expandImageCandidates(it.image) : []);
     const img = candidates && candidates.length ? await loadImageWithCandidates(candidates) : null;
     done++; onProgress?.(done, items.length);
     return img;
@@ -535,7 +526,7 @@ async function composeGrid(items, preloadedImgs) {
 
     const img = preloadedImgs?.[i];
     if (!img || !img.width || !img.height) {
-      // token # tile (no badge)
+      // fallback: token number tile
       ctx.fillStyle = '#161a24'; ctx.fillRect(x, y, tile, tile);
       ctx.fillStyle = '#c9d3e3';
       ctx.font = `bold ${Math.max(16, Math.round(tile * 0.16))}px sans-serif`;
@@ -544,7 +535,7 @@ async function composeGrid(items, preloadedImgs) {
       continue;
     }
 
-    // cover-fit crop
+    // cover-fit crop with guards
     const scale = Math.max(tile / img.width, tile / img.height);
     if (!isFinite(scale) || scale <= 0) {
       ctx.fillStyle = '#161a24'; ctx.fillRect(x, y, tile, tile);
@@ -772,7 +763,6 @@ module.exports = {
     const preloadedImgs = await preloadImages(items, (done, total) => {
       imgPct = clamp(Math.floor((done/total)*100), 0, 100);
       status.images = `${imgPct}% [${bar(imgPct)}]`;
-      // fire-and-forget update
       (async () => { await safeEdit({ content: statusBlock([
         `Wallet: ${status.step}`,
         status.scan && `Scan:     ${status.scan}`,
