@@ -581,7 +581,7 @@ module.exports = {
       .setDescription(desc)
       .setColor(0x66ccff)
       .setImage(`attachment://${file.name}`)
-      .setFooter({ text: `Matrix view • Powered by PimpsDev (ENS + auto-dense up to ${ENV_MAX})` })
+      .setFooter({ text: `Matrix view • Powered by PimpsDev` })
       .setTimestamp();
 
     await interaction.editReply({ content: null, embeds: [embed], files: [file] });
