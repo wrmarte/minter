@@ -43,10 +43,7 @@ function bar(pct, len=16){
   return '█'.repeat(filled) + '░'.repeat(len - filled);
 }
 function statusBlock(lines){
-  return '```' + ['Matrix Status',
-    '─'.repeat(32),
-    ...lines
-  ].join('\n') + '```';
+  return '```' + ['Matrix Status','─'.repeat(32),...lines].join('\n') + '```';
 }
 async function runPool(limit, items, worker) {
   const ret = new Array(items.length);
@@ -66,13 +63,31 @@ async function runPool(limit, items, worker) {
 const IPFS_GATES = [
   'https://cloudflare-ipfs.com/ipfs/',
   'https://ipfs.io/ipfs/',
-  'https://dweb.link/ipfs/'
+  'https://dweb.link/ipfs/',
+  'https://gateway.pinata.cloud/ipfs/',
+  'https://nftstorage.link/ipfs/'
 ];
 function toHttp(url) {
   if (!url || typeof url !== 'string') return url;
   if (!url.startsWith('ipfs://')) return url;
   const cid = url.replace('ipfs://', '');
   return IPFS_GATES.map(g => g + cid);
+}
+function expandImageCandidates(u) {
+  if (!u || typeof u !== 'string') return [];
+  if (u.startsWith('ipfs://')) return toHttp(u);
+  const variants = [u];
+  try {
+    const url = new URL(u);
+    // if already a gateway, add alternates
+    if (/ipfs/.test(url.hostname) && url.pathname.includes('/ipfs/')) {
+      const cidPath = url.pathname.slice(url.pathname.indexOf('/ipfs/') + 6);
+      for (const g of IPFS_GATES) {
+        try { variants.push(new URL(cidPath, g).href); } catch {}
+      }
+    }
+  } catch {}
+  return Array.from(new Set(variants));
 }
 function isDataUrl(u) { return typeof u === 'string' && u.startsWith('data:'); }
 function parseDataUrl(u) {
@@ -86,29 +101,19 @@ function parseDataUrl(u) {
     return { mime, buffer: buf };
   } catch { return null; }
 }
-async function fetchJsonWithFallback(urlOrList, timeoutMs = 7000) {
-  const urls = Array.isArray(urlOrList) ? urlOrList : [urlOrList];
-  for (const u of urls) {
-    try {
-      if (isDataUrl(u)) {
-        const parsed = parseDataUrl(u);
-        if (!parsed) continue;
-        if (/json/.test(parsed.mime)) {
-          try { return JSON.parse(parsed.buffer.toString('utf8')); } catch { continue; }
-        }
-        continue;
-      }
-      const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), timeoutMs);
-      const agent = u.startsWith('http:') ? keepAliveHttp : keepAliveHttps;
-      const res = await fetch(u, { signal: ctrl.signal, agent });
-      clearTimeout(t);
-      if (!res.ok) continue;
-      const data = await res.json().catch(() => null);
-      if (data) return data;
-    } catch {}
-  }
-  return null;
+// very light magic-bytes check for common image types
+function looksLikeImage(buf) {
+  if (!Buffer.isBuffer(buf) || buf.length < 8) return false;
+  const sig = buf.slice(0, 12).toString('hex');
+  // PNG, JPG, GIF, WEBP
+  if (buf.slice(0,8).equals(Buffer.from([0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A]))) return true;
+  if (buf.slice(0,3).equals(Buffer.from([0xFF,0xD8,0xFF]))) return true;
+  if (buf.slice(0,3).equals(Buffer.from([0x47,0x49,0x46]))) return true;
+  if (sig.startsWith('52494646') && sig.includes('57454250')) return true; // RIFF....WEBP
+  // SVG (starts with "<svg" or xml decl)
+  const head = buf.slice(0, 256).toString('utf8').trim().toLowerCase();
+  if (head.startsWith('<svg') || head.startsWith('<?xml')) return true;
+  return false;
 }
 
 /* ===================== ENS resolution (with fallbacks) ===================== */
@@ -170,7 +175,11 @@ async function fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant = 
   const chainHeader = chain === 'eth' ? 'ethereum' : chain === 'base' ? 'base' : null;
   if (!chainHeader) return { items: [], total: 0 };
 
-  const headers = { 'Content-Type': 'application/json', 'x-reservoir-chain': chainHeader };
+  const headers = {
+    'Content-Type': 'application/json',
+    'x-reservoir-chain': chainHeader,
+    'User-Agent': 'MatrixBot/1.0 (+discord)'
+  };
   if (process.env.RESERVOIR_API_KEY) headers['x-api-key'] = process.env.RESERVOIR_API_KEY;
 
   let continuation = null;
@@ -322,19 +331,21 @@ async function fetchOwnerTokensOnchainRolling({ chain, contract, owner, maxWant 
   return { items: slice, total: all.length || slice.length };
 }
 
-/* ===================== Enrich images via tokenURI ===================== */
-async function enrichImagesViaTokenURI({ chain, contract, items }) {
+/* ===================== Enrich images via tokenURI (parallel + progress) ===================== */
+async function enrichImagesViaTokenURI({ chain, contract, items, onProgress }) {
   const provider = getProvider(chain);
   if (!provider) return items;
   const iface = new Interface(['function tokenURI(uint256 tokenId) view returns (string)']);
   const nft = new Contract(contract, iface.fragments, provider);
 
-  const out = [];
-  for (const it of items) {
-    if (it.image) { out.push(it); continue; }
+  let done = 0;
+  const upd = () => onProgress?.(++done, items.length);
+
+  const results = await runPool(8, items, async (it) => {
+    if (it.image) { upd(); return it; }
     try {
       let uri = await safeRpcCall(chain, p => nft.connect(p).tokenURI(it.tokenId));
-      if (!uri) { out.push(it); continue; }
+      if (!uri) { upd(); return it; }
 
       let meta = null;
       if (isDataUrl(uri)) {
@@ -348,32 +359,59 @@ async function enrichImagesViaTokenURI({ chain, contract, items }) {
         meta = await fetchJsonWithFallback(urlList);
       }
 
-      let img = meta?.image || meta?.image_url || meta?.imageUrl || meta?.image_preview_url || meta?.image_thumbnail_url || null;
-      if (img && img.startsWith('ipfs://')) img = toHttp(img)[0];
-      if (img && isDataUrl(img)) {
-        const parsedImg = parseDataUrl(img);
-        if (!(parsedImg && /^image\//.test(parsedImg.mime))) img = null;
+      let img =
+        meta?.image ||
+        meta?.image_url ||
+        meta?.imageUrl ||
+        meta?.image_preview_url ||
+        meta?.image_thumbnail_url ||
+        null;
+
+      // fall back to animation_url if it’s a static image (gif/webp/png/img)
+      if (!img && typeof meta?.animation_url === 'string' && /\.(gif|png|jpe?g|webp)(\?|$)/i.test(meta.animation_url)) {
+        img = meta.animation_url;
       }
-      out.push({ ...it, image: img || null });
-    } catch { out.push(it); }
-  }
-  return out;
+
+      // image_data: inline svg/html; convert to data URL so downloader can try
+      if (!img && typeof meta?.image_data === 'string') {
+        const txt = meta.image_data.trim();
+        if (txt.startsWith('<svg')) img = 'data:image/svg+xml;utf8,' + encodeURIComponent(txt);
+      }
+
+      let candidates = [];
+      if (Array.isArray(img)) candidates = img.flatMap(expandImageCandidates);
+      else if (typeof img === 'string') candidates = expandImageCandidates(img);
+
+      upd();
+      return { ...it, image: candidates.length ? candidates : null };
+    } catch {
+      upd();
+      return it;
+    }
+  });
+
+  return results;
 }
 
-/* ===================== EXTRA: Backfill missing images via Reservoir batch ===================== */
-async function backfillImagesFromReservoir({ chain, contract, items }) {
+/* ===================== EXTRA: Backfill missing images via Reservoir batch (with progress) ===================== */
+async function backfillImagesFromReservoir({ chain, contract, items, onProgress }) {
   const chainHeader = chain === 'eth' ? 'ethereum' : chain === 'base' ? 'base' : null;
   if (!chainHeader) return items;
-  const headers = { 'Content-Type': 'application/json', 'x-reservoir-chain': chainHeader };
+  const headers = {
+    'Content-Type': 'application/json',
+    'x-reservoir-chain': chainHeader,
+    'User-Agent': 'MatrixBot/1.0 (+discord)'
+  };
   if (process.env.RESERVOIR_API_KEY) headers['x-api-key'] = process.env.RESERVOIR_API_KEY;
 
-  const missing = items.filter(it => !it.image).map(it => `${contract}:${it.tokenId}`);
-  if (!missing.length) return items;
+  const targets = items.filter(it => !it.image).map(it => `${contract}:${it.tokenId}`);
+  if (!targets.length) return items;
 
   const CHUNK = 50;
   const images = new Map();
-  for (let i = 0; i < missing.length; i += CHUNK) {
-    const chunk = missing.slice(i, i + CHUNK);
+  let done = 0;
+  for (let i = 0; i < targets.length; i += CHUNK) {
+    const chunk = targets.slice(i, i + CHUNK);
     const url = new URL('https://api.reservoir.tools/tokens/v7');
     for (const t of chunk) url.searchParams.append('tokens', t);
     url.searchParams.set('includeAttributes', 'false');
@@ -385,27 +423,29 @@ async function backfillImagesFromReservoir({ chain, contract, items }) {
       const arr = json?.tokens || [];
       for (const r of arr) {
         const id = `${(r?.token?.contract || contract).toLowerCase()}:${r?.token?.tokenId}`;
-        const img = r?.token?.image || r?.token?.media?.original || r?.token?.media?.imageUrl || null;
+        const img =
+          r?.token?.image ||
+          r?.token?.media?.original ||
+          r?.token?.media?.imageUrl ||
+          null;
         if (img) images.set(id, img);
       }
     } catch {}
+    done += chunk.length;
+    onProgress?.(Math.min(done, targets.length), targets.length);
   }
 
   return items.map(it => {
     if (it.image) return it;
     const key = `${contract}:${it.tokenId}`;
-    let img = images.get(key) || null;
-    if (img && img.startsWith('ipfs://')) img = toHttp(img)[0];
-    if (img && isDataUrl(img)) {
-      const parsedImg = parseDataUrl(img);
-      if (!(parsedImg && /^image\//.test(parsedImg.mime))) img = null;
-    }
-    return { ...it, image: img || null };
+    const found = images.get(key);
+    if (!found) return it;
+    return { ...it, image: expandImageCandidates(found) };
   });
 }
 
 /* ===================== Faster image path ===================== */
-async function downloadImage(urlOrList, timeoutMs = 8000) {
+async function downloadImage(urlOrList, timeoutMs = 9000) {
   const urls = (Array.isArray(urlOrList) ? urlOrList : [urlOrList]).filter(Boolean);
   if (!urls.length) return null;
 
@@ -440,11 +480,21 @@ async function downloadImage(urlOrList, timeoutMs = 8000) {
       const ctrl = new AbortController();
       controllers.push(ctrl);
       const agent = u.startsWith('http:') ? keepAliveHttp : keepAliveHttps;
-      fetch(u, { signal: ctrl.signal, agent, headers: { 'Accept': 'image/*' } })
+      fetch(u, {
+        signal: ctrl.signal,
+        agent,
+        headers: {
+          'Accept': 'image/*',
+          'User-Agent': 'MatrixBot/1.0 (+discord)'
+        }
+      })
         .then(async res => {
           if (!res.ok) return null;
+          const ct = (res.headers.get('content-type') || '').toLowerCase();
           const ab = await res.arrayBuffer();
-          return Buffer.from(ab);
+          const buf = Buffer.from(ab);
+          if (ct && !ct.startsWith('image/') && !looksLikeImage(buf)) return null;
+          return buf;
         })
         .then(buf => {
           if (buf) onDone(buf);
@@ -460,7 +510,7 @@ async function preloadImages(items, onProgress) {
   let done = 0;
   const bufs = await runPool(8, items, async (it) => {
     if (!it.image) { done++; onProgress?.(done, items.length); return null; }
-    const src = it.image.startsWith('ipfs://') ? toHttp(it.image) : [it.image];
+    const src = Array.isArray(it.image) ? it.image : expandImageCandidates(it.image);
     const buf = await downloadImage(src);
     done++; onProgress?.(done, items.length);
     return buf;
@@ -504,7 +554,7 @@ async function composeGrid(items, preloadedImgs) {
 
     const img = preloadedImgs?.[i];
     if (!img) {
-      // fallback: simple token number tile (no placeholder flair)
+      // fallback: simple token number tile (no “placeholder” badge)
       ctx.fillStyle = '#161a24'; ctx.fillRect(x, y, tile, tile);
       ctx.fillStyle = '#9aa3b2';
       ctx.font = `bold ${Math.max(16, Math.round(tile * 0.14))}px sans-serif`;
@@ -639,13 +689,17 @@ module.exports = {
     let status = {
       step: 'Resolving wallet…',
       scan: '',
+      enrich: '',
+      backfill: '',
       images: '0%',
     };
     const pushStatus = async () => {
       const lines = [
         `Wallet: ${status.step}`,
-        status.scan && `Scan:   ${status.scan}`,
-        `Images: ${status.images}`
+        status.scan && `Scan:     ${status.scan}`,
+        status.enrich && `Metadata: ${status.enrich}`,
+        status.backfill && `Backfill: ${status.backfill}`,
+        `Images:   ${status.images}`
       ].filter(Boolean);
       await safeEdit({ content: statusBlock(lines) });
     };
@@ -730,16 +784,44 @@ module.exports = {
       return interaction.editReply(`❌ No ${project.name} NFTs found for \`${ownerDisplay}\` on ${chain}.`);
     }
 
-    // Enrich images via tokenURI
+    // Enrich images via tokenURI (parallel) with progress
+    let lastEnPct = -1;
     status.step = 'Enriching images (tokenURI)…';
+    status.enrich = '0% [────────────────]';
     await pushStatus();
-    items = await enrichImagesViaTokenURI({ chain, contract, items });
+    items = await enrichImagesViaTokenURI({
+      chain, contract, items,
+      onProgress: async (done, total) => {
+        const pct = clamp(Math.floor((done/total)*100), 0, 100);
+        if (pct === lastEnPct) return;
+        lastEnPct = pct;
+        status.enrich = `${pct}% [${bar(pct)}]`;
+        await pushStatus();
+      }
+    });
 
-    // Backfill missing images via Reservoir token batch (ETH/Base)
+    // Backfill missing images via Reservoir token batch (ETH/Base) with progress
     if (items.some(i => !i.image) && (chain === 'eth' || chain === 'base')) {
+      let lastBF = -1;
       status.step = 'Backfilling images (Reservoir)…';
+      status.backfill = '0% [────────────────]';
       await pushStatus();
-      items = await backfillImagesFromReservoir({ chain, contract, items });
+      const totalMissing = items.filter(i => !i.image).length;
+      let bfDone = 0;
+      items = await backfillImagesFromReservoir({
+        chain, contract, items,
+        onProgress: async (done, total) => {
+          // normalize to real number of missing if API deduped
+          bfDone = Math.min(done, totalMissing);
+          const pct = totalMissing ? clamp(Math.floor((bfDone/totalMissing)*100), 0, 100) : 100;
+          if (pct === lastBF) return;
+          lastBF = pct;
+          status.backfill = `${pct}% [${bar(pct)}]`;
+          await pushStatus();
+        }
+      });
+      status.backfill = 'done';
+      await pushStatus();
     }
 
     // Image preload with visible percent
@@ -755,7 +837,7 @@ module.exports = {
       pushStatus();
     });
 
-    // Compose grid (no placeholders; if an image is still missing, show token # tile)
+    // Compose grid (if an image is still missing/unsupported, show clean token # tile)
     const gridBuf = await composeGrid(items, preloadedImgs);
     const file = new AttachmentBuilder(gridBuf, { name: `matrix_${project.name}_${owner.slice(0,6)}.png` });
 
@@ -778,6 +860,7 @@ module.exports = {
     finalized = true;
   }
 };
+
 
 
 
