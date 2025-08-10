@@ -5,15 +5,20 @@ const { Contract, Interface, ethers } = require('ethers');
 const fetch = require('node-fetch');
 const { safeRpcCall, getProvider } = require('../services/providerM');
 
-/* ===================== Adaptive grid config ===================== */
+/* ===================== Config ===================== */
+const ENV_MAX = Math.max(1, Math.min(Number(process.env.MATRIX_MAX_AUTO || 100), 300));
 const GRID_PRESETS = [
   { max: 25,  cols: 5,  tile: 160 },
   { max: 49,  cols: 7,  tile: 120 },
   { max: 64,  cols: 8,  tile: 110 },
   { max: 81,  cols: 9,  tile: 100 },
-  { max: 100, cols: 10, tile: 96 }
+  { max: 100, cols: 10, tile: 96 },
+  { max: 144, cols: 12, tile: 84 },   // extra dense if you bump MATRIX_MAX_AUTO
+  { max: 196, cols: 14, tile: 74 },
+  { max: 225, cols: 15, tile: 70 },
+  { max: 256, cols: 16, tile: 64 },
+  { max: 300, cols: 20, tile: 56 }
 ];
-const MAX_AUTO = 100;
 const GAP = 8;
 const BG = '#0f1115';
 const BORDER = '#1f2230';
@@ -79,22 +84,23 @@ async function tryResolveWithFallbacks(name) {
   }
   return null;
 }
+/** Returns { address, display } where display is the original ENS if provided */
 async function resolveWalletInput(input) {
   // already an address?
-  try { return ethers.getAddress(input); } catch {}
+  try { return { address: ethers.getAddress(input), display: null }; } catch {}
   // ENS?
   if (typeof input === 'string' && input.toLowerCase().endsWith('.eth')) {
     const key = input.toLowerCase();
     const cached = ENS_CACHE.get(key);
     if (cached && (Date.now() - cached.ts) < 10 * 60 * 1000) {
-      return cached.addr;
+      return { address: cached.addr, display: key };
     }
     let addr = await tryResolveWithCurrentProvider(key);
     if (!addr) addr = await tryResolveWithFallbacks(key);
     if (addr) {
       const normalized = ethers.getAddress(addr);
       ENS_CACHE.set(key, { addr: normalized, ts: Date.now() });
-      return normalized;
+      return { address: normalized, display: key };
     }
     throw new Error('ENS name could not be resolved (try a different provider or use 0x address).');
   }
@@ -102,7 +108,7 @@ async function resolveWalletInput(input) {
 }
 
 /* ===================== Reservoir (ETH/Base) ===================== */
-async function fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant = MAX_AUTO }) {
+async function fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant = ENV_MAX }) {
   const chainHeader = chain === 'eth' ? 'ethereum' : chain === 'base' ? 'base' : null;
   if (!chainHeader) return { items: [], total: 0 };
 
@@ -111,7 +117,7 @@ async function fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant = 
 
   let continuation = null;
   const items = [];
-  let safety = 6;
+  let safety = 12; // 🆙 more pages for completeness on Base
   let total = 0;
 
   while (safety-- > 0 && items.length < maxWant) {
@@ -120,7 +126,7 @@ async function fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant = 
     url.searchParams.set('collection', contract);
     url.searchParams.set('limit', String(limit));
     url.searchParams.set('includeTopBid', 'false');
-    url.searchParams.set('sortBy', 'acquiredAt');
+    url.searchParams.set('sortBy', 'acquiredAt'); // recent first; we page to go deeper
     if (continuation) url.searchParams.set('continuation', continuation);
 
     try {
@@ -129,6 +135,8 @@ async function fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant = 
       const json = await res.json();
       const tokens = json?.tokens || [];
       continuation = json?.continuation || null;
+
+      // Best-effort total
       total = typeof json?.count === 'number'
         ? json.count
         : (total || (tokens.length < limit && !continuation ? items.length + tokens.length : 0));
@@ -153,7 +161,7 @@ async function fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant = 
 }
 
 /* ===================== On-chain fallback (Base + Ape + backup) ===================== */
-async function fetchOwnerTokensOnchainRolling({ chain, contract, owner, maxWant = MAX_AUTO }) {
+async function fetchOwnerTokensOnchainRolling({ chain, contract, owner, maxWant = ENV_MAX }) {
   const provider = getProvider(chain);
   if (!provider) return { items: [], total: 0 };
 
@@ -164,7 +172,7 @@ async function fetchOwnerTokensOnchainRolling({ chain, contract, owner, maxWant 
 
   const head = await safeRpcCall(chain, p => p.getBlockNumber()) || 0;
   const WINDOW = 15000;
-  const MAX_WINDOWS = 10;
+  const MAX_WINDOWS = 12; // 🆙 scan farther back to find older holdings
   const owned = new Set();
 
   for (let i = 0; i < MAX_WINDOWS && owned.size < maxWant; i++) {
@@ -360,9 +368,9 @@ module.exports = {
     )
     .addIntegerOption(o =>
       o.setName('limit')
-        .setDescription('Max tiles (auto up to 100 if omitted)')
+        .setDescription(`Max tiles (auto up to ${ENV_MAX} if omitted)`)
         .setMinValue(1)
-        .setMaxValue(100)
+        .setMaxValue(ENV_MAX)
         .setRequired(false)
     ),
 
@@ -400,9 +408,11 @@ module.exports = {
     await interaction.deferReply({ ephemeral: false });
 
     // ENS or address
-    let owner;
+    let owner, ownerDisplay;
     try {
-      owner = await resolveWalletInput(walletInput);
+      const resolved = await resolveWalletInput(walletInput);
+      owner = resolved.address;
+      ownerDisplay = resolved.display || owner;
     } catch (e) {
       return interaction.editReply(`❌ ${e.message}`);
     }
@@ -413,23 +423,26 @@ module.exports = {
 
     const chain = (project.chain || 'base').toLowerCase();
     const contract = (project.address || '').toLowerCase();
-    const maxWant = Math.min(userLimit || MAX_AUTO, MAX_AUTO);
+    const maxWant = Math.min(userLimit || ENV_MAX, ENV_MAX);
 
-    // Try Reservoir for ETH/Base
+    // Try Reservoir for ETH/Base (extended pagination)
     let items = [], totalOwned = 0, usedReservoir = false;
     if (chain === 'eth' || chain === 'base') {
       const resv = await fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant });
-      items = resv.items; totalOwned = resv.total || items.length; usedReservoir = items.length > 0;
+      items = resv.items;
+      totalOwned = resv.total || items.length;
+      usedReservoir = items.length > 0;
     }
 
     // Fallback: on-chain rolling scan (also used for Ape)
     if (!items.length) {
       const onch = await fetchOwnerTokensOnchainRolling({ chain, contract, owner, maxWant });
-      items = onch.items; totalOwned = onch.total || items.length;
+      items = onch.items;
+      totalOwned = onch.total || items.length;
     }
 
     if (!items.length) {
-      return interaction.editReply(`❌ No ${project.name} NFTs found for \`${owner}\` on ${chain}.`);
+      return interaction.editReply(`❌ No ${project.name} NFTs found for \`${ownerDisplay}\` on ${chain}.`);
     }
 
     // Enrich images if needed
@@ -442,7 +455,7 @@ module.exports = {
     const file = new AttachmentBuilder(gridBuf, { name: `matrix_${project.name}_${owner.slice(0,6)}.png` });
 
     const desc = [
-      `Owner: \`${owner}\``,
+      `Owner: \`${ownerDisplay}\`${ownerDisplay.endsWith('.eth') ? `\nResolved: \`${owner}\`` : ''}`,
       `Chain: \`${chain}\``,
       `**Showing ${items.length} of ${totalOwned || items.length} owned**`,
       ...(chain === 'ape' && !usedReservoir ? ['*(ApeChain via on-chain scan)*'] : [])
@@ -453,10 +466,11 @@ module.exports = {
       .setDescription(desc)
       .setColor(0x66ccff)
       .setImage(`attachment://${file.name}`)
-      .setFooter({ text: 'Matrix view • Powered by PimpsDev (ENS + auto-dense)' })
+      .setFooter({ text: `Matrix view • Powered by PimpsDev (ENS + auto-dense up to ${ENV_MAX})` })
       .setTimestamp();
 
     await interaction.editReply({ embeds: [embed], files: [file] });
   }
 };
+
 
