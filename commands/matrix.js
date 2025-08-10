@@ -35,7 +35,7 @@ const keepAliveHttps = new https.Agent({ keepAlive: true, maxSockets: 128 });
 
 /* ===================== Small Utils ===================== */
 function padTopicAddress(addr) {
-  return '0x' + addr.toLowerCase().replace(/^0x/, '').padStart(40, '0').padStart(64, '0');
+  return '0x' + addr.toLowerCase().replace(/^0x/, '').padStart(64, '0');
 }
 function clamp(n, a, b){ return Math.max(a, Math.min(b, n)); }
 function bar(pct, len=16){
@@ -59,7 +59,7 @@ async function runPool(limit, items, worker) {
   return ret;
 }
 
-/* ===================== IPFS + data: helpers ===================== */
+/* ===================== URL helpers (IPFS, Arweave, data) ===================== */
 const IPFS_GATES = [
   'https://cloudflare-ipfs.com/ipfs/',
   'https://ipfs.io/ipfs/',
@@ -68,11 +68,13 @@ const IPFS_GATES = [
   'https://nftstorage.link/ipfs/',
   'https://cf-ipfs.com/ipfs/'
 ];
-function toHttp(url) {
-  if (!url || typeof url !== 'string') return url;
-  if (!url.startsWith('ipfs://')) return url;
-  const cidAndPath = url.replace('ipfs://', ''); // CID or CID/path
+function ipfsToHttp(path) {
+  const cidAndPath = path.replace(/^ipfs:\/\//, '');
   return IPFS_GATES.map(g => g + cidAndPath);
+}
+function arToHttp(u) {
+  const id = u.replace(/^ar:\/\//, '');
+  return ['https://arweave.net/' + id];
 }
 function isDataUrl(u) { return typeof u === 'string' && u.startsWith('data:'); }
 function parseDataUrl(u) {
@@ -88,8 +90,10 @@ function parseDataUrl(u) {
 }
 function expandImageCandidates(u) {
   if (!u || typeof u !== 'string') return [];
-  if (isDataUrl(u)) return [u]; // ✅ keep data: images
-  if (u.startsWith('ipfs://')) return toHttp(u);
+  if (isDataUrl(u)) return [u];
+  if (u.startsWith('ipfs://')) return ipfsToHttp(u);
+  if (u.startsWith('ipfs:/')) return ipfsToHttp('ipfs://' + u.split('ipfs:/').pop());
+  if (u.startsWith('ar://')) return arToHttp(u);
   const variants = [u];
   try {
     const url = new URL(u);
@@ -102,7 +106,7 @@ function expandImageCandidates(u) {
   } catch {}
   return Array.from(new Set(variants));
 }
-// very light magic-bytes check for common image types
+// light magic-bytes check
 function looksLikeImage(buf) {
   if (!Buffer.isBuffer(buf) || buf.length < 8) return false;
   const sig = buf.slice(0, 12).toString('hex');
@@ -115,7 +119,33 @@ function looksLikeImage(buf) {
   return false;
 }
 
-/* ===================== ENS resolution (with fallbacks) ===================== */
+/* ===================== JSON fetch (IPFS + data URLs) ===================== */
+async function fetchJsonWithFallback(urlOrList, timeoutMs = 8000) {
+  const urls = Array.isArray(urlOrList) ? urlOrList : [urlOrList];
+  for (const u of urls) {
+    try {
+      if (isDataUrl(u)) {
+        const parsed = parseDataUrl(u);
+        if (!parsed) continue;
+        if (/json/.test(parsed.mime)) {
+          try { return JSON.parse(parsed.buffer.toString('utf8')); } catch { continue; }
+        }
+        continue;
+      }
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), timeoutMs);
+      const agent = u.startsWith('http:') ? keepAliveHttp : keepAliveHttps;
+      const res = await fetch(u, { signal: ctrl.signal, agent });
+      clearTimeout(t);
+      if (!res.ok) continue;
+      const data = await res.json().catch(() => null);
+      if (data) return data;
+    } catch {}
+  }
+  return null;
+}
+
+/* ===================== ENS resolution ===================== */
 const ENS_CACHE = new Map();
 const ENS_RPC_FALLBACKS = [
   'https://cloudflare-eth.com',
@@ -173,10 +203,7 @@ async function fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant = 
   const chainHeader = chain === 'eth' ? 'ethereum' : chain === 'base' ? 'base' : null;
   if (!chainHeader) return { items: [], total: 0 };
 
-  const headers = {
-    'Content-Type': 'application/json',
-    'x-reservoir-chain': chainHeader
-  };
+  const headers = { 'Content-Type': 'application/json', 'x-reservoir-chain': chainHeader };
   if (process.env.RESERVOIR_API_KEY) headers['x-api-key'] = process.env.RESERVOIR_API_KEY;
 
   let continuation = null;
@@ -221,13 +248,28 @@ async function fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant = 
   return { items, total };
 }
 
-/* ===================== ERC-165 / Enumerable fast path ===================== */
+/* ===================== Detect standards (ERC721 / ERC1155) ===================== */
+async function detectTokenStandard(chain, contract) {
+  const provider = getProvider(chain);
+  if (!provider) return { is721: false, is1155: false };
+  const erc165 = new Contract(contract, ['function supportsInterface(bytes4) view returns (bool)'], provider);
+  const out = { is721: false, is1155: false };
+  try {
+    const s721  = await safeRpcCall(chain, p => erc165.connect(p).supportsInterface('0x80ac58cd')); // ERC721
+    const s1155 = await safeRpcCall(chain, p => erc165.connect(p).supportsInterface('0xd9b67a26')); // ERC1155
+    out.is721 = !!s721;
+    out.is1155 = !!s1155 && !s721; // prefer explicit split
+  } catch {}
+  return out;
+}
+
+/* ===================== Enumerable (ERC721 only) ===================== */
 async function detectEnumerable(chain, contract) {
   const provider = getProvider(chain);
   if (!provider) return false;
   const erc165 = new Contract(contract, ['function supportsInterface(bytes4) view returns (bool)'], provider);
   try {
-    const ok = await safeRpcCall(chain, p => erc165.connect(p).supportsInterface('0x780e9d63'));
+    const ok = await safeRpcCall(chain, p => erc165.connect(p).supportsInterface('0x780e9d63')); // ERC721Enumerable
     return !!ok;
   } catch { return false; }
 }
@@ -260,11 +302,11 @@ async function fetchOwnerTokensEnumerable({ chain, contract, owner, maxWant = EN
   }
 }
 
-/* ===================== On-chain owner-indexed deep scan (parallel windows) ===================== */
-async function fetchOwnerTokensOnchainRolling({ chain, contract, owner, maxWant = ENV_MAX, deep = false, onProgress }) {
+/* ===================== On-chain deep scan ===================== */
+// ERC721: Transfer(address,address,uint256)
+async function fetchOwnerTokens721Rolling({ chain, contract, owner, maxWant = ENV_MAX, deep = false, onProgress }) {
   const provider = getProvider(chain);
   if (!provider) return { items: [], total: 0 };
-
   const iface = new Interface(['event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)']);
   const head = await safeRpcCall(chain, p => p.getBlockNumber()) || 0;
 
@@ -310,33 +352,126 @@ async function fetchOwnerTokensOnchainRolling({ chain, contract, owner, maxWant 
   return { items: slice, total: all.length || slice.length };
 }
 
-/* ===================== Enrich images via tokenURI (parallel + progress) ===================== */
-async function enrichImagesViaTokenURI({ chain, contract, items, onProgress }) {
+// ERC1155: TransferSingle / TransferBatch (ids in data)
+async function fetchOwnerTokens1155Rolling({ chain, contract, owner, maxWant = ENV_MAX, deep = false, onProgress }) {
   const provider = getProvider(chain);
-  if (!provider) return items;
-  const iface = new Interface(['function tokenURI(uint256 tokenId) view returns (string)']);
-  const nft = new Contract(contract, iface.fragments, provider);
+  if (!provider) return { items: [], total: 0 };
+  const iface = new Interface([
+    'event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)',
+    'event TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values)'
+  ]);
+  const head = await safeRpcCall(chain, p => p.getBlockNumber()) || 0;
 
+  const isBase = chain === 'base';
+  const WINDOW = isBase ? LOG_WINDOW_BASE : 60000;
+  const MAX_WINDOWS = deep ? 500 : (isBase ? 120 : 160);
+
+  const topicSingle = ethers.id('TransferSingle(address,address,address,uint256,uint256)');
+  const topicBatch  = ethers.id('TransferBatch(address,address,address,uint256[],uint256[])');
+  const topicFrom = padTopicAddress(owner);
+  const topicTo   = padTopicAddress(owner);
+
+  const windows = [];
+  for (let i = 0; i < MAX_WINDOWS; i++) {
+    const toBlock = head - i * WINDOW;
+    const fromBlock = Math.max(0, toBlock - WINDOW + 1);
+    if (toBlock <= 0) break;
+    windows.push({ fromBlock, toBlock });
+  }
+
+  const balances = new Map(); // tokenId => BigInt
+  let processed = 0;
+  const update = async () => { if (typeof onProgress === 'function') await onProgress(++processed, windows.length); };
+
+  const add = (id, delta) => {
+    const key = id.toString();
+    const cur = balances.get(key) || 0n;
+    const next = cur + BigInt(delta);
+    balances.set(key, next);
+  };
+
+  for (let i = 0; i < windows.length; i += LOG_CONCURRENCY) {
+    const chunk = windows.slice(i, i + LOG_CONCURRENCY);
+    await Promise.all(chunk.map(async ({ fromBlock, toBlock }) => {
+      let sIn = [], sOut = [], bIn = [], bOut = [];
+      try {
+        sIn  = await safeRpcCall(chain, p => p.getLogs({ address: contract.toLowerCase(), topics: [topicSingle, null, null, topicTo],  fromBlock, toBlock })) || [];
+      } catch {}
+      try {
+        sOut = await safeRpcCall(chain, p => p.getLogs({ address: contract.toLowerCase(), topics: [topicSingle, null, topicFrom, null], fromBlock, toBlock })) || [];
+      } catch {}
+      try {
+        bIn  = await safeRpcCall(chain, p => p.getLogs({ address: contract.toLowerCase(), topics: [topicBatch,  null, null, topicTo],  fromBlock, toBlock })) || [];
+      } catch {}
+      try {
+        bOut = await safeRpcCall(chain, p => p.getLogs({ address: contract.toLowerCase(), topics: [topicBatch,  null, topicFrom, null], fromBlock, toBlock })) || [];
+      } catch {}
+
+      for (const log of sIn)  { let parsed; try { parsed = iface.parseLog(log); } catch { continue; } add(parsed.args.id,  parsed.args.value); }
+      for (const log of sOut) { let parsed; try { parsed = iface.parseLog(log); } catch { continue; } add(parsed.args.id, -parsed.args.value); }
+      for (const log of bIn)  { let parsed; try { parsed = iface.parseLog(log); } catch { continue; }
+        const ids = parsed.args.ids, vals = parsed.args.values;
+        for (let i = 0; i < ids.length; i++) add(ids[i], vals[i]);
+      }
+      for (const log of bOut) { let parsed; try { parsed = iface.parseLog(log); } catch { continue; }
+        const ids = parsed.args.ids, vals = parsed.args.values;
+        for (let i = 0; i < ids.length; i++) add(ids[i], -vals[i]);
+      }
+      await update();
+    }));
+    // we can't early-stop reliably; continue to accumulate
+  }
+
+  const ownedIds = [];
+  for (const [id, bal] of balances.entries()) if (bal > 0n) ownedIds.push(id);
+  const slice = ownedIds.slice(0, maxWant).map(id => ({ tokenId: id, image: null, name: `#${id}` }));
+  return { items: slice, total: ownedIds.length || slice.length };
+}
+
+/* ===================== Resolve tokenURI / uri (ERC721/1155) ===================== */
+function idHex64(tokenId) {
+  const bn = BigInt(tokenId);
+  return bn.toString(16).padStart(64, '0');
+}
+
+async function resolveMetadataURI({ chain, contract, tokenId, is1155 }) {
+  const provider = getProvider(chain);
+  if (!provider) return null;
+  if (is1155) {
+    const c = new Contract(contract, ['function uri(uint256) view returns (string)'], provider);
+    let uri = await safeRpcCall(chain, p => c.connect(p).uri(tokenId));
+    if (!uri) return null;
+    // {id} substitution per ERC1155 metadata standard
+    uri = uri.replace(/\{id\}/gi, idHex64(tokenId));
+    return uri.startsWith('ipfs://') ? ipfsToHttp(uri) : [uri];
+  } else {
+    const c = new Contract(contract, ['function tokenURI(uint256) view returns (string)'], provider);
+    const uri = await safeRpcCall(chain, p => c.connect(p).tokenURI(tokenId));
+    if (!uri) return null;
+    return uri.startsWith('ipfs://') ? ipfsToHttp(uri) : [uri];
+  }
+}
+
+/* ===================== Enrich images (with progress) ===================== */
+async function enrichImages({ chain, contract, items, is1155, onProgress }) {
   let done = 0;
   const upd = () => onProgress?.(++done, items.length);
 
   const results = await runPool(8, items, async (it) => {
     if (it.image) { upd(); return it; }
     try {
-      let uri = await safeRpcCall(chain, p => nft.connect(p).tokenURI(it.tokenId));
-      if (!uri) { upd(); return it; }
+      const uriList = await resolveMetadataURI({ chain, contract, tokenId: it.tokenId, is1155 });
+      if (!uriList) { upd(); return it; }
 
       let meta = null;
-      if (isDataUrl(uri)) {
-        const parsed = parseDataUrl(uri);
+      // try data: first among list
+      if (isDataUrl(uriList[0])) {
+        const parsed = parseDataUrl(uriList[0]);
         if (parsed && /json/.test(parsed.mime)) {
           try { meta = JSON.parse(parsed.buffer.toString('utf8')); } catch {}
         }
       }
-      if (!meta) {
-        const urlList = uri.startsWith('ipfs://') ? toHttp(uri) : [uri];
-        meta = await fetchJsonWithFallback(urlList);
-      }
+      if (!meta) meta = await fetchJsonWithFallback(uriList);
 
       let img =
         meta?.image ||
@@ -369,14 +504,11 @@ async function enrichImagesViaTokenURI({ chain, contract, items, onProgress }) {
   return results;
 }
 
-/* ===================== Backfill missing images via Reservoir batch (with progress) ===================== */
+/* ===================== Backfill missing images via Reservoir (progress) ===================== */
 async function backfillImagesFromReservoir({ chain, contract, items, onProgress }) {
   const chainHeader = chain === 'eth' ? 'ethereum' : chain === 'base' ? 'base' : null;
   if (!chainHeader) return items;
-  const headers = {
-    'Content-Type': 'application/json',
-    'x-reservoir-chain': chainHeader
-  };
+  const headers = { 'Content-Type': 'application/json', 'x-reservoir-chain': chainHeader };
   if (process.env.RESERVOIR_API_KEY) headers['x-api-key'] = process.env.RESERVOIR_API_KEY;
 
   const targets = items.filter(it => !it.image).map(it => `${contract}:${it.tokenId}`);
@@ -416,66 +548,38 @@ async function backfillImagesFromReservoir({ chain, contract, items, onProgress 
 }
 
 /* ===================== Robust image loading ===================== */
-// Try direct URL decode first (often better for CDNs), then race gateways via buffer fetch.
 async function loadImageWithCandidates(candidates, perTryMs = 8000) {
-  // 1) URL route with per-URL timeout
+  // Try URL route first
   for (const u of candidates) {
     try {
-      const img = await Promise.race([
-        loadImage(u),
-        new Promise(res => setTimeout(() => res(null), perTryMs))
-      ]);
-      if (img && img.width > 0 && img.height > 0) return img;
+      if (isDataUrl(u)) {
+        const parsed = parseDataUrl(u);
+        if (parsed && /^image\//.test(parsed.mime)) {
+          const img = await loadImage(parsed.buffer);
+          if (img && img.width > 0 && img.height > 0) return img;
+        }
+      } else {
+        const img = await Promise.race([
+          loadImage(u),
+          new Promise(res => setTimeout(() => res(null), perTryMs))
+        ]);
+        if (img && img.width > 0 && img.height > 0) return img;
+      }
     } catch {}
   }
-  // 2) Buffer fetch (races gateways)
-  const buf = await (async () => {
-    let settled = false;
-    const controllers = [];
-    const agentFor = (u) => u.startsWith('http:') ? keepAliveHttp : keepAliveHttps;
-
-    return await new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        controllers.forEach(c => c.abort());
-        resolve(null);
-      }, perTryMs);
-
-      let remaining = candidates.length;
-      const finish = (b) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        controllers.forEach(c => c.abort());
-        resolve(b || null);
-      };
-
-      for (const u of candidates) {
-        if (isDataUrl(u)) {
-          const parsed = parseDataUrl(u);
-          if (parsed && /^image\//.test(parsed.mime)) return finish(parsed.buffer);
-          if (--remaining === 0) finish(null);
-          continue;
-        }
-        const ctrl = new AbortController();
-        controllers.push(ctrl);
-        fetch(u, { signal: ctrl.signal, agent: agentFor(u), headers: { 'Accept': 'image/*' } })
-          .then(async res => {
-            if (!res.ok) return null;
-            const ab = await res.arrayBuffer();
-            const buf = Buffer.from(ab);
-            if (!looksLikeImage(buf)) return null;
-            return buf;
-          })
-          .then(b => { if (b) finish(b); else if (--remaining === 0) finish(null); })
-          .catch(() => { if (--remaining === 0) finish(null); });
-      }
-    });
-  })();
-
-  if (buf) {
+  // Fallback: simple fetch of first viable URL
+  for (const u of candidates) {
+    if (isDataUrl(u)) continue;
     try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), perTryMs);
+      const agent = u.startsWith('http:') ? keepAliveHttp : keepAliveHttps;
+      const res = await fetch(u, { signal: ctrl.signal, agent, headers: { 'Accept': 'image/*' } });
+      clearTimeout(t);
+      if (!res.ok) continue;
+      const ab = await res.arrayBuffer();
+      const buf = Buffer.from(ab);
+      if (!looksLikeImage(buf)) continue;
       const img = await loadImage(buf);
       if (img && img.width > 0 && img.height > 0) return img;
     } catch {}
@@ -526,7 +630,6 @@ async function composeGrid(items, preloadedImgs) {
 
     const img = preloadedImgs?.[i];
     if (!img || !img.width || !img.height) {
-      // fallback: token number tile
       ctx.fillStyle = '#161a24'; ctx.fillRect(x, y, tile, tile);
       ctx.fillStyle = '#c9d3e3';
       ctx.font = `bold ${Math.max(16, Math.round(tile * 0.16))}px sans-serif`;
@@ -535,16 +638,7 @@ async function composeGrid(items, preloadedImgs) {
       continue;
     }
 
-    // cover-fit crop with guards
     const scale = Math.max(tile / img.width, tile / img.height);
-    if (!isFinite(scale) || scale <= 0) {
-      ctx.fillStyle = '#161a24'; ctx.fillRect(x, y, tile, tile);
-      ctx.fillStyle = '#c9d3e3';
-      ctx.font = `bold ${Math.max(16, Math.round(tile * 0.16))}px sans-serif`;
-      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText(`#${items[i]?.tokenId ?? '?'}`, x + tile / 2, y + tile / 2);
-      continue;
-    }
     const sw = Math.max(1, Math.floor(tile / scale));
     const sh = Math.max(1, Math.floor(tile / scale));
     const sx = Math.max(0, Math.floor((img.width  - sw) / 2));
@@ -573,7 +667,11 @@ async function getGuildTrackedProjects(pg, client, guildId) {
       if (ch?.guildId === guildId) { trackedHere = true; break; }
     }
     if (trackedHere) {
-      out.push({ name: row.name, address: (row.address || '').toLowerCase(), chain: (row.chain || 'base').toLowerCase() });
+      out.push({
+        name: row.name,
+        address: (row.address || '').toLowerCase(),
+        chain: (row.chain || 'base').toLowerCase()
+      });
     }
   }
   return out;
@@ -602,9 +700,24 @@ module.exports = {
   data: new SlashCommandBuilder()
     .setName('matrix')
     .setDescription('Render a grid of a wallet’s NFTs for a project tracked by this server (ENS + auto-dense)')
-    .addStringOption(o => o.setName('wallet').setDescription('Wallet address or ENS (.eth)').setRequired(true))
-    .addStringOption(o => o.setName('project').setDescription('Project (only from this server’s tracked list)').setRequired(false).setAutocomplete(true))
-    .addIntegerOption(o => o.setName('limit').setDescription(`Max tiles (auto up to ${ENV_MAX} if omitted)`).setMinValue(1).setMaxValue(ENV_MAX).setRequired(false)),
+    .addStringOption(o =>
+      o.setName('wallet')
+        .setDescription('Wallet address or ENS (.eth)')
+        .setRequired(true)
+    )
+    .addStringOption(o =>
+      o.setName('project')
+        .setDescription('Project (only from this server’s tracked list)')
+        .setRequired(false)
+        .setAutocomplete(true)
+    )
+    .addIntegerOption(o =>
+      o.setName('limit')
+        .setDescription(`Max tiles (auto up to ${ENV_MAX} if omitted)`)
+        .setMinValue(1)
+        .setMaxValue(ENV_MAX)
+        .setRequired(false)
+    ),
 
   async autocomplete(interaction) {
     const pg = interaction.client.pg;
@@ -678,7 +791,10 @@ module.exports = {
     const contract = (project.address || '').toLowerCase();
     const maxWant = Math.min(userLimit || ENV_MAX, ENV_MAX);
 
-    // Try Reservoir for ETH/Base
+    // Detect standard
+    const std = await detectTokenStandard(chain, contract);
+
+    // Try Reservoir first
     let items = [], totalOwned = 0, usedReservoir = false;
     if (chain === 'eth' || chain === 'base') {
       const resv = await fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant });
@@ -687,24 +803,21 @@ module.exports = {
       usedReservoir = items.length > 0;
     }
 
-    // Enumerable fast path
-    if (items.length < maxWant) {
-      const isEnum = await detectEnumerable(chain, contract);
-      if (isEnum) {
-        status.step = 'Fetching tokens (enumerable)…';
-        await pushStatus();
-        const en = await fetchOwnerTokensEnumerable({ chain, contract, owner, maxWant });
-        const byId = new Map(items.map(it => [String(it.tokenId), it]));
-        for (const it of en.items) { const k = String(it.tokenId); if (!byId.has(k)) byId.set(k, it); }
-        items = Array.from(byId.values()).slice(0, maxWant);
-        totalOwned = Math.max(totalOwned, en.total || 0, items.length);
-      }
+    // Enumerable fast path (ERC721 only)
+    if (std.is721 && items.length < maxWant) {
+      status.step = 'Fetching tokens (enumerable)…';
+      await pushStatus();
+      const en = await fetchOwnerTokensEnumerable({ chain, contract, owner, maxWant });
+      const byId = new Map(items.map(it => [String(it.tokenId), it]));
+      for (const it of en.items) { const k = String(it.tokenId); if (!byId.has(k)) byId.set(k, it); }
+      items = Array.from(byId.values()).slice(0, maxWant);
+      totalOwned = Math.max(totalOwned, en.total || 0, items.length);
     }
 
-    // Owner-indexed deep log scan
+    // On-chain deep scan with progress
     if (items.length < maxWant) {
       let lastPct = -1;
-      status.step = chain === 'base' ? 'Deep scan (Base)…' : 'Scanning logs…';
+      status.step = std.is1155 ? 'Deep scan (ERC1155)…' : (chain === 'base' ? 'Deep scan (Base)…' : 'Scanning logs…');
       status.scan = '0% [────────────────]';
       await pushStatus();
 
@@ -712,7 +825,11 @@ module.exports = {
         const pct = clamp(Math.floor((done/total)*100), 0, 100);
         if (pct !== lastPct) { lastPct = pct; status.scan = `${pct}% [${bar(pct)}]`; await pushStatus(); }
       };
-      const onch = await fetchOwnerTokensOnchainRolling({ chain, contract, owner, maxWant, deep: chain === 'base', onProgress: onScanProgress });
+
+      const onch = std.is1155
+        ? await fetchOwnerTokens1155Rolling({ chain, contract, owner, maxWant, deep: chain === 'base', onProgress: onScanProgress })
+        : await fetchOwnerTokens721Rolling ({ chain, contract, owner, maxWant, deep: chain === 'base', onProgress: onScanProgress });
+
       const byId = new Map(items.map(it => [String(it.tokenId), it]));
       for (const it of onch.items) { const key = String(it.tokenId); if (!byId.has(key)) byId.set(key, it); }
       items = Array.from(byId.values()).slice(0, maxWant);
@@ -721,15 +838,17 @@ module.exports = {
       await pushStatus();
     }
 
-    if (!items.length) return interaction.editReply(`❌ No ${project.name} NFTs found for \`${ownerDisplay}\` on ${chain}.`);
+    if (!items.length) {
+      return interaction.editReply(`❌ No ${project.name} NFTs found for \`${ownerDisplay}\` on ${chain}. (Checked ERC721/1155 paths)`);
+    }
 
-    // Enrich images via tokenURI (progress)
+    // Enrich images (ERC721 tokenURI OR ERC1155 uri with {id}) + progress
     let lastEnPct = -1;
-    status.step = 'Enriching images (tokenURI)…';
+    status.step = 'Enriching images (metadata)…';
     status.enrich = '0% [────────────────]';
     await pushStatus();
-    items = await enrichImagesViaTokenURI({
-      chain, contract, items,
+    items = await enrichImages({
+      chain, contract, items, is1155: std.is1155,
       onProgress: async (done, total) => {
         const pct = clamp(Math.floor((done/total)*100), 0, 100);
         if (pct !== lastEnPct) { lastEnPct = pct; status.enrich = `${pct}% [${bar(pct)}]`; await pushStatus(); }
@@ -795,6 +914,7 @@ module.exports = {
     finalized = true;
   }
 };
+
 
 
 
