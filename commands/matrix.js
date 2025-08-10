@@ -4,19 +4,17 @@ const { createCanvas, loadImage } = require('@napi-rs/canvas');
 const { Contract, Interface, ethers } = require('ethers');
 const fetch = require('node-fetch');
 
-// ENV: RESERVOIR_API_KEY (optional but recommended)
-// Uses your existing provider manager:
 const { safeRpcCall, getProvider } = require('../services/providerM');
 
-const MAX_TILES = 25;         // grid max (5x5)
-const COLS = 5;               // columns in the grid
-const GAP = 8;                // px gap between tiles
-const TILE = 160;             // px thumbnail size
-const BG = '#0f1115';         // background
-const BORDER = '#1f2230';     // tile border
+const MAX_TILES = 25;           // grid max
+const COLS = 5;                 // columns
+const GAP = 8;                  // px gap
+const TILE = 160;               // px tile
+const BG = '#0f1115';
+const BORDER = '#1f2230';
 
-// IPFS helpers
-const IPFS = [
+// -------- IPFS helpers ----------
+const IPFS_GATES = [
   'https://cloudflare-ipfs.com/ipfs/',
   'https://ipfs.io/ipfs/',
   'https://dweb.link/ipfs/'
@@ -25,9 +23,9 @@ function toHttp(url) {
   if (!url || typeof url !== 'string') return url;
   if (!url.startsWith('ipfs://')) return url;
   const cid = url.replace('ipfs://', '');
-  return IPFS.map(g => g + cid);
+  return IPFS_GATES.map(g => g + cid);
 }
-async function fetchJsonWithFallback(urlOrList, timeoutMs = 6000) {
+async function fetchJsonWithFallback(urlOrList, timeoutMs = 7000) {
   const urls = Array.isArray(urlOrList) ? urlOrList : [urlOrList];
   for (const u of urls) {
     try {
@@ -43,10 +41,10 @@ async function fetchJsonWithFallback(urlOrList, timeoutMs = 6000) {
   return null;
 }
 
+// -------- Reservoir (fast path) ----------
 async function fetchOwnerTokensReservoir({ chain, contract, owner, limit }) {
-  // Reservoir supports chain via header x-reservoir-chain, values: 'ethereum', 'base'
   const chainHeader = chain === 'eth' ? 'ethereum' : chain === 'base' ? 'base' : null;
-  if (!chainHeader) return []; // skip for unsupported
+  if (!chainHeader) return [];
   const url = `https://api.reservoir.tools/users/${owner}/tokens/v10?collection=${contract}&limit=${limit}&includeTopBid=false&sortBy=acquiredAt`;
   const headers = {
     'Content-Type': 'application/json',
@@ -69,9 +67,8 @@ async function fetchOwnerTokensReservoir({ chain, contract, owner, limit }) {
   }
 }
 
+// -------- On-chain fallback ----------
 async function fetchOwnerTokensOnchain({ chain, contract, owner, limit }) {
-  // Best-effort fallback: scan recent Transfer logs to find tokens held by owner.
-  // Not perfect, but avoids requiring enumerable interface.
   const provider = getProvider(chain);
   if (!provider) return [];
 
@@ -81,7 +78,7 @@ async function fetchOwnerTokensOnchain({ chain, contract, owner, limit }) {
   ]);
 
   const latest = await safeRpcCall(chain, p => p.getBlockNumber()) || 0;
-  const fromBlock = Math.max(0, latest - 8000); // window
+  const fromBlock = Math.max(0, latest - 9000);
   let logs = [];
   try {
     logs = await safeRpcCall(chain, p => p.getLogs({
@@ -118,14 +115,12 @@ async function enrichImagesViaTokenURI({ chain, contract, items }) {
       let img = meta?.image;
       if (img && img.startsWith('ipfs://')) img = toHttp(img)[0];
       out.push({ ...it, image: img || null });
-    } catch {
-      out.push(it);
-    }
+    } catch { out.push(it); }
   }
   return out;
 }
 
-async function downloadImage(url, timeoutMs = 7000) {
+async function downloadImage(url, timeoutMs = 8000) {
   const urls = Array.isArray(url) ? url : [url];
   for (const u of urls) {
     if (!u) continue;
@@ -151,24 +146,20 @@ async function composeGrid(items, cols = COLS) {
   const canvas = createCanvas(W, H);
   const ctx = canvas.getContext('2d');
 
-  // background
   ctx.fillStyle = BG;
   ctx.fillRect(0, 0, W, H);
 
-  // draw tiles
   for (let i = 0; i < count; i++) {
     const r = Math.floor(i / cols);
     const c = i % cols;
     const x = GAP + c * (TILE + GAP);
     const y = GAP + r * (TILE + GAP);
 
-    // border
     ctx.fillStyle = BORDER;
     ctx.fillRect(x - 1, y - 1, TILE + 2, TILE + 2);
 
     const imgUrl = items[i].image;
     if (!imgUrl) {
-      // placeholder
       ctx.fillStyle = '#161a24';
       ctx.fillRect(x, y, TILE, TILE);
       ctx.fillStyle = '#4b4f63';
@@ -183,6 +174,7 @@ async function composeGrid(items, cols = COLS) {
       const buf = await downloadImage(imgUrl);
       if (!buf) throw new Error('img dl fail');
       const img = await loadImage(buf);
+
       // cover-fit
       const ratio = Math.max(TILE / img.width, TILE / img.height);
       const w = Math.round(img.width * ratio);
@@ -193,9 +185,8 @@ async function composeGrid(items, cols = COLS) {
       const tmp = createCanvas(w, h);
       const tctx = tmp.getContext('2d');
       tctx.drawImage(img, 0, 0, w, h);
-      ctx.drawImage(tmp, ox * -1, oy * -1, w, h, x, y, TILE, TILE);
+      ctx.drawImage(tmp, -ox, -oy, w, h, x, y, TILE, TILE);
     } catch {
-      // fallback box
       ctx.fillStyle = '#161a24';
       ctx.fillRect(x, y, TILE, TILE);
       ctx.fillStyle = '#4b4f63';
@@ -209,39 +200,64 @@ async function composeGrid(items, cols = COLS) {
   return canvas.toBuffer('image/png');
 }
 
-async function resolveProjectInGuild(pg, guildId, name) {
-  // Prefer contract_watchlist entries for this guild
-  // If `name` is provided, match it (case-insensitive); else return the only tracked, or null if multiple.
-  const res = await pg.query(`SELECT name, address, chain FROM contract_watchlist`);
-  const rows = res.rows || [];
+// ---------- DB helpers (restrict to this guild’s tracked projects) ----------
+function normalizeChannels(channel_ids) {
+  if (Array.isArray(channel_ids)) return channel_ids.filter(Boolean).map(String);
+  if (!channel_ids) return [];
+  return channel_ids.toString().split(',').map(s => s.trim()).filter(Boolean);
+}
 
-  // Filter to those tracked in this guild (via channel_ids)
-  const filtered = [];
-  for (const r of rows) {
-    const chans = Array.isArray(r.channel_ids) ? r.channel_ids : (r.channel_ids || '').toString().split(',').filter(Boolean);
-    // We can’t easily map to guild without the client cache here; accept all rows for now and let autocomplete handle UI filter.
-    filtered.push({ name: r.name, address: r.address, chain: (r.chain || 'base').toLowerCase(), channel_ids: chans });
+async function getGuildTrackedProjects(pg, client, guildId) {
+  const out = [];
+  const res = await pg.query(`SELECT name, address, chain, channel_ids FROM contract_watchlist`);
+  for (const row of res.rows || []) {
+    const channels = normalizeChannels(row.channel_ids);
+    let trackedHere = false;
+    for (const cid of channels) {
+      const ch = client.channels.cache.get(cid);
+      if (ch?.guildId === guildId) { trackedHere = true; break; }
+    }
+    if (trackedHere) {
+      out.push({
+        name: row.name,
+        address: (row.address || '').toLowerCase(),
+        chain: (row.chain || 'base').toLowerCase()
+      });
+    }
+  }
+  return out;
+}
+
+async function resolveProjectForGuild(pg, client, guildId, projectInput) {
+  const tracked = await getGuildTrackedProjects(pg, client, guildId);
+  if (!tracked.length) return { error: '❌ This server is not tracking any projects.' };
+
+  if (!projectInput) {
+    // If exactly one tracked, use it
+    if (tracked.length === 1) return { project: tracked[0] };
+    return { error: 'ℹ️ Multiple projects are tracked here. Please choose a `project` (use autocomplete).' };
   }
 
-  if (name) {
-    const n = name.toLowerCase();
-    const row = filtered.find(x => (x.name || '').toLowerCase() === n);
-    return row || null;
+  // projectInput from autocomplete is "name|chain|address"
+  const [name, chain, address] = projectInput.split('|');
+  if (!name || !chain || !address) {
+    return { error: '❌ Invalid project value. Please choose from the autocomplete list.' };
   }
-
-  // No name provided: if there is exactly one distinct collection tracked overall, return it
-  const uniqKey = new Set(filtered.map(x => `${x.address.toLowerCase()}|${x.chain}`));
-  if (uniqKey.size === 1) {
-    const r = filtered[0];
-    return { name: r.name, address: r.address, chain: r.chain };
+  const match = tracked.find(p =>
+    (p.name || '').toLowerCase() === name.toLowerCase() &&
+    (p.chain || '') === chain.toLowerCase() &&
+    (p.address || '') === address.toLowerCase()
+  );
+  if (!match) {
+    return { error: '❌ That project is not tracked in this server.' };
   }
-  return null; // require explicit selection
+  return { project: match };
 }
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('matrix')
-    .setDescription('Render a grid of a wallet’s NFTs for a tracked project')
+    .setDescription('Render a grid of a wallet’s NFTs for a project tracked by this server')
     .addStringOption(o =>
       o.setName('wallet')
         .setDescription('Wallet address (0x...)')
@@ -249,7 +265,7 @@ module.exports = {
     )
     .addStringOption(o =>
       o.setName('project')
-        .setDescription('Project/collection name (if your server tracks more than one)')
+        .setDescription('Project (only from this server’s tracked list)')
         .setRequired(false)
         .setAutocomplete(true)
     )
@@ -263,87 +279,73 @@ module.exports = {
 
   async autocomplete(interaction) {
     const pg = interaction.client.pg;
-    const focused = interaction.options.getFocused()?.toLowerCase?.() || '';
+    const guildId = interaction.guild?.id;
+    const focused = (interaction.options.getFocused() || '').toLowerCase();
+
     try {
-      const res = await pg.query(`SELECT name, address, chain, channel_ids FROM contract_watchlist`);
+      const tracked = await getGuildTrackedProjects(pg, interaction.client, guildId);
       const options = [];
-      for (const row of res.rows) {
+
+      for (const row of tracked) {
         const name = row.name || 'Unnamed';
         if (focused && !name.toLowerCase().includes(focused)) continue;
-        const chain = (row.chain || 'base').toLowerCase();
-        const emoji = chain === 'base' ? '🟦' : chain === 'eth' ? '🟧' : chain === 'ape' ? '🐵' : '❓';
-        const addr = (row.address || '').toLowerCase();
-        const short = addr ? `${addr.slice(0, 6)}...${addr.slice(-4)}` : '0x????';
-        const label = `${emoji} ${name} • ${short} • ${chain}`;
-        const val = `${name}|${chain}|${addr}`;
-        options.push({ name: label.slice(0, 100), value: val });
+        const emoji = row.chain === 'base' ? '🟦' : row.chain === 'eth' ? '🟧' : row.chain === 'ape' ? '🐵' : '❓';
+        const short = row.address ? `${row.address.slice(0, 6)}...${row.address.slice(-4)}` : '0x????';
+        const label = `${emoji} ${name} • ${short} • ${row.chain}`;
+        const value = `${name}|${row.chain}|${row.address}`;
+        options.push({ name: label.slice(0, 100), value });
         if (options.length >= 25) break;
       }
+
       await interaction.respond(options);
-    } catch {
+    } catch (e) {
+      console.warn('autocomplete /matrix error:', e.message);
       await interaction.respond([]);
     }
   },
 
   async execute(interaction) {
     const pg = interaction.client.pg;
-    const wallet = interaction.options.getString('wallet');
-    const projectRaw = interaction.options.getString('project') || '';
-    const limit = Math.min(interaction.options.getInteger('limit') || MAX_TILES, 30);
     const guildId = interaction.guild?.id;
+    const wallet = interaction.options.getString('wallet');
+    const projectInput = interaction.options.getString('project') || '';
+    const limit = Math.min(interaction.options.getInteger('limit') || MAX_TILES, 30);
 
     await interaction.deferReply({ ephemeral: false });
 
-    // Basic addr validation
+    // validate wallet
     let owner;
     try { owner = ethers.getAddress(wallet); }
-    catch {
-      return interaction.editReply('❌ Invalid wallet address.');
-    }
+    catch { return interaction.editReply('❌ Invalid wallet address.'); }
 
-    // Resolve project / contract + chain
-    let project = null;
-    if (projectRaw) {
-      const [name, chain, address] = projectRaw.split('|');
-      if (name && chain && address) {
-        project = { name, chain, address };
-      }
-    }
-    if (!project) {
-      project = await resolveProjectInGuild(pg, guildId, interaction.options.getString('project'));
-      if (!project) {
-        return interaction.editReply('ℹ️ Please specify a `project` (your server tracks multiple). Try typing to use autocomplete.');
-      }
-    }
+    // resolve project ONLY if tracked by this server
+    const { project, error } = await resolveProjectForGuild(pg, interaction.client, guildId, projectInput);
+    if (error) return interaction.editReply(error);
 
     const chain = (project.chain || 'base').toLowerCase();
     const contract = (project.address || '').toLowerCase();
 
-    // Fetch owner tokens
+    // fetch tokens
     let items = await fetchOwnerTokensReservoir({ chain, contract, owner, limit });
     if (!items.length) {
-      // fallback: quick onchain scan
       items = await fetchOwnerTokensOnchain({ chain, contract, owner, limit });
     }
     if (!items.length) {
-      return interaction.editReply(`❌ No ${project.name} NFTs found for ${owner.slice(0,6)}...${owner.slice(-4)}.`);
+      return interaction.editReply(`❌ No ${project.name} NFTs found for \`${owner}\` on ${chain}.`);
     }
 
-    // Enrich images via tokenURI if needed
+    // enrich images
     if (items.some(i => !i.image)) {
       items = await enrichImagesViaTokenURI({ chain, contract, items });
     }
 
-    // Compose grid
+    // compose grid
     const grid = await composeGrid(items, COLS);
     const file = new AttachmentBuilder(grid, { name: `matrix_${project.name}_${owner.slice(0,6)}.png` });
 
-    const title = `🧩 ${project.name} — ${items.length} token${items.length === 1 ? '' : 's'}`;
-    const desc  = `Owner: \`${owner}\`\nChain: \`${chain}\``;
-
     const embed = new EmbedBuilder()
-      .setTitle(title)
-      .setDescription(desc)
+      .setTitle(`🧩 ${project.name} — ${items.length} token${items.length === 1 ? '' : 's'}`)
+      .setDescription(`Owner: \`${owner}\`\nChain: \`${chain}\``)
       .setColor(0x66ccff)
       .setImage(`attachment://${file.name}`)
       .setFooter({ text: 'Matrix view • Powered by PimpsDev' })
@@ -352,3 +354,4 @@ module.exports = {
     await interaction.editReply({ embeds: [embed], files: [file] });
   }
 };
+
