@@ -25,9 +25,9 @@ const GAP = 8;
 const BG = '#0f1115';
 const BORDER = '#1f2230';
 
-// Deep-scan tuning
-const LOG_WINDOW_BASE = 200000; // Base block window
-const LOG_CONCURRENCY = 4;      // windows in parallel on Base
+// Deep-scan tuning (env overridable)
+const LOG_WINDOW_BASE = Math.max(10000, Number(process.env.MATRIX_LOG_WINDOW_BASE || 200000));
+const LOG_CONCURRENCY = Math.max(1, Number(process.env.MATRIX_LOG_CONCURRENCY || 4));
 
 /* ===================== Keep-Alive Agents ===================== */
 const keepAliveHttp = new http.Agent({ keepAlive: true, maxSockets: 128 });
@@ -144,6 +144,7 @@ async function tryResolveWithFallbacks(name) {
   }
   return null;
 }
+/** Returns { address, display } where display is the original ENS if provided */
 async function resolveWalletInput(input) {
   try { return { address: ethers.getAddress(input), display: null }; } catch {}
   if (typeof input === 'string' && input.toLowerCase().endsWith('.eth')) {
@@ -473,6 +474,58 @@ async function preloadImages(items, onProgress) {
   return imgs; // index-aligned with items
 }
 
+/* ===================== Image composition ===================== */
+function pickPreset(count) {
+  for (const p of GRID_PRESETS) if (count <= p.max) return p;
+  return GRID_PRESETS[GRID_PRESETS.length - 1];
+}
+async function composeGrid(items, preloadedImgs) {
+  const count = items.length;
+  const preset = pickPreset(count);
+  const cols = preset.cols;
+  const tile = preset.tile;
+  const rows = Math.ceil(count / cols);
+  const W = cols * tile + (cols + 1) * GAP;
+  const H = rows * tile + (rows + 1) * GAP;
+
+  const canvas = createCanvas(W, H);
+  const ctx = canvas.getContext('2d');
+
+  ctx.fillStyle = BG; ctx.fillRect(0, 0, W, H);
+
+  for (let i = 0; i < count; i++) {
+    const r = Math.floor(i / cols);
+    const c = i % cols;
+    const x = GAP + c * (tile + GAP);
+    const y = GAP + r * (tile + GAP);
+
+    ctx.fillStyle = BORDER;
+    ctx.fillRect(x - 1, y - 1, tile + 2, tile + 2);
+
+    const img = preloadedImgs?.[i];
+    if (!img) {
+      // fallback: simple token number tile (no placeholder flair)
+      ctx.fillStyle = '#161a24'; ctx.fillRect(x, y, tile, tile);
+      ctx.fillStyle = '#9aa3b2';
+      ctx.font = `bold ${Math.max(16, Math.round(tile * 0.14))}px sans-serif`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(`#${items[i]?.tokenId ?? '?'}`, x + tile / 2, y + tile / 2);
+      continue;
+    }
+
+    // cover-fit crop
+    const scale = Math.max(tile / img.width, tile / img.height);
+    const sw = Math.floor(tile / scale);
+    const sh = Math.floor(tile / scale);
+    const sx = Math.floor((img.width  - sw) / 2);
+    const sy = Math.floor((img.height - sh) / 2);
+
+    ctx.drawImage(img, sx, sy, sw, sh, x, y, tile, tile);
+  }
+
+  return canvas.toBuffer('image/png');
+}
+
 /* ===================== DB / guild helpers ===================== */
 function normalizeChannels(channel_ids) {
   if (Array.isArray(channel_ids)) return channel_ids.filter(Boolean).map(String);
@@ -575,6 +628,13 @@ module.exports = {
 
     await interaction.deferReply({ ephemeral: false });
 
+    // Safe editor that won’t crash if the message is finalized
+    let finalized = false;
+    const safeEdit = async (payload) => {
+      if (finalized) return;
+      try { await interaction.editReply(payload); } catch (_) { /* ignore */ }
+    };
+
     // Live status updater
     let status = {
       step: 'Resolving wallet…',
@@ -587,7 +647,7 @@ module.exports = {
         status.scan && `Scan:   ${status.scan}`,
         `Images: ${status.images}`
       ].filter(Boolean);
-      await interaction.editReply({ content: statusBlock(lines) });
+      await safeEdit({ content: statusBlock(lines) });
     };
 
     status.step = 'Resolving wallet…';
@@ -715,8 +775,10 @@ module.exports = {
       .setTimestamp();
 
     await interaction.editReply({ content: null, embeds: [embed], files: [file] });
+    finalized = true;
   }
 };
+
 
 
 
