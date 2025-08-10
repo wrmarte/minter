@@ -1,7 +1,6 @@
 const { JsonRpcProvider } = require('ethers');
-const https = require('https');
 
-// ✅ RPC lists per chain
+// ===================== RPC lists per chain =====================
 const RPCS = {
   base: [
     'https://mainnet.base.org',
@@ -24,120 +23,208 @@ const RPCS = {
   ]
 };
 
-const providerIndex = {};
-const providers = {};
+// ===================== Internal state =====================
+const chains = {}; // chain -> { endpoints[], pinnedIdx, chainCooldownUntil, lastOfflineLogAt }
+function now() { return Date.now(); }
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function jitter(ms) { return Math.floor(ms * (0.85 + Math.random() * 0.3)); }
 
-// ✅ Helper to test if RPC is alive
-async function isRpcAlive(url) {
-  return new Promise(res => {
-    const req = https.get(url, () => res(true));
-    req.on('error', () => res(false));
-    req.setTimeout(2000, () => {
-      req.destroy();
-      res(false);
-    });
-  });
+function initChain(chain) {
+  if (chains[chain]) return;
+  chains[chain] = {
+    endpoints: (RPCS[chain] || []).map(url => ({
+      url,
+      provider: null,
+      failCount: 0,
+      cooldownUntil: 0,
+      lastOkAt: 0
+    })),
+    pinnedIdx: null,
+    chainCooldownUntil: 0,
+    lastOfflineLogAt: 0
+  };
 }
 
-// ✅ Initialize first provider for each chain
-(async () => {
-  for (const chain in RPCS) {
-    providerIndex[chain] = 0;
-    for (let i = 0; i < RPCS[chain].length; i++) {
-      const url = RPCS[chain][i];
-      const alive = await isRpcAlive(url);
-      if (alive) {
-        providers[chain] = new JsonRpcProvider(
-          url,
-          chain === 'ape' ? { name: 'apechain', chainId: 33139 } : undefined
-        );
-        console.log(`✅ ${chain} initialized with RPC: ${url}`);
-        break;
-      } else {
-        console.warn(`❌ Skipping dead RPC: ${url}`);
-      }
-    }
-    if (!providers[chain]) {
-      console.error(`❌ All ${chain} RPCs failed — using null`);
-    }
-  }
-})();
-
-// ✅ Get current provider for a chain
-function getProvider(chain = 'base') {
-  const key = chain.toLowerCase();
-  if (!providers[key]) {
-    console.warn(`⚠️ No live provider for "${key}". Returning null.`);
-    return null;
-  }
-  return providers[key];
+// Build provider with optional ApeChain network hint
+function makeProvider(chain, url) {
+  const network = chain === 'ape' ? { name: 'apechain', chainId: 33139 } : undefined;
+  const p = new JsonRpcProvider(url, network);
+  p._rpcUrl = url;
+  p.pollingInterval = 8000;
+  return p;
 }
 
-// ✅ Network readiness check (mainly for Ape)
-async function isNetworkReady(provider) {
+// Quick JSON-RPC liveness probe
+async function pingProvider(provider, timeoutMs = 2500) {
   try {
-    const net = await provider.getNetwork();
-    return !!net.chainId;
+    const res = await promiseWithTimeout(provider.getBlockNumber(), timeoutMs, 'rpc ping timeout');
+    return Number.isInteger(res) && res >= 0;
   } catch {
     return false;
   }
 }
 
-// ✅ Rotate to next provider
-async function rotateProvider(chain = 'base') {
-  const key = chain.toLowerCase();
+// Helper: per-call timeout
+function promiseWithTimeout(promise, ms, reason = 'timeout') {
+  let t;
+  const timer = new Promise((_, rej) => (t = setTimeout(() => rej(new Error(reason)), ms)));
+  return Promise.race([promise.finally(() => clearTimeout(t)), timer]);
+}
 
-  if (!RPCS[key] || RPCS[key].length <= 1) {
-    console.warn(`⛔ No rotation available for ${key} (static RPC only)`);
-    return;
-  }
+// Score endpoints: lower is better
+function scoreEndpoint(ep) {
+  const cd = Math.max(0, ep.cooldownUntil - now()); // ms
+  const penalty = ep.failCount * 1000;
+  const recency = ep.lastOkAt ? Math.max(0, now() - ep.lastOkAt) / 1000 : 9999;
+  return cd + penalty + recency;
+}
 
-  for (let attempts = 0; attempts < RPCS[key].length; attempts++) {
-    providerIndex[key] = (providerIndex[key] + 1) % RPCS[key].length;
-    const url = RPCS[key][providerIndex[key]];
-    const tempProvider = new JsonRpcProvider(
-      url,
-      key === 'ape' ? { name: 'apechain', chainId: 33139 } : undefined
-    );
+// Attempt to select and pin a healthy provider
+async function selectHealthy(chain) {
+  initChain(chain);
+  const st = chains[chain];
 
-    if (key !== 'ape' || await isNetworkReady(tempProvider)) {
-      providers[key] = tempProvider;
-      console.warn(`🔁 Rotated RPC for ${key}: ${url}`);
-      return;
-    } else {
-      console.warn(`❌ Skipped ${url} — ${key} RPC not responding`);
+  if (now() < st.chainCooldownUntil) return null;
+
+  // If current pin exists, return it
+  if (st.pinnedIdx != null) {
+    const ep = st.endpoints[st.pinnedIdx];
+    if (ep && now() >= ep.cooldownUntil) {
+      if (!ep.provider) ep.provider = makeProvider(chain, ep.url);
+      return ep.provider;
     }
   }
 
-  providers[key] = null;
-  console.error(`❌ All ${key} RPCs failed — provider set to null`);
+  // Sort endpoints by health score
+  const ordered = st.endpoints
+    .map((ep, idx) => ({ ep, idx, score: scoreEndpoint(ep) }))
+    .sort((a, b) => a.score - b.score);
+
+  for (const { ep, idx } of ordered) {
+    if (now() < ep.cooldownUntil) continue;
+    if (!ep.provider) ep.provider = makeProvider(chain, ep.url);
+
+    const ok = await pingProvider(ep.provider, 2000);
+    if (ok) {
+      ep.failCount = 0;
+      ep.cooldownUntil = 0;
+      ep.lastOkAt = now();
+      st.pinnedIdx = idx;
+      console.log(`✅ ${chain} initialized/pinned RPC: ${ep.url}`);
+      return ep.provider;
+    } else {
+      // backoff this endpoint
+      ep.failCount += 1;
+      const backoff = Math.min(30000, 1000 * Math.pow(2, ep.failCount)); // cap 30s
+      ep.cooldownUntil = now() + jitter(backoff);
+    }
+  }
+
+  // All endpoints failed -> put chain in cooldown
+  st.pinnedIdx = null;
+  st.chainCooldownUntil = now() + 20000; // 20s
+  if (now() - st.lastOfflineLogAt > 60000) {
+    console.warn(`⛔ ${chain} RPC appears offline. Cooling down 20s.`);
+    st.lastOfflineLogAt = now();
+  }
+  return null;
 }
 
-// ✅ Failover-safe RPC call
-async function safeRpcCall(chain, callFn, retries = 4) {
+// ===================== Public API =====================
+
+// Get current provider (may return null during chain cooldown)
+function getProvider(chain = 'base') {
+  const key = (chain || 'base').toLowerCase();
+  initChain(key);
+
+  const st = chains[key];
+  if (now() < st.chainCooldownUntil) {
+    console.warn(`⚠️ No live provider for "${key}". Returning null (chain cooldown).`);
+    return null;
+  }
+
+  const idx = st.pinnedIdx;
+  if (idx == null) {
+    // Not pinned yet; non-async path returns null. Callers using safeRpcCall will handle.
+    return null;
+  }
+  const ep = st.endpoints[idx];
+  if (!ep || now() < ep.cooldownUntil) return null;
+  if (!ep.provider) ep.provider = makeProvider(key, ep.url);
+  return ep.provider;
+}
+
+// Rotate to next provider: unpin and trigger reselection on next call
+async function rotateProvider(chain = 'base') {
   const key = chain.toLowerCase();
+  initChain(key);
+  const st = chains[key];
+
+  if (st.pinnedIdx != null) {
+    const ep = st.endpoints[st.pinnedIdx];
+    if (ep) {
+      ep.failCount += 1;
+      const backoff = Math.min(30000, 1000 * Math.pow(2, ep.failCount));
+      ep.cooldownUntil = now() + jitter(backoff);
+      console.warn(`🔁 Rotated RPC for ${key}: ${ep.url} cooling down ~${Math.round(backoff / 1000)}s`);
+    }
+  }
+  st.pinnedIdx = null;
+  // Attempt immediate reselection (non-blocking for callers)
+  await selectHealthy(key);
+}
+
+// Failover-safe RPC call with retries + timeout
+async function safeRpcCall(chain, callFn, retries = 4, perCallTimeoutMs = 6000) {
+  const key = (chain || 'base').toLowerCase();
+  initChain(key);
+
+  let lastErr = null;
 
   for (let i = 0; i < retries; i++) {
-    const provider = getProvider(key);
+    let provider = getProvider(key);
     if (!provider) {
-      console.warn(`⚠️ No live provider for "${key}". Skipping call.`);
-      return null;
+      provider = await selectHealthy(key);
+      if (!provider) {
+        // Chain in cooldown or all endpoints down
+        await sleep(jitter(300 + i * 200));
+        continue;
+      }
     }
 
     try {
-      return await callFn(provider);
+      const result = await promiseWithTimeout(callFn(provider), perCallTimeoutMs, 'rpc call timeout');
+      // mark success
+      const st = chains[key];
+      const ep = st.endpoints[st.pinnedIdx ?? -1];
+      if (ep) {
+        ep.failCount = 0;
+        ep.cooldownUntil = 0;
+        ep.lastOkAt = now();
+      }
+      st.chainCooldownUntil = 0;
+      return result;
     } catch (err) {
+      lastErr = err;
       const msg = err?.info?.responseBody || err?.message || '';
-      const isApeBatchLimit = key === 'ape' && msg.includes('Batch of more than 3 requests');
-      const isForbidden = msg.includes('403') || msg.includes('API key is not allowed');
-      const isLogBlocked = msg.includes("'eth_getLogs' is unavailable");
+      const code = err?.code || 'UNKNOWN_ERROR';
 
-      const failUrl = getProvider(key)?.connection?.url || 'unknown';
-      console.warn(`⚠️ [${key}] RPC Error: ${err.message || err.code || 'unknown'}`);
+      // logging (throttled by rotateProvider/selectHealthy when offline)
+      console.warn(`⚠️ [${key}] RPC Error: ${err.message || code}`);
       if (err?.code) console.warn(`🔍 RPC failure code: ${err.code}`);
+      const current = getProvider(key);
+      const failUrl = current?._rpcUrl || chains[key].endpoints[chains[key].pinnedIdx ?? -1]?.url || 'unknown';
       console.warn(`🔻 RPC failed [${key}]: ${failUrl}`);
 
-      const shouldRotate = (
+      // Special handling: Ape batch limit
+      const isApeBatchLimit = key === 'ape' && msg.includes('Batch of more than 3 requests');
+      if (isApeBatchLimit) {
+        console.warn('⛔ ApeChain batch limit hit — skip batch, no retry');
+        return null;
+      }
+
+      // Rotate on typical transient issues
+      const shouldRotate =
         msg.includes('no response') ||
         msg.includes('429') ||
         msg.includes('timeout') ||
@@ -153,22 +240,18 @@ async function safeRpcCall(chain, callFn, retries = 4) {
         msg.includes('503') ||
         msg.includes('Bad Gateway') ||
         msg.includes('Gateway Time-out') ||
-        isForbidden ||
-        isLogBlocked
-      );
+        msg.includes('API key is not allowed') ||
+        msg.includes("'eth_getLogs' is unavailable");
 
       if (shouldRotate) {
-        if (key === 'ape' && isApeBatchLimit) {
-          console.warn('⛔ ApeChain batch limit hit — skip batch, no retry');
-          return null;
-        }
-
         await rotateProvider(key);
-        await new Promise(res => setTimeout(res, 500));
+        await sleep(jitter(300 + i * 200));
         continue;
       }
 
-      throw err;
+      // unknown / non-rotating error: still try other endpoints
+      await rotateProvider(key);
+      await sleep(jitter(300 + i * 200));
     }
   }
 
@@ -176,9 +259,9 @@ async function safeRpcCall(chain, callFn, retries = 4) {
   return null;
 }
 
-// ✅ Max batch size per chain
+// Max batch size per chain (unchanged)
 function getMaxBatchSize(chain = 'base') {
-  return chain.toLowerCase() === 'ape' ? 3 : 10;
+  return (chain || 'base').toLowerCase() === 'ape' ? 3 : 10;
 }
 
 module.exports = {
@@ -187,6 +270,7 @@ module.exports = {
   safeRpcCall,
   getMaxBatchSize
 };
+
 
 
 
