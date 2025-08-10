@@ -1,6 +1,6 @@
 // commands/matrix.js
 const { SlashCommandBuilder, AttachmentBuilder, EmbedBuilder } = require('discord.js');
-const { createCanvas, loadImage } = require('canvas');
+const { createCanvas, loadImage } = require('@napi-rs/canvas');
 const { Contract, Interface, ethers } = require('ethers');
 const fetch = require('node-fetch');
 
