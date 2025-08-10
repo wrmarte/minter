@@ -29,13 +29,9 @@ const BORDER = '#1f2230';
 const LOG_WINDOW_BASE = Math.max(10000, Number(process.env.MATRIX_LOG_WINDOW_BASE || 200000));
 const LOG_CONCURRENCY = Math.max(1, Number(process.env.MATRIX_LOG_CONCURRENCY || 4));
 
-// Concurrency knobs (env overridable)
-const METADATA_CONCURRENCY = Math.max(4, Number(process.env.MATRIX_METADATA_CONCURRENCY || 12));
-const IMAGE_CONCURRENCY = Math.max(4, Number(process.env.MATRIX_IMAGE_CONCURRENCY || 10));
-
 /* ===================== Keep-Alive Agents ===================== */
-const keepAliveHttp = new http.Agent({ keepAlive: true, maxSockets: 256 });
-const keepAliveHttps = new https.Agent({ keepAlive: true, maxSockets: 256 });
+const keepAliveHttp = new http.Agent({ keepAlive: true, maxSockets: 128 });
+const keepAliveHttps = new https.Agent({ keepAlive: true, maxSockets: 128 });
 
 /* ===================== Small Utils ===================== */
 function padTopicAddress(addr) {
@@ -64,34 +60,8 @@ async function runPool(limit, items, worker) {
   return ret;
 }
 
-/* ===================== LRU caches ===================== */
-function makeLRU(max = 1000, ttlMs = 60*60*1000) {
-  const map = new Map(); // k -> {v, ts}
-  return {
-    get(k) {
-      const t = map.get(k);
-      if (!t) return undefined;
-      if (Date.now() - t.ts > ttlMs) { map.delete(k); return undefined; }
-      // bump recency
-      map.delete(k); map.set(k, { v: t.v, ts: t.ts });
-      return t.v;
-    },
-    set(k, v) {
-      if (map.has(k)) map.delete(k);
-      map.set(k, { v, ts: Date.now() });
-      if (map.size > max) {
-        const first = map.keys().next().value;
-        map.delete(first);
-      }
-    }
-  };
-}
-const URI_CACHE = makeLRU(4000, 6*60*60*1000);      // tokenURI/uri → [urls]
-const META_CACHE = makeLRU(2000, 2*60*60*1000);     // metadata JSON
-const GATE_SCORE = new Map(); // hostname -> score
-
 /* ===================== URL helpers (IPFS, Arweave, data) ===================== */
-const BASE_IPFS_GATES = [
+const IPFS_GATES = [
   'https://cloudflare-ipfs.com/ipfs/',
   'https://ipfs.io/ipfs/',
   'https://dweb.link/ipfs/',
@@ -99,18 +69,9 @@ const BASE_IPFS_GATES = [
   'https://nftstorage.link/ipfs/',
   'https://cf-ipfs.com/ipfs/'
 ];
-function sortGateways(gates) {
-  return [...gates].sort((a, b) => {
-    try {
-      const ha = new URL(a).hostname, hb = new URL(b).hostname;
-      const sa = GATE_SCORE.get(ha) || 0, sb = GATE_SCORE.get(hb) || 0;
-      return sb - sa;
-    } catch { return 0; }
-  });
-}
 function ipfsToHttp(path) {
-  const cidAndPath = path.replace(/^ipfs:\/\//, '');
-  return sortGateways(BASE_IPFS_GATES).map(g => g + cidAndPath);
+  const cidAndPath = path.replace(/^ipfs:\/\//, ''); // CID or CID/path
+  return IPFS_GATES.map(g => g + cidAndPath);
 }
 function arToHttp(u) {
   const id = u.replace(/^ar:\/\//, '');
@@ -138,7 +99,7 @@ function expandImageCandidates(u) {
     const url = new URL(u);
     if ((/ipfs/i).test(url.hostname) && url.pathname.includes('/ipfs/')) {
       const cidPath = url.pathname.slice(url.pathname.indexOf('/ipfs/') + 6);
-      for (const g of sortGateways(BASE_IPFS_GATES)) {
+      for (const g of IPFS_GATES) {
         try { variants.push(new URL(cidPath, g).href); } catch {}
       }
     }
@@ -185,6 +146,7 @@ async function fetchJsonWithFallback(urlOrList, timeoutMs = 8000) {
 }
 
 /* ===================== Deep metadata image extractor ===================== */
+// Recursively collect every plausible image URL from arbitrary metadata shapes
 function collectAllImageCandidates(meta, limit = 40) {
   const out = new Set();
   const seen = new Set();
@@ -204,7 +166,10 @@ function collectAllImageCandidates(meta, limit = 40) {
     visits++;
     if (cur == null) continue;
 
-    if (typeof cur === 'string') { pushUrl(cur); continue; }
+    if (typeof cur === 'string') {
+      pushUrl(cur);
+      continue;
+    }
     if (typeof cur !== 'object') continue;
     if (seen.has(cur)) continue;
     seen.add(cur);
@@ -218,8 +183,13 @@ function collectAllImageCandidates(meta, limit = 40) {
       if (k in cur) pushUrl(cur[k]);
     }
 
-    if (Array.isArray(cur)) { for (const v of cur) queue.push(v); }
-    else { for (const [, v] of Object.entries(cur)) queue.push(v); }
+    if (Array.isArray(cur)) {
+      for (const v of cur) queue.push(v);
+    } else {
+      for (const [, v] of Object.entries(cur)) {
+        queue.push(v);
+      }
+    }
   }
 
   const expanded = [];
@@ -481,10 +451,18 @@ async function fetchOwnerTokens1155Rolling({ chain, contract, owner, maxWant = E
     const chunk = windows.slice(i, i + LOG_CONCURRENCY);
     await Promise.all(chunk.map(async ({ fromBlock, toBlock }) => {
       let sIn = [], sOut = [], bIn = [], bOut = [];
-      try { sIn  = await safeRpcCall(chain, p => p.getLogs({ address: contract.toLowerCase(), topics: [topicSingle, null, null, topicTo],  fromBlock, toBlock })) || []; } catch {}
-      try { sOut = await safeRpcCall(chain, p => p.getLogs({ address: contract.toLowerCase(), topics: [topicSingle, null, topicFrom, null], fromBlock, toBlock })) || []; } catch {}
-      try { bIn  = await safeRpcCall(chain, p => p.getLogs({ address: contract.toLowerCase(), topics: [topicBatch,  null, null, topicTo],  fromBlock, toBlock })) || []; } catch {}
-      try { bOut = await safeRpcCall(chain, p => p.getLogs({ address: contract.toLowerCase(), topics: [topicBatch,  null, topicFrom, null], fromBlock, toBlock })) || []; } catch {}
+      try {
+        sIn  = await safeRpcCall(chain, p => p.getLogs({ address: contract.toLowerCase(), topics: [topicSingle, null, null, topicTo],  fromBlock, toBlock })) || [];
+      } catch {}
+      try {
+        sOut = await safeRpcCall(chain, p => p.getLogs({ address: contract.toLowerCase(), topics: [topicSingle, null, topicFrom, null], fromBlock, toBlock })) || [];
+      } catch {}
+      try {
+        bIn  = await safeRpcCall(chain, p => p.getLogs({ address: contract.toLowerCase(), topics: [topicBatch,  null, null, topicTo],  fromBlock, toBlock })) || [];
+      } catch {}
+      try {
+        bOut = await safeRpcCall(chain, p => p.getLogs({ address: contract.toLowerCase(), topics: [topicBatch,  null, topicFrom, null], fromBlock, toBlock })) || [];
+      } catch {}
 
       for (const log of sIn)  { let parsed; try { parsed = iface.parseLog(log); } catch { continue; } add(parsed.args.id,  parsed.args.value); }
       for (const log of sOut) { let parsed; try { parsed = iface.parseLog(log); } catch { continue; } add(parsed.args.id, -parsed.args.value); }
@@ -498,6 +476,7 @@ async function fetchOwnerTokens1155Rolling({ chain, contract, owner, maxWant = E
       }
       await update();
     }));
+    // cannot early-stop reliably for 1155; need full history to compute balances
   }
 
   const ownedIds = [];
@@ -506,145 +485,81 @@ async function fetchOwnerTokens1155Rolling({ chain, contract, owner, maxWant = E
   return { items: slice, total: ownedIds.length || slice.length };
 }
 
-/* ===================== Multicall3 (batch tokenURI/uri) ===================== */
-const MULTICALL3_ADDRESS = '0xcA11bde05977b3631167028862bE2a173976CA11';
-const MULTICALL3_ABI = [
-  'function aggregate3(tuple(address target, bool allowFailure, bytes callData)[] calls) payable returns (tuple(bool success, bytes returnData)[] returnData)'
-];
-async function batchResolveURIs({ chain, contract, tokenIds, is1155 }) {
-  const provider = getProvider(chain);
-  if (!provider || !tokenIds.length) return {};
-  const iface = new Interface([ is1155 ? 'function uri(uint256) view returns (string)' : 'function tokenURI(uint256) view returns (string)' ]);
-  const mc = new Contract(MULTICALL3_ADDRESS, MULTICALL3_ABI, provider);
-
-  const BATCH = 60;
-  const out = {};
-  for (let i=0; i<tokenIds.length; i+=BATCH) {
-    const chunk = tokenIds.slice(i, i+BATCH);
-    const calls = chunk.map(id => ({
-      target: contract,
-      allowFailure: true,
-      callData: iface.encodeFunctionData(is1155 ? 'uri' : 'tokenURI', [id])
-    }));
-    try {
-      const res = await safeRpcCall(chain, p => mc.connect(p).aggregate3(calls));
-      if (Array.isArray(res)) {
-        for (let j = 0; j < chunk.length; j++) {
-          const id = chunk[j];
-          try {
-            if (res[j]?.success && res[j]?.returnData) {
-              const [uri] = iface.decodeFunctionResult(is1155 ? 'uri' : 'tokenURI', res[j].returnData);
-              if (uri) out[id] = uri;
-            }
-          } catch {}
-        }
-      }
-    } catch {
-      // if the batch fails, fallback to per-call for this chunk
-      for (const id of chunk) {
-        try {
-          const single = await safeRpcCall(chain, p => new Contract(contract, iface.fragments, p).connect(p)[is1155?'uri':'tokenURI'](id));
-          if (single) out[id] = single;
-        } catch {}
-      }
-    }
-  }
-  return out;
-}
-
-/* ===================== Resolve tokenURI / uri (cached) ===================== */
+/* ===================== Resolve tokenURI / uri (ERC721/1155) ===================== */
 function idHex64(tokenId) {
   const bn = BigInt(tokenId);
   return bn.toString(16).padStart(64, '0');
 }
-async function resolveMetadataURIList({ chain, contract, tokenIds, is1155 }) {
-  const keys = tokenIds.map(tid => `${chain}:${contract}:${tid}:${is1155?'1155':'721'}`);
-  const need = [];
-  const result = {};
-
-  for (let i = 0; i < tokenIds.length; i++) {
-    const k = keys[i];
-    const cached = URI_CACHE.get(k);
-    if (cached) result[tokenIds[i]] = cached;
-    else need.push(tokenIds[i]);
+async function resolveMetadataURI({ chain, contract, tokenId, is1155 }) {
+  const provider = getProvider(chain);
+  if (!provider) return null;
+  if (is1155) {
+    const c = new Contract(contract, ['function uri(uint256) view returns (string)'], provider);
+    let uri = await safeRpcCall(chain, p => c.connect(p).uri(tokenId));
+    if (!uri) return null;
+    uri = uri.replace(/\{id\}/gi, idHex64(tokenId)); // ERC1155 {id} substitution
+    return uri.startsWith('ipfs://') ? ipfsToHttp(uri) : [uri];
+  } else {
+    const c = new Contract(contract, ['function tokenURI(uint256) view returns (string)'], provider);
+    const uri = await safeRpcCall(chain, p => c.connect(p).tokenURI(tokenId));
+    if (!uri) return null;
+    return uri.startsWith('ipfs://') ? ipfsToHttp(uri) : [uri];
   }
-  if (!need.length) return result;
-
-  // batch pull raw URIs via multicall
-  const raw = await batchResolveURIs({ chain, contract, tokenIds: need, is1155 });
-  for (const tid of need) {
-    const uri = raw[tid];
-    if (!uri) continue;
-    const list = is1155
-      ? (uri.replace(/\{id\}/gi, idHex64(tid)).startsWith('ipfs://')
-          ? ipfsToHttp(uri.replace(/\{id\}/gi, idHex64(tid)))
-          : [uri.replace(/\{id\}/gi, idHex64(tid))])
-      : (uri.startsWith('ipfs://') ? ipfsToHttp(uri) : [uri]);
-    result[tid] = list;
-    URI_CACHE.set(`${chain}:${contract}:${tid}:${is1155?'1155':'721'}`, list);
-  }
-  return result;
 }
 
-/* ===================== Enrich images (with progress + deep fallback + cache) ===================== */
+/* ===================== Enrich images (with progress + deep fallback) ===================== */
 async function enrichImages({ chain, contract, items, is1155, onProgress }) {
-  // 1) get URIs for all missing
-  const targets = items.filter(it => !it.image).map(it => it.tokenId);
-  const uriMap = await resolveMetadataURIList({ chain, contract, tokenIds: targets, is1155 });
-
-  // 2) fetch metadata (cached) + extract candidates
   let done = 0;
   const upd = () => onProgress?.(++done, items.length);
 
-  const byId = new Map(items.map(it => [String(it.tokenId), it]));
-  await runPool(METADATA_CONCURRENCY, targets, async (tid) => {
-    const it = byId.get(String(tid));
-    const uris = uriMap[tid];
-    if (!uris || it.image) { upd(); return; }
+  const results = await runPool(8, items, async (it) => {
+    if (it.image) { upd(); return it; }
+    try {
+      const uriList = await resolveMetadataURI({ chain, contract, tokenId: it.tokenId, is1155 });
+      if (!uriList) { upd(); return it; }
 
-    const metaKey = `meta:${chain}:${contract}:${tid}`;
-    let meta = META_CACHE.get(metaKey);
-    if (!meta) {
-      // try data: first
-      if (isDataUrl(uris[0])) {
-        const parsed = parseDataUrl(uris[0]);
+      let meta = null;
+      if (isDataUrl(uriList[0])) {
+        const parsed = parseDataUrl(uriList[0]);
         if (parsed && /json/.test(parsed.mime)) {
           try { meta = JSON.parse(parsed.buffer.toString('utf8')); } catch {}
         }
       }
-      if (!meta) meta = await fetchJsonWithFallback(uris);
-      if (meta) META_CACHE.set(metaKey, meta);
-    }
+      if (!meta) meta = await fetchJsonWithFallback(uriList);
 
-    let img =
-      meta?.image ||
-      meta?.image_url ||
-      meta?.imageUrl ||
-      meta?.image_preview_url ||
-      meta?.image_thumbnail_url ||
-      null;
+      let img =
+        meta?.image ||
+        meta?.image_url ||
+        meta?.imageUrl ||
+        meta?.image_preview_url ||
+        meta?.image_thumbnail_url ||
+        null;
 
-    if (!img && typeof meta?.animation_url === 'string' && /\.(gif|png|jpe?g|webp|avif)(\?|$)/i.test(meta.animation_url)) {
-      img = meta.animation_url;
-    }
-    if (!img && typeof meta?.image_data === 'string') {
-      const txt = meta.image_data.trim();
-      if (txt.startsWith('<svg')) img = 'data:image/svg+xml;utf8,' + encodeURIComponent(txt);
-    }
+      if (!img && typeof meta?.animation_url === 'string' && /\.(gif|png|jpe?g|webp|avif)(\?|$)/i.test(meta.animation_url)) {
+        img = meta.animation_url;
+      }
+      if (!img && typeof meta?.image_data === 'string') {
+        const txt = meta.image_data.trim();
+        if (txt.startsWith('<svg')) img = 'data:image/svg+xml;utf8,' + encodeURIComponent(txt);
+      }
 
-    let candidates = [];
-    if (img) {
-      candidates = Array.isArray(img) ? img.flatMap(expandImageCandidates) : expandImageCandidates(img);
-    }
-    if (!candidates.length && meta && typeof meta === 'object') {
-      candidates = collectAllImageCandidates(meta);
-    }
+      let candidates = [];
+      if (img) {
+        candidates = Array.isArray(img) ? img.flatMap(expandImageCandidates) : expandImageCandidates(img);
+      }
+      if (!candidates.length && meta && typeof meta === 'object') {
+        candidates = collectAllImageCandidates(meta);
+      }
 
-    if (candidates.length) byId.set(String(tid), { ...it, image: candidates });
-    upd();
+      upd();
+      return { ...it, image: candidates.length ? candidates : null };
+    } catch {
+      upd();
+      return it;
+    }
   });
 
-  return items.map(it => byId.get(String(it.tokenId)) || it);
+  return results;
 }
 
 /* ===================== Backfill missing images via Reservoir (progress) ===================== */
@@ -708,11 +623,7 @@ async function loadImageWithCandidates(candidates, perTryMs = 8000) {
           loadImage(u),
           new Promise(res => setTimeout(() => res(null), perTryMs))
         ]);
-        if (img && img.width > 0 && img.height > 0) {
-          // gateway scoring (success)
-          try { const host = new URL(u).hostname; GATE_SCORE.set(host, (GATE_SCORE.get(host)||0)+1); } catch {}
-          return img;
-        }
+        if (img && img.width > 0 && img.height > 0) return img;
       }
     } catch {}
   }
@@ -730,17 +641,14 @@ async function loadImageWithCandidates(candidates, perTryMs = 8000) {
       const buf = Buffer.from(ab);
       if (!looksLikeImage(buf)) continue;
       const img = await loadImage(buf);
-      if (img && img.width > 0 && img.height > 0) {
-        try { const host = new URL(u).hostname; GATE_SCORE.set(host, (GATE_SCORE.get(host)||0)+1); } catch {}
-        return img;
-      }
+      if (img && img.width > 0 && img.height > 0) return img;
     } catch {}
   }
   return null;
 }
 async function preloadImages(items, onProgress) {
   let done = 0;
-  const imgs = await runPool(IMAGE_CONCURRENCY, items, async (it) => {
+  const imgs = await runPool(8, items, async (it) => {
     const candidates =
       Array.isArray(it.image) ? it.image :
       (typeof it.image === 'string' ? expandImageCandidates(it.image) : []);
@@ -792,6 +700,14 @@ async function composeGrid(items, preloadedImgs) {
 
     // cover-fit crop with guards
     const scale = Math.max(tile / img.width, tile / img.height);
+    if (!isFinite(scale) || scale <= 0) {
+      ctx.fillStyle = '#161a24'; ctx.fillRect(x, y, tile, tile);
+      ctx.fillStyle = '#c9d3e3';
+      ctx.font = `bold ${Math.max(16, Math.round(tile * 0.16))}px sans-serif`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(`#${items[i]?.tokenId ?? '?'}`, x + tile / 2, y + tile / 2);
+      continue;
+    }
     const sw = Math.max(1, Math.floor(tile / scale));
     const sh = Math.max(1, Math.floor(tile / scale));
     const sx = Math.max(0, Math.floor((img.width  - sw) / 2));
@@ -995,7 +911,7 @@ module.exports = {
       return interaction.editReply(`❌ No ${project.name} NFTs found for \`${ownerDisplay}\` on ${chain}. (Checked ERC721/1155 paths)`);
     }
 
-    // Enrich images (ERC721 tokenURI OR ERC1155 uri with {id}) + progress (batched + cached)
+    // Enrich images (ERC721 tokenURI OR ERC1155 uri with {id}) + progress
     let lastEnPct = -1;
     status.step = 'Enriching images (metadata)…';
     status.enrich = '0% [────────────────]';
@@ -1026,7 +942,7 @@ module.exports = {
       await pushStatus();
     }
 
-    // Image preload with visible percent
+    // Image preload with visible percent (robust loader)
     status.step = `Loading images (${items.length})…`;
     let imgPct = 0;
     status.images = `0% [${bar(0)}]`;
@@ -1050,11 +966,11 @@ module.exports = {
       if (!preloadedImgs[i]) missingIdx.push(i);
     }
     if (missingIdx.length) {
+      // optionally update status here if you want
       await Promise.all(missingIdx.map(async (i) => {
         try {
-          const uriMap = await resolveMetadataURIList({ chain, contract, tokenIds: [items[i].tokenId], is1155: std.is1155 });
-          const uris = uriMap[items[i].tokenId];
-          const meta = uris ? await fetchJsonWithFallback(uris) : null;
+          const uriList = await resolveMetadataURI({ chain, contract, tokenId: items[i].tokenId, is1155: std.is1155 });
+          const meta = uriList ? await fetchJsonWithFallback(uriList) : null;
           const cands = meta ? collectAllImageCandidates(meta) : [];
           if (cands.length) {
             items[i] = { ...items[i], image: cands };
@@ -1090,6 +1006,14 @@ module.exports = {
     finalized = true;
   }
 };
+
+
+
+
+
+
+
+
 
 
 
