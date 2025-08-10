@@ -7,14 +7,13 @@ const { safeRpcCall, getProvider } = require('../services/providerM');
 
 // ---------- Adaptive grid config ----------
 const GRID_PRESETS = [
-  // up toCount, cols, tilePx
   { max: 25,  cols: 5,  tile: 160 },
   { max: 49,  cols: 7,  tile: 120 },
   { max: 64,  cols: 8,  tile: 110 },
   { max: 81,  cols: 9,  tile: 100 },
   { max: 100, cols: 10, tile: 96 }
 ];
-const MAX_AUTO = 100; // max tiles when auto-adapting
+const MAX_AUTO = 100;
 const GAP = 8;
 const BG = '#0f1115';
 const BORDER = '#1f2230';
@@ -47,20 +46,33 @@ async function fetchJsonWithFallback(urlOrList, timeoutMs = 7000) {
   return null;
 }
 
-// ---------- Reservoir (fast path, with continuation) ----------
+// ---------- ENS resolution ----------
+async function resolveWalletInput(input) {
+  // If it's already a valid address, return it
+  try { return ethers.getAddress(input); } catch {}
+  // If it's an ENS name, resolve on Ethereum mainnet
+  if (typeof input === 'string' && input.toLowerCase().endsWith('.eth')) {
+    const prov = getProvider('eth');
+    if (!prov) throw new Error('No ETH provider available to resolve ENS.');
+    const addr = await safeRpcCall('eth', p => p.resolveName(input));
+    if (addr) return ethers.getAddress(addr);
+    throw new Error('ENS name could not be resolved.');
+  }
+  throw new Error('Invalid wallet or ENS name.');
+}
+
+// ---------- Reservoir (fast path) ----------
 async function fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant = MAX_AUTO }) {
+  // Reservoir supports eth + base; skip for ape
   const chainHeader = chain === 'eth' ? 'ethereum' : chain === 'base' ? 'base' : null;
   if (!chainHeader) return { items: [], total: 0 };
 
-  const headers = {
-    'Content-Type': 'application/json',
-    'x-reservoir-chain': chainHeader
-  };
+  const headers = { 'Content-Type': 'application/json', 'x-reservoir-chain': chainHeader };
   if (process.env.RESERVOIR_API_KEY) headers['x-api-key'] = process.env.RESERVOIR_API_KEY;
 
   let continuation = null;
   const items = [];
-  let safety = 6; // up to ~6 pages
+  let safety = 6;
   let total = 0;
 
   while (safety-- > 0 && items.length < maxWant) {
@@ -78,7 +90,9 @@ async function fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant = 
       const json = await res.json();
       const tokens = json?.tokens || [];
       continuation = json?.continuation || null;
-      total = typeof json?.count === 'number' ? json.count : (total || (tokens.length < limit && !continuation ? items.length + tokens.length : 0));
+      total = typeof json?.count === 'number'
+        ? json.count
+        : (total || (tokens.length < limit && !continuation ? items.length + tokens.length : 0));
 
       for (const t of tokens) {
         if (!t?.token?.tokenId) continue;
@@ -95,13 +109,12 @@ async function fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant = 
     }
   }
 
-  // If Reservoir didn’t provide total, use items length as minimum
   if (!total) total = items.length;
   return { items, total };
 }
 
-// ---------- On-chain fallback (window scan) ----------
-async function fetchOwnerTokensOnchainWindow({ chain, contract, owner, maxWant = MAX_AUTO }) {
+// ---------- On-chain fallback: rolling windows (handles Base + Ape) ----------
+async function fetchOwnerTokensOnchainRolling({ chain, contract, owner, maxWant = MAX_AUTO }) {
   const provider = getProvider(chain);
   if (!provider) return { items: [], total: 0 };
 
@@ -110,28 +123,41 @@ async function fetchOwnerTokensOnchainWindow({ chain, contract, owner, maxWant =
     'function tokenURI(uint256 tokenId) view returns (string)'
   ]);
 
-  const latest = await safeRpcCall(chain, p => p.getBlockNumber()) || 0;
-  const fromBlock = Math.max(0, latest - 12000); // ~2–3 hours window
+  const head = await safeRpcCall(chain, p => p.getBlockNumber()) || 0;
 
-  let logs = [];
-  try {
-    logs = await safeRpcCall(chain, p => p.getLogs({
-      address: contract.toLowerCase(),
-      topics: [ethers.id('Transfer(address,address,uint256)')],
-      fromBlock, toBlock: latest
-    })) || [];
-  } catch {}
-
+  // scan backwards in windows until we have enough or hit a limit
+  const WINDOW = 15000;   // ~larger window for Base/Ape stability
+  const MAX_WINDOWS = 10; // scan up to ~150k blocks max
   const owned = new Set();
-  for (const log of logs) {
-    let parsed; try { parsed = iface.parseLog(log); } catch { continue; }
-    const { from, to, tokenId } = parsed.args;
-    const tid = tokenId.toString();
-    if ((to || '').toLowerCase() === owner.toLowerCase()) owned.add(tid);
-    if ((from || '').toLowerCase() === owner.toLowerCase()) owned.delete(tid);
+
+  for (let i = 0; i < MAX_WINDOWS && owned.size < maxWant; i++) {
+    const toBlock = head - i * WINDOW;
+    const fromBlock = Math.max(0, toBlock - WINDOW + 1);
+    if (toBlock <= 0) break;
+
+    let logs = [];
+    try {
+      logs = await safeRpcCall(chain, p => p.getLogs({
+        address: contract.toLowerCase(),
+        topics: [ethers.id('Transfer(address,address,uint256)')],
+        fromBlock, toBlock
+      })) || [];
+    } catch {
+      continue;
+    }
+
+    for (const log of logs) {
+      let parsed; try { parsed = iface.parseLog(log); } catch { continue; }
+      const { from, to, tokenId } = parsed.args;
+      const tid = tokenId.toString();
+      if ((to || '').toLowerCase() === owner.toLowerCase()) owned.add(tid);
+      if ((from || '').toLowerCase() === owner.toLowerCase()) owned.delete(tid);
+    }
   }
+
   const all = Array.from(owned);
   const slice = all.slice(0, maxWant).map(id => ({ tokenId: id, image: null, name: `#${id}` }));
+  // We don’t know the absolute total without a full scan; report at least the count we saw
   return { items: slice, total: all.length || slice.length };
 }
 
@@ -173,12 +199,11 @@ async function downloadImage(url, timeoutMs = 8000) {
   return null;
 }
 
-// ---------- Adaptive grid composition ----------
+// ---------- Adaptive grid ----------
 function pickPreset(count) {
   for (const p of GRID_PRESETS) if (count <= p.max) return p;
   return GRID_PRESETS[GRID_PRESETS.length - 1];
 }
-
 async function composeGrid(items) {
   const count = items.length;
   const preset = pickPreset(count);
@@ -216,14 +241,11 @@ async function composeGrid(items) {
       const buf = await downloadImage(imgUrl);
       if (!buf) throw new Error('img dl fail');
       const img = await loadImage(buf);
-
-      // cover-fit
       const ratio = Math.max(tile / img.width, tile / img.height);
       const w = Math.round(img.width * ratio);
       const h = Math.round(img.height * ratio);
       const ox = Math.floor((w - tile) / 2);
       const oy = Math.floor((h - tile) / 2);
-
       const tmp = createCanvas(w, h);
       const tctx = tmp.getContext('2d');
       tctx.drawImage(img, 0, 0, w, h);
@@ -288,10 +310,10 @@ async function resolveProjectForGuild(pg, client, guildId, projectInput) {
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('matrix')
-    .setDescription('Render a grid of a wallet’s NFTs for a project tracked by this server (auto dense)')
+    .setDescription('Render a grid of a wallet’s NFTs for a project tracked by this server (auto dense, ENS supported)')
     .addStringOption(o =>
       o.setName('wallet')
-        .setDescription('Wallet address (0x...)')
+        .setDescription('Wallet address or ENS (.eth)')
         .setRequired(true)
     )
     .addStringOption(o =>
@@ -335,16 +357,19 @@ module.exports = {
   async execute(interaction) {
     const pg = interaction.client.pg;
     const guildId = interaction.guild?.id;
-    const wallet = interaction.options.getString('wallet');
+    const walletInput = interaction.options.getString('wallet');
     const projectInput = interaction.options.getString('project') || '';
     const userLimit = interaction.options.getInteger('limit') || null;
 
     await interaction.deferReply({ ephemeral: false });
 
-    // validate wallet
+    // ENS or address
     let owner;
-    try { owner = ethers.getAddress(wallet); }
-    catch { return interaction.editReply('❌ Invalid wallet address.'); }
+    try {
+      owner = await resolveWalletInput(walletInput);
+    } catch (e) {
+      return interaction.editReply(`❌ ${e.message}`);
+    }
 
     // resolve project ONLY if tracked by this server
     const { project, error } = await resolveProjectForGuild(pg, interaction.client, guildId, projectInput);
@@ -353,17 +378,21 @@ module.exports = {
     const chain = (project.chain || 'base').toLowerCase();
     const contract = (project.address || '').toLowerCase();
 
-    // Fetch items (Reservoir with paging; fallback to on-chain window)
     const maxWant = Math.min(userLimit || MAX_AUTO, MAX_AUTO);
-    let items = [], totalOwned = 0;
 
-    const resv = await fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant });
-    items = resv.items; totalOwned = resv.total || items.length;
+    // Try Reservoir for ETH/Base; skip on Ape
+    let items = [], totalOwned = 0, usedReservoir = false;
+    if (chain === 'eth' || chain === 'base') {
+      const resv = await fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant });
+      items = resv.items; totalOwned = resv.total || items.length; usedReservoir = items.length > 0;
+    }
 
+    // Fallback: on-chain rolling scan (needed for Ape, also for Base/ETH if API returns nothing)
     if (!items.length) {
-      const onch = await fetchOwnerTokensOnchainWindow({ chain, contract, owner, maxWant });
+      const onch = await fetchOwnerTokensOnchainRolling({ chain, contract, owner, maxWant });
       items = onch.items; totalOwned = onch.total || items.length;
     }
+
     if (!items.length) {
       return interaction.editReply(`❌ No ${project.name} NFTs found for \`${owner}\` on ${chain}.`);
     }
@@ -378,14 +407,22 @@ module.exports = {
     const file = new AttachmentBuilder(gridBuf, { name: `matrix_${project.name}_${owner.slice(0,6)}.png` });
 
     const title = `🧩 ${project.name}`;
-    const desc  = `Owner: \`${owner}\`\nChain: \`${chain}\`\n**Showing ${items.length} of ${totalOwned} owned**`;
+    const descParts = [
+      `Owner: \`${owner}\``,
+      `Chain: \`${chain}\``,
+      `**Showing ${items.length} of ${totalOwned || items.length} owned**`
+    ];
+    if (chain === 'ape' && usedReservoir === false) {
+      // friendly note for ape
+      descParts.push('*(ApeChain via on-chain scan)*');
+    }
 
     const embed = new EmbedBuilder()
       .setTitle(title)
-      .setDescription(desc)
+      .setDescription(descParts.join('\n'))
       .setColor(0x66ccff)
       .setImage(`attachment://${file.name}`)
-      .setFooter({ text: 'Matrix view • Powered by PimpsDev (auto-dense)' })
+      .setFooter({ text: 'Matrix view • Powered by PimpsDev (ENS + auto-dense)' })
       .setTimestamp();
 
     await interaction.editReply({ embeds: [embed], files: [file] });
