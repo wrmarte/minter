@@ -15,7 +15,7 @@ const GRID_PRESETS = [
   { max: 64,  cols: 8,  tile: 110 },
   { max: 81,  cols: 9,  tile: 100 },
   { max: 100, cols: 10, tile: 96 },
-  { max: 144, cols: 12, tile: 84 },   // extra dense if you bump MATRIX_MAX_AUTO
+  { max: 144, cols: 12, tile: 84 },
   { max: 196, cols: 14, tile: 74 },
   { max: 225, cols: 15, tile: 70 },
   { max: 256, cols: 16, tile: 64 },
@@ -53,8 +53,12 @@ async function runPool(limit, items, worker) {
 function padTopicAddress(addr) {
   return '0x' + addr.toLowerCase().replace(/^0x/, '').padStart(40, '0').padStart(64, '0');
 }
+function progressBar(pct, len = 14) {
+  const filled = Math.max(0, Math.min(len, Math.round((pct / 100) * len)));
+  return '█'.repeat(filled) + '░'.repeat(len - filled);
+}
 
-/* ===================== IPFS helpers ===================== */
+/* ===================== IPFS + data: helpers ===================== */
 const IPFS_GATES = [
   'https://cloudflare-ipfs.com/ipfs/',
   'https://ipfs.io/ipfs/',
@@ -66,10 +70,30 @@ function toHttp(url) {
   const cid = url.replace('ipfs://', '');
   return IPFS_GATES.map(g => g + cid);
 }
+function isDataUrl(u) { return typeof u === 'string' && u.startsWith('data:'); }
+function parseDataUrl(u) {
+  try {
+    const m = /^data:([^;,]+)?(?:;charset=[^;,]+)?(;base64)?,(.*)$/i.exec(u);
+    if (!m) return null;
+    const mime = m[1] || 'text/plain';
+    const isB64 = !!m[2];
+    const data = m[3] || '';
+    const buf = isB64 ? Buffer.from(data, 'base64') : Buffer.from(decodeURIComponent(data), 'utf8');
+    return { mime, buffer: buf };
+  } catch { return null; }
+}
 async function fetchJsonWithFallback(urlOrList, timeoutMs = 7000) {
   const urls = Array.isArray(urlOrList) ? urlOrList : [urlOrList];
   for (const u of urls) {
     try {
+      if (isDataUrl(u)) {
+        const parsed = parseDataUrl(u);
+        if (!parsed) continue;
+        if (/json/.test(parsed.mime)) {
+          try { return JSON.parse(parsed.buffer.toString('utf8')); } catch { continue; }
+        }
+        continue;
+      }
       const ctrl = new AbortController();
       const t = setTimeout(() => ctrl.abort(), timeoutMs);
       const agent = u.startsWith('http:') ? keepAliveHttp : keepAliveHttps;
@@ -199,7 +223,6 @@ async function detectEnumerable(chain, contract) {
     return !!ok;
   } catch { return false; }
 }
-
 async function fetchOwnerTokensEnumerable({ chain, contract, owner, maxWant = ENV_MAX }) {
   const provider = getProvider(chain);
   if (!provider) return { items: [], total: 0, enumerable: false };
@@ -220,9 +243,7 @@ async function fetchOwnerTokensEnumerable({ chain, contract, owner, maxWant = EN
         const tid = await safeRpcCall(chain, p => nft.connect(p).tokenOfOwnerByIndex(owner, i));
         if (tid == null) break;
         ids.push(tid.toString());
-      } catch {
-        break;
-      }
+      } catch { break; }
     }
     const items = ids.map(id => ({ tokenId: id, image: null, name: `#${id}` }));
     return { items, total: bal, enumerable: true };
@@ -284,6 +305,7 @@ async function fetchOwnerTokensOnchainRolling({ chain, contract, owner, maxWant 
   return { items: slice, total: all.length || slice.length };
 }
 
+/* ===================== Image enrichment (more fields + data:) ===================== */
 async function enrichImagesViaTokenURI({ chain, contract, items }) {
   const provider = getProvider(chain);
   if (!provider) return items;
@@ -296,16 +318,61 @@ async function enrichImagesViaTokenURI({ chain, contract, items }) {
     try {
       let uri = await safeRpcCall(chain, p => nft.connect(p).tokenURI(it.tokenId));
       if (!uri) { out.push(it); continue; }
-      const meta = await fetchJsonWithFallback(uri.startsWith('ipfs://') ? toHttp(uri) : [uri]);
-      let img = meta?.image;
+
+      // Support data: JSON in tokenURI directly
+      let meta = null;
+      if (isDataUrl(uri)) {
+        const parsed = parseDataUrl(uri);
+        if (parsed && /json/.test(parsed.mime)) {
+          try { meta = JSON.parse(parsed.buffer.toString('utf8')); } catch {}
+        }
+      }
+      if (!meta) {
+        const urlList = uri.startsWith('ipfs://') ? toHttp(uri) : [uri];
+        meta = await fetchJsonWithFallback(urlList);
+      }
+
+      // Grab common fields
+      let img = meta?.image || meta?.image_url || meta?.imageUrl || null;
+
+      // image_data is often inline SVG; we’ll mark as placeholder
+      if (!img && typeof meta?.image_data === 'string') {
+        // stash a reason so placeholder shows "SVG"
+        out.push({ ...it, image: null, __placeholderReason: 'SVG' });
+        continue;
+      }
+
+      // normalize ipfs
       if (img && img.startsWith('ipfs://')) img = toHttp(img)[0];
+
+      // data:image/*;base64 support
+      if (img && isDataUrl(img)) {
+        const parsedImg = parseDataUrl(img);
+        if (parsedImg && /^image\//.test(parsedImg.mime)) {
+          // keep data URL as-is; downloader handles it
+          out.push({ ...it, image: img });
+          continue;
+        }
+        // non-image data => placeholder
+        out.push({ ...it, image: null, __placeholderReason: 'DATA' });
+        continue;
+      }
+
+      // possible SVG URL
+      if (img && /\.svg(\?.*)?$/i.test(img)) {
+        out.push({ ...it, image: null, __placeholderReason: 'SVG' });
+        continue;
+      }
+
       out.push({ ...it, image: img || null });
-    } catch { out.push(it); }
+    } catch {
+      out.push(it);
+    }
   }
   return out;
 }
 
-/* ========= Merge helper (fills from on-chain if Reservoir is partial) ========= */
+/* ========= Merge helper ========= */
 function dedupeByTokenId(list) {
   const seen = new Set();
   const out = [];
@@ -322,6 +389,13 @@ function dedupeByTokenId(list) {
 async function downloadImage(urlOrList, timeoutMs = 8000) {
   const urls = (Array.isArray(urlOrList) ? urlOrList : [urlOrList]).filter(Boolean);
   if (!urls.length) return null;
+
+  // data:image/*;base64 — handle locally
+  if (urls.length === 1 && isDataUrl(urls[0])) {
+    const parsed = parseDataUrl(urls[0]);
+    if (parsed && /^image\//.test(parsed.mime)) return parsed.buffer;
+    return null;
+  }
 
   return await new Promise(async (resolve) => {
     let settled = false;
@@ -385,6 +459,45 @@ async function preloadImages(items, onProgress) {
   return imgs; // index-aligned with items
 }
 
+/* ===================== Placeholder renderer ===================== */
+function drawPlaceholder(ctx, x, y, tile, tokenId, reason = '') {
+  // strong contrast background + subtle pattern
+  ctx.fillStyle = '#1a2236';
+  ctx.fillRect(x, y, tile, tile);
+  ctx.globalAlpha = 0.15;
+  ctx.fillStyle = '#ffffff';
+  for (let i = -tile; i < tile * 2; i += 10) {
+    ctx.fillRect(x + i, y, 2, tile);
+  }
+  ctx.globalAlpha = 1;
+
+  // border
+  ctx.strokeStyle = '#2c3c5c';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(x + 1, y + 1, tile - 2, tile - 2);
+
+  // token label
+  ctx.fillStyle = '#c8d4ff';
+  ctx.font = `bold ${Math.max(16, Math.round(tile * 0.14))}px sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const label = tokenId ? `#${tokenId}` : 'UNKNOWN';
+  ctx.fillText(label, x + tile / 2, y + tile / 2);
+
+  // badge
+  if (reason) {
+    const badge = String(reason).toUpperCase();
+    const padX = 6, padY = 3;
+    ctx.font = `bold ${Math.max(10, Math.round(tile * 0.1))}px sans-serif`;
+    const w = ctx.measureText(badge).width + padX * 2;
+    const h = Math.max(16, Math.round(tile * 0.16));
+    ctx.fillStyle = '#2e8cff';
+    ctx.fillRect(x + tile - w - 8, y + 8, w, h);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(badge, x + tile - w/2 - 8, y + 8 + h/2 + 1);
+  }
+}
+
 /* ===================== Image composition ===================== */
 function pickPreset(count) {
   for (const p of GRID_PRESETS) if (count <= p.max) return p;
@@ -415,11 +528,7 @@ async function composeGrid(items, preloadedImgs) {
 
     const img = preloadedImgs?.[i];
     if (!img) {
-      ctx.fillStyle = '#161a24'; ctx.fillRect(x, y, tile, tile);
-      ctx.fillStyle = '#4b4f63';
-      ctx.font = `bold ${Math.max(14, Math.round(tile * 0.12))}px sans-serif`;
-      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText(`#${items[i].tokenId}`, x + tile / 2, y + tile / 2);
+      drawPlaceholder(ctx, x, y, tile, items[i]?.tokenId, items[i]?.__placeholderReason || 'NO IMG');
       continue;
     }
 
@@ -551,7 +660,8 @@ module.exports = {
       return interaction.editReply(`❌ ${e.message}`);
     }
 
-    await interaction.editReply({ content: '🔎 Fetching tokens…' });
+    // Warn if this might take awhile (deep scans on Base old collections)
+    await interaction.editReply({ content: '🔎 Fetching tokens… *(older Base collections may take a bit — we’ll show progress)*' });
 
     // resolve project ONLY if tracked by this server
     const { project, error } = await resolveProjectForGuild(pg, interaction.client, guildId, projectInput);
@@ -561,7 +671,7 @@ module.exports = {
     const contract = (project.address || '').toLowerCase();
     const maxWant = Math.min(userLimit || ENV_MAX, ENV_MAX);
 
-    // Try Reservoir for ETH/Base (extended pagination)
+    // Try Reservoir for ETH/Base
     let items = [], totalOwned = 0, usedReservoir = false;
     if (chain === 'eth' || chain === 'base') {
       const resv = await fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant });
@@ -570,12 +680,12 @@ module.exports = {
       usedReservoir = items.length > 0;
     }
 
-    // Enumerable fast path (older contracts often have it)
+    // Enumerable fast path
     if (items.length < maxWant) {
       const isEnum = await detectEnumerable(chain, contract);
       if (isEnum) {
+        await interaction.editReply({ content: '🧭 Fetching on-chain (enumerable)…' });
         const en = await fetchOwnerTokensEnumerable({ chain, contract, owner, maxWant });
-        // prefer any images from Reservoir, merge by tokenId
         const byId = new Map(items.map(it => [String(it.tokenId), it]));
         for (const it of en.items) {
           const k = String(it.tokenId);
@@ -586,10 +696,14 @@ module.exports = {
       }
     }
 
-    // Owner-indexed deep log scan (covers very old Base holdings)
+    // Owner-indexed deep log scan (older Base holdings)
     if (items.length < maxWant) {
-      const onch = await fetchOwnerTokensOnchainRolling({ chain, contract, owner, maxWant, deep: chain === 'base' });
-      // merge & dedupe by tokenId, prefer images we already have
+      const deep = chain === 'base';
+      await interaction.editReply({ content: deep
+        ? '🕳️ Deep scan enabled for Base (walking old logs)…'
+        : '📜 Scanning transfer logs…'
+      });
+      const onch = await fetchOwnerTokensOnchainRolling({ chain, contract, owner, maxWant, deep });
       const byId = new Map(items.map(it => [String(it.tokenId), it]));
       for (const it of onch.items) {
         const key = String(it.tokenId);
@@ -599,24 +713,21 @@ module.exports = {
       totalOwned = Math.max(totalOwned, onch.total || 0, items.length);
     }
 
-    // Final fallback: if still nothing
     if (!items.length) {
       return interaction.editReply(`❌ No ${project.name} NFTs found for \`${ownerDisplay}\` on ${chain}.`);
     }
 
-    // Enrich images if needed
-    if (items.some(i => !i.image)) {
-      items = await enrichImagesViaTokenURI({ chain, contract, items });
-    }
+    // Enrich images if needed (also tags SVG/DATA for placeholder)
+    items = await enrichImagesViaTokenURI({ chain, contract, items });
 
     // Progress updates during image preloading
-    const throttled = throttle(1200);
-    await interaction.editReply({ content: `🖼️ Rendering ${items.length} tiles… 0%` });
+    const throttled = throttle(1100);
+    await interaction.editReply({ content: `🖼️ Rendering ${items.length} tiles… 0%  [${progressBar(0)}]` });
 
     const preloadedImgs = await preloadImages(items, async (done, total) => {
       const pct = Math.max(0, Math.min(100, Math.floor((done / total) * 100)));
       await throttled(async () => {
-        await interaction.editReply({ content: `🖼️ Rendering ${total} tiles… ${pct}%` });
+        await interaction.editReply({ content: `🖼️ Rendering ${total} tiles… ${pct}%  [${progressBar(pct)}]` });
       });
     });
 
@@ -636,7 +747,7 @@ module.exports = {
       .setDescription(desc)
       .setColor(0x66ccff)
       .setImage(`attachment://${file.name}`)
-      .setFooter({ text: `Matrix view • Powered by PimpsDev` })
+      .setFooter({ text: `Matrix view • Powered by PimpsDev (SVG/data placeholders rendered, progress shown)` })
       .setTimestamp();
 
     await interaction.editReply({ content: null, embeds: [embed], files: [file] });
