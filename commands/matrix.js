@@ -65,7 +65,8 @@ const IPFS_GATES = [
   'https://ipfs.io/ipfs/',
   'https://dweb.link/ipfs/',
   'https://gateway.pinata.cloud/ipfs/',
-  'https://nftstorage.link/ipfs/'
+  'https://nftstorage.link/ipfs/',
+  'https://cf-ipfs.com/ipfs/'
 ];
 function toHttp(url) {
   if (!url || typeof url !== 'string') return url;
@@ -79,8 +80,7 @@ function expandImageCandidates(u) {
   const variants = [u];
   try {
     const url = new URL(u);
-    // if already a gateway, add alternates
-    if (/ipfs/.test(url.hostname) && url.pathname.includes('/ipfs/')) {
+    if ((/ipfs/i).test(url.hostname) && url.pathname.includes('/ipfs/')) {
       const cidPath = url.pathname.slice(url.pathname.indexOf('/ipfs/') + 6);
       for (const g of IPFS_GATES) {
         try { variants.push(new URL(cidPath, g).href); } catch {}
@@ -101,23 +101,21 @@ function parseDataUrl(u) {
     return { mime, buffer: buf };
   } catch { return null; }
 }
-// very light magic-bytes check for common image types
+// lightweight magic-bytes check
 function looksLikeImage(buf) {
   if (!Buffer.isBuffer(buf) || buf.length < 8) return false;
   const sig = buf.slice(0, 12).toString('hex');
-  // PNG, JPG, GIF, WEBP
-  if (buf.slice(0,8).equals(Buffer.from([0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A]))) return true;
-  if (buf.slice(0,3).equals(Buffer.from([0xFF,0xD8,0xFF]))) return true;
-  if (buf.slice(0,3).equals(Buffer.from([0x47,0x49,0x46]))) return true;
-  if (sig.startsWith('52494646') && sig.includes('57454250')) return true; // RIFF....WEBP
-  // SVG (starts with "<svg" or xml decl)
-  const head = buf.slice(0, 256).toString('utf8').trim().toLowerCase();
+  if (buf.slice(0,8).equals(Buffer.from([0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A]))) return true; // PNG
+  if (buf.slice(0,3).equals(Buffer.from([0xFF,0xD8,0xFF]))) return true; // JPG
+  if (buf.slice(0,3).equals(Buffer.from([0x47,0x49,0x46]))) return true; // GIF
+  if (sig.startsWith('52494646') && sig.includes('57454250')) return true; // WEBP
+  const head = buf.slice(0, 256).toString('utf8').trim().toLowerCase(); // SVG/XML
   if (head.startsWith('<svg') || head.startsWith('<?xml')) return true;
   return false;
 }
 
 /* ===================== ENS resolution (with fallbacks) ===================== */
-const ENS_CACHE = new Map(); // name -> { addr, ts }
+const ENS_CACHE = new Map();
 const ENS_RPC_FALLBACKS = [
   'https://cloudflare-eth.com',
   'https://rpc.ankr.com/eth',
@@ -149,7 +147,6 @@ async function tryResolveWithFallbacks(name) {
   }
   return null;
 }
-/** Returns { address, display } where display is the original ENS if provided */
 async function resolveWalletInput(input) {
   try { return { address: ethers.getAddress(input), display: null }; } catch {}
   if (typeof input === 'string' && input.toLowerCase().endsWith('.eth')) {
@@ -217,9 +214,7 @@ async function fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant = 
         if (items.length >= maxWant) break;
       }
       if (!continuation || tokens.length === 0) break;
-    } catch {
-      break;
-    }
+    } catch { break; }
   }
 
   if (!total) total = items.length;
@@ -232,7 +227,7 @@ async function detectEnumerable(chain, contract) {
   if (!provider) return false;
   const erc165 = new Contract(contract, ['function supportsInterface(bytes4) view returns (bool)'], provider);
   try {
-    const ok = await safeRpcCall(chain, p => erc165.connect(p).supportsInterface('0x780e9d63')); // ERC721Enumerable
+    const ok = await safeRpcCall(chain, p => erc165.connect(p).supportsInterface('0x780e9d63'));
     return !!ok;
   } catch { return false; }
 }
@@ -298,31 +293,15 @@ async function fetchOwnerTokensOnchainRolling({ chain, contract, owner, maxWant 
     await Promise.all(chunk.map(async ({ fromBlock, toBlock }) => {
       let inLogs = [], outLogs = [];
       try {
-        inLogs = await safeRpcCall(chain, p => p.getLogs({
-          address: contract.toLowerCase(),
-          topics: [topic0, null, topicTo],
-          fromBlock, toBlock
-        })) || [];
+        inLogs = await safeRpcCall(chain, p => p.getLogs({ address: contract.toLowerCase(), topics: [topic0, null, topicTo], fromBlock, toBlock })) || [];
       } catch {}
       try {
-        outLogs = await safeRpcCall(chain, p => p.getLogs({
-          address: contract.toLowerCase(),
-          topics: [topic0, topicFrom, null],
-          fromBlock, toBlock
-        })) || [];
+        outLogs = await safeRpcCall(chain, p => p.getLogs({ address: contract.toLowerCase(), topics: [topic0, topicFrom, null], fromBlock, toBlock })) || [];
       } catch {}
-
-      for (const log of inLogs) {
-        let parsed; try { parsed = iface.parseLog(log); } catch { continue; }
-        owned.add(parsed.args.tokenId.toString());
-      }
-      for (const log of outLogs) {
-        let parsed; try { parsed = iface.parseLog(log); } catch { continue; }
-        owned.delete(parsed.args.tokenId.toString());
-      }
+      for (const log of inLogs) { let parsed; try { parsed = iface.parseLog(log); } catch { continue; } owned.add(parsed.args.tokenId.toString()); }
+      for (const log of outLogs) { let parsed; try { parsed = iface.parseLog(log); } catch { continue; } owned.delete(parsed.args.tokenId.toString()); }
       await update();
     }));
-
     if (!deep && owned.size >= maxWant) break;
   }
 
@@ -367,12 +346,9 @@ async function enrichImagesViaTokenURI({ chain, contract, items, onProgress }) {
         meta?.image_thumbnail_url ||
         null;
 
-      // fall back to animation_url if it’s a static image (gif/webp/png/img)
-      if (!img && typeof meta?.animation_url === 'string' && /\.(gif|png|jpe?g|webp)(\?|$)/i.test(meta.animation_url)) {
+      if (!img && typeof meta?.animation_url === 'string' && /\.(gif|png|jpe?g|webp|avif)(\?|$)/i.test(meta.animation_url)) {
         img = meta.animation_url;
       }
-
-      // image_data: inline svg/html; convert to data URL so downloader can try
       if (!img && typeof meta?.image_data === 'string') {
         const txt = meta.image_data.trim();
         if (txt.startsWith('<svg')) img = 'data:image/svg+xml;utf8,' + encodeURIComponent(txt);
@@ -393,7 +369,7 @@ async function enrichImagesViaTokenURI({ chain, contract, items, onProgress }) {
   return results;
 }
 
-/* ===================== EXTRA: Backfill missing images via Reservoir batch (with progress) ===================== */
+/* ===================== Backfill missing images via Reservoir batch (with progress) ===================== */
 async function backfillImagesFromReservoir({ chain, contract, items, onProgress }) {
   const chainHeader = chain === 'eth' ? 'ethereum' : chain === 'base' ? 'base' : null;
   if (!chainHeader) return items;
@@ -423,11 +399,7 @@ async function backfillImagesFromReservoir({ chain, contract, items, onProgress 
       const arr = json?.tokens || [];
       for (const r of arr) {
         const id = `${(r?.token?.contract || contract).toLowerCase()}:${r?.token?.tokenId}`;
-        const img =
-          r?.token?.image ||
-          r?.token?.media?.original ||
-          r?.token?.media?.imageUrl ||
-          null;
+        const img = r?.token?.image || r?.token?.media?.original || r?.token?.media?.imageUrl || null;
         if (img) images.set(id, img);
       }
     } catch {}
@@ -444,7 +416,7 @@ async function backfillImagesFromReservoir({ chain, contract, items, onProgress 
   });
 }
 
-/* ===================== Faster image path ===================== */
+/* ===================== Robust image loading ===================== */
 async function downloadImage(urlOrList, timeoutMs = 9000) {
   const urls = (Array.isArray(urlOrList) ? urlOrList : [urlOrList]).filter(Boolean);
   if (!urls.length) return null;
@@ -483,10 +455,7 @@ async function downloadImage(urlOrList, timeoutMs = 9000) {
       fetch(u, {
         signal: ctrl.signal,
         agent,
-        headers: {
-          'Accept': 'image/*',
-          'User-Agent': 'MatrixBot/1.0 (+discord)'
-        }
+        headers: { 'Accept': 'image/*', 'User-Agent': 'MatrixBot/1.0 (+discord)' }
       })
         .then(async res => {
           if (!res.ok) return null;
@@ -496,32 +465,44 @@ async function downloadImage(urlOrList, timeoutMs = 9000) {
           if (ct && !ct.startsWith('image/') && !looksLikeImage(buf)) return null;
           return buf;
         })
-        .then(buf => {
-          if (buf) onDone(buf);
-          else if (--remaining === 0) onDone(null);
-        })
-        .catch(() => {
-          if (--remaining === 0) onDone(null);
-        });
+        .then(buf => { if (buf) onDone(buf); else if (--remaining === 0) onDone(null); })
+        .catch(() => { if (--remaining === 0) onDone(null); });
     });
   });
 }
+
+// Try decode via buffer first, then fall back to loadImage(URL) with a timeout per candidate.
+async function loadImageWithCandidates(candidates, perTryMs = 6000) {
+  // 1) buffer route (fast, with parallel IPFS races)
+  const buf = await downloadImage(candidates, perTryMs);
+  if (buf) {
+    try {
+      const img = await loadImage(buf);
+      if (img && img.width > 0 && img.height > 0) return img;
+    } catch {}
+  }
+  // 2) URL route (some CDNs behave better with direct URL decoding)
+  for (const u of candidates) {
+    try {
+      const img = await Promise.race([
+        loadImage(u),
+        new Promise(res => setTimeout(() => res(null), perTryMs))
+      ]);
+      if (img && img.width > 0 && img.height > 0) return img;
+    } catch {}
+  }
+  return null;
+}
+
 async function preloadImages(items, onProgress) {
   let done = 0;
-  const bufs = await runPool(8, items, async (it) => {
-    if (!it.image) { done++; onProgress?.(done, items.length); return null; }
-    const src = Array.isArray(it.image) ? it.image : expandImageCandidates(it.image);
-    const buf = await downloadImage(src);
+  const imgs = await runPool(8, items, async (it) => {
+    const candidates = Array.isArray(it.image) ? it.image : expandImageCandidates(it.image);
+    const img = candidates && candidates.length ? await loadImageWithCandidates(candidates) : null;
     done++; onProgress?.(done, items.length);
-    return buf;
+    return img;
   });
-
-  const imgs = await runPool(8, bufs, async (buf) => {
-    if (!buf) return null;
-    try { return await loadImage(buf); } catch { return null; }
-  });
-
-  return imgs; // index-aligned with items
+  return imgs;
 }
 
 /* ===================== Image composition ===================== */
@@ -553,11 +534,11 @@ async function composeGrid(items, preloadedImgs) {
     ctx.fillRect(x - 1, y - 1, tile + 2, tile + 2);
 
     const img = preloadedImgs?.[i];
-    if (!img) {
-      // fallback: simple token number tile (no “placeholder” badge)
+    if (!img || !img.width || !img.height) {
+      // token # tile (no badge)
       ctx.fillStyle = '#161a24'; ctx.fillRect(x, y, tile, tile);
-      ctx.fillStyle = '#9aa3b2';
-      ctx.font = `bold ${Math.max(16, Math.round(tile * 0.14))}px sans-serif`;
+      ctx.fillStyle = '#c9d3e3';
+      ctx.font = `bold ${Math.max(16, Math.round(tile * 0.16))}px sans-serif`;
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillText(`#${items[i]?.tokenId ?? '?'}`, x + tile / 2, y + tile / 2);
       continue;
@@ -565,12 +546,20 @@ async function composeGrid(items, preloadedImgs) {
 
     // cover-fit crop
     const scale = Math.max(tile / img.width, tile / img.height);
-    const sw = Math.floor(tile / scale);
-    const sh = Math.floor(tile / scale);
-    const sx = Math.floor((img.width  - sw) / 2);
-    const sy = Math.floor((img.height - sh) / 2);
+    if (!isFinite(scale) || scale <= 0) {
+      ctx.fillStyle = '#161a24'; ctx.fillRect(x, y, tile, tile);
+      ctx.fillStyle = '#c9d3e3';
+      ctx.font = `bold ${Math.max(16, Math.round(tile * 0.16))}px sans-serif`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(`#${items[i]?.tokenId ?? '?'}`, x + tile / 2, y + tile / 2);
+      continue;
+    }
+    const sw = Math.max(1, Math.floor(tile / scale));
+    const sh = Math.max(1, Math.floor(tile / scale));
+    const sx = Math.max(0, Math.floor((img.width  - sw) / 2));
+    const sy = Math.max(0, Math.floor((img.height - sh) / 2));
 
-    ctx.drawImage(img, sx, sy, sw, sh, x, y, tile, tile);
+    ctx.drawImage(img, sx, sy, Math.min(sw, img.width), Math.min(sh, img.height), x, y, tile, tile);
   }
 
   return canvas.toBuffer('image/png');
@@ -593,11 +582,7 @@ async function getGuildTrackedProjects(pg, client, guildId) {
       if (ch?.guildId === guildId) { trackedHere = true; break; }
     }
     if (trackedHere) {
-      out.push({
-        name: row.name,
-        address: (row.address || '').toLowerCase(),
-        chain: (row.chain || 'base').toLowerCase()
-      });
+      out.push({ name: row.name, address: (row.address || '').toLowerCase(), chain: (row.chain || 'base').toLowerCase() });
     }
   }
   return out;
@@ -626,24 +611,9 @@ module.exports = {
   data: new SlashCommandBuilder()
     .setName('matrix')
     .setDescription('Render a grid of a wallet’s NFTs for a project tracked by this server (ENS + auto-dense)')
-    .addStringOption(o =>
-      o.setName('wallet')
-        .setDescription('Wallet address or ENS (.eth)')
-        .setRequired(true)
-    )
-    .addStringOption(o =>
-      o.setName('project')
-        .setDescription('Project (only from this server’s tracked list)')
-        .setRequired(false)
-        .setAutocomplete(true)
-    )
-    .addIntegerOption(o =>
-      o.setName('limit')
-        .setDescription(`Max tiles (auto up to ${ENV_MAX} if omitted)`)
-        .setMinValue(1)
-        .setMaxValue(ENV_MAX)
-        .setRequired(false)
-    ),
+    .addStringOption(o => o.setName('wallet').setDescription('Wallet address or ENS (.eth)').setRequired(true))
+    .addStringOption(o => o.setName('project').setDescription('Project (only from this server’s tracked list)').setRequired(false).setAutocomplete(true))
+    .addIntegerOption(o => o.setName('limit').setDescription(`Max tiles (auto up to ${ENV_MAX} if omitted)`).setMinValue(1).setMaxValue(ENV_MAX).setRequired(false)),
 
   async autocomplete(interaction) {
     const pg = interaction.client.pg;
@@ -680,19 +650,10 @@ module.exports = {
 
     // Safe editor that won’t crash if the message is finalized
     let finalized = false;
-    const safeEdit = async (payload) => {
-      if (finalized) return;
-      try { await interaction.editReply(payload); } catch (_) { /* ignore */ }
-    };
+    const safeEdit = async (payload) => { if (finalized) return; try { await interaction.editReply(payload); } catch {} };
 
     // Live status updater
-    let status = {
-      step: 'Resolving wallet…',
-      scan: '',
-      enrich: '',
-      backfill: '',
-      images: '0%',
-    };
+    let status = { step: 'Resolving wallet…', scan: '', enrich: '', backfill: '', images: '0%' };
     const pushStatus = async () => {
       const lines = [
         `Wallet: ${status.step}`,
@@ -713,9 +674,7 @@ module.exports = {
       const resolved = await resolveWalletInput(walletInput);
       owner = resolved.address;
       ownerDisplay = resolved.display || owner;
-    } catch (e) {
-      return interaction.editReply(`❌ ${e.message}`);
-    }
+    } catch (e) { return interaction.editReply(`❌ ${e.message}`); }
 
     status.step = 'Fetching tokens (API)…';
     await pushStatus();
@@ -745,16 +704,13 @@ module.exports = {
         await pushStatus();
         const en = await fetchOwnerTokensEnumerable({ chain, contract, owner, maxWant });
         const byId = new Map(items.map(it => [String(it.tokenId), it]));
-        for (const it of en.items) {
-          const k = String(it.tokenId);
-          if (!byId.has(k)) byId.set(k, it);
-        }
+        for (const it of en.items) { const k = String(it.tokenId); if (!byId.has(k)) byId.set(k, it); }
         items = Array.from(byId.values()).slice(0, maxWant);
         totalOwned = Math.max(totalOwned, en.total || 0, items.length);
       }
     }
 
-    // Owner-indexed deep log scan (older Base holdings), parallel windows + progress
+    // Owner-indexed deep log scan
     if (items.length < maxWant) {
       let lastPct = -1;
       status.step = chain === 'base' ? 'Deep scan (Base)…' : 'Scanning logs…';
@@ -763,28 +719,20 @@ module.exports = {
 
       const onScanProgress = async (done, total) => {
         const pct = clamp(Math.floor((done/total)*100), 0, 100);
-        if (pct === lastPct) return;
-        lastPct = pct;
-        status.scan = `${pct}% [${bar(pct)}]`;
-        await pushStatus();
+        if (pct !== lastPct) { lastPct = pct; status.scan = `${pct}% [${bar(pct)}]`; await pushStatus(); }
       };
       const onch = await fetchOwnerTokensOnchainRolling({ chain, contract, owner, maxWant, deep: chain === 'base', onProgress: onScanProgress });
       const byId = new Map(items.map(it => [String(it.tokenId), it]));
-      for (const it of onch.items) {
-        const key = String(it.tokenId);
-        if (!byId.has(key)) byId.set(key, it);
-      }
+      for (const it of onch.items) { const key = String(it.tokenId); if (!byId.has(key)) byId.set(key, it); }
       items = Array.from(byId.values()).slice(0, maxWant);
       totalOwned = Math.max(totalOwned, onch.total || 0, items.length);
       status.scan = 'done';
       await pushStatus();
     }
 
-    if (!items.length) {
-      return interaction.editReply(`❌ No ${project.name} NFTs found for \`${ownerDisplay}\` on ${chain}.`);
-    }
+    if (!items.length) return interaction.editReply(`❌ No ${project.name} NFTs found for \`${ownerDisplay}\` on ${chain}.`);
 
-    // Enrich images via tokenURI (parallel) with progress
+    // Enrich images via tokenURI (progress)
     let lastEnPct = -1;
     status.step = 'Enriching images (tokenURI)…';
     status.enrich = '0% [────────────────]';
@@ -793,38 +741,29 @@ module.exports = {
       chain, contract, items,
       onProgress: async (done, total) => {
         const pct = clamp(Math.floor((done/total)*100), 0, 100);
-        if (pct === lastEnPct) return;
-        lastEnPct = pct;
-        status.enrich = `${pct}% [${bar(pct)}]`;
-        await pushStatus();
+        if (pct !== lastEnPct) { lastEnPct = pct; status.enrich = `${pct}% [${bar(pct)}]`; await pushStatus(); }
       }
     });
 
-    // Backfill missing images via Reservoir token batch (ETH/Base) with progress
+    // Backfill missing images via Reservoir (progress)
     if (items.some(i => !i.image) && (chain === 'eth' || chain === 'base')) {
       let lastBF = -1;
       status.step = 'Backfilling images (Reservoir)…';
       status.backfill = '0% [────────────────]';
       await pushStatus();
       const totalMissing = items.filter(i => !i.image).length;
-      let bfDone = 0;
       items = await backfillImagesFromReservoir({
         chain, contract, items,
-        onProgress: async (done, total) => {
-          // normalize to real number of missing if API deduped
-          bfDone = Math.min(done, totalMissing);
-          const pct = totalMissing ? clamp(Math.floor((bfDone/totalMissing)*100), 0, 100) : 100;
-          if (pct === lastBF) return;
-          lastBF = pct;
-          status.backfill = `${pct}% [${bar(pct)}]`;
-          await pushStatus();
+        onProgress: async (done /* chunk count */, total) => {
+          const pct = totalMissing ? clamp(Math.floor((Math.min(done, totalMissing)/totalMissing)*100), 0, 100) : 100;
+          if (pct !== lastBF) { lastBF = pct; status.backfill = `${pct}% [${bar(pct)}]`; await pushStatus(); }
         }
       });
       status.backfill = 'done';
       await pushStatus();
     }
 
-    // Image preload with visible percent
+    // Image preload with visible percent (robust loader)
     status.step = `Loading images (${items.length})…`;
     let imgPct = 0;
     status.images = `0% [${bar(0)}]`;
@@ -833,11 +772,17 @@ module.exports = {
     const preloadedImgs = await preloadImages(items, (done, total) => {
       imgPct = clamp(Math.floor((done/total)*100), 0, 100);
       status.images = `${imgPct}% [${bar(imgPct)}]`;
-      // fire-and-forget update to keep it snappy
-      pushStatus();
+      // fire-and-forget update
+      (async () => { await safeEdit({ content: statusBlock([
+        `Wallet: ${status.step}`,
+        status.scan && `Scan:     ${status.scan}`,
+        status.enrich && `Metadata: ${status.enrich}`,
+        status.backfill && `Backfill: ${status.backfill}`,
+        `Images:   ${status.images}`
+      ].filter(Boolean)) }); })();
     });
 
-    // Compose grid (if an image is still missing/unsupported, show clean token # tile)
+    // Compose grid
     const gridBuf = await composeGrid(items, preloadedImgs);
     const file = new AttachmentBuilder(gridBuf, { name: `matrix_${project.name}_${owner.slice(0,6)}.png` });
 
@@ -860,6 +805,7 @@ module.exports = {
     finalized = true;
   }
 };
+
 
 
 
