@@ -35,6 +35,7 @@ const keepAliveHttps = new https.Agent({ keepAlive: true, maxSockets: 128 });
 
 /* ===================== Small Utils ===================== */
 function padTopicAddress(addr) {
+  // 32-byte left-padded address topic
   return '0x' + addr.toLowerCase().replace(/^0x/, '').padStart(64, '0');
 }
 function clamp(n, a, b){ return Math.max(a, Math.min(b, n)); }
@@ -69,7 +70,7 @@ const IPFS_GATES = [
   'https://cf-ipfs.com/ipfs/'
 ];
 function ipfsToHttp(path) {
-  const cidAndPath = path.replace(/^ipfs:\/\//, '');
+  const cidAndPath = path.replace(/^ipfs:\/\//, ''); // CID or CID/path
   return IPFS_GATES.map(g => g + cidAndPath);
 }
 function arToHttp(u) {
@@ -92,7 +93,6 @@ function expandImageCandidates(u) {
   if (!u || typeof u !== 'string') return [];
   if (isDataUrl(u)) return [u];
   if (u.startsWith('ipfs://')) return ipfsToHttp(u);
-  if (u.startsWith('ipfs:/')) return ipfsToHttp('ipfs://' + u.split('ipfs:/').pop());
   if (u.startsWith('ar://')) return arToHttp(u);
   const variants = [u];
   try {
@@ -143,6 +143,63 @@ async function fetchJsonWithFallback(urlOrList, timeoutMs = 8000) {
     } catch {}
   }
   return null;
+}
+
+/* ===================== Deep metadata image extractor ===================== */
+// Recursively collect every plausible image URL from arbitrary metadata shapes
+function collectAllImageCandidates(meta, limit = 40) {
+  const out = new Set();
+  const seen = new Set();
+  const queue = [meta];
+  let visits = 0;
+
+  const pushUrl = (u) => {
+    if (!u || typeof u !== 'string') return;
+    if (u.startsWith('data:image')) { out.add(u); return; }
+    if (u.startsWith('ipfs://') || u.startsWith('ar://') || u.startsWith('http://') || u.startsWith('https://')) {
+      out.add(u);
+    }
+  };
+
+  while (queue.length && out.size < limit && visits < 5000) {
+    const cur = queue.shift();
+    visits++;
+    if (cur == null) continue;
+
+    if (typeof cur === 'string') {
+      pushUrl(cur);
+      continue;
+    }
+    if (typeof cur !== 'object') continue;
+    if (seen.has(cur)) continue;
+    seen.add(cur);
+
+    const prioritize = [
+      'image','image_url','imageUrl','imageURI','image_uri',
+      'imagePreviewUrl','image_preview_url','thumbnail','thumbnail_url',
+      'displayUri','artifactUri','animation_url','content','uri','url','src'
+    ];
+    for (const k of prioritize) {
+      if (k in cur) pushUrl(cur[k]);
+    }
+
+    if (Array.isArray(cur)) {
+      for (const v of cur) queue.push(v);
+    } else {
+      for (const [, v] of Object.entries(cur)) {
+        queue.push(v);
+      }
+    }
+  }
+
+  const expanded = [];
+  for (const u of out) {
+    if (isDataUrl(u)) { expanded.push(u); continue; }
+    if (u.startsWith('ipfs://')) { expanded.push(...ipfsToHttp(u)); continue; }
+    if (u.startsWith('ar://')) { expanded.push(...arToHttp(u)); continue; }
+    expanded.push(u);
+  }
+  return Array.from(new Set(expanded));
 }
 
 /* ===================== ENS resolution ===================== */
@@ -258,7 +315,7 @@ async function detectTokenStandard(chain, contract) {
     const s721  = await safeRpcCall(chain, p => erc165.connect(p).supportsInterface('0x80ac58cd')); // ERC721
     const s1155 = await safeRpcCall(chain, p => erc165.connect(p).supportsInterface('0xd9b67a26')); // ERC1155
     out.is721 = !!s721;
-    out.is1155 = !!s1155 && !s721; // prefer explicit split
+    out.is1155 = !!s1155 && !s721;
   } catch {}
   return out;
 }
@@ -419,7 +476,7 @@ async function fetchOwnerTokens1155Rolling({ chain, contract, owner, maxWant = E
       }
       await update();
     }));
-    // we can't early-stop reliably; continue to accumulate
+    // cannot early-stop reliably for 1155; need full history to compute balances
   }
 
   const ownedIds = [];
@@ -433,7 +490,6 @@ function idHex64(tokenId) {
   const bn = BigInt(tokenId);
   return bn.toString(16).padStart(64, '0');
 }
-
 async function resolveMetadataURI({ chain, contract, tokenId, is1155 }) {
   const provider = getProvider(chain);
   if (!provider) return null;
@@ -441,8 +497,7 @@ async function resolveMetadataURI({ chain, contract, tokenId, is1155 }) {
     const c = new Contract(contract, ['function uri(uint256) view returns (string)'], provider);
     let uri = await safeRpcCall(chain, p => c.connect(p).uri(tokenId));
     if (!uri) return null;
-    // {id} substitution per ERC1155 metadata standard
-    uri = uri.replace(/\{id\}/gi, idHex64(tokenId));
+    uri = uri.replace(/\{id\}/gi, idHex64(tokenId)); // ERC1155 {id} substitution
     return uri.startsWith('ipfs://') ? ipfsToHttp(uri) : [uri];
   } else {
     const c = new Contract(contract, ['function tokenURI(uint256) view returns (string)'], provider);
@@ -452,7 +507,7 @@ async function resolveMetadataURI({ chain, contract, tokenId, is1155 }) {
   }
 }
 
-/* ===================== Enrich images (with progress) ===================== */
+/* ===================== Enrich images (with progress + deep fallback) ===================== */
 async function enrichImages({ chain, contract, items, is1155, onProgress }) {
   let done = 0;
   const upd = () => onProgress?.(++done, items.length);
@@ -464,7 +519,6 @@ async function enrichImages({ chain, contract, items, is1155, onProgress }) {
       if (!uriList) { upd(); return it; }
 
       let meta = null;
-      // try data: first among list
       if (isDataUrl(uriList[0])) {
         const parsed = parseDataUrl(uriList[0]);
         if (parsed && /json/.test(parsed.mime)) {
@@ -490,8 +544,12 @@ async function enrichImages({ chain, contract, items, is1155, onProgress }) {
       }
 
       let candidates = [];
-      if (Array.isArray(img)) candidates = img.flatMap(expandImageCandidates);
-      else if (typeof img === 'string') candidates = expandImageCandidates(img);
+      if (img) {
+        candidates = Array.isArray(img) ? img.flatMap(expandImageCandidates) : expandImageCandidates(img);
+      }
+      if (!candidates.length && meta && typeof meta === 'object') {
+        candidates = collectAllImageCandidates(meta);
+      }
 
       upd();
       return { ...it, image: candidates.length ? candidates : null };
@@ -530,8 +588,10 @@ async function backfillImagesFromReservoir({ chain, contract, items, onProgress 
       const arr = json?.tokens || [];
       for (const r of arr) {
         const id = `${(r?.token?.contract || contract).toLowerCase()}:${r?.token?.tokenId}`;
-        const img = r?.token?.image || r?.token?.media?.original || r?.token?.media?.imageUrl || null;
-        if (img) images.set(id, img);
+        const t = r?.token || {};
+        const m = t.media || {};
+        const guess = t.image || m.imageUrl || m.thumbnail || m.small || m.medium || m.large || m.original || null;
+        if (guess) images.set(id, guess);
       }
     } catch {}
     done += chunk.length;
@@ -567,7 +627,7 @@ async function loadImageWithCandidates(candidates, perTryMs = 8000) {
       }
     } catch {}
   }
-  // Fallback: simple fetch of first viable URL
+  // Fallback: fetch buffer
   for (const u of candidates) {
     if (isDataUrl(u)) continue;
     try {
@@ -586,7 +646,6 @@ async function loadImageWithCandidates(candidates, perTryMs = 8000) {
   }
   return null;
 }
-
 async function preloadImages(items, onProgress) {
   let done = 0;
   const imgs = await runPool(8, items, async (it) => {
@@ -630,6 +689,7 @@ async function composeGrid(items, preloadedImgs) {
 
     const img = preloadedImgs?.[i];
     if (!img || !img.width || !img.height) {
+      // always show something (token #)
       ctx.fillStyle = '#161a24'; ctx.fillRect(x, y, tile, tile);
       ctx.fillStyle = '#c9d3e3';
       ctx.font = `bold ${Math.max(16, Math.round(tile * 0.16))}px sans-serif`;
@@ -638,7 +698,16 @@ async function composeGrid(items, preloadedImgs) {
       continue;
     }
 
+    // cover-fit crop with guards
     const scale = Math.max(tile / img.width, tile / img.height);
+    if (!isFinite(scale) || scale <= 0) {
+      ctx.fillStyle = '#161a24'; ctx.fillRect(x, y, tile, tile);
+      ctx.fillStyle = '#c9d3e3';
+      ctx.font = `bold ${Math.max(16, Math.round(tile * 0.16))}px sans-serif`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(`#${items[i]?.tokenId ?? '?'}`, x + tile / 2, y + tile / 2);
+      continue;
+    }
     const sw = Math.max(1, Math.floor(tile / scale));
     const sh = Math.max(1, Math.floor(tile / scale));
     const sx = Math.max(0, Math.floor((img.width  - sw) / 2));
@@ -879,7 +948,7 @@ module.exports = {
     status.images = `0% [${bar(0)}]`;
     await pushStatus();
 
-    const preloadedImgs = await preloadImages(items, (done, total) => {
+    let preloadedImgs = await preloadImages(items, (done, total) => {
       imgPct = clamp(Math.floor((done/total)*100), 0, 100);
       status.images = `${imgPct}% [${bar(imgPct)}]`;
       (async () => { await safeEdit({ content: statusBlock([
@@ -890,6 +959,29 @@ module.exports = {
         `Images:   ${status.images}`
       ].filter(Boolean)) }); })();
     });
+
+    // Last-chance recovery for missing images: re-fetch metadata deeply and try again
+    const missingIdx = [];
+    for (let i = 0; i < items.length; i++) {
+      if (!preloadedImgs[i]) missingIdx.push(i);
+    }
+    if (missingIdx.length) {
+      // optionally update status here if you want
+      await Promise.all(missingIdx.map(async (i) => {
+        try {
+          const uriList = await resolveMetadataURI({ chain, contract, tokenId: items[i].tokenId, is1155: std.is1155 });
+          const meta = uriList ? await fetchJsonWithFallback(uriList) : null;
+          const cands = meta ? collectAllImageCandidates(meta) : [];
+          if (cands.length) {
+            items[i] = { ...items[i], image: cands };
+          }
+        } catch {}
+      }));
+      const recovered = await preloadImages(missingIdx.map(i => items[i]), () => {});
+      for (let k = 0; k < missingIdx.length; k++) {
+        preloadedImgs[ missingIdx[k] ] = recovered[k] || preloadedImgs[ missingIdx[k] ];
+      }
+    }
 
     // Compose grid
     const gridBuf = await composeGrid(items, preloadedImgs);
