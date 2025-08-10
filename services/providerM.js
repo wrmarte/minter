@@ -1,25 +1,27 @@
+// services/providerM.js
 const { JsonRpcProvider } = require('ethers');
 const fetch = require('node-fetch');
 
 /* =========================================================
-   Dynamic Ape RPC discovery + resilient pool
-   - Auto-fetch free endpoints at startup & every 6h
-   - Exponential backoff per endpoint + chain cooldown
-   - Supports sync & async safeRpcCall
+   Resilient multi-chain provider manager with dynamic RPCs
+   - Chains: eth(1), base(8453), ape(33139)
+   - Auto-fetch RPC lists at startup & every 6h
+   - Per-endpoint backoff + per-chain cooldown + timeouts
+   - Never throws from public APIs; returns null on failure
 ========================================================= */
 
-// ---------- Static base lists ----------
+/* ---------- Static baselines (always included) ---------- */
 const STATIC_RPCS = {
+  eth: [
+    'https://eth.llamarpc.com',
+    'https://1rpc.io/eth',
+    'https://rpc.ankr.com/eth',
+  ],
   base: [
     'https://mainnet.base.org',
     'https://base.publicnode.com',
     'https://1rpc.io/base',
     'https://base.llamarpc.com',
-  ],
-  eth: [
-    'https://eth.llamarpc.com',
-    'https://1rpc.io/eth',
-    'https://rpc.ankr.com/eth',
   ],
   ape: [
     'https://rpc1.apexchain.xyz',
@@ -31,32 +33,81 @@ const STATIC_RPCS = {
   ],
 };
 
-// Known freebies to try appending for Ape
-const EXTRA_APE_FREE = [
-  'https://apechain-rpc.publicnode.com',
-  'https://rpc.apechain.io',
-  'https://apechain.drpc.org',
-  'https://rpc.apechain.p2p.org',
-];
-
-// ---------- Mutable pool (will be kept up-to-date) ----------
-const RPCS = {
-  base: [...STATIC_RPCS.base],
-  eth: [...STATIC_RPCS.eth],
-  ape: [...STATIC_RPCS.ape],
+/* ---------- Optional extra freebies ---------- */
+const EXTRA_RPCS = {
+  eth: [
+    // add optional free/public eth RPCs if you like
+  ],
+  base: [
+    'https://base-rpc.publicnode.com',
+  ],
+  ape: [
+    'https://apechain-rpc.publicnode.com',
+    'https://rpc.apechain.io',
+    'https://apechain.drpc.org',
+    'https://rpc.apechain.p2p.org',
+  ],
 };
 
-// ---------- Internal state ----------
-const chains = {}; // chain -> { endpoints[], pinnedIdx, chainCooldownUntil, lastOfflineLogAt }
+/* ---------- Mutable working set (will refresh) ---------- */
+const RPCS = {
+  eth: [...STATIC_RPCS.eth, ...(EXTRA_RPCS.eth || [])],
+  base: [...STATIC_RPCS.base, ...(EXTRA_RPCS.base || [])],
+  ape: [...STATIC_RPCS.ape, ...(EXTRA_RPCS.ape || [])],
+};
+
+/* ---------- Chain metadata ---------- */
+const CHAIN_META = {
+  eth: { chainId: 1,    network: undefined },                       // ethers auto-detect
+  base: { chainId: 8453, network: undefined },                      // ethers auto-detect
+  ape: { chainId: 33139, network: { name: 'apechain', chainId: 33139 } }, // hint
+};
+
+const REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6h
+
+/* ---------- Internal state ---------- */
+const chains = {}; // key -> { endpoints[], pinnedIdx, chainCooldownUntil, lastOfflineLogAt }
 function now() { return Date.now(); }
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 function jitter(ms) { return Math.floor(ms * (0.85 + Math.random() * 0.3)); }
 function isThenable(x) { return x && typeof x.then === 'function'; }
 
-function initChain(chain) {
-  if (chains[chain]) return;
-  chains[chain] = {
-    endpoints: (RPCS[chain] || []).map(url => ({
+/* ---------- Promise/thenable-safe timeout ---------- */
+function withTimeout(resultOrPromise, ms, reason = 'timeout') {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const t = setTimeout(() => {
+      if (!settled) { settled = true; reject(new Error(reason)); }
+    }, ms);
+    const ok = v => { if (!settled) { settled = true; clearTimeout(t); resolve(v); } };
+    const err = e => { if (!settled) { settled = true; clearTimeout(t); reject(e); } };
+    try {
+      if (isThenable(resultOrPromise)) resultOrPromise.then(ok, err);
+      else ok(resultOrPromise); // sync
+    } catch (e) { err(e); }
+  });
+}
+
+/* ---------- Helpers ---------- */
+function uniqueHttps(list) {
+  const out = [];
+  const seen = new Set();
+  for (let url of list) {
+    if (!url || typeof url !== 'string') continue;
+    url = url.trim();
+    if (!url.startsWith('https://')) continue;
+    if (/\$\{[^}]+\}/.test(url)) continue; // skip placeholders
+    if (seen.has(url)) continue;
+    seen.add(url);
+    out.push(url);
+  }
+  return out;
+}
+
+function initChain(key) {
+  if (chains[key]) return;
+  chains[key] = {
+    endpoints: (RPCS[key] || []).map(url => ({
       url,
       provider: null,
       failCount: 0,
@@ -69,26 +120,10 @@ function initChain(chain) {
   };
 }
 
-// ---------- Utils ----------
-function uniqueHttps(list) {
-  const out = [];
-  const seen = new Set();
-  for (let url of list) {
-    if (!url || typeof url !== 'string') continue;
-    url = url.trim();
-    if (!url.startsWith('https://')) continue;
-    if (/\$\{[^}]+\}/.test(url)) continue; // skip placeholdered URLs
-    if (seen.has(url)) continue;
-    seen.add(url);
-    out.push(url);
-  }
-  return out;
-}
-
-function rebuildChainEndpoints(chain) {
-  const st = chains[chain];
+function rebuildChainEndpoints(key) {
+  const st = chains[key];
   if (!st) return;
-  const merged = uniqueHttps(RPCS[chain] || []);
+  const merged = uniqueHttps(RPCS[key] || []);
   st.endpoints = merged.map(url => ({
     url,
     provider: null,
@@ -96,13 +131,12 @@ function rebuildChainEndpoints(chain) {
     cooldownUntil: 0,
     lastOkAt: 0,
   }));
-  st.pinnedIdx = null; // force re-selection
+  st.pinnedIdx = null; // force reselection
 }
 
-// ---------- Network / provider handling ----------
-function makeProvider(chain, url) {
-  const network = chain === 'ape' ? { name: 'apechain', chainId: 33139 } : undefined;
-  const p = new JsonRpcProvider(url, network);
+function makeProvider(key, url) {
+  const meta = CHAIN_META[key] || {};
+  const p = new JsonRpcProvider(url, meta.network);
   p._rpcUrl = url;
   p.pollingInterval = 8000;
   return p;
@@ -117,83 +151,60 @@ async function pingProvider(provider, timeoutMs = 2500) {
   }
 }
 
-// Promise/thenable-safe timeout wrapper
-function withTimeout(resultOrPromise, ms, reason = 'timeout') {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const t = setTimeout(() => {
-      if (!settled) { settled = true; reject(new Error(reason)); }
-    }, ms);
-
-    const settleOk = (val) => { if (!settled) { settled = true; clearTimeout(t); resolve(val); } };
-    const settleErr = (err) => { if (!settled) { settled = true; clearTimeout(t); reject(err); } };
-
-    try {
-      if (isThenable(resultOrPromise)) {
-        resultOrPromise.then(settleOk, settleErr);
-      } else {
-        settleOk(resultOrPromise);
-      }
-    } catch (e) {
-      settleErr(e);
-    }
-  });
-}
-
 function scoreEndpoint(ep) {
   const cd = Math.max(0, ep.cooldownUntil - now());
   const penalty = ep.failCount * 1000;
   const recency = ep.lastOkAt ? Math.max(0, now() - ep.lastOkAt) / 1000 : 9999;
-  return cd + penalty + recency;
+  return cd + penalty + recency; // lower is better
 }
 
-async function selectHealthy(chain) {
-  initChain(chain);
-  const st = chains[chain];
+async function selectHealthy(key) {
+  initChain(key);
+  const st = chains[key];
 
   if (now() < st.chainCooldownUntil) return null;
 
+  // reuse pinned if not cooling
   if (st.pinnedIdx != null) {
     const ep = st.endpoints[st.pinnedIdx];
     if (ep && now() >= ep.cooldownUntil) {
-      if (!ep.provider) ep.provider = makeProvider(chain, ep.url);
+      if (!ep.provider) ep.provider = makeProvider(key, ep.url);
       return ep.provider;
     }
   }
 
+  // try best candidates
   const ordered = st.endpoints
     .map((ep, idx) => ({ ep, idx, score: scoreEndpoint(ep) }))
     .sort((a, b) => a.score - b.score);
 
   for (const { ep, idx } of ordered) {
     if (now() < ep.cooldownUntil) continue;
-    if (!ep.provider) ep.provider = makeProvider(chain, ep.url);
-
+    if (!ep.provider) ep.provider = makeProvider(key, ep.url);
     const ok = await pingProvider(ep.provider, 2000);
     if (ok) {
-      ep.failCount = 0;
-      ep.cooldownUntil = 0;
-      ep.lastOkAt = now();
+      ep.failCount = 0; ep.cooldownUntil = 0; ep.lastOkAt = now();
       st.pinnedIdx = idx;
-      console.log(`✅ ${chain} initialized/pinned RPC: ${ep.url}`);
+      console.log(`✅ ${key} initialized/pinned RPC: ${ep.url}`);
       return ep.provider;
     } else {
       ep.failCount += 1;
-      const backoff = Math.min(30000, 1000 ** Math.min(3, ep.failCount)) * 2; // conservative backoff
+      const backoff = Math.min(30000, 1000 ** Math.min(3, ep.failCount)) * 2; // up to ~30s
       ep.cooldownUntil = now() + jitter(backoff);
     }
   }
 
+  // all failed -> chain cooldown
   st.pinnedIdx = null;
-  st.chainCooldownUntil = now() + 20000; // chain cooldown 20s
+  st.chainCooldownUntil = now() + 20000; // 20s
   if (now() - st.lastOfflineLogAt > 60000) {
-    console.warn(`⛔ ${chain} RPC appears offline. Cooling down 20s.`);
+    console.warn(`⛔ ${key} RPC appears offline. Cooling down 20s.`);
     st.lastOfflineLogAt = now();
   }
   return null;
 }
 
-// ---------- Public API ----------
+/* ---------- Public API ---------- */
 function getProvider(chain = 'base') {
   const key = (chain || 'base').toLowerCase();
   initChain(key);
@@ -224,6 +235,7 @@ async function rotateProvider(chain = 'base') {
     }
   }
   st.pinnedIdx = null;
+  // kick off reselection
   await selectHealthy(key);
 }
 
@@ -239,7 +251,10 @@ async function safeRpcCall(chain, callFn, retries = 4, perCallTimeoutMs = 6000) 
     }
 
     try {
+      // accept sync or async result
       const result = await withTimeout(callFn(provider), perCallTimeoutMs, 'rpc call timeout');
+
+      // mark success
       const st = chains[key];
       const ep = st.endpoints[st.pinnedIdx ?? -1];
       if (ep) {
@@ -248,11 +263,13 @@ async function safeRpcCall(chain, callFn, retries = 4, perCallTimeoutMs = 6000) 
         ep.lastOkAt = now();
       }
       st.chainCooldownUntil = 0;
+
       return result;
     } catch (err) {
       const msg = err?.info?.responseBody || err?.message || '';
       const code = err?.code || 'UNKNOWN_ERROR';
       console.warn(`⚠️ [${key}] RPC Error: ${err.message || code}`);
+
       const current = getProvider(key);
       const st = chains[key];
       const failUrl =
@@ -261,9 +278,8 @@ async function safeRpcCall(chain, callFn, retries = 4, perCallTimeoutMs = 6000) 
         'unknown';
       console.warn(`🔻 RPC failed [${key}]: ${failUrl}`);
 
-      // Ape batch limit special-case
-      const isApeBatchLimit = key === 'ape' && msg.includes('Batch of more than 3 requests');
-      if (isApeBatchLimit) {
+      // Ape special-case
+      if (key === 'ape' && msg.includes('Batch of more than 3 requests')) {
         console.warn('⛔ ApeChain batch limit hit — skip batch, no retry');
         return null;
       }
@@ -281,8 +297,8 @@ function getMaxBatchSize(chain = 'base') {
   return (chain || 'base').toLowerCase() === 'ape' ? 3 : 10;
 }
 
-// ---------- Dynamic Ape RPC discovery ----------
-async function fetchJson(url, timeoutMs = 6000) {
+/* ---------- Dynamic RPC discovery ---------- */
+async function fetchJson(url, timeoutMs = 7000) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
@@ -295,7 +311,6 @@ async function fetchJson(url, timeoutMs = 6000) {
 }
 
 function extractRpcUrlsFromChainRecord(rec) {
-  // Try common fields: rpc / rpcs / rpcUrls with arrays of strings
   const out = [];
   if (Array.isArray(rec.rpc)) out.push(...rec.rpc);
   if (Array.isArray(rec.rpcs)) out.push(...rec.rpcs);
@@ -310,95 +325,83 @@ function extractRpcUrlsFromChainRecord(rec) {
   return out;
 }
 
-async function discoverApeRpcs() {
+async function discoverChainRpcs(chainId) {
   const collected = [];
 
-  // 1) chainid.network (canonical list)
+  // 1) chainid.network canonical list
   try {
-    const chains = await fetchJson('https://chainid.network/chains.json', 8000);
-    if (Array.isArray(chains)) {
-      const ape = chains.find(c => c.chainId === 33139 || /ape/i.test(c.name || '') || /ape/i.test(c.chain || ''));
-      if (ape) {
-        collected.push(...extractRpcUrlsFromChainRecord(ape));
-      }
+    const list = await fetchJson('https://chainid.network/chains.json', 9000);
+    if (Array.isArray(list)) {
+      const rec = list.find(c => c.chainId === chainId);
+      if (rec) collected.push(...extractRpcUrlsFromChainRecord(rec));
     }
-  } catch (e) {
-    // ignore
-  }
+  } catch {}
 
-  // 2) Chainlist dev API fallback
+  // 2) Chainlist per-chain endpoint (best effort)
   try {
-    const data = await fetchJson('https://chainlist.org/chain/33139', 8000).catch(() => null);
+    const data = await fetchJson(`https://chainlist.org/chain/${chainId}`, 9000).catch(() => null);
     if (data) {
-      const urls = extractRpcUrlsFromChainRecord(data);
-      collected.push(...urls);
+      collected.push(...extractRpcUrlsFromChainRecord(data));
     }
-  } catch (e) {
-    // ignore
-  }
-
-  // 3) Merge in static suggestions
-  collected.push(...STATIC_RPCS.ape, ...EXTRA_APE_FREE);
+  } catch {}
 
   return uniqueHttps(collected);
 }
 
-async function refreshApeRpcPool(reason = 'startup') {
+async function refreshRpcPool(key, reason = 'periodic') {
+  const meta = CHAIN_META[key];
+  if (!meta?.chainId) return;
+
   try {
-    const fresh = await discoverApeRpcs();
+    const fresh = await discoverChainRpcs(meta.chainId);
     if (!fresh.length) return;
 
-    // Merge with current pool, keep order preferring fresh first
-    const merged = uniqueHttps([...fresh, ...RPCS.ape]);
-    const before = RPCS.ape.join(',');
-    RPCS.ape = merged;
+    const merged = uniqueHttps([...fresh, ...(STATIC_RPCS[key] || []), ...(EXTRA_RPCS[key] || []), ...(RPCS[key] || [])]);
+    const before = (RPCS[key] || []).join(',');
+    RPCS[key] = merged;
 
-    if (before !== RPCS.ape.join(',')) {
-      console.log(`🔄 Ape RPC list updated (${reason}). Count=${RPCS.ape.length}`);
-      rebuildChainEndpoints('ape');
-      // Try to pin a healthy endpoint ASAP (non-blocking)
-      selectHealthy('ape').catch(() => {});
+    if (before !== RPCS[key].join(',')) {
+      console.log(`🔄 ${key} RPC list updated (${reason}). Count=${RPCS[key].length}`);
+      rebuildChainEndpoints(key);
+      selectHealthy(key).catch(() => {});
     }
   } catch (e) {
-    console.warn(`⚠️ Ape RPC discovery failed (${reason}): ${e.message}`);
+    console.warn(`⚠️ ${key} RPC discovery failed (${reason}): ${e.message}`);
   }
 }
 
-// ---------- Bootstrap ----------
+/* ---------- Bootstrap ---------- */
 (async () => {
-  // Initial endpoint discovery for Ape
-  await refreshApeRpcPool('startup');
+  // Initial dynamic fetch for all chains
+  await Promise.all([
+    refreshRpcPool('eth', 'startup'),
+    refreshRpcPool('base', 'startup'),
+    refreshRpcPool('ape', 'startup'),
+  ]);
 
-  // Initialize other chains
-  for (const chain of ['base', 'eth']) {
-    initChain(chain);
-    if (!chains[chain].endpoints.length) {
-      RPCS[chain] = [...STATIC_RPCS[chain]];
-      rebuildChainEndpoints(chain);
+  // Initialize chains & try pinning one endpoint each
+  for (const key of Object.keys(CHAIN_META)) {
+    initChain(key);
+    if (!chains[key].endpoints.length) {
+      // ensure at least static if discovery failed
+      RPCS[key] = uniqueHttps([...(STATIC_RPCS[key] || []), ...(EXTRA_RPCS[key] || [])]);
+      rebuildChainEndpoints(key);
     }
-    // try pin
-    selectHealthy(chain).catch(() => {});
+    selectHealthy(key).catch(() => {});
   }
 
-  // Attempt to pin Ape too
-  initChain('ape');
-  selectHealthy('ape').catch(() => {});
-
-  // Periodic Ape RPC refresh every 6 hours
+  // Periodic refresh
   setInterval(() => {
-    refreshApeRpcPool('periodic');
-  }, 6 * 60 * 60 * 1000);
+    for (const key of Object.keys(CHAIN_META)) {
+      refreshRpcPool(key, 'periodic');
+    }
+  }, REFRESH_INTERVAL_MS);
 })();
 
+/* ---------- Exports ---------- */
 module.exports = {
   getProvider,
   rotateProvider,
   safeRpcCall,
   getMaxBatchSize,
 };
-
-
-
-
-
-
