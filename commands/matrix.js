@@ -13,7 +13,7 @@ const GRID_PRESETS = [
   { max: 64,  cols: 8,  tile: 110 },
   { max: 81,  cols: 9,  tile: 100 },
   { max: 100, cols: 10, tile: 96 },
-  { max: 144, cols: 12, tile: 84 },   // extra dense if you bump MATRIX_MAX_AUTO
+  { max: 144, cols: 12, tile: 84 },
   { max: 196, cols: 14, tile: 74 },
   { max: 225, cols: 15, tile: 70 },
   { max: 256, cols: 16, tile: 64 },
@@ -86,9 +86,7 @@ async function tryResolveWithFallbacks(name) {
 }
 /** Returns { address, display } where display is the original ENS if provided */
 async function resolveWalletInput(input) {
-  // already an address?
   try { return { address: ethers.getAddress(input), display: null }; } catch {}
-  // ENS?
   if (typeof input === 'string' && input.toLowerCase().endsWith('.eth')) {
     const key = input.toLowerCase();
     const cached = ENS_CACHE.get(key);
@@ -117,7 +115,7 @@ async function fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant = 
 
   let continuation = null;
   const items = [];
-  let safety = 12; // 🆙 more pages for completeness on Base
+  let safety = 16; // more pages to be thorough
   let total = 0;
 
   while (safety-- > 0 && items.length < maxWant) {
@@ -126,7 +124,7 @@ async function fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant = 
     url.searchParams.set('collection', contract);
     url.searchParams.set('limit', String(limit));
     url.searchParams.set('includeTopBid', 'false');
-    url.searchParams.set('sortBy', 'acquiredAt'); // recent first; we page to go deeper
+    url.searchParams.set('sortBy', 'acquiredAt'); // recent first
     if (continuation) url.searchParams.set('continuation', continuation);
 
     try {
@@ -136,7 +134,6 @@ async function fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant = 
       const tokens = json?.tokens || [];
       continuation = json?.continuation || null;
 
-      // Best-effort total
       total = typeof json?.count === 'number'
         ? json.count
         : (total || (tokens.length < limit && !continuation ? items.length + tokens.length : 0));
@@ -171,8 +168,12 @@ async function fetchOwnerTokensOnchainRolling({ chain, contract, owner, maxWant 
   ]);
 
   const head = await safeRpcCall(chain, p => p.getBlockNumber()) || 0;
-  const WINDOW = 15000;
-  const MAX_WINDOWS = 12; // 🆙 scan farther back to find older holdings
+
+  // Tuned for Base so we look farther back than a few hours
+  const isBase = chain === 'base';
+  const WINDOW = isBase ? 50000 : 15000;
+  const MAX_WINDOWS = isBase ? 80 : 12; // ~4M blocks on Base (~months), ~180k elsewhere
+
   const owned = new Set();
 
   for (let i = 0; i < MAX_WINDOWS && owned.size < maxWant; i++) {
@@ -222,6 +223,19 @@ async function enrichImagesViaTokenURI({ chain, contract, items }) {
       if (img && img.startsWith('ipfs://')) img = toHttp(img)[0];
       out.push({ ...it, image: img || null });
     } catch { out.push(it); }
+  }
+  return out;
+}
+
+/* ========= Merge helper (fills from on-chain if Reservoir is partial) ========= */
+function dedupeByTokenId(list) {
+  const seen = new Set();
+  const out = [];
+  for (const it of list) {
+    const key = String(it.tokenId);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(it);
   }
   return out;
 }
@@ -434,6 +448,20 @@ module.exports = {
       usedReservoir = items.length > 0;
     }
 
+    // If Reservoir looks partial (e.g., Base returns just a few), fill from on-chain
+    if ((chain === 'base' || chain === 'eth') && items.length < maxWant) {
+      const onch = await fetchOwnerTokensOnchainRolling({ chain, contract, owner, maxWant });
+      // merge & dedupe by tokenId, prefer images we already have
+      const byId = new Map();
+      for (const it of items) byId.set(String(it.tokenId), it);
+      for (const it of onch.items) {
+        const key = String(it.tokenId);
+        if (!byId.has(key)) byId.set(key, it);
+      }
+      items = Array.from(byId.values()).slice(0, maxWant);
+      totalOwned = Math.max(totalOwned, onch.total || 0, items.length);
+    }
+
     // Fallback: on-chain rolling scan (also used for Ape)
     if (!items.length) {
       const onch = await fetchOwnerTokensOnchainRolling({ chain, contract, owner, maxWant });
@@ -472,5 +500,6 @@ module.exports = {
     await interaction.editReply({ embeds: [embed], files: [file] });
   }
 };
+
 
 
