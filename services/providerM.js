@@ -7,6 +7,7 @@ const fetch = require('node-fetch');
    - Chains: eth(1), base(8453), ape(33139)
    - Auto-fetch RPC lists at startup & every 6h
    - Per-endpoint backoff + per-chain cooldown + timeouts
+   - Static network hints (no ethers network-detect retries)
    - Never throws from public APIs; returns null on failure
 ========================================================= */
 
@@ -15,13 +16,13 @@ const STATIC_RPCS = {
   eth: [
     'https://eth.llamarpc.com',
     'https://1rpc.io/eth',
-    'https://rpc.ankr.com/eth',
+    'https://rpc.ankr.com/eth'
   ],
   base: [
     'https://mainnet.base.org',
     'https://base.publicnode.com',
     'https://1rpc.io/base',
-    'https://base.llamarpc.com',
+    'https://base.llamarpc.com'
   ],
   ape: [
     'https://rpc1.apexchain.xyz',
@@ -29,48 +30,82 @@ const STATIC_RPCS = {
     'https://api.ape-rpc.com',
     'https://apex.rpc.thirdweb.com',
     'https://apexchain.alt.technology',
-    'https://apex-mainnet.rpc.karzay.com',
-  ],
+    'https://apex-mainnet.rpc.karzay.com'
+  ]
 };
 
 /* ---------- Optional extra freebies ---------- */
 const EXTRA_RPCS = {
   eth: [
-    // add optional free/public eth RPCs if you like
+    'https://ethereum-rpc.publicnode.com'
   ],
   base: [
-    'https://base-rpc.publicnode.com',
+    'https://base-rpc.publicnode.com'
   ],
   ape: [
     'https://apechain-rpc.publicnode.com',
     'https://rpc.apechain.io',
     'https://apechain.drpc.org',
-    'https://rpc.apechain.p2p.org',
-  ],
+    'https://rpc.apechain.p2p.org'
+  ]
 };
 
 /* ---------- Mutable working set (will refresh) ---------- */
 const RPCS = {
   eth: [...STATIC_RPCS.eth, ...(EXTRA_RPCS.eth || [])],
   base: [...STATIC_RPCS.base, ...(EXTRA_RPCS.base || [])],
-  ape: [...STATIC_RPCS.ape, ...(EXTRA_RPCS.ape || [])],
+  ape: [...STATIC_RPCS.ape, ...(EXTRA_RPCS.ape || [])]
 };
 
-/* ---------- Chain metadata ---------- */
+/* ---------- Chain metadata (STATIC NETWORK HINTS) ---------- */
 const CHAIN_META = {
-  eth: { chainId: 1,    network: undefined },                       // ethers auto-detect
-  base: { chainId: 8453, network: undefined },                      // ethers auto-detect
-  ape: { chainId: 33139, network: { name: 'apechain', chainId: 33139 } }, // hint
+  eth:  { chainId: 1,    network: { name: 'homestead', chainId: 1 } },
+  base: { chainId: 8453, network: { name: 'base', chainId: 8453 } },
+  ape:  { chainId: 33139, network: { name: 'apechain', chainId: 33139 } }
 };
 
 const REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6h
 
 /* ---------- Internal state ---------- */
 const chains = {}; // key -> { endpoints[], pinnedIdx, chainCooldownUntil, lastOfflineLogAt }
+const selectLocks = new Map(); // key -> Promise|null (serialize selection)
 function now() { return Date.now(); }
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 function jitter(ms) { return Math.floor(ms * (0.85 + Math.random() * 0.3)); }
 function isThenable(x) { return x && typeof x.then === 'function'; }
+
+/* ---------- URL normalization (strip trailing slashes) ---------- */
+function normalizeUrl(u) {
+  if (!u || typeof u !== 'string') return u;
+  u = u.trim();
+  try {
+    const url = new URL(u);
+    // remove trailing slashes on pathname (but keep root '/')
+    if (url.pathname !== '/') {
+      url.pathname = url.pathname.replace(/\/+$/, '');
+      if (url.pathname === '') url.pathname = '/';
+    }
+    // drop trailing slash on full URL
+    return url.toString().replace(/\/+$/, '');
+  } catch {
+    return u.replace(/\/+$/, '');
+  }
+}
+
+function uniqueHttps(list) {
+  const out = [];
+  const seen = new Set();
+  for (let url of list) {
+    if (!url || typeof url !== 'string') continue;
+    url = normalizeUrl(url);
+    if (!url.startsWith('https://')) continue;
+    if (/\$\{[^}]+\}/.test(url)) continue; // skip placeholders
+    if (seen.has(url)) continue;
+    seen.add(url);
+    out.push(url);
+  }
+  return out;
+}
 
 /* ---------- Promise/thenable-safe timeout ---------- */
 function withTimeout(resultOrPromise, ms, reason = 'timeout') {
@@ -88,22 +123,7 @@ function withTimeout(resultOrPromise, ms, reason = 'timeout') {
   });
 }
 
-/* ---------- Helpers ---------- */
-function uniqueHttps(list) {
-  const out = [];
-  const seen = new Set();
-  for (let url of list) {
-    if (!url || typeof url !== 'string') continue;
-    url = url.trim();
-    if (!url.startsWith('https://')) continue;
-    if (/\$\{[^}]+\}/.test(url)) continue; // skip placeholders
-    if (seen.has(url)) continue;
-    seen.add(url);
-    out.push(url);
-  }
-  return out;
-}
-
+/* ---------- Init & rebuild ---------- */
 function initChain(key) {
   if (chains[key]) return;
   chains[key] = {
@@ -112,11 +132,11 @@ function initChain(key) {
       provider: null,
       failCount: 0,
       cooldownUntil: 0,
-      lastOkAt: 0,
+      lastOkAt: 0
     })),
     pinnedIdx: null,
     chainCooldownUntil: 0,
-    lastOfflineLogAt: 0,
+    lastOfflineLogAt: 0
   };
 }
 
@@ -129,15 +149,18 @@ function rebuildChainEndpoints(key) {
     provider: null,
     failCount: 0,
     cooldownUntil: 0,
-    lastOkAt: 0,
+    lastOkAt: 0
   }));
   st.pinnedIdx = null; // force reselection
 }
 
+/* ---------- Provider & scoring ---------- */
 function makeProvider(key, url) {
   const meta = CHAIN_META[key] || {};
-  const p = new JsonRpcProvider(url, meta.network);
-  p._rpcUrl = url;
+  const u = normalizeUrl(url);
+  // staticNetwork:true prevents ethers network-detect retries
+  const p = new JsonRpcProvider(u, meta.network, { staticNetwork: !!meta.network });
+  p._rpcUrl = u;
   p.pollingInterval = 8000;
   return p;
 }
@@ -158,50 +181,58 @@ function scoreEndpoint(ep) {
   return cd + penalty + recency; // lower is better
 }
 
+/* ---------- Selection (serialized per-chain) ---------- */
 async function selectHealthy(key) {
   initChain(key);
-  const st = chains[key];
+  if (selectLocks.get(key)) return selectLocks.get(key);
 
-  if (now() < st.chainCooldownUntil) return null;
+  const run = (async () => {
+    const st = chains[key];
+    if (now() < st.chainCooldownUntil) return null;
 
-  // reuse pinned if not cooling
-  if (st.pinnedIdx != null) {
-    const ep = st.endpoints[st.pinnedIdx];
-    if (ep && now() >= ep.cooldownUntil) {
+    // reuse pinned if not cooling
+    if (st.pinnedIdx != null) {
+      const ep = st.endpoints[st.pinnedIdx];
+      if (ep && now() >= ep.cooldownUntil) {
+        if (!ep.provider) ep.provider = makeProvider(key, ep.url);
+        return ep.provider;
+      }
+    }
+
+    const ordered = st.endpoints
+      .map((ep, idx) => ({ ep, idx, score: scoreEndpoint(ep) }))
+      .sort((a, b) => a.score - b.score);
+
+    for (const { ep, idx } of ordered) {
+      if (now() < ep.cooldownUntil) continue;
       if (!ep.provider) ep.provider = makeProvider(key, ep.url);
-      return ep.provider;
+
+      const ok = await pingProvider(ep.provider, 2000);
+      if (ok) {
+        ep.failCount = 0; ep.cooldownUntil = 0; ep.lastOkAt = now();
+        st.pinnedIdx = idx;
+        console.log(`✅ ${key} initialized/pinned RPC: ${ep.url}`);
+        return ep.provider;
+      } else {
+        ep.failCount += 1;
+        const backoff = Math.min(30000, 1000 ** Math.min(3, ep.failCount)) * 2; // conservative
+        ep.cooldownUntil = now() + jitter(backoff);
+      }
     }
-  }
 
-  // try best candidates
-  const ordered = st.endpoints
-    .map((ep, idx) => ({ ep, idx, score: scoreEndpoint(ep) }))
-    .sort((a, b) => a.score - b.score);
-
-  for (const { ep, idx } of ordered) {
-    if (now() < ep.cooldownUntil) continue;
-    if (!ep.provider) ep.provider = makeProvider(key, ep.url);
-    const ok = await pingProvider(ep.provider, 2000);
-    if (ok) {
-      ep.failCount = 0; ep.cooldownUntil = 0; ep.lastOkAt = now();
-      st.pinnedIdx = idx;
-      console.log(`✅ ${key} initialized/pinned RPC: ${ep.url}`);
-      return ep.provider;
-    } else {
-      ep.failCount += 1;
-      const backoff = Math.min(30000, 1000 ** Math.min(3, ep.failCount)) * 2; // up to ~30s
-      ep.cooldownUntil = now() + jitter(backoff);
+    // all failed -> chain cooldown
+    st.pinnedIdx = null;
+    st.chainCooldownUntil = now() + 20000; // 20s
+    if (now() - st.lastOfflineLogAt > 60000) {
+      console.warn(`⛔ ${key} RPC appears offline. Cooling down 20s.`);
+      st.lastOfflineLogAt = now();
     }
-  }
+    return null;
+  })();
 
-  // all failed -> chain cooldown
-  st.pinnedIdx = null;
-  st.chainCooldownUntil = now() + 20000; // 20s
-  if (now() - st.lastOfflineLogAt > 60000) {
-    console.warn(`⛔ ${key} RPC appears offline. Cooling down 20s.`);
-    st.lastOfflineLogAt = now();
-  }
-  return null;
+  selectLocks.set(key, run);
+  try { return await run; }
+  finally { selectLocks.delete(key); }
 }
 
 /* ---------- Public API ---------- */
@@ -235,7 +266,6 @@ async function rotateProvider(chain = 'base') {
     }
   }
   st.pinnedIdx = null;
-  // kick off reselection
   await selectHealthy(key);
 }
 
@@ -298,7 +328,7 @@ function getMaxBatchSize(chain = 'base') {
 }
 
 /* ---------- Dynamic RPC discovery ---------- */
-async function fetchJson(url, timeoutMs = 7000) {
+async function fetchJson(url, timeoutMs = 9000) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
@@ -340,9 +370,7 @@ async function discoverChainRpcs(chainId) {
   // 2) Chainlist per-chain endpoint (best effort)
   try {
     const data = await fetchJson(`https://chainlist.org/chain/${chainId}`, 9000).catch(() => null);
-    if (data) {
-      collected.push(...extractRpcUrlsFromChainRecord(data));
-    }
+    if (data) collected.push(...extractRpcUrlsFromChainRecord(data));
   } catch {}
 
   return uniqueHttps(collected);
@@ -356,7 +384,13 @@ async function refreshRpcPool(key, reason = 'periodic') {
     const fresh = await discoverChainRpcs(meta.chainId);
     if (!fresh.length) return;
 
-    const merged = uniqueHttps([...fresh, ...(STATIC_RPCS[key] || []), ...(EXTRA_RPCS[key] || []), ...(RPCS[key] || [])]);
+    const merged = uniqueHttps([
+      ...fresh,
+      ...(STATIC_RPCS[key] || []),
+      ...(EXTRA_RPCS[key] || []),
+      ...(RPCS[key] || [])
+    ]);
+
     const before = (RPCS[key] || []).join(',');
     RPCS[key] = merged;
 
@@ -376,14 +410,13 @@ async function refreshRpcPool(key, reason = 'periodic') {
   await Promise.all([
     refreshRpcPool('eth', 'startup'),
     refreshRpcPool('base', 'startup'),
-    refreshRpcPool('ape', 'startup'),
+    refreshRpcPool('ape', 'startup')
   ]);
 
   // Initialize chains & try pinning one endpoint each
   for (const key of Object.keys(CHAIN_META)) {
     initChain(key);
     if (!chains[key].endpoints.length) {
-      // ensure at least static if discovery failed
       RPCS[key] = uniqueHttps([...(STATIC_RPCS[key] || []), ...(EXTRA_RPCS[key] || [])]);
       rebuildChainEndpoints(key);
     }
@@ -403,5 +436,6 @@ module.exports = {
   getProvider,
   rotateProvider,
   safeRpcCall,
-  getMaxBatchSize,
+  getMaxBatchSize
 };
+
