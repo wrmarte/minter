@@ -37,7 +37,6 @@ function throttle(ms) {
     if (now - last >= ms) { last = now; await fn(); }
   };
 }
-
 async function runPool(limit, items, worker) {
   const ret = new Array(items.length);
   let i = 0;
@@ -50,6 +49,9 @@ async function runPool(limit, items, worker) {
   };
   await Promise.all(new Array(Math.min(limit, items.length)).fill(0).map(next));
   return ret;
+}
+function padTopicAddress(addr) {
+  return '0x' + addr.toLowerCase().replace(/^0x/, '').padStart(40, '0').padStart(64, '0');
 }
 
 /* ===================== IPFS helpers ===================== */
@@ -116,9 +118,7 @@ async function tryResolveWithFallbacks(name) {
 }
 /** Returns { address, display } where display is the original ENS if provided */
 async function resolveWalletInput(input) {
-  // already an address?
   try { return { address: ethers.getAddress(input), display: null }; } catch {}
-  // ENS?
   if (typeof input === 'string' && input.toLowerCase().endsWith('.eth')) {
     const key = input.toLowerCase();
     const cached = ENS_CACHE.get(key);
@@ -147,7 +147,7 @@ async function fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant = 
 
   let continuation = null;
   const items = [];
-  let safety = 16; // more pages to be thorough
+  let safety = 16;
   let total = 0;
 
   while (safety-- > 0 && items.length < maxWant) {
@@ -156,7 +156,7 @@ async function fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant = 
     url.searchParams.set('collection', contract);
     url.searchParams.set('limit', String(limit));
     url.searchParams.set('includeTopBid', 'false');
-    url.searchParams.set('sortBy', 'acquiredAt'); // recent first
+    url.searchParams.set('sortBy', 'acquiredAt');
     if (continuation) url.searchParams.set('continuation', continuation);
 
     try {
@@ -189,47 +189,93 @@ async function fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant = 
   return { items, total };
 }
 
-/* ===================== On-chain fallback (Base + Ape + backup) ===================== */
-async function fetchOwnerTokensOnchainRolling({ chain, contract, owner, maxWant = ENV_MAX }) {
+/* ===================== ERC-165 / Enumerable fast path ===================== */
+async function detectEnumerable(chain, contract) {
+  const provider = getProvider(chain);
+  if (!provider) return false;
+  const erc165 = new Contract(contract, ['function supportsInterface(bytes4) view returns (bool)'], provider);
+  try {
+    const ok = await safeRpcCall(chain, p => erc165.connect(p).supportsInterface('0x780e9d63')); // ERC721Enumerable
+    return !!ok;
+  } catch { return false; }
+}
+
+async function fetchOwnerTokensEnumerable({ chain, contract, owner, maxWant = ENV_MAX }) {
+  const provider = getProvider(chain);
+  if (!provider) return { items: [], total: 0, enumerable: false };
+  const nft = new Contract(contract, [
+    'function balanceOf(address) view returns (uint256)',
+    'function tokenOfOwnerByIndex(address,uint256) view returns (uint256)'
+  ], provider);
+
+  try {
+    const balRaw = await safeRpcCall(chain, p => nft.connect(p).balanceOf(owner));
+    const bal = Number(balRaw?.toString?.() ?? balRaw ?? 0);
+    if (!Number.isFinite(bal) || bal <= 0) return { items: [], total: 0, enumerable: true };
+
+    const want = Math.min(bal, maxWant);
+    const ids = [];
+    for (let i = 0; i < want; i++) {
+      try {
+        const tid = await safeRpcCall(chain, p => nft.connect(p).tokenOfOwnerByIndex(owner, i));
+        if (tid == null) break;
+        ids.push(tid.toString());
+      } catch {
+        break;
+      }
+    }
+    const items = ids.map(id => ({ tokenId: id, image: null, name: `#${id}` }));
+    return { items, total: bal, enumerable: true };
+  } catch {
+    return { items: [], total: 0, enumerable: false };
+  }
+}
+
+/* ===================== On-chain fallback (owner-indexed deep scan) ===================== */
+async function fetchOwnerTokensOnchainRolling({ chain, contract, owner, maxWant = ENV_MAX, deep = false }) {
   const provider = getProvider(chain);
   if (!provider) return { items: [], total: 0 };
 
-  const iface = new Interface([
-    'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
-    'function tokenURI(uint256 tokenId) view returns (string)'
-  ]);
-
+  const iface = new Interface(['event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)']);
   const head = await safeRpcCall(chain, p => p.getBlockNumber()) || 0;
 
-  // Tuned for Base so we look farther back than a few hours
   const isBase = chain === 'base';
-  const WINDOW = isBase ? 50000 : 15000;
-  const MAX_WINDOWS = isBase ? 80 : 12; // ~4M blocks on Base, ~180k elsewhere
+  const WINDOW = isBase ? 200000 : 60000;          // larger windows on Base
+  const MAX_WINDOWS = deep ? 500 : (isBase ? 80 : 120);
 
   const owned = new Set();
+  const topic0 = ethers.id('Transfer(address,address,uint256)');
+  const topicTo   = padTopicAddress(owner);
+  const topicFrom = padTopicAddress(owner);
 
-  for (let i = 0; i < MAX_WINDOWS && owned.size < maxWant; i++) {
+  for (let i = 0; i < MAX_WINDOWS && (deep || owned.size < maxWant); i++) {
     const toBlock = head - i * WINDOW;
     const fromBlock = Math.max(0, toBlock - WINDOW + 1);
     if (toBlock <= 0) break;
 
-    let logs = [];
+    let inLogs = [], outLogs = [];
     try {
-      logs = await safeRpcCall(chain, p => p.getLogs({
+      inLogs = await safeRpcCall(chain, p => p.getLogs({
         address: contract.toLowerCase(),
-        topics: [ethers.id('Transfer(address,address,uint256)')],
+        topics: [topic0, null, topicTo],
         fromBlock, toBlock
       })) || [];
-    } catch {
-      continue;
-    }
+    } catch {}
+    try {
+      outLogs = await safeRpcCall(chain, p => p.getLogs({
+        address: contract.toLowerCase(),
+        topics: [topic0, topicFrom, null],
+        fromBlock, toBlock
+      })) || [];
+    } catch {}
 
-    for (const log of logs) {
+    for (const log of inLogs) {
       let parsed; try { parsed = iface.parseLog(log); } catch { continue; }
-      const { from, to, tokenId } = parsed.args;
-      const tid = tokenId.toString();
-      if ((to || '').toLowerCase() === owner.toLowerCase()) owned.add(tid);
-      if ((from || '').toLowerCase() === owner.toLowerCase()) owned.delete(tid);
+      owned.add(parsed.args.tokenId.toString());
+    }
+    for (const log of outLogs) {
+      let parsed; try { parsed = iface.parseLog(log); } catch { continue; }
+      owned.delete(parsed.args.tokenId.toString());
     }
   }
 
@@ -273,7 +319,6 @@ function dedupeByTokenId(list) {
 }
 
 /* ===================== Faster image path ===================== */
-// Race multiple gateway URLs per image. First successful response wins.
 async function downloadImage(urlOrList, timeoutMs = 8000) {
   const urls = (Array.isArray(urlOrList) ? urlOrList : [urlOrList]).filter(Boolean);
   if (!urls.length) return null;
@@ -525,11 +570,27 @@ module.exports = {
       usedReservoir = items.length > 0;
     }
 
-    // If Reservoir looks partial (e.g., Base returns just a few), fill from on-chain
-    if ((chain === 'base' || chain === 'eth') && items.length < maxWant) {
-      const onch = await fetchOwnerTokensOnchainRolling({ chain, contract, owner, maxWant });
-      const byId = new Map();
-      for (const it of items) byId.set(String(it.tokenId), it);
+    // Enumerable fast path (older contracts often have it)
+    if (items.length < maxWant) {
+      const isEnum = await detectEnumerable(chain, contract);
+      if (isEnum) {
+        const en = await fetchOwnerTokensEnumerable({ chain, contract, owner, maxWant });
+        // prefer any images from Reservoir, merge by tokenId
+        const byId = new Map(items.map(it => [String(it.tokenId), it]));
+        for (const it of en.items) {
+          const k = String(it.tokenId);
+          if (!byId.has(k)) byId.set(k, it);
+        }
+        items = Array.from(byId.values()).slice(0, maxWant);
+        totalOwned = Math.max(totalOwned, en.total || 0, items.length);
+      }
+    }
+
+    // Owner-indexed deep log scan (covers very old Base holdings)
+    if (items.length < maxWant) {
+      const onch = await fetchOwnerTokensOnchainRolling({ chain, contract, owner, maxWant, deep: chain === 'base' });
+      // merge & dedupe by tokenId, prefer images we already have
+      const byId = new Map(items.map(it => [String(it.tokenId), it]));
       for (const it of onch.items) {
         const key = String(it.tokenId);
         if (!byId.has(key)) byId.set(key, it);
@@ -538,13 +599,7 @@ module.exports = {
       totalOwned = Math.max(totalOwned, onch.total || 0, items.length);
     }
 
-    // Fallback: on-chain rolling scan (also used for Ape)
-    if (!items.length) {
-      const onch = await fetchOwnerTokensOnchainRolling({ chain, contract, owner, maxWant });
-      items = onch.items;
-      totalOwned = onch.total || items.length;
-    }
-
+    // Final fallback: if still nothing
     if (!items.length) {
       return interaction.editReply(`❌ No ${project.name} NFTs found for \`${ownerDisplay}\` on ${chain}.`);
     }
@@ -587,6 +642,7 @@ module.exports = {
     await interaction.editReply({ content: null, embeds: [embed], files: [file] });
   }
 };
+
 
 
 
