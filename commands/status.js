@@ -1,11 +1,49 @@
-const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
-const { getProvider } = require('../services/provider');
-const { contractListeners } = require('../services/mintProcessorBase');
+const { SlashCommandBuilder, EmbedBuilder, version: djsVersion } = require('discord.js');
+const { getProvider, safeRpcCall } = require('../services/provider'); // <-- same path you already use
+// If you have separate processors, these imports will just work; if not present, they’ll be undefined and we handle it.
+let baseListeners = {}, ethListeners = {}, apeListeners = {};
+try { baseListeners = require('../services/mintProcessorBase').contractListeners || {}; } catch {}
+try { ethListeners  = require('../services/mintProcessorETH')?.contractListeners || {}; } catch {}
+try { apeListeners  = require('../services/mintProcessorApe')?.contractListeners || {}; } catch {}
+
 const { statSync } = require('fs');
 const os = require('os');
-const version = require('../package.json').version;
+const pkgVersion = require('../package.json').version;
 
 let mintProcessorStartTime = Date.now();
+
+function fmtUptime(ms) {
+  const d = Math.floor(ms / 86400000);
+  const h = Math.floor((ms % 86400000) / 3600000);
+  const m = Math.floor((ms % 3600000) / 60000);
+  return (d ? `${d}d ` : '') + `${h}h ${m}m`;
+}
+
+function fmtBytes(n) {
+  const mb = n / 1024 / 1024;
+  return `${mb.toFixed(1)} MB`;
+}
+
+function statusEmoji(ok) {
+  return ok ? '🟢' : '🔴';
+}
+
+async function chainStatus(chainKey, label) {
+  // Grab provider URL (if any) even if a call fails
+  const prov = getProvider(chainKey);
+  const url = prov?._rpcUrl || '—';
+  let live = false;
+  let block = 'N/A';
+
+  // Use safeRpcCall to avoid throwing or hanging
+  const blockNum = await safeRpcCall(chainKey, p => p.getBlockNumber(), 2, 3000);
+  if (typeof blockNum === 'number' && blockNum >= 0) {
+    live = true;
+    block = `#${blockNum.toLocaleString()}`;
+  }
+
+  return `${statusEmoji(live)} **${label}** — ${live ? 'Live' : 'Offline'} ${live ? `(${block})` : ''}\n↳ \`${url}\``;
+}
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -16,45 +54,65 @@ module.exports = {
     const client = interaction.client;
     const pg = client.pg;
 
-    await interaction.deferReply();
+    await interaction.deferReply({ ephemeral: false }).catch(() => {});
 
-    // ✅ Database
-    let dbStatus = '🔴 Failed';
+    // DB status + latency
+    let dbStatus = '🔴 Failed', dbLatency = 'N/A';
     try {
+      const t0 = Date.now();
       await pg.query('SELECT 1');
+      dbLatency = `${Date.now() - t0}ms`;
       dbStatus = '🟢 Connected';
     } catch {}
 
-    // ✅ RPC
-    let rpcStatus = '🔴 Failed', blockNum = 'N/A';
-    try {
-      const block = await getProvider().getBlockNumber();
-      rpcStatus = '🟢 Live';
-      blockNum = `#${block}`;
-    } catch {}
+    // Chains
+    const [ethLine, baseLine, apeLine] = await Promise.all([
+      chainStatus('eth',  'Ethereum'),
+      chainStatus('base', 'Base'),
+      chainStatus('ape',  'ApeChain')
+    ]);
 
-    // ✅ Discord Gateway
-    const discordStatus = client.ws.status === 0 ? '🟢 Connected' : '🔴 Disconnected';
+    // Discord Gateway
+    const wsOk = interaction.client.ws.status === 0;
+    const discordStatus = `${statusEmoji(wsOk)} ${wsOk ? 'Connected' : 'Disconnected'}`;
 
-    // ✅ Mint Processor
-    const activeListeners = Object.keys(contractListeners || {}).length;
-    const mintStatus = activeListeners > 0 ? `🟢 ${activeListeners} Active` : '🟠 No listeners';
+    // Mint processors (listener counts if available)
+    const baseCount = Object.keys(baseListeners || {}).length;
+    const ethCount  = Object.keys(ethListeners  || {}).length;
+    const apeCount  = Object.keys(apeListeners  || {}).length;
 
-    // ✅ Slash Command Count
-    let slashStatus = '🔴 0';
+    const mintStatus = [
+      `🧱 Base: ${baseCount > 0 ? `🟢 ${baseCount} active` : '🟠 idle'}`,
+      `🟧 ETH: ${ethCount > 0 ? `🟢 ${ethCount} active` : '🟠 idle'}`,
+      `🦍 Ape: ${apeCount > 0 ? `🟢 ${apeCount} active` : '🟠 idle'}`
+    ].join(' • ');
+
+    // Commands: loaded (local), global registered, guild registered
+    const loadedLocal = client.commands?.size || 0;
+
+    let globalRegistered = 'N/A';
     try {
       const appCmds = await client.application.commands.fetch();
-      slashStatus = appCmds.size > 0 ? `🟢 ${appCmds.size}` : '🔴 0';
+      globalRegistered = `${appCmds.size}`;
     } catch {}
 
-    // ✅ Guild Count
+    let guildRegistered = 'N/A';
+    try {
+      const g = interaction.guild;
+      if (g) {
+        const guildCmds = await g.commands.fetch();
+        guildRegistered = `${guildCmds.size}`;
+      }
+    } catch {}
+
+    // Guild count
     const totalGuilds = client.guilds.cache.size;
 
-    // ✅ Flex / Token / Contract Stats
+    // DB table counts (safe)
     const getCount = async (query) => {
       try {
         const res = await pg.query(query);
-        return parseInt(res.rows[0].count);
+        return parseInt(res.rows[0]?.count || '0', 10);
       } catch { return 0; }
     };
 
@@ -64,56 +122,72 @@ module.exports = {
       getCount('SELECT COUNT(*) FROM tracked_tokens')
     ]);
 
-    // ✅ Uptime
-    const formatUptime = (ms) => {
-      const h = Math.floor(ms / 3600000);
-      const m = Math.floor((ms % 3600000) / 60000);
-      return `${h}h ${m}m`;
-    };
+    // Uptime
+    const procUptime = fmtUptime(process.uptime() * 1000);
+    const mintUptime = fmtUptime(Date.now() - mintProcessorStartTime);
 
-    const uptime = formatUptime(process.uptime() * 1000);
-    const mintUptime = formatUptime(Date.now() - mintProcessorStartTime);
+    // Memory & CPU
+    const mem = process.memoryUsage();
+    const memoryUsage = `${fmtBytes(mem.rss)} RSS / ${fmtBytes(mem.heapUsed)} heap`;
+    const cpuLoad = os.loadavg?.()[0]?.toFixed(2) ?? 'N/A';
+    const nodeVer = process.version;
 
-    // ✅ Memory
-    const memUsed = (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1);
-    const memTotal = (process.memoryUsage().heapTotal / 1024 / 1024).toFixed(1);
-    const memoryUsage = `${memUsed} MB / ${memTotal} MB`;
+    // Shard info (if using sharding)
+    const shardInfo = client.shard
+      ? `ID ${client.shard.ids?.[0]} of ${client.shard.count}`
+      : 'N/A';
 
-    // ✅ Last Event
+    // Last event time
     let lastEventTime = 'N/A';
     try {
       const seenStats = statSync('./data/seen.json');
       lastEventTime = `<t:${Math.floor(seenStats.mtimeMs / 1000)}:R>`;
     } catch {}
 
-    // ✅ Ping
-    const ping = Date.now() - interaction.createdTimestamp;
+    // Ping (approx)
+    const ping = Math.max(0, Date.now() - interaction.createdTimestamp);
+
+    const linesTop = [
+      `🗄️ **Database** — ${dbStatus} *(latency: ${dbLatency})*`,
+      `📶 **Discord Gateway** — ${discordStatus}`,
+      `📡 **RPC Providers**`,
+      ethLine,
+      baseLine,
+      apeLine,
+      `⏱️ **Bot Ping** — ${ping}ms`,
+    ];
+
+    const linesMid = [
+      `🧱 **Mint Processors** — ${mintStatus} *(Uptime: ${mintUptime})*`,
+      `🌐 **Servers** — ${totalGuilds} guilds`,
+      `🔑 **Slash Commands** — Local: **${loadedLocal}** • Global: **${globalRegistered}** • This Guild: **${guildRegistered}**`,
+      `📦 **NFT Contracts Tracked** — ${nftContracts}`,
+      `💰 **Tokens Tracked** — ${tokensTracked}`,
+      `🎯 **Flex Projects** — ${flexProjects}`,
+      `⏱️ **Last Event** — ${lastEventTime}`
+    ];
+
+    const linesSys = [
+      `🧮 **Memory** — ${memoryUsage}`,
+      `🖥️ **CPU Load (1m)** — ${cpuLoad}`,
+      `🧪 **Bot Version** — v${pkgVersion}`,
+      `🟣 **discord.js** — v${djsVersion}`,
+      `🟢 **Node.js** — ${nodeVer}`,
+      `🧩 **Shard** — ${shardInfo}`,
+      `⏱️ **Total Uptime** — ${procUptime}`
+    ];
 
     const embed = new EmbedBuilder()
       .setTitle('📊 Full System Status')
       .setColor(0x2ecc71)
-      .setDescription([
-        `🗄️ **Database** — ${dbStatus}`,
-        `📡 **RPC Provider** — ${rpcStatus} (${blockNum})`,
-        `📶 **Bot Ping** — ${ping}ms`,
-        `🤖 **Discord Gateway** — ${discordStatus}`,
-        `🧱 **Mint Processor** — ${mintStatus} *(Uptime: ${mintUptime})*`,
-        `🌐 **Servers** — ${totalGuilds} Guilds`,
-        `🔑 **Slash Commands** — ${slashStatus}`,
-        `📦 **NFT Contracts Tracked** — ${nftContracts}`,
-        `💰 **Tokens Tracked** — ${tokensTracked}`,
-        `🎯 **Flex Projects** — ${flexProjects}`,
-        `⏱️ **Last Event** — ${lastEventTime}`,
-        `🧮 **Memory Usage** — ${memoryUsage}`,
-        `🧪 **Bot Version** — v${version}`,
-        `⏱️ **Total Uptime** — ${uptime}`
-      ].join('\n'))
+      .setDescription([...linesTop, '', ...linesMid, '', ...linesSys].join('\n'))
       .setFooter({ text: 'Powered by PimpsDev 🧪' })
       .setTimestamp();
 
-    await interaction.editReply({ embeds: [embed] });
+    await interaction.editReply({ embeds: [embed] }).catch(() => {});
   }
 };
+
 
 
 
