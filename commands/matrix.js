@@ -29,6 +29,10 @@ const BORDER = '#1f2230';
 const LOG_WINDOW_BASE = Math.max(10000, Number(process.env.MATRIX_LOG_WINDOW_BASE || 200000));
 const LOG_CONCURRENCY = Math.max(1, Number(process.env.MATRIX_LOG_CONCURRENCY || 4));
 
+// Concurrency knobs (env overridable)
+const METADATA_CONCURRENCY = Math.max(4, Number(process.env.MATRIX_METADATA_CONCURRENCY || 12));
+const IMAGE_CONCURRENCY    = Math.max(4, Number(process.env.MATRIX_IMAGE_CONCURRENCY || 12));
+
 /* ===================== Keep-Alive Agents ===================== */
 const keepAliveHttp = new http.Agent({ keepAlive: true, maxSockets: 128 });
 const keepAliveHttps = new https.Agent({ keepAlive: true, maxSockets: 128 });
@@ -490,20 +494,33 @@ function idHex64(tokenId) {
   const bn = BigInt(tokenId);
   return bn.toString(16).padStart(64, '0');
 }
+
+// Per-process lightweight cache for token URI lists (safe, small)
+const RESOLVED_URI_CACHE = new Map(); // key -> Array<string>
+
 async function resolveMetadataURI({ chain, contract, tokenId, is1155 }) {
+  const key = `${chain}:${contract}:${String(tokenId)}:${is1155 ? '1155' : '721'}`;
+  const cached = RESOLVED_URI_CACHE.get(key);
+  if (cached) return cached;
+
   const provider = getProvider(chain);
   if (!provider) return null;
+
   if (is1155) {
     const c = new Contract(contract, ['function uri(uint256) view returns (string)'], provider);
     let uri = await safeRpcCall(chain, p => c.connect(p).uri(tokenId));
     if (!uri) return null;
     uri = uri.replace(/\{id\}/gi, idHex64(tokenId)); // ERC1155 {id} substitution
-    return uri.startsWith('ipfs://') ? ipfsToHttp(uri) : [uri];
+    const list = uri.startsWith('ipfs://') ? ipfsToHttp(uri) : [uri];
+    RESOLVED_URI_CACHE.set(key, list);
+    return list;
   } else {
     const c = new Contract(contract, ['function tokenURI(uint256) view returns (string)'], provider);
     const uri = await safeRpcCall(chain, p => c.connect(p).tokenURI(tokenId));
     if (!uri) return null;
-    return uri.startsWith('ipfs://') ? ipfsToHttp(uri) : [uri];
+    const list = uri.startsWith('ipfs://') ? ipfsToHttp(uri) : [uri];
+    RESOLVED_URI_CACHE.set(key, list);
+    return list;
   }
 }
 
@@ -512,7 +529,7 @@ async function enrichImages({ chain, contract, items, is1155, onProgress }) {
   let done = 0;
   const upd = () => onProgress?.(++done, items.length);
 
-  const results = await runPool(8, items, async (it) => {
+  const results = await runPool(METADATA_CONCURRENCY, items, async (it) => {
     if (it.image) { upd(); return it; }
     try {
       const uriList = await resolveMetadataURI({ chain, contract, tokenId: it.tokenId, is1155 });
@@ -648,7 +665,7 @@ async function loadImageWithCandidates(candidates, perTryMs = 8000) {
 }
 async function preloadImages(items, onProgress) {
   let done = 0;
-  const imgs = await runPool(8, items, async (it) => {
+  const imgs = await runPool(IMAGE_CONCURRENCY, items, async (it) => {
     const candidates =
       Array.isArray(it.image) ? it.image :
       (typeof it.image === 'string' ? expandImageCandidates(it.image) : []);
@@ -970,7 +987,7 @@ module.exports = {
       await Promise.all(missingIdx.map(async (i) => {
         try {
           const uriList = await resolveMetadataURI({ chain, contract, tokenId: items[i].tokenId, is1155: std.is1155 });
-          const meta = uriList ? await fetchJsonWithFallback(uriList) : null;
+        const meta = uriList ? await fetchJsonWithFallback(uriList) : null;
           const cands = meta ? collectAllImageCandidates(meta) : [];
           if (cands.length) {
             items[i] = { ...items[i], image: cands };
