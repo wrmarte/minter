@@ -25,17 +25,28 @@ const GAP = 8;
 const BG = '#0f1115';
 const BORDER = '#1f2230';
 
+// Deep-scan tuning
+const LOG_WINDOW_BASE = 200000; // Base block window
+const LOG_CONCURRENCY = 4;      // windows in parallel on Base
+
 /* ===================== Keep-Alive Agents ===================== */
 const keepAliveHttp = new http.Agent({ keepAlive: true, maxSockets: 128 });
 const keepAliveHttps = new https.Agent({ keepAlive: true, maxSockets: 128 });
 
 /* ===================== Small Utils ===================== */
-function throttle(ms) {
-  let last = 0;
-  return async (fn) => {
-    const now = Date.now();
-    if (now - last >= ms) { last = now; await fn(); }
-  };
+function padTopicAddress(addr) {
+  return '0x' + addr.toLowerCase().replace(/^0x/, '').padStart(40, '0').padStart(64, '0');
+}
+function clamp(n, a, b){ return Math.max(a, Math.min(b, n)); }
+function bar(pct, len=16){
+  const filled = clamp(Math.round((pct/100)*len), 0, len);
+  return '█'.repeat(filled) + '░'.repeat(len - filled);
+}
+function statusBlock(lines){
+  return '```' + ['Matrix Status',
+    '─'.repeat(32),
+    ...lines
+  ].join('\n') + '```';
 }
 async function runPool(limit, items, worker) {
   const ret = new Array(items.length);
@@ -49,13 +60,6 @@ async function runPool(limit, items, worker) {
   };
   await Promise.all(new Array(Math.min(limit, items.length)).fill(0).map(next));
   return ret;
-}
-function padTopicAddress(addr) {
-  return '0x' + addr.toLowerCase().replace(/^0x/, '').padStart(40, '0').padStart(64, '0');
-}
-function progressBar(pct, len = 14) {
-  const filled = Math.max(0, Math.min(len, Math.round((pct / 100) * len)));
-  return '█'.repeat(filled) + '░'.repeat(len - filled);
 }
 
 /* ===================== IPFS + data: helpers ===================== */
@@ -140,7 +144,6 @@ async function tryResolveWithFallbacks(name) {
   }
   return null;
 }
-/** Returns { address, display } where display is the original ENS if provided */
 async function resolveWalletInput(input) {
   try { return { address: ethers.getAddress(input), display: null }; } catch {}
   if (typeof input === 'string' && input.toLowerCase().endsWith('.eth')) {
@@ -252,8 +255,8 @@ async function fetchOwnerTokensEnumerable({ chain, contract, owner, maxWant = EN
   }
 }
 
-/* ===================== On-chain fallback (owner-indexed deep scan) ===================== */
-async function fetchOwnerTokensOnchainRolling({ chain, contract, owner, maxWant = ENV_MAX, deep = false }) {
+/* ===================== On-chain owner-indexed deep scan (parallel windows) ===================== */
+async function fetchOwnerTokensOnchainRolling({ chain, contract, owner, maxWant = ENV_MAX, deep = false, onProgress }) {
   const provider = getProvider(chain);
   if (!provider) return { items: [], total: 0 };
 
@@ -261,43 +264,56 @@ async function fetchOwnerTokensOnchainRolling({ chain, contract, owner, maxWant 
   const head = await safeRpcCall(chain, p => p.getBlockNumber()) || 0;
 
   const isBase = chain === 'base';
-  const WINDOW = isBase ? 200000 : 60000;          // larger windows on Base
+  const WINDOW = isBase ? LOG_WINDOW_BASE : 60000;
   const MAX_WINDOWS = deep ? 500 : (isBase ? 80 : 120);
 
-  const owned = new Set();
   const topic0 = ethers.id('Transfer(address,address,uint256)');
   const topicTo   = padTopicAddress(owner);
   const topicFrom = padTopicAddress(owner);
 
-  for (let i = 0; i < MAX_WINDOWS && (deep || owned.size < maxWant); i++) {
+  const windows = [];
+  for (let i = 0; i < MAX_WINDOWS; i++) {
     const toBlock = head - i * WINDOW;
     const fromBlock = Math.max(0, toBlock - WINDOW + 1);
     if (toBlock <= 0) break;
+    windows.push({ fromBlock, toBlock });
+  }
 
-    let inLogs = [], outLogs = [];
-    try {
-      inLogs = await safeRpcCall(chain, p => p.getLogs({
-        address: contract.toLowerCase(),
-        topics: [topic0, null, topicTo],
-        fromBlock, toBlock
-      })) || [];
-    } catch {}
-    try {
-      outLogs = await safeRpcCall(chain, p => p.getLogs({
-        address: contract.toLowerCase(),
-        topics: [topic0, topicFrom, null],
-        fromBlock, toBlock
-      })) || [];
-    } catch {}
+  const owned = new Set();
+  let processed = 0;
+  const update = async () => { if (typeof onProgress === 'function') await onProgress(++processed, windows.length); };
 
-    for (const log of inLogs) {
-      let parsed; try { parsed = iface.parseLog(log); } catch { continue; }
-      owned.add(parsed.args.tokenId.toString());
-    }
-    for (const log of outLogs) {
-      let parsed; try { parsed = iface.parseLog(log); } catch { continue; }
-      owned.delete(parsed.args.tokenId.toString());
-    }
+  for (let i = 0; i < windows.length; i += LOG_CONCURRENCY) {
+    const chunk = windows.slice(i, i + LOG_CONCURRENCY);
+    await Promise.all(chunk.map(async ({ fromBlock, toBlock }) => {
+      let inLogs = [], outLogs = [];
+      try {
+        inLogs = await safeRpcCall(chain, p => p.getLogs({
+          address: contract.toLowerCase(),
+          topics: [topic0, null, topicTo],
+          fromBlock, toBlock
+        })) || [];
+      } catch {}
+      try {
+        outLogs = await safeRpcCall(chain, p => p.getLogs({
+          address: contract.toLowerCase(),
+          topics: [topic0, topicFrom, null],
+          fromBlock, toBlock
+        })) || [];
+      } catch {}
+
+      for (const log of inLogs) {
+        let parsed; try { parsed = iface.parseLog(log); } catch { continue; }
+        owned.add(parsed.args.tokenId.toString());
+      }
+      for (const log of outLogs) {
+        let parsed; try { parsed = iface.parseLog(log); } catch { continue; }
+        owned.delete(parsed.args.tokenId.toString());
+      }
+      await update();
+    }));
+
+    if (!deep && owned.size >= maxWant) break;
   }
 
   const all = Array.from(owned);
@@ -305,7 +321,7 @@ async function fetchOwnerTokensOnchainRolling({ chain, contract, owner, maxWant 
   return { items: slice, total: all.length || slice.length };
 }
 
-/* ===================== Image enrichment (more fields + data:) ===================== */
+/* ===================== Enrich images via tokenURI ===================== */
 async function enrichImagesViaTokenURI({ chain, contract, items }) {
   const provider = getProvider(chain);
   if (!provider) return items;
@@ -319,7 +335,6 @@ async function enrichImagesViaTokenURI({ chain, contract, items }) {
       let uri = await safeRpcCall(chain, p => nft.connect(p).tokenURI(it.tokenId));
       if (!uri) { out.push(it); continue; }
 
-      // Support data: JSON in tokenURI directly
       let meta = null;
       if (isDataUrl(uri)) {
         const parsed = parseDataUrl(uri);
@@ -332,57 +347,60 @@ async function enrichImagesViaTokenURI({ chain, contract, items }) {
         meta = await fetchJsonWithFallback(urlList);
       }
 
-      // Grab common fields
-      let img = meta?.image || meta?.image_url || meta?.imageUrl || null;
-
-      // image_data is often inline SVG; we’ll mark as placeholder
-      if (!img && typeof meta?.image_data === 'string') {
-        // stash a reason so placeholder shows "SVG"
-        out.push({ ...it, image: null, __placeholderReason: 'SVG' });
-        continue;
-      }
-
-      // normalize ipfs
+      let img = meta?.image || meta?.image_url || meta?.imageUrl || meta?.image_preview_url || meta?.image_thumbnail_url || null;
       if (img && img.startsWith('ipfs://')) img = toHttp(img)[0];
-
-      // data:image/*;base64 support
       if (img && isDataUrl(img)) {
         const parsedImg = parseDataUrl(img);
-        if (parsedImg && /^image\//.test(parsedImg.mime)) {
-          // keep data URL as-is; downloader handles it
-          out.push({ ...it, image: img });
-          continue;
-        }
-        // non-image data => placeholder
-        out.push({ ...it, image: null, __placeholderReason: 'DATA' });
-        continue;
+        if (!(parsedImg && /^image\//.test(parsedImg.mime))) img = null;
       }
-
-      // possible SVG URL
-      if (img && /\.svg(\?.*)?$/i.test(img)) {
-        out.push({ ...it, image: null, __placeholderReason: 'SVG' });
-        continue;
-      }
-
       out.push({ ...it, image: img || null });
-    } catch {
-      out.push(it);
-    }
+    } catch { out.push(it); }
   }
   return out;
 }
 
-/* ========= Merge helper ========= */
-function dedupeByTokenId(list) {
-  const seen = new Set();
-  const out = [];
-  for (const it of list) {
-    const key = String(it.tokenId);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(it);
+/* ===================== EXTRA: Backfill missing images via Reservoir batch ===================== */
+async function backfillImagesFromReservoir({ chain, contract, items }) {
+  const chainHeader = chain === 'eth' ? 'ethereum' : chain === 'base' ? 'base' : null;
+  if (!chainHeader) return items;
+  const headers = { 'Content-Type': 'application/json', 'x-reservoir-chain': chainHeader };
+  if (process.env.RESERVOIR_API_KEY) headers['x-api-key'] = process.env.RESERVOIR_API_KEY;
+
+  const missing = items.filter(it => !it.image).map(it => `${contract}:${it.tokenId}`);
+  if (!missing.length) return items;
+
+  const CHUNK = 50;
+  const images = new Map();
+  for (let i = 0; i < missing.length; i += CHUNK) {
+    const chunk = missing.slice(i, i + CHUNK);
+    const url = new URL('https://api.reservoir.tools/tokens/v7');
+    for (const t of chunk) url.searchParams.append('tokens', t);
+    url.searchParams.set('includeAttributes', 'false');
+
+    try {
+      const res = await fetch(url.toString(), { headers });
+      if (!res.ok) continue;
+      const json = await res.json();
+      const arr = json?.tokens || [];
+      for (const r of arr) {
+        const id = `${(r?.token?.contract || contract).toLowerCase()}:${r?.token?.tokenId}`;
+        const img = r?.token?.image || r?.token?.media?.original || r?.token?.media?.imageUrl || null;
+        if (img) images.set(id, img);
+      }
+    } catch {}
   }
-  return out;
+
+  return items.map(it => {
+    if (it.image) return it;
+    const key = `${contract}:${it.tokenId}`;
+    let img = images.get(key) || null;
+    if (img && img.startsWith('ipfs://')) img = toHttp(img)[0];
+    if (img && isDataUrl(img)) {
+      const parsedImg = parseDataUrl(img);
+      if (!(parsedImg && /^image\//.test(parsedImg.mime))) img = null;
+    }
+    return { ...it, image: img || null };
+  });
 }
 
 /* ===================== Faster image path ===================== */
@@ -437,17 +455,13 @@ async function downloadImage(urlOrList, timeoutMs = 8000) {
     });
   });
 }
-
-// Preload images in parallel with a small pool and optional progress callback
 async function preloadImages(items, onProgress) {
   let done = 0;
-  const update = onProgress || (() => Promise.resolve());
-
   const bufs = await runPool(8, items, async (it) => {
-    if (!it.image) { done++; await update(done, items.length); return null; }
+    if (!it.image) { done++; onProgress?.(done, items.length); return null; }
     const src = it.image.startsWith('ipfs://') ? toHttp(it.image) : [it.image];
     const buf = await downloadImage(src);
-    done++; await update(done, items.length);
+    done++; onProgress?.(done, items.length);
     return buf;
   });
 
@@ -457,92 +471,6 @@ async function preloadImages(items, onProgress) {
   });
 
   return imgs; // index-aligned with items
-}
-
-/* ===================== Placeholder renderer ===================== */
-function drawPlaceholder(ctx, x, y, tile, tokenId, reason = '') {
-  // strong contrast background + subtle pattern
-  ctx.fillStyle = '#1a2236';
-  ctx.fillRect(x, y, tile, tile);
-  ctx.globalAlpha = 0.15;
-  ctx.fillStyle = '#ffffff';
-  for (let i = -tile; i < tile * 2; i += 10) {
-    ctx.fillRect(x + i, y, 2, tile);
-  }
-  ctx.globalAlpha = 1;
-
-  // border
-  ctx.strokeStyle = '#2c3c5c';
-  ctx.lineWidth = 2;
-  ctx.strokeRect(x + 1, y + 1, tile - 2, tile - 2);
-
-  // token label
-  ctx.fillStyle = '#c8d4ff';
-  ctx.font = `bold ${Math.max(16, Math.round(tile * 0.14))}px sans-serif`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  const label = tokenId ? `#${tokenId}` : 'UNKNOWN';
-  ctx.fillText(label, x + tile / 2, y + tile / 2);
-
-  // badge
-  if (reason) {
-    const badge = String(reason).toUpperCase();
-    const padX = 6, padY = 3;
-    ctx.font = `bold ${Math.max(10, Math.round(tile * 0.1))}px sans-serif`;
-    const w = ctx.measureText(badge).width + padX * 2;
-    const h = Math.max(16, Math.round(tile * 0.16));
-    ctx.fillStyle = '#2e8cff';
-    ctx.fillRect(x + tile - w - 8, y + 8, w, h);
-    ctx.fillStyle = '#ffffff';
-    ctx.fillText(badge, x + tile - w/2 - 8, y + 8 + h/2 + 1);
-  }
-}
-
-/* ===================== Image composition ===================== */
-function pickPreset(count) {
-  for (const p of GRID_PRESETS) if (count <= p.max) return p;
-  return GRID_PRESETS[GRID_PRESETS.length - 1];
-}
-async function composeGrid(items, preloadedImgs) {
-  const count = items.length;
-  const preset = pickPreset(count);
-  const cols = preset.cols;
-  const tile = preset.tile;
-  const rows = Math.ceil(count / cols);
-  const W = cols * tile + (cols + 1) * GAP;
-  const H = rows * tile + (rows + 1) * GAP;
-
-  const canvas = createCanvas(W, H);
-  const ctx = canvas.getContext('2d');
-
-  ctx.fillStyle = BG; ctx.fillRect(0, 0, W, H);
-
-  for (let i = 0; i < count; i++) {
-    const r = Math.floor(i / cols);
-    const c = i % cols;
-    const x = GAP + c * (tile + GAP);
-    const y = GAP + r * (tile + GAP);
-
-    ctx.fillStyle = BORDER;
-    ctx.fillRect(x - 1, y - 1, tile + 2, tile + 2);
-
-    const img = preloadedImgs?.[i];
-    if (!img) {
-      drawPlaceholder(ctx, x, y, tile, items[i]?.tokenId, items[i]?.__placeholderReason || 'NO IMG');
-      continue;
-    }
-
-    // cover-fit crop math (no temp canvas)
-    const scale = Math.max(tile / img.width, tile / img.height);
-    const sw = Math.floor(tile / scale);
-    const sh = Math.floor(tile / scale);
-    const sx = Math.floor((img.width  - sw) / 2);
-    const sy = Math.floor((img.height - sh) / 2);
-
-    ctx.drawImage(img, sx, sy, sw, sh, x, y, tile, tile);
-  }
-
-  return canvas.toBuffer('image/png');
 }
 
 /* ===================== DB / guild helpers ===================== */
@@ -647,8 +575,23 @@ module.exports = {
 
     await interaction.deferReply({ ephemeral: false });
 
-    // Initial status
-    await interaction.editReply({ content: '⏳ Resolving wallet…' });
+    // Live status updater
+    let status = {
+      step: 'Resolving wallet…',
+      scan: '',
+      images: '0%',
+    };
+    const pushStatus = async () => {
+      const lines = [
+        `Wallet: ${status.step}`,
+        status.scan && `Scan:   ${status.scan}`,
+        `Images: ${status.images}`
+      ].filter(Boolean);
+      await interaction.editReply({ content: statusBlock(lines) });
+    };
+
+    status.step = 'Resolving wallet…';
+    await pushStatus();
 
     // ENS or address
     let owner, ownerDisplay;
@@ -660,8 +603,8 @@ module.exports = {
       return interaction.editReply(`❌ ${e.message}`);
     }
 
-    // Warn if this might take awhile (deep scans on Base old collections)
-    await interaction.editReply({ content: '🔎 Fetching tokens… *(older Base collections may take a bit — we’ll show progress)*' });
+    status.step = 'Fetching tokens (API)…';
+    await pushStatus();
 
     // resolve project ONLY if tracked by this server
     const { project, error } = await resolveProjectForGuild(pg, interaction.client, guildId, projectInput);
@@ -684,7 +627,8 @@ module.exports = {
     if (items.length < maxWant) {
       const isEnum = await detectEnumerable(chain, contract);
       if (isEnum) {
-        await interaction.editReply({ content: '🧭 Fetching on-chain (enumerable)…' });
+        status.step = 'Fetching tokens (enumerable)…';
+        await pushStatus();
         const en = await fetchOwnerTokensEnumerable({ chain, contract, owner, maxWant });
         const byId = new Map(items.map(it => [String(it.tokenId), it]));
         for (const it of en.items) {
@@ -696,14 +640,21 @@ module.exports = {
       }
     }
 
-    // Owner-indexed deep log scan (older Base holdings)
+    // Owner-indexed deep log scan (older Base holdings), parallel windows + progress
     if (items.length < maxWant) {
-      const deep = chain === 'base';
-      await interaction.editReply({ content: deep
-        ? '🕳️ Deep scan enabled for Base (walking old logs)…'
-        : '📜 Scanning transfer logs…'
-      });
-      const onch = await fetchOwnerTokensOnchainRolling({ chain, contract, owner, maxWant, deep });
+      let lastPct = -1;
+      status.step = chain === 'base' ? 'Deep scan (Base)…' : 'Scanning logs…';
+      status.scan = '0% [────────────────]';
+      await pushStatus();
+
+      const onScanProgress = async (done, total) => {
+        const pct = clamp(Math.floor((done/total)*100), 0, 100);
+        if (pct === lastPct) return;
+        lastPct = pct;
+        status.scan = `${pct}% [${bar(pct)}]`;
+        await pushStatus();
+      };
+      const onch = await fetchOwnerTokensOnchainRolling({ chain, contract, owner, maxWant, deep: chain === 'base', onProgress: onScanProgress });
       const byId = new Map(items.map(it => [String(it.tokenId), it]));
       for (const it of onch.items) {
         const key = String(it.tokenId);
@@ -711,27 +662,40 @@ module.exports = {
       }
       items = Array.from(byId.values()).slice(0, maxWant);
       totalOwned = Math.max(totalOwned, onch.total || 0, items.length);
+      status.scan = 'done';
+      await pushStatus();
     }
 
     if (!items.length) {
       return interaction.editReply(`❌ No ${project.name} NFTs found for \`${ownerDisplay}\` on ${chain}.`);
     }
 
-    // Enrich images if needed (also tags SVG/DATA for placeholder)
+    // Enrich images via tokenURI
+    status.step = 'Enriching images (tokenURI)…';
+    await pushStatus();
     items = await enrichImagesViaTokenURI({ chain, contract, items });
 
-    // Progress updates during image preloading
-    const throttled = throttle(1100);
-    await interaction.editReply({ content: `🖼️ Rendering ${items.length} tiles… 0%  [${progressBar(0)}]` });
+    // Backfill missing images via Reservoir token batch (ETH/Base)
+    if (items.some(i => !i.image) && (chain === 'eth' || chain === 'base')) {
+      status.step = 'Backfilling images (Reservoir)…';
+      await pushStatus();
+      items = await backfillImagesFromReservoir({ chain, contract, items });
+    }
 
-    const preloadedImgs = await preloadImages(items, async (done, total) => {
-      const pct = Math.max(0, Math.min(100, Math.floor((done / total) * 100)));
-      await throttled(async () => {
-        await interaction.editReply({ content: `🖼️ Rendering ${total} tiles… ${pct}%  [${progressBar(pct)}]` });
-      });
+    // Image preload with visible percent
+    status.step = `Loading images (${items.length})…`;
+    let imgPct = 0;
+    status.images = `0% [${bar(0)}]`;
+    await pushStatus();
+
+    const preloadedImgs = await preloadImages(items, (done, total) => {
+      imgPct = clamp(Math.floor((done/total)*100), 0, 100);
+      status.images = `${imgPct}% [${bar(imgPct)}]`;
+      // fire-and-forget update to keep it snappy
+      pushStatus();
     });
 
-    // Compose adaptive grid
+    // Compose grid (no placeholders; if an image is still missing, show token # tile)
     const gridBuf = await composeGrid(items, preloadedImgs);
     const file = new AttachmentBuilder(gridBuf, { name: `matrix_${project.name}_${owner.slice(0,6)}.png` });
 
@@ -747,7 +711,7 @@ module.exports = {
       .setDescription(desc)
       .setColor(0x66ccff)
       .setImage(`attachment://${file.name}`)
-      .setFooter({ text: `Matrix view • Powered by PimpsDev (SVG/data placeholders rendered, progress shown)` })
+      .setFooter({ text: `Matrix view • Powered by PimpsDev` })
       .setTimestamp();
 
     await interaction.editReply({ content: null, embeds: [embed], files: [file] });
