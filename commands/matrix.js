@@ -5,7 +5,7 @@ const { Contract, Interface, ethers } = require('ethers');
 const fetch = require('node-fetch');
 const { safeRpcCall, getProvider } = require('../services/providerM');
 
-// ---------- Adaptive grid config ----------
+/* ===================== Adaptive grid config ===================== */
 const GRID_PRESETS = [
   { max: 25,  cols: 5,  tile: 160 },
   { max: 49,  cols: 7,  tile: 120 },
@@ -18,7 +18,7 @@ const GAP = 8;
 const BG = '#0f1115';
 const BORDER = '#1f2230';
 
-// ---------- IPFS helpers ----------
+/* ===================== IPFS helpers ===================== */
 const IPFS_GATES = [
   'https://cloudflare-ipfs.com/ipfs/',
   'https://ipfs.io/ipfs/',
@@ -46,24 +46,63 @@ async function fetchJsonWithFallback(urlOrList, timeoutMs = 7000) {
   return null;
 }
 
-// ---------- ENS resolution ----------
-async function resolveWalletInput(input) {
-  // If it's already a valid address, return it
-  try { return ethers.getAddress(input); } catch {}
-  // If it's an ENS name, resolve on Ethereum mainnet
-  if (typeof input === 'string' && input.toLowerCase().endsWith('.eth')) {
+/* ===================== ENS resolution (with fallbacks) ===================== */
+const ENS_CACHE = new Map(); // name -> { addr, ts }
+const ENS_RPC_FALLBACKS = [
+  'https://cloudflare-eth.com',
+  'https://rpc.ankr.com/eth',
+  'https://eth.llamarpc.com',
+  'https://1rpc.io/eth',
+  'https://ethereum-rpc.publicnode.com'
+];
+function withTimeout(promise, ms = 4000, reason = 'ENS timeout') {
+  return Promise.race([
+    promise,
+    new Promise((_, rej) => setTimeout(() => rej(new Error(reason)), ms))
+  ]);
+}
+async function tryResolveWithCurrentProvider(name) {
+  try {
     const prov = getProvider('eth');
-    if (!prov) throw new Error('No ETH provider available to resolve ENS.');
-    const addr = await safeRpcCall('eth', p => p.resolveName(input));
-    if (addr) return ethers.getAddress(addr);
-    throw new Error('ENS name could not be resolved.');
+    if (!prov) return null;
+    const addr = await withTimeout(prov.resolveName(name), 4000);
+    return addr || null;
+  } catch { return null; }
+}
+async function tryResolveWithFallbacks(name) {
+  for (const url of ENS_RPC_FALLBACKS) {
+    try {
+      const prov = new ethers.JsonRpcProvider(url);
+      const addr = await withTimeout(prov.resolveName(name), 4000);
+      if (addr) return addr;
+    } catch {}
+  }
+  return null;
+}
+async function resolveWalletInput(input) {
+  // already an address?
+  try { return ethers.getAddress(input); } catch {}
+  // ENS?
+  if (typeof input === 'string' && input.toLowerCase().endsWith('.eth')) {
+    const key = input.toLowerCase();
+    const cached = ENS_CACHE.get(key);
+    if (cached && (Date.now() - cached.ts) < 10 * 60 * 1000) {
+      return cached.addr;
+    }
+    let addr = await tryResolveWithCurrentProvider(key);
+    if (!addr) addr = await tryResolveWithFallbacks(key);
+    if (addr) {
+      const normalized = ethers.getAddress(addr);
+      ENS_CACHE.set(key, { addr: normalized, ts: Date.now() });
+      return normalized;
+    }
+    throw new Error('ENS name could not be resolved (try a different provider or use 0x address).');
   }
   throw new Error('Invalid wallet or ENS name.');
 }
 
-// ---------- Reservoir (fast path) ----------
+/* ===================== Reservoir (ETH/Base) ===================== */
 async function fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant = MAX_AUTO }) {
-  // Reservoir supports eth + base; skip for ape
   const chainHeader = chain === 'eth' ? 'ethereum' : chain === 'base' ? 'base' : null;
   if (!chainHeader) return { items: [], total: 0 };
 
@@ -113,7 +152,7 @@ async function fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant = 
   return { items, total };
 }
 
-// ---------- On-chain fallback: rolling windows (handles Base + Ape) ----------
+/* ===================== On-chain fallback (Base + Ape + backup) ===================== */
 async function fetchOwnerTokensOnchainRolling({ chain, contract, owner, maxWant = MAX_AUTO }) {
   const provider = getProvider(chain);
   if (!provider) return { items: [], total: 0 };
@@ -124,10 +163,8 @@ async function fetchOwnerTokensOnchainRolling({ chain, contract, owner, maxWant 
   ]);
 
   const head = await safeRpcCall(chain, p => p.getBlockNumber()) || 0;
-
-  // scan backwards in windows until we have enough or hit a limit
-  const WINDOW = 15000;   // ~larger window for Base/Ape stability
-  const MAX_WINDOWS = 10; // scan up to ~150k blocks max
+  const WINDOW = 15000;
+  const MAX_WINDOWS = 10;
   const owned = new Set();
 
   for (let i = 0; i < MAX_WINDOWS && owned.size < maxWant; i++) {
@@ -157,7 +194,6 @@ async function fetchOwnerTokensOnchainRolling({ chain, contract, owner, maxWant 
 
   const all = Array.from(owned);
   const slice = all.slice(0, maxWant).map(id => ({ tokenId: id, image: null, name: `#${id}` }));
-  // We don’t know the absolute total without a full scan; report at least the count we saw
   return { items: slice, total: all.length || slice.length };
 }
 
@@ -182,6 +218,7 @@ async function enrichImagesViaTokenURI({ chain, contract, items }) {
   return out;
 }
 
+/* ===================== Image composition ===================== */
 async function downloadImage(url, timeoutMs = 8000) {
   const urls = Array.isArray(url) ? url : [url];
   for (const u of urls) {
@@ -198,8 +235,6 @@ async function downloadImage(url, timeoutMs = 8000) {
   }
   return null;
 }
-
-// ---------- Adaptive grid ----------
 function pickPreset(count) {
   for (const p of GRID_PRESETS) if (count <= p.max) return p;
   return GRID_PRESETS[GRID_PRESETS.length - 1];
@@ -262,7 +297,7 @@ async function composeGrid(items) {
   return canvas.toBuffer('image/png');
 }
 
-// ---------- DB / guild helpers ----------
+/* ===================== DB / guild helpers ===================== */
 function normalizeChannels(channel_ids) {
   if (Array.isArray(channel_ids)) return channel_ids.filter(Boolean).map(String);
   if (!channel_ids) return [];
@@ -307,10 +342,11 @@ async function resolveProjectForGuild(pg, client, guildId, projectInput) {
   return { project: match };
 }
 
+/* ===================== Slash Command ===================== */
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('matrix')
-    .setDescription('Render a grid of a wallet’s NFTs for a project tracked by this server (auto dense, ENS supported)')
+    .setDescription('Render a grid of a wallet’s NFTs for a project tracked by this server (ENS + auto-dense)')
     .addStringOption(o =>
       o.setName('wallet')
         .setDescription('Wallet address or ENS (.eth)')
@@ -377,17 +413,16 @@ module.exports = {
 
     const chain = (project.chain || 'base').toLowerCase();
     const contract = (project.address || '').toLowerCase();
-
     const maxWant = Math.min(userLimit || MAX_AUTO, MAX_AUTO);
 
-    // Try Reservoir for ETH/Base; skip on Ape
+    // Try Reservoir for ETH/Base
     let items = [], totalOwned = 0, usedReservoir = false;
     if (chain === 'eth' || chain === 'base') {
       const resv = await fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant });
       items = resv.items; totalOwned = resv.total || items.length; usedReservoir = items.length > 0;
     }
 
-    // Fallback: on-chain rolling scan (needed for Ape, also for Base/ETH if API returns nothing)
+    // Fallback: on-chain rolling scan (also used for Ape)
     if (!items.length) {
       const onch = await fetchOwnerTokensOnchainRolling({ chain, contract, owner, maxWant });
       items = onch.items; totalOwned = onch.total || items.length;
@@ -406,20 +441,16 @@ module.exports = {
     const gridBuf = await composeGrid(items);
     const file = new AttachmentBuilder(gridBuf, { name: `matrix_${project.name}_${owner.slice(0,6)}.png` });
 
-    const title = `🧩 ${project.name}`;
-    const descParts = [
+    const desc = [
       `Owner: \`${owner}\``,
       `Chain: \`${chain}\``,
-      `**Showing ${items.length} of ${totalOwned || items.length} owned**`
-    ];
-    if (chain === 'ape' && usedReservoir === false) {
-      // friendly note for ape
-      descParts.push('*(ApeChain via on-chain scan)*');
-    }
+      `**Showing ${items.length} of ${totalOwned || items.length} owned**`,
+      ...(chain === 'ape' && !usedReservoir ? ['*(ApeChain via on-chain scan)*'] : [])
+    ].join('\n');
 
     const embed = new EmbedBuilder()
-      .setTitle(title)
-      .setDescription(descParts.join('\n'))
+      .setTitle(`🧩 ${project.name}`)
+      .setDescription(desc)
       .setColor(0x66ccff)
       .setImage(`attachment://${file.name}`)
       .setFooter({ text: 'Matrix view • Powered by PimpsDev (ENS + auto-dense)' })
