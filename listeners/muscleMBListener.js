@@ -1,11 +1,17 @@
+// listeners/musclemb.js
 const fetch = require('node-fetch');
 const { EmbedBuilder, PermissionsBitField } = require('discord.js');
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const GROQ_MODEL_ENV = (process.env.GROQ_MODEL || '').trim();
 
+// Typing speed (match MBella by default)
+const MB_MS_PER_CHAR = Number(process.env.MB_MS_PER_CHAR || '40');
+const MB_MAX_DELAY_MS = Number(process.env.MB_MAX_DELAY_MS || '5000');
+
 const cooldown = new Set();
 const TRIGGERS = ['musclemb', 'muscle mb', 'yo mb', 'mbbot', 'mb bro'];
+const FEMALE_TRIGGERS = ['mbella', 'mb ella', 'lady mb', 'queen mb', 'bella'];
 
 /** ===== Activity tracker for periodic nice messages ===== */
 const lastActiveByUser = new Map(); // key: `${guildId}:${userId}` -> { ts, channelId }
@@ -14,6 +20,7 @@ const NICE_PING_EVERY_MS = 4 * 60 * 60 * 1000; // 4 hours
 const NICE_SCAN_EVERY_MS = 60 * 60 * 1000;     // scan hourly
 const NICE_ACTIVE_WINDOW_MS = 45 * 60 * 1000;  // “active” = last 45 minutes
 
+// Expanded with more non-gym, general life/ship vibes
 const NICE_LINES = [
   "hydrate, hustle, and be kind today 💧💪",
   "tiny reps compound. keep going, legend ✨",
@@ -25,40 +32,17 @@ const NICE_LINES = [
   "write it down, knock it out, fist bump later ✍️👊",
   "skip the scroll, ship the thing 📦",
   "mood follows motion — move first 🕺",
-];
-
-/** === MB timing (match MBella) & periodic quote config === */
-const MB_MS_PER_CHAR = Number(process.env.MB_MS_PER_CHAR || '40');     // 40ms/char
-const MB_MAX_DELAY_MS = Number(process.env.MB_MAX_DELAY_MS || '4000'); // 5s cap
-const MB_WISDOM_PINGS_RATIO = Number(process.env.MB_WISDOM_PINGS_RATIO || '0.6'); // 60% of pings use quotes
-
-/** Non-gym, short, witty quotes for periodic auto-posts (NOT appended to replies) */
-const WISDOM_QUOTES = [
-  'Confidence is a language—speak it fluently. ✨',
-  'Curiosity prints its own passport. 🌍',
-  'Distraction is expensive. Focus is luxury. 💡',
-  'Be so honest it feels like innovation. 🔧',
-  'Make the room warmer, then say less. 🕯️',
-  'Silence carries farther than shouting. 🤫',
-  'Your attention is currency—invest wisely. 💳',
-  'Elegance is refusing to rush the magic. ⏳',
-  'Edit your life like a good sentence. ✂️',
-  'Small doors often lead to big rooms. 🚪',
-  'Audacity pairs well with restraint. 🎭',
-  'Mystery tastes better than certainty. 🥂',
-  'Maps are suggestions; instincts are GPS. 🧭',
-  'The plot thickens when you do. 📚',
-  'Romance the process, not the outcome. 💫',
-  'Taste is a muscle—train it gently. 🎨',
-  'Leave room for echo. The message grows. 📡',
-  'Move like you already know the ending. 🎬',
-  'Craft a life that fits like custom. 🧵',
-  'Polish is louder than volume. ✨',
-  'Simplicity is the most dramatic outfit. 🖤',
-  'Let your choices have good aftertaste. 🍷',
-  'Momentum is a love letter to tomorrow. 💌',
-  'Kindness is the ultimate flex. 🌿',
-  'Your future self is watching—impress them. 👀',
+  // extra non-gym quotes:
+  "clear tab, clear mind — ship the smallest next thing 🧹",
+  "inbox zero? nah—impact first, inbox later ✉️➡️🚀",
+  "add five quiet minutes to think; it pays compound interest ⏱️",
+  "ask one better question and the work gets lighter ❓✨",
+  "today’s goal: one honest message, one shipped change 📤",
+  "a tiny draft beats a perfect idea living in your head 📝",
+  "choose progress over polish; polish comes after 🧽",
+  "drink water, touch grass, send the PR 🌿",
+  "don’t doomscroll; dreamscroll your own roadmap 🗺️",
+  "precision beats intensity — name the next step 🎯",
 ];
 
 /** Helper: safe channel to speak in */
@@ -170,12 +154,12 @@ async function fetchGroqModels() {
     }
     const data = safeJsonParse(bodyText);
     if (!data || !Array.isArray(data.data)) return [];
+    // Prefer chat-capable families; sort by heuristic
     const ids = data.data.map(x => x.id).filter(Boolean);
     const chatLikely = ids.filter(id =>
       /llama|mixtral|gemma|qwen|deepseek/i.test(id)
     ).sort(preferOrder);
-    const ordered = chatLikely.length ? chatLikely : ids.sort(preferOrder);
-    return ordered;
+    return chatLikely.length ? chatLikely : ids.sort(preferOrder);
   } catch (e) {
     console.error('❌ Failed to list Groq models:', e.message);
     return [];
@@ -193,6 +177,7 @@ async function getModelsToTry() {
       MODEL_CACHE = { ts: now, models };
     }
   }
+  // Merge env + cached unique
   for (const id of MODEL_CACHE.models) {
     if (!list.includes(id)) list.push(id);
   }
@@ -239,27 +224,36 @@ async function groqWithDiscovery(systemPrompt, userContent, temperature) {
       const r = await groqTryModel(m, systemPrompt, userContent, temperature);
       if (!r.res.ok) {
         console.error(`❌ Groq HTTP ${r.res.status} on model "${m}": ${r.bodyText?.slice(0, 400)}`);
+        // If model is decommissioned or 400/404, try next
         if (r.res.status === 400 || r.res.status === 404) {
           last = { model: m, ...r };
           continue;
         }
+        // For 401/403/429/5xx, stop & surface
         return { model: m, ...r };
       }
-      return { model: m, ...r };
+      return { model: m, ...r }; // success
     } catch (e) {
       console.error(`❌ Groq fetch error on model "${m}":`, e.message);
       last = { model: m, error: e };
+      // try next
     }
   }
   return last || { error: new Error('All models failed') };
 }
 
-/** ---------------- Module export ---------------- */
+/** ---------- Cross-listener typing suppression (set by MBella) ---------- */
+function isTypingSuppressed(client, channelId) {
+  const until = client.__mbTypingSuppress?.get(channelId) || 0;
+  return Date.now() < until;
+}
+
+/** ---------------- Module export: keeps your original logic ---------------- */
 module.exports = (client) => {
-  /** Periodic pings (now sometimes drop non-gym quotes) */
+  /** Periodic nice pings (lightweight) */
   setInterval(async () => {
     const now = Date.now();
-    const byGuild = new Map(); // guildId -> [{channelId, ts}]
+    const byGuild = new Map(); // guildId -> [{userId, channelId, ts}]
     for (const [key, info] of lastActiveByUser.entries()) {
       const [guildId] = key.split(':');
       if (!byGuild.has(guildId)) byGuild.set(guildId, []);
@@ -280,15 +274,9 @@ module.exports = (client) => {
       const channel = findSpeakableChannel(guild, preferredChannel);
       if (!channel) continue;
 
-      let text;
-      if (Math.random() < MB_WISDOM_PINGS_RATIO && WISDOM_QUOTES.length) {
-        text = `✨ “${pick(WISDOM_QUOTES)}”`;
-      } else {
-        text = `✨ quick vibe check: ${pick(NICE_LINES)}`;
-      }
-
+      const nice = pick(NICE_LINES);
       try {
-        await channel.send(text);
+        await channel.send(`✨ quick vibe check: ${nice}`);
         lastNicePingByGuild.set(guildId, now);
       } catch {}
     }
@@ -303,7 +291,14 @@ module.exports = (client) => {
       channelId: message.channel.id,
     });
 
-    const lowered = message.content.toLowerCase();
+    const lowered = (message.content || '').toLowerCase();
+
+    // If MBella is handling this channel right now, suppress MuscleMB typing/responding
+    if (isTypingSuppressed(client, message.channel.id)) return;
+
+    // Don’t compete directly with MBella triggers
+    if (FEMALE_TRIGGERS.some(t => lowered.includes(t))) return;
+
     const botMentioned = message.mentions.has(client.user);
     const hasTriggerWord = TRIGGERS.some(trigger => lowered.includes(trigger));
 
@@ -339,6 +334,7 @@ module.exports = (client) => {
     cleanedInput = `${introLine}${cleanedInput}`;
 
     try {
+      // show typing as main bot while thinking
       await message.channel.sendTyping();
 
       const isRoast = shouldRoast && !isRoastingBot;
@@ -413,9 +409,11 @@ module.exports = (client) => {
         } else if (groqTry.res.status === 429) {
           hint = '⚠️ Rate limited. Short breather—then we rip again. ⏱️';
         } else if (groqTry.res.status === 400 || groqTry.res.status === 404) {
-          hint = (message.author.id === process.env.BOT_OWNER_ID)
-            ? `⚠️ Model issue (${groqTry.res.status}). Set GROQ_MODEL in Railway or rely on auto-discovery.`
-            : '⚠️ MB switched plates. One more shot. 🏋️';
+          if (message.author.id === process.env.BOT_OWNER_ID) {
+            hint = `⚠️ Model issue (${groqTry.res.status}). Set GROQ_MODEL in Railway or rely on auto-discovery.`;
+          } else {
+            hint = '⚠️ MB switched plates. One more shot. 🏋️';
+          }
         } else if (groqTry.res.status >= 500) {
           hint = '⚠️ MB cloud cramps (server error). One more try soon. ☁️';
         }
@@ -464,7 +462,6 @@ module.exports = (client) => {
           .setDescription(`💬 ${aiReply}`)
           .setFooter({ text: `Mode: ${currentMode} ${footerEmoji}` });
 
-        // Typing delay (matches MBella; env-overridable)
         const delayMs = Math.min(aiReply.length * MB_MS_PER_CHAR, MB_MAX_DELAY_MS);
         await new Promise(resolve => setTimeout(resolve, delayMs));
 
