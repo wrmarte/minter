@@ -9,6 +9,9 @@ const GROQ_MODEL_ENV = (process.env.GROQ_MODEL || '').trim();
 const MB_MS_PER_CHAR = Number(process.env.MB_MS_PER_CHAR || '40');
 const MB_MAX_DELAY_MS = Number(process.env.MB_MAX_DELAY_MS || '5000');
 
+// Name MBella uses when posting via webhook/embeds
+const MBELLA_NAME = (process.env.MBELLA_NAME || 'MBella').trim();
+
 const cooldown = new Set();
 const TRIGGERS = ['musclemb', 'muscle mb', 'yo mb', 'mbbot', 'mb bro'];
 const FEMALE_TRIGGERS = ['mbella', 'mb ella', 'lady mb', 'queen mb', 'bella'];
@@ -248,8 +251,40 @@ function isTypingSuppressed(client, channelId) {
   return Date.now() < until;
 }
 
+// Mark suppression helper (we'll also mark when we SEE MBella post)
+function markTypingSuppressed(client, channelId, ms = 11000) {
+  if (!client.__mbTypingSuppress) client.__mbTypingSuppress = new Map();
+  const until = Date.now() + ms;
+  client.__mbTypingSuppress.set(channelId, until);
+  setTimeout(() => {
+    const exp = client.__mbTypingSuppress.get(channelId);
+    if (exp && exp <= Date.now()) client.__mbTypingSuppress.delete(channelId);
+  }, ms + 500);
+}
+
 /** ---------------- Module export: keeps your original logic ---------------- */
 module.exports = (client) => {
+  /** 🔎 MBella-post detector: if MBella just posted in a channel,
+   * suppress MuscleMB typing/responding there for ~11s so no "typing after reply".
+   */
+  client.on('messageCreate', (m) => {
+    try {
+      if (!m.guild) return;
+      // Webhook path: author username is MBella (because webhook username was set)
+      const fromWebhookBella = Boolean(m.webhookId) &&
+        typeof m.author?.username === 'string' &&
+        m.author.username.toLowerCase() === MBELLA_NAME.toLowerCase();
+
+      // Fallback path: bot-authored embed with author.name = MBella
+      const fromEmbedBella = (m.author?.id === client.user.id) &&
+        (m.embeds?.[0]?.author?.name || '').toLowerCase() === MBELLA_NAME.toLowerCase();
+
+      if (fromWebhookBella || fromEmbedBella) {
+        markTypingSuppressed(client, m.channel.id, 11000);
+      }
+    } catch {}
+  });
+
   /** Periodic nice pings (lightweight) */
   setInterval(async () => {
     const now = Date.now();
@@ -293,7 +328,7 @@ module.exports = (client) => {
 
     const lowered = (message.content || '').toLowerCase();
 
-    // If MBella is handling this channel right now, suppress MuscleMB typing/responding
+    // If MBella recently posted/claimed the channel, suppress MuscleMB here
     if (isTypingSuppressed(client, message.channel.id)) return;
 
     // Don’t compete directly with MBella triggers
@@ -487,4 +522,5 @@ module.exports = (client) => {
     }
   });
 };
+
 
