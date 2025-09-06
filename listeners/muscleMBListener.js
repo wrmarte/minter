@@ -27,13 +27,13 @@ const NICE_LINES = [
   "mood follows motion — move first 🕺",
 ];
 
-/** === MB timing (match MBella) & add-on quotes config === */
+/** === MB timing (match MBella) & periodic quote config === */
 const MB_MS_PER_CHAR = Number(process.env.MB_MS_PER_CHAR || '40');     // 40ms/char
 const MB_MAX_DELAY_MS = Number(process.env.MB_MAX_DELAY_MS || '5000'); // 5s cap
-const MB_ADDON_QUOTES_CHANCE = Number(process.env.MB_ADDON_QUOTES_CHANCE || '0.6'); // 60%
+const MB_WISDOM_PINGS_RATIO = Number(process.env.MB_WISDOM_PINGS_RATIO || '0.6'); // 60% of pings use quotes
 
-/** Non-gym, short, witty add-on quotes (randomly appended) */
-const MB_ADDON_QUOTES = [
+/** Non-gym, short, witty quotes for periodic auto-posts (NOT appended to replies) */
+const WISDOM_QUOTES = [
   'Confidence is a language—speak it fluently. ✨',
   'Curiosity prints its own passport. 🌍',
   'Distraction is expensive. Focus is luxury. 💡',
@@ -170,12 +170,10 @@ async function fetchGroqModels() {
     }
     const data = safeJsonParse(bodyText);
     if (!data || !Array.isArray(data.data)) return [];
-    // Prefer llama-* and mixtral-*/gemma-* if present; sort by heuristic
     const ids = data.data.map(x => x.id).filter(Boolean);
     const chatLikely = ids.filter(id =>
-      /llama|mixtral|gemma|qwen|deepseek/i.test(id) // broad match for chat-capable families
+      /llama|mixtral|gemma|qwen|deepseek/i.test(id)
     ).sort(preferOrder);
-    // Fallback to all if filter too strict
     const ordered = chatLikely.length ? chatLikely : ids.sort(preferOrder);
     return ordered;
   } catch (e) {
@@ -195,7 +193,6 @@ async function getModelsToTry() {
       MODEL_CACHE = { ts: now, models };
     }
   }
-  // Merge env + cached unique
   for (const id of MODEL_CACHE.models) {
     if (!list.includes(id)) list.push(id);
   }
@@ -242,30 +239,27 @@ async function groqWithDiscovery(systemPrompt, userContent, temperature) {
       const r = await groqTryModel(m, systemPrompt, userContent, temperature);
       if (!r.res.ok) {
         console.error(`❌ Groq HTTP ${r.res.status} on model "${m}": ${r.bodyText?.slice(0, 400)}`);
-        // If model is decommissioned or 400/404, try next
         if (r.res.status === 400 || r.res.status === 404) {
           last = { model: m, ...r };
           continue;
         }
-        // For 401/403/429/5xx, stop & surface
         return { model: m, ...r };
       }
-      return { model: m, ...r }; // success
+      return { model: m, ...r };
     } catch (e) {
       console.error(`❌ Groq fetch error on model "${m}":`, e.message);
       last = { model: m, error: e };
-      // try next
     }
   }
   return last || { error: new Error('All models failed') };
 }
 
-/** ---------------- Module export: keeps your original logic ---------------- */
+/** ---------------- Module export ---------------- */
 module.exports = (client) => {
-  /** Periodic nice pings (lightweight) */
+  /** Periodic pings (now sometimes drop non-gym quotes) */
   setInterval(async () => {
     const now = Date.now();
-    const byGuild = new Map(); // guildId -> [{userId, channelId, ts}]
+    const byGuild = new Map(); // guildId -> [{channelId, ts}]
     for (const [key, info] of lastActiveByUser.entries()) {
       const [guildId] = key.split(':');
       if (!byGuild.has(guildId)) byGuild.set(guildId, []);
@@ -286,9 +280,15 @@ module.exports = (client) => {
       const channel = findSpeakableChannel(guild, preferredChannel);
       if (!channel) continue;
 
-      const nice = pick(NICE_LINES);
+      let text;
+      if (Math.random() < MB_WISDOM_PINGS_RATIO && WISDOM_QUOTES.length) {
+        text = `✨ “${pick(WISDOM_QUOTES)}”`;
+      } else {
+        text = `✨ quick vibe check: ${pick(NICE_LINES)}`;
+      }
+
       try {
-        await channel.send(`✨ quick vibe check: ${nice}`);
+        await channel.send(text);
         lastNicePingByGuild.set(guildId, now);
       } catch {}
     }
@@ -413,11 +413,9 @@ module.exports = (client) => {
         } else if (groqTry.res.status === 429) {
           hint = '⚠️ Rate limited. Short breather—then we rip again. ⏱️';
         } else if (groqTry.res.status === 400 || groqTry.res.status === 404) {
-          if (message.author.id === process.env.BOT_OWNER_ID) {
-            hint = `⚠️ Model issue (${groqTry.res.status}). Set GROQ_MODEL in Railway or rely on auto-discovery.`;
-          } else {
-            hint = '⚠️ MB switched plates. One more shot. 🏋️';
-          }
+          hint = (message.author.id === process.env.BOT_OWNER_ID)
+            ? `⚠️ Model issue (${groqTry.res.status}). Set GROQ_MODEL in Railway or rely on auto-discovery.`
+            : '⚠️ MB switched plates. One more shot. 🏋️';
         } else if (groqTry.res.status >= 500) {
           hint = '⚠️ MB cloud cramps (server error). One more try soon. ☁️';
         }
@@ -426,7 +424,7 @@ module.exports = (client) => {
         return;
       }
 
-      let groqData = safeJsonParse(groqTry.bodyText);
+      const groqData = safeJsonParse(groqTry.bodyText);
       if (!groqData) {
         console.error('❌ Groq returned non-JSON/empty:', groqTry.bodyText?.slice(0, 300));
         try { await message.reply('⚠️ MB static noise… say that again or keep it simple. 📻'); } catch {}
@@ -441,15 +439,9 @@ module.exports = (client) => {
         return;
       }
 
-      // === Build reply (with optional non-gym quote add-on) ===
-      let aiReply = groqData.choices?.[0]?.message?.content?.trim();
+      const aiReply = groqData.choices?.[0]?.message?.content?.trim();
 
       if (aiReply?.length) {
-        // Add-on quote (random)
-        if (Math.random() < MB_ADDON_QUOTES_CHANCE) {
-          aiReply += `\n\n_“${pick(MB_ADDON_QUOTES)}”_`;
-        }
-
         let embedColor = '#9b59b6';
         const modeColorMap = {
           chill: '#3498db',
