@@ -6,11 +6,14 @@ const { EmbedBuilder, PermissionsBitField } = require('discord.js');
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const GROQ_MODEL_ENV = (process.env.GROQ_MODEL || '').trim();
 
-const MBELLA_NAME = (process.env.MBELLA_NAME || 'MuscleMBella').trim();
+// Display config
+const MBELLA_NAME = (process.env.MBELLA_NAME || 'MBella').trim();
 const MBELLA_AVATAR_URL = (process.env.MBELLA_AVATAR_URL || '').trim();
 
+// Behavior config
 const COOLDOWN_MS = 10_000;
-const FEMALE_TRIGGERS = ['mbella', 'mb ella', 'musclembella', 'lady mb', 'queen mb'];
+const FEMALE_TRIGGERS = ['mbella', 'mb ella', 'lady mb', 'queen mb', 'bella'];
+const RELEASE_REGEX = /\b(stop|bye bella|goodbye bella|end chat|silence bella)\b/i;
 
 /** Guard rail */
 if (!GROQ_API_KEY || GROQ_API_KEY.trim().length < 10) {
@@ -21,6 +24,38 @@ if (!GROQ_API_KEY || GROQ_API_KEY.trim().length < 10) {
 const cooldown = new Set();
 const channelWebhookCache = new Map(); // channelId -> webhook
 
+// Optional cross-listener dedupe (if you use this in other listeners too)
+function alreadyHandled(client, messageId) {
+  if (!client.__mbHandled) client.__mbHandled = new Set();
+  return client.__mbHandled.has(messageId);
+}
+function markHandled(client, messageId) {
+  if (!client.__mbHandled) client.__mbHandled = new Set();
+  client.__mbHandled.add(messageId);
+  setTimeout(() => client.__mbHandled.delete(messageId), 60_000);
+}
+
+// "current partner" cache: only that user can keep the reply-thread going
+const BELLA_TTL_MS = 30 * 60 * 1000; // 30 mins
+const bellaPartners = new Map(); // channelId -> { userId, expiresAt }
+
+function setBellaPartner(channelId, userId, ttlMs = BELLA_TTL_MS) {
+  bellaPartners.set(channelId, { userId, expiresAt: Date.now() + ttlMs });
+}
+function getBellaPartner(channelId) {
+  const rec = bellaPartners.get(channelId);
+  if (!rec) return null;
+  if (Date.now() > rec.expiresAt) {
+    bellaPartners.delete(channelId);
+    return null;
+  }
+  return rec.userId;
+}
+function clearBellaPartner(channelId) {
+  bellaPartners.delete(channelId);
+}
+
+/** ================== UTILS ================== */
 function safeJsonParse(text) { try { return JSON.parse(text); } catch { return null; } }
 
 async function fetchWithTimeout(url, opts = {}, timeoutMs = 25_000) {
@@ -223,7 +258,6 @@ async function isReplyToMBella(message, client) {
 
     // webhook path: compare webhookId to our channel webhook
     if (referenced.webhookId) {
-      // ensure cache has the channel's webhook (without creating new)
       let hook = channelWebhookCache.get(message.channel.id);
       if (!hook) {
         const hooks = await message.channel.fetchWebhooks().catch(() => null);
@@ -231,11 +265,10 @@ async function isReplyToMBella(message, client) {
         if (hook) channelWebhookCache.set(message.channel.id, hook);
       }
       if (hook && referenced.webhookId === hook.id) return true;
-      // also try username match for safety (webhook messages expose username via author)
       if (referenced.author?.username && referenced.author.username.toLowerCase() === MBELLA_NAME.toLowerCase()) return true;
     }
 
-    // fallback path: bot reply with embed author = MBELLA_NAME
+    // fallback path: bot reply with embed author = MBella
     if (referenced.author?.id === client.user.id) {
       const embedAuthor = referenced.embeds?.[0]?.author?.name || '';
       if (embedAuthor.toLowerCase() === MBELLA_NAME.toLowerCase()) return true;
@@ -244,7 +277,10 @@ async function isReplyToMBella(message, client) {
   return false;
 }
 
-/** ================== MBELLA STYLE PROMPT ================== */
+/** ================== MBELLA STYLE PROMPT ==================
+ * Sensual + sexy (PG-13), nutty, clever. Keeps chat going by default.
+ * Guardrails: playful innuendo OK; no explicit sexual content; no minors; consent-first.
+ */
 function buildMBellaSystemPrompt({ isRoast, isRoastingBot, roastTargets, currentMode, recentContext }) {
   const styleDeck = [
     'Style: sensual, flirty, a bit chaotic-nutty, and smart; playful teasing and witty banter.',
@@ -257,11 +293,11 @@ function buildMBellaSystemPrompt({ isRoast, isRoastingBot, roastTargets, current
   let systemPrompt = '';
   if (isRoast) {
     systemPrompt =
-      `You are MuscleMBella — a sharp, seductive roastmistress. Roast these tagged degens: ${roastTargets}. ` +
+      `You are MBella — a sharp, seductive roastmistress. Roast these tagged degens: ${roastTargets}. ` +
       `Keep it witty and playful; never cruel. Punch up with humor and innuendo, not insults. 💋🔥`;
   } else if (isRoastingBot) {
     systemPrompt =
-      `You are MuscleMBella — unbothered, clever, and dazzling. Someone tried to roast you; clap back with velvet-glove swagger, playful not mean. ✨`;
+      `You are MBella — unbothered, clever, and dazzling. Someone tried to roast you; clap back with velvet-glove swagger, playful not mean. ✨`;
   } else {
     let modeLayer = '';
     switch (currentMode) {
@@ -270,7 +306,7 @@ function buildMBellaSystemPrompt({ isRoast, isRoastingBot, roastTargets, current
       case 'motivator': modeLayer = 'Flirty hype — energy, sparkle, and gentle push. 🔥'; break;
       default:          modeLayer = 'Default — cheeky, smart, a bit nutty; charming and kind.';
     }
-    systemPrompt = `You are MuscleMBella — a savvy, sensual degen AI with style. ${modeLayer}`;
+    systemPrompt = `You are MBella — a savvy, sensual degen AI with style. ${modeLayer}`;
   }
 
   const softGuard =
@@ -288,21 +324,35 @@ module.exports = (client) => {
   client.on('messageCreate', async (message) => {
     try {
       if (message.author.bot || !message.guild) return;
+      if (alreadyHandled(client, message.id)) return;
 
       const lowered = (message.content || '').toLowerCase();
       const hasFemaleTrigger = FEMALE_TRIGGERS.some(t => lowered.includes(t));
       const botMentioned = message.mentions.has(client.user);
       const hintedBella = /\bbella\b/.test(lowered);
 
-      // NEW: reply-to detection (treat replies to MBella as triggers)
+      // "release" phrases: clear partner lock
+      if (RELEASE_REGEX.test(message.content || '')) {
+        clearBellaPartner(message.channel.id);
+        // Optional acknowledgement:
+        // await message.reply('✨ I’ll be quiet now. Call me if you need me.');
+        return;
+      }
+
+      // reply detection
       const replyingToMBella = await isReplyToMBella(message, client);
 
-      if (!hasFemaleTrigger && !(botMentioned && hintedBella) && !replyingToMBella) return;
+      // author-gated reply: only current partner can keep the flow
+      const partnerId = getBellaPartner(message.channel.id);
+      const replyAllowed = replyingToMBella && (!partnerId || partnerId === message.author.id);
+
+      // overall trigger decision
+      if (!hasFemaleTrigger && !(botMentioned && hintedBella) && !replyAllowed) return;
       if (message.mentions.everyone || message.mentions.roles.size > 0) return;
 
-      // cooldown — allow natural back-and-forth with MBella
+      // cooldown — bypass when replying to her
       const isOwner = message.author.id === process.env.BOT_OWNER_ID;
-      const bypassCooldown = replyingToMBella; // <- bypass when replying to her
+      const bypassCooldown = replyAllowed;
       if (!bypassCooldown) {
         if (cooldown.has(message.author.id) && !isOwner) return;
         cooldown.add(message.author.id);
@@ -313,10 +363,10 @@ module.exports = (client) => {
 
       // Roast logic
       const mentionedUsers = message.mentions.users.filter(u => u.id !== client.user.id);
-      const shouldRoast = (hasFemaleTrigger || (botMentioned && hintedBella) || replyingToMBella) && mentionedUsers.size > 0;
+      const shouldRoast = (hasFemaleTrigger || (botMentioned && hintedBella) || replyAllowed) && mentionedUsers.size > 0;
       const isRoastingBot = shouldRoast && message.mentions.has(client.user) && mentionedUsers.size === 1 && mentionedUsers.has(client.user.id);
 
-      // Mode from DB
+      // Mode from DB (reuse mb_modes)
       let currentMode = 'default';
       try {
         const modeRes = await client.pg.query(
@@ -331,7 +381,7 @@ module.exports = (client) => {
       // Recent context
       const recentContext = await getRecentContext(message);
 
-      // Clean input
+      // Clean input: remove triggers & mentions
       let cleanedInput = lowered;
       for (const t of FEMALE_TRIGGERS) cleanedInput = cleanedInput.replaceAll(t, '');
       message.mentions.users.forEach(user => {
@@ -344,7 +394,7 @@ module.exports = (client) => {
       let intro = '';
       if (hasFemaleTrigger) intro = `Detected trigger word: "${FEMALE_TRIGGERS.find(t => lowered.includes(t))}". `;
       else if (botMentioned && hintedBella) intro = `You called for MBella. `;
-      else if (replyingToMBella) intro = `Reply detected — continuing with MBella. `;
+      else if (replyAllowed) intro = `Reply detected — continuing with MBella. `;
       if (!cleanedInput) cleanedInput = shouldRoast ? 'Roast these fools.' : 'Your move, darling.';
       cleanedInput = `${intro}${cleanedInput}`;
 
@@ -431,10 +481,16 @@ module.exports = (client) => {
           if (aiReply) { try { await message.reply(aiReply); } catch {} }
         }
       }
+
+      // lock the conversation to this user so their replies keep the flow
+      setBellaPartner(message.channel.id, message.author.id);
+
+      markHandled(client, message.id);
     } catch (err) {
       console.error('❌ MBella listener error:', err?.stack || err?.message || String(err));
       try { await message.reply('⚠️ MBella pulled a hammy. BRB. 🦵'); } catch {}
     }
   });
 };
+
 
