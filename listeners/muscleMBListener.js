@@ -2,6 +2,7 @@ const fetch = require('node-fetch');
 const { EmbedBuilder, ChannelType, PermissionsBitField } = require('discord.js');
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const GROQ_MODEL_ENV = (process.env.GROQ_MODEL || '').trim();
 const cooldown = new Set();
 const TRIGGERS = ['musclemb', 'muscle mb', 'yo mb', 'mbbot', 'mb bro'];
 
@@ -19,7 +20,6 @@ const NICE_LINES = [
   "posture check, water sip, breathe deep 🧘‍♂️",
   "you’re doing great. send a W to someone else too 🙌",
   "breaks are part of the grind — reset, then rip ⚡️",
-  // small tasteful additions
   "stack small dubs; the big ones follow 🧱",
   "write it down, knock it out, fist bump later ✍️👊",
   "skip the scroll, ship the thing 📦",
@@ -39,10 +39,7 @@ function findSpeakableChannel(guild, preferredChannelId = null) {
     const ch = guild.channels.cache.get(preferredChannelId);
     if (canSend(ch)) return ch;
   }
-  // system channel?
   if (guild.systemChannel && canSend(guild.systemChannel)) return guild.systemChannel;
-
-  // first sendable text channel
   return guild.channels.cache.find((c) => canSend(c)) || null;
 }
 
@@ -52,18 +49,18 @@ async function getRecentContext(message) {
     const fetched = await message.channel.messages.fetch({ limit: 8 });
     const lines = [];
     for (const [, m] of fetched) {
-      if (m.id === message.id) continue; // avoid echoing the current message
+      if (m.id === message.id) continue;
       if (m.author?.bot) continue;
       const txt = (m.content || '').trim();
       if (!txt) continue;
-      // Keep short snippets only
       const oneLine = txt.replace(/\s+/g, ' ').slice(0, 200);
       lines.push(`${m.author.username}: ${oneLine}`);
       if (lines.length >= 6) break;
     }
     if (!lines.length) return '';
-    // Most recent first
-    return `Recent context:\n` + lines.join('\n');
+    const joined = lines.join('\n');
+    // keep the prompt small even if we ever change fetch limit
+    return `Recent context:\n${joined}`.slice(0, 1200);
   } catch {
     return '';
   }
@@ -91,7 +88,6 @@ async function fetchWithTimeout(url, opts = {}, timeoutMs = 25000) {
       clearTimeout(timer);
     }
   } else {
-    // Fallback: race; prevents “typing forever” even without true abort
     return await Promise.race([
       (async () => {
         const res = await fetch(url, opts);
@@ -103,16 +99,82 @@ async function fetchWithTimeout(url, opts = {}, timeoutMs = 25000) {
   }
 }
 
-// Warn once if key is clearly wrong/missing (helps spot prod env issues fast)
-if (!GROQ_API_KEY || typeof GROQ_API_KEY !== 'string' || GROQ_API_KEY.trim().length < 10) {
+// Warn once if key looks wrong/missing
+if (!GROQ_API_KEY || GROQ_API_KEY.trim().length < 10) {
   console.warn('⚠️ GROQ_API_KEY is missing or too short. Verify Railway env.');
+}
+
+/** Build Groq payload once (model injected later) */
+function buildGroqBody(model, systemPrompt, userContent, temperature, maxTokens = 120) {
+  // keep payload lean; trim user content hard just in case
+  const cleanUser = String(userContent || '').slice(0, 4000);
+  return JSON.stringify({
+    model,
+    temperature,
+    max_tokens: maxTokens,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: cleanUser },
+    ],
+  });
+}
+
+/** Try Groq once with the provided model id */
+async function groqOnce(model, systemPrompt, userContent, temperature) {
+  const { res, bodyText } = await fetchWithTimeout(
+    'https://api.groq.com/openai/v1/chat/completions',
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${GROQ_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: buildGroqBody(model, systemPrompt, userContent, temperature, 140),
+    },
+    25000
+  );
+  return { res, bodyText };
+}
+
+/** Try Groq with model fallback (ENV -> llama3-70b-8192 -> llama-3.1-70b-versatile) */
+async function groqWithFallback(systemPrompt, userContent, temperature, authorId) {
+  const modelsToTry = [];
+  if (GROQ_MODEL_ENV) modelsToTry.push(GROQ_MODEL_ENV);
+  modelsToTry.push('llama3-70b-8192', 'llama-3.1-70b-versatile');
+
+  let last = null;
+  for (const m of modelsToTry) {
+    try {
+      const r = await groqOnce(m, systemPrompt, userContent, temperature);
+      if (!r.res.ok) {
+        // Owner hint for obvious config issues
+        if (r.res.status === 401 || r.res.status === 403) {
+          r.ownerHint = '⚠️ MB auth error with Groq (401/403). Verify GROQ_API_KEY & project permissions.';
+        } else if (r.res.status === 400 || r.res.status === 404) {
+          r.ownerHint = `⚠️ Model issue (${r.res.status}). Set a valid GROQ_MODEL or try 'llama-3.1-70b-versatile'.`;
+        }
+        last = { model: m, ...r };
+        console.error(`❌ Groq HTTP ${r.res.status} on model "${m}": ${r.bodyText?.slice(0, 400)}`);
+        // If 400/404, try next model automatically
+        if (r.res.status === 400 || r.res.status === 404) continue;
+        // For other codes, break and surface
+        break;
+      } else {
+        return { model: m, ...r };
+      }
+    } catch (e) {
+      console.error(`❌ Groq fetch error on model "${m}":`, e.message);
+      last = { model: m, error: e };
+      // try next model
+    }
+  }
+  return last;
 }
 
 module.exports = (client) => {
   /** Periodic nice pings (lightweight) */
   setInterval(async () => {
     const now = Date.now();
-    // iterate guilds we’ve seen activity for
     const byGuild = new Map(); // guildId -> [{userId, channelId, ts}]
     for (const [key, info] of lastActiveByUser.entries()) {
       const [guildId, userId] = key.split(':');
@@ -125,16 +187,13 @@ module.exports = (client) => {
       if (!guild) continue;
 
       const lastPingTs = lastNicePingByGuild.get(guildId) || 0;
-      if (now - lastPingTs < NICE_PING_EVERY_MS) continue; // not time yet
+      if (now - lastPingTs < NICE_PING_EVERY_MS) continue;
 
-      // active within window
       const active = entries.filter(e => now - e.ts <= NICE_ACTIVE_WINDOW_MS);
       if (!active.length) continue;
 
-      // choose 1–2 random active members to nudge (not spammy)
       const targets = [pick(active)];
       if (active.length > 3 && Math.random() < 0.5) {
-        // maybe a second one, different channel if possible
         let candidate = pick(active);
         let attempts = 0;
         while (attempts++ < 5 && targets.find(t => t.userId === candidate.userId)) {
@@ -143,7 +202,6 @@ module.exports = (client) => {
         if (!targets.find(t => t.userId === candidate.userId)) targets.push(candidate);
       }
 
-      // Send one group message per guild, to a good channel
       const preferredChannel = targets[0]?.channelId || null;
       const channel = findSpeakableChannel(guild, preferredChannel);
       if (!channel) continue;
@@ -152,7 +210,7 @@ module.exports = (client) => {
       try {
         await channel.send(`✨ quick vibe check: ${nice}`);
         lastNicePingByGuild.set(guildId, now);
-      } catch {/* ignore */}
+      } catch {}
     }
   }, NICE_SCAN_EVERY_MS);
 
@@ -214,7 +272,7 @@ module.exports = (client) => {
           [message.guild.id]
         );
         currentMode = modeRes.rows[0]?.mode || 'default';
-      } catch (err) {
+      } catch {
         console.warn('⚠️ Failed to fetch mb_mode, using default.');
       }
 
@@ -256,62 +314,50 @@ module.exports = (client) => {
       if (currentMode === 'villain') temperature = 0.5;
       if (currentMode === 'motivator') temperature = 0.9;
 
-      // ---- Robust Groq request with timeout + explicit checks ----
-      let groqResp, groqText, groqData;
-      try {
-        ({ res: groqResp, bodyText: groqText } = await fetchWithTimeout(
-          'https://api.groq.com/openai/v1/chat/completions',
-          {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${GROQ_API_KEY}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              model: 'llama3-70b-8192',
-              temperature,
-              max_tokens: 120, // same concision, a touch more room than 100
-              messages: [
-                { role: 'system', content: fullSystemPrompt },
-                { role: 'user', content: cleanedInput },
-              ],
-            }),
-          },
-          25000 // 25s
-        ));
-      } catch (e) {
-        console.error('❌ Groq fetch error (timeout/network):', e.message);
-        // Visible fallback: never leave silence
+      // ---- Groq with model fallback & clear diagnostics ----
+      const groqTry = await groqWithFallback(fullSystemPrompt, cleanedInput, temperature, message.author.id);
+
+      // Network/timeout error path
+      if (!groqTry || groqTry.error) {
+        console.error('❌ Groq fetch/network error (all models):', groqTry?.error?.message || 'unknown');
         try { await message.reply('⚠️ MB lag spike. One rep at a time—try again in a sec. ⏱️'); } catch {}
         return;
       }
 
-      if (!groqResp.ok) {
-        console.error(`❌ Groq HTTP ${groqResp.status}: ${groqText?.slice(0, 400)}`);
+      // Non-OK HTTP
+      if (!groqTry.res.ok) {
         let hint = '⚠️ MB jammed the reps rack (API). Try again shortly. 🏋️';
-        if (groqResp.status === 401 || groqResp.status === 403) {
+        if (groqTry.res.status === 401 || groqTry.res.status === 403) {
           hint = (message.author.id === process.env.BOT_OWNER_ID)
-            ? '⚠️ MB auth error with Groq (401/403). Verify GROQ_API_KEY in Railway.'
+            ? '⚠️ MB auth error with Groq (401/403). Verify GROQ_API_KEY & project permissions.'
             : '⚠️ MB auth blip. Coach is reloading plates. 🏋️';
-        } else if (groqResp.status === 429) {
+        } else if (groqTry.res.status === 429) {
           hint = '⚠️ Rate limited. Short breather—then we rip again. ⏱️';
-        } else if (groqResp.status >= 500) {
+        } else if (groqTry.res.status === 400 || groqTry.res.status === 404) {
+          // Owner-only config hint for model issues
+          if (message.author.id === process.env.BOT_OWNER_ID) {
+            hint = `⚠️ Model issue (${groqTry.res.status}). Set GROQ_MODEL or try 'llama-3.1-70b-versatile'.`;
+          } else {
+            hint = '⚠️ MB switched plates. One more shot. 🏋️';
+          }
+        } else if (groqTry.res.status >= 500) {
           hint = '⚠️ MB cloud cramps (server error). One more try soon. ☁️';
         }
+        console.error(`❌ Groq HTTP ${groqTry.res.status} on "${groqTry.model}": ${groqTry.bodyText?.slice(0, 400)}`);
         try { await message.reply(hint); } catch {}
         return;
       }
 
-      groqData = safeJsonParse(groqText);
+      const groqData = safeJsonParse(groqTry.bodyText);
       if (!groqData) {
-        console.error('❌ Groq returned non-JSON/empty:', groqText?.slice(0, 300));
+        console.error('❌ Groq returned non-JSON/empty:', groqTry.bodyText?.slice(0, 300));
         try { await message.reply('⚠️ MB static noise… say that again or keep it simple. 📻'); } catch {}
         return;
       }
       if (groqData.error) {
         console.error('❌ Groq API error:', groqData.error);
         const hint = (message.author.id === process.env.BOT_OWNER_ID)
-          ? `⚠️ Groq error: ${groqData.error?.message || 'unknown'}. Check project/model access.`
+          ? `⚠️ Groq error: ${groqData.error?.message || 'unknown'}. Check model access & payload size.`
           : '⚠️ MB slipped on a banana peel (API error). One sec. 🍌';
         try { await message.reply(hint); } catch {}
         return;
@@ -349,11 +395,9 @@ module.exports = (client) => {
           await message.reply({ embeds: [embed] });
         } catch (err) {
           console.warn('❌ MuscleMB embed reply error:', err.message);
-          // If embed fails (permissions/format), send plain text fallback:
           try { await message.reply(aiReply); } catch {}
         }
       } else {
-        // Absolute fallback: never leave the channel silent
         try {
           await message.reply('💬 (silent set) MB heard you but returned no sauce. Try again with fewer words.');
         } catch {}
@@ -369,3 +413,4 @@ module.exports = (client) => {
     }
   });
 };
+
