@@ -521,7 +521,10 @@ module.exports = (client) => {
         setTimeout(() => cooldown.delete(message.author.id), COOLDOWN_MS);
       }
 
-      // 🔕 Suppress MuscleMB typing in this channel while MBella handles it
+      // ✅ Show main bot typing right away (single pulse)
+      try { await message.channel.sendTyping(); } catch {}
+
+      // 🔕 Suppress MuscleMB typing spam (from other listener) during this turn
       setTypingSuppress(client, message.channel.id, 12000);
 
       // Debounce the “typing” placeholder; only create it if LLM takes longer than threshold
@@ -671,18 +674,3 @@ module.exports = (client) => {
     }
   });
 };
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
