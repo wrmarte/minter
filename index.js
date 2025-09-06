@@ -21,6 +21,8 @@ const client = new Client({
 
 // ✅ Load MuscleMB trigger
 require('./listeners/muscleMBListener')(client);
+require('./listeners/mbella')(client);
+
 
 // ✅ Load FF Trigger listener
 require('./listeners/fftrigger')(client);
