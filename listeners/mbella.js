@@ -12,7 +12,7 @@ const MBELLA_AVATAR_URL = (process.env.MBELLA_AVATAR_URL || '').trim();
 const COOLDOWN_MS = 10_000;
 const FEMALE_TRIGGERS = ['mbella', 'mb ella', 'musclembella', 'lady mb', 'queen mb'];
 
-/** Guard rail: if env key looks bad, warn once */
+/** Guard rail */
 if (!GROQ_API_KEY || GROQ_API_KEY.trim().length < 10) {
   console.warn('⚠️ GROQ_API_KEY missing/short for MBella. Check your env.');
 }
@@ -21,18 +21,6 @@ if (!GROQ_API_KEY || GROQ_API_KEY.trim().length < 10) {
 const cooldown = new Set();
 const channelWebhookCache = new Map(); // channelId -> webhook
 
-// prevent double responses if multiple listeners run
-function alreadyHandled(client, messageId) {
-  if (!client.__mbHandled) client.__mbHandled = new Set();
-  return client.__mbHandled.has(messageId);
-}
-function markHandled(client, messageId) {
-  if (!client.__mbHandled) client.__mbHandled = new Set();
-  client.__mbHandled.add(messageId);
-  setTimeout(() => client.__mbHandled.delete(messageId), 60_000);
-}
-
-/** ================== UTILS ================== */
 function safeJsonParse(text) { try { return JSON.parse(text); } catch { return null; } }
 
 async function fetchWithTimeout(url, opts = {}, timeoutMs = 25_000) {
@@ -226,16 +214,42 @@ async function sendViaWebhook(channel, { username, avatarURL, embeds, content })
   }
 }
 
-/** ================== MBELLA STYLE PROMPT ==================
- * Sensual + sexy (PG-13), nutty, clever. Keeps chat going by default.
- * Guardrails: playful innuendo OK; no explicit sexual content; no minors; consent-first; be kind.
- */
+/** detect if this message is a reply to MBella (webhook or fallback) */
+async function isReplyToMBella(message, client) {
+  const ref = message.reference;
+  if (!ref?.messageId) return false;
+  try {
+    const referenced = await message.channel.messages.fetch(ref.messageId);
+
+    // webhook path: compare webhookId to our channel webhook
+    if (referenced.webhookId) {
+      // ensure cache has the channel's webhook (without creating new)
+      let hook = channelWebhookCache.get(message.channel.id);
+      if (!hook) {
+        const hooks = await message.channel.fetchWebhooks().catch(() => null);
+        hook = hooks?.find(h => h.owner?.id === client.user.id);
+        if (hook) channelWebhookCache.set(message.channel.id, hook);
+      }
+      if (hook && referenced.webhookId === hook.id) return true;
+      // also try username match for safety (webhook messages expose username via author)
+      if (referenced.author?.username && referenced.author.username.toLowerCase() === MBELLA_NAME.toLowerCase()) return true;
+    }
+
+    // fallback path: bot reply with embed author = MBELLA_NAME
+    if (referenced.author?.id === client.user.id) {
+      const embedAuthor = referenced.embeds?.[0]?.author?.name || '';
+      if (embedAuthor.toLowerCase() === MBELLA_NAME.toLowerCase()) return true;
+    }
+  } catch { /* ignore */ }
+  return false;
+}
+
+/** ================== MBELLA STYLE PROMPT ================== */
 function buildMBellaSystemPrompt({ isRoast, isRoastingBot, roastTargets, currentMode, recentContext }) {
-  // Core persona — flirty, clever, a little chaotic, but tasteful
   const styleDeck = [
     'Style: sensual, flirty, a bit chaotic-nutty, and smart; playful teasing and witty banter.',
-    'Tone: confident, charming, and warm; use 1–3 tasteful emojis max (no spam).',
-    'Safety: PG-13 only; no explicit sexual content; no kink specifics; no minors; consent & boundaries always.',
+    'Tone: confident, charming, and warm; use 1–3 tasteful emojis max.',
+    'Safety: PG-13 only; no explicit sexual content; no minors; consent & boundaries always.',
     'Brevity: 2–4 short sentences total.',
     'Conversation: end with a short flirty/open-ended follow-up question by default (unless the user asked to stop).',
   ].join(' ');
@@ -274,31 +288,35 @@ module.exports = (client) => {
   client.on('messageCreate', async (message) => {
     try {
       if (message.author.bot || !message.guild) return;
-      if (alreadyHandled(client, message.id)) return;
 
-      // Trigger detection for MBella
       const lowered = (message.content || '').toLowerCase();
       const hasFemaleTrigger = FEMALE_TRIGGERS.some(t => lowered.includes(t));
       const botMentioned = message.mentions.has(client.user);
       const hintedBella = /\bbella\b/.test(lowered);
 
-      if (!hasFemaleTrigger && !(botMentioned && hintedBella)) return;
+      // NEW: reply-to detection (treat replies to MBella as triggers)
+      const replyingToMBella = await isReplyToMBella(message, client);
+
+      if (!hasFemaleTrigger && !(botMentioned && hintedBella) && !replyingToMBella) return;
       if (message.mentions.everyone || message.mentions.roles.size > 0) return;
 
-      // per-user cooldown (owner bypass)
+      // cooldown — allow natural back-and-forth with MBella
       const isOwner = message.author.id === process.env.BOT_OWNER_ID;
-      if (cooldown.has(message.author.id) && !isOwner) return;
-      cooldown.add(message.author.id);
-      setTimeout(() => cooldown.delete(message.author.id), COOLDOWN_MS);
+      const bypassCooldown = replyingToMBella; // <- bypass when replying to her
+      if (!bypassCooldown) {
+        if (cooldown.has(message.author.id) && !isOwner) return;
+        cooldown.add(message.author.id);
+        setTimeout(() => cooldown.delete(message.author.id), COOLDOWN_MS);
+      }
 
       await message.channel.sendTyping();
 
       // Roast logic
       const mentionedUsers = message.mentions.users.filter(u => u.id !== client.user.id);
-      const shouldRoast = (hasFemaleTrigger || (botMentioned && hintedBella)) && mentionedUsers.size > 0;
+      const shouldRoast = (hasFemaleTrigger || (botMentioned && hintedBella) || replyingToMBella) && mentionedUsers.size > 0;
       const isRoastingBot = shouldRoast && message.mentions.has(client.user) && mentionedUsers.size === 1 && mentionedUsers.has(client.user.id);
 
-      // Mode from DB (reuse mb_modes)
+      // Mode from DB
       let currentMode = 'default';
       try {
         const modeRes = await client.pg.query(
@@ -313,7 +331,7 @@ module.exports = (client) => {
       // Recent context
       const recentContext = await getRecentContext(message);
 
-      // Clean input: remove triggers & mentions
+      // Clean input
       let cleanedInput = lowered;
       for (const t of FEMALE_TRIGGERS) cleanedInput = cleanedInput.replaceAll(t, '');
       message.mentions.users.forEach(user => {
@@ -326,6 +344,7 @@ module.exports = (client) => {
       let intro = '';
       if (hasFemaleTrigger) intro = `Detected trigger word: "${FEMALE_TRIGGERS.find(t => lowered.includes(t))}". `;
       else if (botMentioned && hintedBella) intro = `You called for MBella. `;
+      else if (replyingToMBella) intro = `Reply detected — continuing with MBella. `;
       if (!cleanedInput) cleanedInput = shouldRoast ? 'Roast these fools.' : 'Your move, darling.';
       cleanedInput = `${intro}${cleanedInput}`;
 
@@ -339,22 +358,19 @@ module.exports = (client) => {
         recentContext
       });
 
-      // Temperature tuned slightly higher for playful variance
+      // Temperature tuned higher for playful variance
       let temperature = 0.85;
       if (currentMode === 'villain') temperature = 0.6;
       if (currentMode === 'motivator') temperature = 0.9;
 
-      // Groq call with discovery
+      // Groq call
       const groqTry = await groqWithDiscovery(systemPrompt, cleanedInput, temperature);
 
-      // network/timeout fail
       if (!groqTry || groqTry.error) {
         console.error('❌ (MBella) network error:', groqTry?.error?.message || 'unknown');
         try { await message.reply('⚠️ MBella lag spike. One breath, one rep. ⏱️'); } catch {}
-        markHandled(client, message.id);
         return;
       }
-      // non-OK HTTP
       if (!groqTry.res.ok) {
         let hint = '⚠️ MBella jammed the rep rack (API). Try again shortly. 🏋️‍♀️';
         if (groqTry.res.status === 401 || groqTry.res.status === 403) {
@@ -372,7 +388,6 @@ module.exports = (client) => {
         }
         console.error(`❌ (MBella) HTTP ${groqTry.res.status} on "${groqTry.model}": ${groqTry.bodyText?.slice(0, 400)}`);
         try { await message.reply(hint); } catch {}
-        markHandled(client, message.id);
         return;
       }
 
@@ -380,7 +395,6 @@ module.exports = (client) => {
       if (!groqData) {
         console.error('❌ (MBella) non-JSON body:', groqTry.bodyText?.slice(0, 300));
         try { await message.reply('⚠️ MBella static noise… say it simpler. 📻'); } catch {}
-        markHandled(client, message.id);
         return;
       }
       if (groqData.error) {
@@ -389,22 +403,19 @@ module.exports = (client) => {
           ? `⚠️ MBella Groq error: ${groqData.error?.message || 'unknown'}.`
           : '⚠️ MBella slipped on a peel (API). One sec. 🍌';
         try { await message.reply(hint); } catch {}
-        markHandled(client, message.id);
         return;
       }
 
       const aiReply = groqData.choices?.[0]?.message?.content?.trim();
 
-      // Build embed (MBella style)
       const embed = new EmbedBuilder()
-        .setColor('#e84393') // MBella accent
+        .setColor('#e84393')
         .setAuthor({ name: MBELLA_NAME, iconURL: MBELLA_AVATAR_URL || undefined })
         .setDescription(`💬 ${aiReply || '...'}`);
 
       const delayMs = Math.min((aiReply || '').length * 40, 5000);
       await new Promise(r => setTimeout(r, delayMs));
 
-      // Prefer webhook to “speak as MBella”
       let sent = null;
       try {
         sent = await sendViaWebhook(message.channel, {
@@ -415,17 +426,15 @@ module.exports = (client) => {
       } catch {}
 
       if (!sent) {
-        // Fallback: normal reply (still styled as MBella via author + color)
         try { await message.reply({ embeds: [embed] }); } catch (err) {
           console.warn('❌ (MBella) send fallback error:', err.message);
           if (aiReply) { try { await message.reply(aiReply); } catch {} }
         }
       }
-
-      markHandled(client, message.id);
     } catch (err) {
       console.error('❌ MBella listener error:', err?.stack || err?.message || String(err));
       try { await message.reply('⚠️ MBella pulled a hammy. BRB. 🦵'); } catch {}
     }
   });
 };
+
