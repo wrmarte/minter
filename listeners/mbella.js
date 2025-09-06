@@ -13,7 +13,7 @@ const MBELLA_AVATAR_URL = (process.env.MBELLA_AVATAR_URL || '').trim();
 // Typing delay: match MuscleMB by default (env overridable)
 const MBELLA_MS_PER_CHAR = Number(process.env.MBELLA_MS_PER_CHAR || '40');     // 40ms/char
 const MBELLA_MAX_DELAY_MS = Number(process.env.MBELLA_MAX_DELAY_MS || '5000'); // 5s cap
-// Make MuscleMB "type" a moment earlier than MBella’s message lands
+// Make MuscleMB "typing" appear just before MBella message lands
 const MBELLA_DELAY_OFFSET_MS = Number(process.env.MBELLA_DELAY_OFFSET_MS || '150'); // +150ms
 
 // Behavior config
@@ -267,9 +267,7 @@ async function getOrCreateWebhook(channel) {
           name: 'MB Relay',
           avatar: MBELLA_AVATAR_URL || undefined
         });
-      } catch (e) {
-        // ignore edit failures
-      }
+      } catch {}
     }
 
     if (!hook) {
@@ -413,6 +411,7 @@ module.exports = (client) => {
   schedulePeriodicQuotes(client);
 
   client.on('messageCreate', async (message) => {
+    let typingKeeper = null;
     try {
       if (message.author.bot || !message.guild) return;
 
@@ -450,7 +449,11 @@ module.exports = (client) => {
         setTimeout(() => cooldown.delete(message.author.id), COOLDOWN_MS);
       }
 
-      // ❌ Don’t sendTyping() — prevents “MuscleMB is typing…” artifact
+      // Show typing as the main bot account (Discord caps ~10s; refresh to keep alive)
+      await message.channel.sendTyping();
+      typingKeeper = setInterval(() => {
+        message.channel.sendTyping().catch(() => {});
+      }, 9000);
 
       const mentionedUsers = message.mentions.users.filter(u => u.id !== client.user.id);
       const shouldRoast = (hasFemaleTrigger || (botMentioned && hintedBella) || replyAllowed) && mentionedUsers.size > 0;
@@ -496,11 +499,13 @@ module.exports = (client) => {
       const groqTry = await groqWithDiscovery(systemPrompt, cleanedInput, temperature);
 
       if (!groqTry || groqTry.error) {
+        clearInterval(typingKeeper);
         console.error('❌ (MBella) network error:', groqTry?.error?.message || 'unknown');
         try { await message.reply('⚠️ MBella lag spike. One breath, one rep. ⏱️'); } catch {}
         return;
       }
       if (!groqTry.res.ok) {
+        clearInterval(typingKeeper);
         let hint = '⚠️ MBella jammed the rep rack (API). Try again shortly. 🏋️‍♀️';
         if (groqTry.res.status === 401 || groqTry.res.status === 403) {
           hint = (message.author.id === process.env.BOT_OWNER_ID)
@@ -522,11 +527,13 @@ module.exports = (client) => {
 
       const groqData = safeJsonParse(groqTry.bodyText);
       if (!groqData) {
+        clearInterval(typingKeeper);
         console.error('❌ (MBella) non-JSON body:', groqTry.bodyText?.slice(0, 300));
         try { await message.reply('⚠️ MBella static noise… say it simpler. 📻'); } catch {}
         return;
       }
       if (groqData.error) {
+        clearInterval(typingKeeper);
         console.error('❌ (MBella) API error:', groqData.error);
         const hint = (message.author.id === process.env.BOT_OWNER_ID)
           ? `⚠️ MBella Groq error: ${groqData.error?.message || 'unknown'}.`
@@ -537,17 +544,19 @@ module.exports = (client) => {
 
       let aiReply = groqData.choices?.[0]?.message?.content?.trim() || '';
 
-      // No add-on quotes on replies — periodic only
-
+      // Build embed (MBella style)
       const embed = new EmbedBuilder()
         .setColor('#e84393')
         .setAuthor({ name: MBELLA_NAME, iconURL: MBELLA_AVATAR_URL || undefined })
         .setDescription(`💬 ${aiReply || '...'}`);
 
-      // Delay so MuscleMB's typing appears first (and natural pacing)
+      // Natural pacing + tiny offset so typing appears first
       const baseDelay = Math.min((aiReply || '').length * MBELLA_MS_PER_CHAR, MBELLA_MAX_DELAY_MS);
       const delayMs = baseDelay + MBELLA_DELAY_OFFSET_MS;
       await new Promise(r => setTimeout(r, delayMs));
+
+      // Stop typing indicator before sending
+      clearInterval(typingKeeper);
 
       let sent = null;
       try {
@@ -568,11 +577,13 @@ module.exports = (client) => {
       setBellaPartner(message.channel.id, message.author.id);
       markHandled(client, message.id);
     } catch (err) {
+      clearInterval(typingKeeper);
       console.error('❌ MBella listener error:', err?.stack || err?.message || String(err));
       try { await message.reply('⚠️ MBella pulled a hammy. BRB. 🦵'); } catch {}
     }
   });
 };
+
 
 
 
