@@ -13,13 +13,15 @@ const MBELLA_AVATAR_URL = (process.env.MBELLA_AVATAR_URL || '').trim();
 // Typing delay: match MuscleMB by default (env overridable)
 const MBELLA_MS_PER_CHAR = Number(process.env.MBELLA_MS_PER_CHAR || '40');     // 40ms/char
 const MBELLA_MAX_DELAY_MS = Number(process.env.MBELLA_MAX_DELAY_MS || '5000'); // 5s cap
+// Make MuscleMB "type" a moment earlier than MBella’s message lands
+const MBELLA_DELAY_OFFSET_MS = Number(process.env.MBELLA_DELAY_OFFSET_MS || '150'); // +150ms
 
 // Behavior config
 const COOLDOWN_MS = 10_000;
 const FEMALE_TRIGGERS = ['mbella', 'mb ella', 'lady mb', 'queen mb', 'bella'];
 const RELEASE_REGEX = /\b(stop|bye bella|goodbye bella|end chat|silence bella)\b/i;
 
-// Periodic quotes: enabled by default so she auto-posts every ~4h in active guilds
+// Periodic quotes (sexy lines) every ~4h in active guilds
 const MBELLA_PERIODIC_QUOTES = /^true$/i.test(process.env.MBELLA_PERIODIC_QUOTES || 'true');
 const NICE_PING_EVERY_MS = 4 * 60 * 60 * 1000; // 4 hours
 const NICE_SCAN_EVERY_MS = 60 * 60 * 1000;     // scan hourly
@@ -44,7 +46,7 @@ function markHandled(client, messageId) {
   setTimeout(() => client.__mbHandled.delete(messageId), 60_000);
 }
 
-// "current partner" cache: only that user can keep the reply-thread going
+// "current partner" cache
 const BELLA_TTL_MS = 30 * 60 * 1000; // 30 mins
 const bellaPartners = new Map(); // channelId -> { userId, expiresAt }
 function setBellaPartner(channelId, userId, ttlMs = BELLA_TTL_MS) {
@@ -53,15 +55,10 @@ function setBellaPartner(channelId, userId, ttlMs = BELLA_TTL_MS) {
 function getBellaPartner(channelId) {
   const rec = bellaPartners.get(channelId);
   if (!rec) return null;
-  if (Date.now() > rec.expiresAt) {
-    bellaPartners.delete(channelId);
-    return null;
-  }
+  if (Date.now() > rec.expiresAt) { bellaPartners.delete(channelId); return null; }
   return rec.userId;
 }
-function clearBellaPartner(channelId) {
-  bellaPartners.delete(channelId);
-}
+function clearBellaPartner(channelId) { bellaPartners.delete(channelId); }
 
 // Activity trackers for periodic quotes
 const lastActiveByUser = new Map(); // key: `${guildId}:${userId}` -> { ts, channelId }
@@ -108,14 +105,8 @@ async function fetchWithTimeout(url, opts = {}, timeoutMs = 25_000) {
 }
 
 function preferOrder(a, b) {
-  const size = (id) => {
-    const m = id.match(/(\d+)\s*b|\b(\d+)[bB]\b|-(\d+)b/);
-    return m ? parseInt(m[1] || m[2] || m[3] || '0', 10) : 0;
-  };
-  const ver = (id) => {
-    const m = id.match(/(\d+(?:\.\d+)?)/);
-    return m ? parseFloat(m[1]) : 0;
-  };
+  const size = (id) => { const m = id.match(/(\d+)\s*b|\b(\d+)[bB]\b|-(\d+)b/); return m ? parseInt(m[1] || m[2] || m[3] || '0', 10) : 0; };
+  const ver  = (id) => { const m = id.match(/(\d+(?:\.\d+)?)/); return m ? parseFloat(m[1]) : 0; };
   const szDiff = size(b) - size(a);
   if (szDiff) return szDiff;
   return ver(b) - ver(a);
@@ -132,10 +123,7 @@ async function fetchGroqModels() {
       { headers: { 'Authorization': `Bearer ${GROQ_API_KEY}` } },
       20_000
     );
-    if (!res.ok) {
-      console.error(`❌ Groq /models HTTP ${res.status}: ${bodyText?.slice(0, 300)}`);
-      return [];
-    }
+    if (!res.ok) { console.error(`❌ Groq /models HTTP ${res.status}: ${bodyText?.slice(0, 300)}`); return []; }
     const data = safeJsonParse(bodyText);
     if (!data || !Array.isArray(data.data)) return [];
     const ids = data.data.map(x => x.id).filter(Boolean);
@@ -189,9 +177,7 @@ async function groqTryModel(model, systemPrompt, userContent, temperature) {
 }
 
 async function groqWithDiscovery(systemPrompt, userContent, temperature) {
-  if (!GROQ_API_KEY || GROQ_API_KEY.trim().length < 10) {
-    return { error: new Error('Missing GROQ_API_KEY') };
-  }
+  if (!GROQ_API_KEY || GROQ_API_KEY.trim().length < 10) return { error: new Error('Missing GROQ_API_KEY') };
   const models = await getModelsToTry();
   if (!models.length) return { error: new Error('No Groq models available') };
 
@@ -229,9 +215,7 @@ async function getRecentContext(message) {
     }
     if (!lines.length) return '';
     return `Recent context:\n${lines.join('\n')}`.slice(0, 1200);
-  } catch {
-    return '';
-  }
+  } catch { return ''; }
 }
 
 async function getReferenceSnippet(message) {
@@ -242,9 +226,7 @@ async function getReferenceSnippet(message) {
     const txt = (referenced?.content || '').replace(/\s+/g, ' ').trim().slice(0, 240);
     if (!txt) return '';
     return `You are replying to ${referenced.author?.username || 'someone'}: "${txt}"`;
-  } catch {
-    return '';
-  }
+  } catch { return ''; }
 }
 
 function canSendInChannel(guild, channel) {
@@ -256,7 +238,6 @@ function canSendInChannel(guild, channel) {
 function findSpeakableChannel(guild, preferredChannelId = null) {
   const me = guild.members.me;
   if (!me) return null;
-
   if (preferredChannelId) {
     const ch = guild.channels.cache.get(preferredChannelId);
     if (canSendInChannel(guild, ch)) return ch;
@@ -279,12 +260,25 @@ async function getOrCreateWebhook(channel) {
     const hooks = await channel.fetchWebhooks().catch(() => null);
     let hook = hooks?.find(h => h.owner?.id === channel.client.user.id);
 
+    // If exists, try to *update avatar* so Discord refreshes cached look
+    if (hook) {
+      try {
+        await hook.edit({
+          name: 'MB Relay',
+          avatar: MBELLA_AVATAR_URL || undefined
+        });
+      } catch (e) {
+        // ignore edit failures
+      }
+    }
+
     if (!hook) {
       hook = await channel.createWebhook({
         name: 'MB Relay',
         avatar: MBELLA_AVATAR_URL || undefined
       }).catch(() => null);
     }
+
     if (hook) channelWebhookCache.set(channel.id, hook);
     return hook || null;
   } catch {
@@ -313,7 +307,6 @@ async function isReplyToMBella(message, client) {
   if (!ref?.messageId) return false;
   try {
     const referenced = await message.channel.messages.fetch(ref.messageId);
-
     if (referenced.webhookId) {
       let hook = channelWebhookCache.get(message.channel.id);
       if (!hook) {
@@ -324,12 +317,11 @@ async function isReplyToMBella(message, client) {
       if (hook && referenced.webhookId === hook.id) return true;
       if (referenced.author?.username && referenced.author.username.toLowerCase() === MBELLA_NAME.toLowerCase()) return true;
     }
-
     if (referenced.author?.id === client.user.id) {
       const embedAuthor = referenced.embeds?.[0]?.author?.name || '';
       if (embedAuthor.toLowerCase() === MBELLA_NAME.toLowerCase()) return true;
     }
-  } catch { /* ignore */ }
+  } catch {}
   return false;
 }
 
@@ -345,12 +337,9 @@ function buildMBellaSystemPrompt({ isRoast, isRoastingBot, roastTargets, current
 
   let systemPrompt = '';
   if (isRoast) {
-    systemPrompt =
-      `You are MBella — a sharp, seductive roastmistress. Roast these tagged degens: ${roastTargets}. ` +
-      `Keep it witty and playful; never cruel. Punch up with humor and innuendo, not insults. 💋🔥`;
+    systemPrompt = `You are MBella — a sharp, seductive roastmistress. Roast these tagged degens: ${roastTargets}. Keep it witty and playful; never cruel. Punch up with humor and innuendo, not insults. 💋🔥`;
   } else if (isRoastingBot) {
-    systemPrompt =
-      `You are MBella — unbothered, clever, and dazzling. Someone tried to roast you; clap back with velvet-glove swagger, playful not mean. ✨`;
+    systemPrompt = `You are MBella — unbothered, clever, and dazzling. Someone tried to roast you; clap back with velvet-glove swagger, playful not mean. ✨`;
   } else {
     let modeLayer = '';
     switch (currentMode) {
@@ -362,14 +351,10 @@ function buildMBellaSystemPrompt({ isRoast, isRoastingBot, roastTargets, current
     systemPrompt = `You are MBella — a savvy, sensual degen AI with style. ${modeLayer}`;
   }
 
-  const softGuard =
-    'Be kind by default; no slurs; no harassment. No explicit sexual content or graphic descriptions. Respect boundaries.';
-  const convoNudge =
-    'After your main point, add one short flirty follow-up question to keep the conversation going.';
+  const softGuard = 'Be kind by default; no slurs; no harassment. No explicit sexual content or graphic descriptions. Respect boundaries.';
+  const convoNudge = 'After your main point, add one short flirty follow-up question to keep the conversation going.';
 
-  return [systemPrompt, styleDeck, softGuard, convoNudge, recentContext || '']
-    .filter(Boolean)
-    .join('\n\n');
+  return [systemPrompt, styleDeck, softGuard, convoNudge, recentContext || ''].filter(Boolean).join('\n\n');
 }
 
 /** ================== OPTIONAL PERIODIC QUOTES ================== */
@@ -378,7 +363,7 @@ function schedulePeriodicQuotes(client) {
   setInterval(async () => {
     try {
       const now = Date.now();
-      const byGuild = new Map(); // guildId -> last seen entries
+      const byGuild = new Map();
       for (const [key, info] of lastActiveByUser.entries()) {
         const [guildId] = key.split(':');
         if (!byGuild.has(guildId)) byGuild.set(guildId, []);
@@ -390,7 +375,7 @@ function schedulePeriodicQuotes(client) {
         if (!guild) continue;
 
         const lastPingTs = lastNicePingByGuild.get(guildId) || 0;
-        if (now - lastPingTs < NICE_PING_EVERY_MS) continue; // not time yet
+        if (now - lastPingTs < NICE_PING_EVERY_MS) continue;
 
         const active = entries.filter(e => now - e.ts <= NICE_ACTIVE_WINDOW_MS);
         if (!active.length) continue;
@@ -405,7 +390,6 @@ function schedulePeriodicQuotes(client) {
           .setAuthor({ name: MBELLA_NAME, iconURL: MBELLA_AVATAR_URL || undefined })
           .setDescription(`✨ ${quote}`);
 
-        // try webhook (speaks as MBella), fallback to normal send
         let sent = null;
         try {
           sent = await sendViaWebhook(channel, {
@@ -414,9 +398,7 @@ function schedulePeriodicQuotes(client) {
             embeds: [embed],
           });
         } catch {}
-        if (!sent) {
-          try { await channel.send({ embeds: [embed] }); } catch {}
-        }
+        if (!sent) { try { await channel.send({ embeds: [embed] }); } catch {} }
 
         lastNicePingByGuild.set(guildId, now);
       }
@@ -428,7 +410,6 @@ function schedulePeriodicQuotes(client) {
 
 /** ================== EXPORT LISTENER ================== */
 module.exports = (client) => {
-  // Optional periodic quotes scheduler (enabled by default; toggle with MBELLA_PERIODIC_QUOTES=false)
   schedulePeriodicQuotes(client);
 
   client.on('messageCreate', async (message) => {
@@ -448,24 +429,19 @@ module.exports = (client) => {
       const botMentioned = message.mentions.has(client.user);
       const hintedBella = /\bbella\b/.test(lowered);
 
-      // "release" phrases: clear partner lock
       if (RELEASE_REGEX.test(message.content || '')) {
         clearBellaPartner(message.channel.id);
         return;
       }
 
-      // reply detection
       const replyingToMBella = await isReplyToMBella(message, client);
 
-      // author-gated reply: only current partner can keep the flow
       const partnerId = getBellaPartner(message.channel.id);
       const replyAllowed = replyingToMBella && (!partnerId || partnerId === message.author.id);
 
-      // overall trigger decision
       if (!hasFemaleTrigger && !(botMentioned && hintedBella) && !replyAllowed) return;
       if (message.mentions.everyone || message.mentions.roles.size > 0) return;
 
-      // cooldown — bypass when replying to her
       const isOwner = message.author.id === process.env.BOT_OWNER_ID;
       const bypassCooldown = replyAllowed;
       if (!bypassCooldown) {
@@ -474,34 +450,21 @@ module.exports = (client) => {
         setTimeout(() => cooldown.delete(message.author.id), COOLDOWN_MS);
       }
 
-      // ⛔️ Don’t call sendTyping() -> avoids showing “MuscleMB is typing…”
-      // await message.channel.sendTyping();
+      // ❌ Don’t sendTyping() — prevents “MuscleMB is typing…” artifact
 
-      // Roast logic
       const mentionedUsers = message.mentions.users.filter(u => u.id !== client.user.id);
       const shouldRoast = (hasFemaleTrigger || (botMentioned && hintedBella) || replyAllowed) && mentionedUsers.size > 0;
       const isRoastingBot = shouldRoast && message.mentions.has(client.user) && mentionedUsers.size === 1 && mentionedUsers.has(client.user.id);
 
-      // Mode from DB (reuse mb_modes)
       let currentMode = 'default';
       try {
-        const modeRes = await client.pg.query(
-          `SELECT mode FROM mb_modes WHERE server_id = $1 LIMIT 1`,
-          [message.guild.id]
-        );
+        const modeRes = await client.pg.query(`SELECT mode FROM mb_modes WHERE server_id = $1 LIMIT 1`, [message.guild.id]);
         currentMode = modeRes.rows[0]?.mode || 'default';
-      } catch {
-        console.warn('⚠️ (MBella) failed to fetch mb_mode, using default.');
-      }
+      } catch { console.warn('⚠️ (MBella) failed to fetch mb_mode, using default.'); }
 
-      // Recent context + replied-to snippet = more awareness
-      const [recentContext, referenceSnippet] = await Promise.all([
-        getRecentContext(message),
-        getReferenceSnippet(message)
-      ]);
+      const [recentContext, referenceSnippet] = await Promise.all([ getRecentContext(message), getReferenceSnippet(message) ]);
       const awarenessContext = [recentContext, referenceSnippet].filter(Boolean).join('\n');
 
-      // Clean input: remove triggers & mentions
       let cleanedInput = lowered;
       for (const t of FEMALE_TRIGGERS) cleanedInput = cleanedInput.replaceAll(t, '');
       message.mentions.users.forEach(user => {
@@ -510,7 +473,6 @@ module.exports = (client) => {
       });
       cleanedInput = cleanedInput.replaceAll(`<@${client.user.id}>`, '').trim();
 
-      // Intro flavor
       let intro = '';
       if (hasFemaleTrigger) intro = `Detected trigger word: "${FEMALE_TRIGGERS.find(t => lowered.includes(t))}". `;
       else if (botMentioned && hintedBella) intro = `You called for MBella. `;
@@ -518,7 +480,6 @@ module.exports = (client) => {
       if (!cleanedInput) cleanedInput = shouldRoast ? 'Roast these fools.' : 'Your move, darling.';
       cleanedInput = `${intro}${cleanedInput}`;
 
-      // Build prompt
       const roastTargets = [...mentionedUsers.values()].map(u => u.username).join(', ');
       const systemPrompt = buildMBellaSystemPrompt({
         isRoast: (shouldRoast && !isRoastingBot),
@@ -528,12 +489,10 @@ module.exports = (client) => {
         recentContext: awarenessContext
       });
 
-      // Temperature tuned higher for playful variance
       let temperature = 0.85;
       if (currentMode === 'villain') temperature = 0.6;
       if (currentMode === 'motivator') temperature = 0.9;
 
-      // Groq call
       const groqTry = await groqWithDiscovery(systemPrompt, cleanedInput, temperature);
 
       if (!groqTry || groqTry.error) {
@@ -578,17 +537,16 @@ module.exports = (client) => {
 
       let aiReply = groqData.choices?.[0]?.message?.content?.trim() || '';
 
-      // ❌ No add-on quotes on replies anymore
-      // (quotes are sent only by the periodic scheduler above)
+      // No add-on quotes on replies — periodic only
 
-      // Build embed (MBella style)
       const embed = new EmbedBuilder()
         .setColor('#e84393')
         .setAuthor({ name: MBELLA_NAME, iconURL: MBELLA_AVATAR_URL || undefined })
         .setDescription(`💬 ${aiReply || '...'}`);
 
-      // Typing delay (match MuscleMB defaults)
-      const delayMs = Math.min((aiReply || '').length * MBELLA_MS_PER_CHAR, MBELLA_MAX_DELAY_MS);
+      // Delay so MuscleMB's typing appears first (and natural pacing)
+      const baseDelay = Math.min((aiReply || '').length * MBELLA_MS_PER_CHAR, MBELLA_MAX_DELAY_MS);
+      const delayMs = baseDelay + MBELLA_DELAY_OFFSET_MS;
       await new Promise(r => setTimeout(r, delayMs));
 
       let sent = null;
@@ -607,9 +565,7 @@ module.exports = (client) => {
         }
       }
 
-      // lock the conversation to this user so their replies keep the flow
       setBellaPartner(message.channel.id, message.author.id);
-
       markHandled(client, message.id);
     } catch (err) {
       console.error('❌ MBella listener error:', err?.stack || err?.message || String(err));
@@ -617,6 +573,7 @@ module.exports = (client) => {
     }
   });
 };
+
 
 
 
