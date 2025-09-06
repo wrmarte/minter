@@ -10,17 +10,17 @@ const GROQ_MODEL_ENV = (process.env.GROQ_MODEL || '').trim();
 const MBELLA_NAME = (process.env.MBELLA_NAME || 'MBella').trim();
 const MBELLA_AVATAR_URL = (process.env.MBELLA_AVATAR_URL || '').trim();
 
-// Typing delay: half of MuscleMB (env overridable)
-const MBELLA_MS_PER_CHAR = Number(process.env.MBELLA_MS_PER_CHAR || '20');     // 20ms/char
-const MBELLA_MAX_DELAY_MS = Number(process.env.MBELLA_MAX_DELAY_MS || '2500'); // 2.5s cap
+// Typing delay: match MuscleMB by default (env overridable)
+const MBELLA_MS_PER_CHAR = Number(process.env.MBELLA_MS_PER_CHAR || '40');     // 40ms/char
+const MBELLA_MAX_DELAY_MS = Number(process.env.MBELLA_MAX_DELAY_MS || '5000'); // 5s cap
 
 // Behavior config
 const COOLDOWN_MS = 10_000;
 const FEMALE_TRIGGERS = ['mbella', 'mb ella', 'lady mb', 'queen mb', 'bella'];
 const RELEASE_REGEX = /\b(stop|bye bella|goodbye bella|end chat|silence bella)\b/i;
 
-// Optional periodic quotes (off by default)
-const MBELLA_PERIODIC_QUOTES = /^true$/i.test(process.env.MBELLA_PERIODIC_QUOTES || 'false');
+// Periodic quotes: enabled by default so she auto-posts every ~4h in active guilds
+const MBELLA_PERIODIC_QUOTES = /^true$/i.test(process.env.MBELLA_PERIODIC_QUOTES || 'true');
 const NICE_PING_EVERY_MS = 4 * 60 * 60 * 1000; // 4 hours
 const NICE_SCAN_EVERY_MS = 60 * 60 * 1000;     // scan hourly
 const NICE_ACTIVE_WINDOW_MS = 45 * 60 * 1000;  // “active” = last 45 minutes
@@ -34,7 +34,6 @@ if (!GROQ_API_KEY || GROQ_API_KEY.trim().length < 10) {
 const cooldown = new Set();
 const channelWebhookCache = new Map(); // channelId -> webhook
 
-// Dedupe across listeners if you use the same guard elsewhere
 function alreadyHandled(client, messageId) {
   if (!client.__mbHandled) client.__mbHandled = new Set();
   return client.__mbHandled.has(messageId);
@@ -64,7 +63,7 @@ function clearBellaPartner(channelId) {
   bellaPartners.delete(channelId);
 }
 
-// Lightweight activity trackers for optional periodic quotes
+// Activity trackers for periodic quotes
 const lastActiveByUser = new Map(); // key: `${guildId}:${userId}` -> { ts, channelId }
 const lastNicePingByGuild = new Map(); // guildId -> ts
 
@@ -315,7 +314,6 @@ async function isReplyToMBella(message, client) {
   try {
     const referenced = await message.channel.messages.fetch(ref.messageId);
 
-    // webhook path: compare webhookId to our channel webhook
     if (referenced.webhookId) {
       let hook = channelWebhookCache.get(message.channel.id);
       if (!hook) {
@@ -327,7 +325,6 @@ async function isReplyToMBella(message, client) {
       if (referenced.author?.username && referenced.author.username.toLowerCase() === MBELLA_NAME.toLowerCase()) return true;
     }
 
-    // fallback path: bot reply with embed author = MBella
     if (referenced.author?.id === client.user.id) {
       const embedAuthor = referenced.embeds?.[0]?.author?.name || '';
       if (embedAuthor.toLowerCase() === MBELLA_NAME.toLowerCase()) return true;
@@ -336,10 +333,7 @@ async function isReplyToMBella(message, client) {
   return false;
 }
 
-/** ================== MBELLA STYLE PROMPT ==================
- * Sensual + sexy (PG-13), nutty, clever. Keeps chat going by default.
- * Guardrails: playful innuendo OK; no explicit sexual content; no minors; consent-first.
- */
+/** ================== MBELLA STYLE PROMPT ================== */
 function buildMBellaSystemPrompt({ isRoast, isRoastingBot, roastTargets, currentMode, recentContext }) {
   const styleDeck = [
     'Style: sensual, flirty, a bit chaotic-nutty, and smart; playful teasing and witty banter.',
@@ -434,14 +428,14 @@ function schedulePeriodicQuotes(client) {
 
 /** ================== EXPORT LISTENER ================== */
 module.exports = (client) => {
-  // Optional periodic quotes scheduler
+  // Optional periodic quotes scheduler (enabled by default; toggle with MBELLA_PERIODIC_QUOTES=false)
   schedulePeriodicQuotes(client);
 
   client.on('messageCreate', async (message) => {
     try {
       if (message.author.bot || !message.guild) return;
 
-      // Track activity for optional periodic quotes
+      // Track activity for periodic quotes
       lastActiveByUser.set(`${message.guild.id}:${message.author.id}`, {
         ts: Date.now(),
         channelId: message.channel.id,
@@ -457,8 +451,6 @@ module.exports = (client) => {
       // "release" phrases: clear partner lock
       if (RELEASE_REGEX.test(message.content || '')) {
         clearBellaPartner(message.channel.id);
-        // Optional acknowledgement:
-        // await message.reply('✨ I’ll be quiet now. Call me if you need me.');
         return;
       }
 
@@ -482,7 +474,8 @@ module.exports = (client) => {
         setTimeout(() => cooldown.delete(message.author.id), COOLDOWN_MS);
       }
 
-      await message.channel.sendTyping();
+      // ⛔️ Don’t call sendTyping() -> avoids showing “MuscleMB is typing…”
+      // await message.channel.sendTyping();
 
       // Roast logic
       const mentionedUsers = message.mentions.users.filter(u => u.id !== client.user.id);
@@ -585,10 +578,8 @@ module.exports = (client) => {
 
       let aiReply = groqData.choices?.[0]?.message?.content?.trim() || '';
 
-      // Random sexy quote add-on (60% chance)
-      if (Math.random() < 0.6) {
-        aiReply += `\n\n_“${pick(SEXY_QUOTES)}”_`;
-      }
+      // ❌ No add-on quotes on replies anymore
+      // (quotes are sent only by the periodic scheduler above)
 
       // Build embed (MBella style)
       const embed = new EmbedBuilder()
@@ -596,7 +587,7 @@ module.exports = (client) => {
         .setAuthor({ name: MBELLA_NAME, iconURL: MBELLA_AVATAR_URL || undefined })
         .setDescription(`💬 ${aiReply || '...'}`);
 
-      // Half the typing delay of MuscleMB
+      // Typing delay (match MuscleMB defaults)
       const delayMs = Math.min((aiReply || '').length * MBELLA_MS_PER_CHAR, MBELLA_MAX_DELAY_MS);
       await new Promise(r => setTimeout(r, delayMs));
 
@@ -626,6 +617,7 @@ module.exports = (client) => {
     }
   });
 };
+
 
 
 
