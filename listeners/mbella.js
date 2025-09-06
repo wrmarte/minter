@@ -19,6 +19,9 @@ const MBELLA_DELAY_OFFSET_MS = Number(process.env.MBELLA_DELAY_OFFSET_MS || '150
 // Simulated typing: create a webhook placeholder only if LLM is slow
 const MBELLA_TYPING_DEBOUNCE_MS = Number(process.env.MBELLA_TYPING_DEBOUNCE_MS || '1200');
 
+// NEW: ensure MBella sends only after at least this many ms have passed since main-bot sendTyping()
+const MBELLA_TYPING_TARGET_MS = Number(process.env.MBELLA_TYPING_TARGET_MS || '9200'); // ~9.2s
+
 // Behavior config
 const COOLDOWN_MS = 10_000;
 const FEMALE_TRIGGERS = ['mbella', 'mb ella', 'lady mb', 'queen mb', 'bella'];
@@ -63,7 +66,7 @@ function getBellaPartner(channelId) {
 }
 function clearBellaPartner(channelId) { bellaPartners.delete(channelId); }
 
-// 🔕 Typing suppression window so MuscleMB won’t “type” in this channel
+// 🔕 Cross-listener typing suppression (read/write shared map on client)
 function setTypingSuppress(client, channelId, ms = 12000) {
   if (!client.__mbTypingSuppress) client.__mbTypingSuppress = new Map();
   const until = Date.now() + ms;
@@ -95,6 +98,7 @@ const SEXY_QUOTES = [
 /** ================== UTILS ================== */
 function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 function safeJsonParse(text) { try { return JSON.parse(text); } catch { return null; } }
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 async function fetchWithTimeout(url, opts = {}, timeoutMs = 25_000) {
   const hasAbort = typeof globalThis.AbortController === 'function';
@@ -137,7 +141,10 @@ async function fetchGroqModels() {
       { headers: { 'Authorization': `Bearer ${GROQ_API_KEY}` } },
       20_000
     );
-    if (!res.ok) { console.error(`❌ Groq /models HTTP ${res.status}: ${bodyText?.slice(0, 300)}`); return []; }
+    if (!res.ok) {
+      console.error(`❌ Groq /models HTTP ${res.status}: ${bodyText?.slice(0, 300)}`);
+      return [];
+    }
     const data = safeJsonParse(bodyText);
     if (!data || !Array.isArray(data.data)) return [];
     const ids = data.data.map(x => x.id).filter(Boolean);
@@ -432,32 +439,26 @@ module.exports = (client) => {
     let typingTimer = null;      // debounce timer
     let placeholder = null;      // the temporary "..." webhook msg
     let placeholderHook = null;  // the webhook used to send it
+    let typingStartMs = 0;       // NEW: when we sent main-bot typing()
 
     const clearPlaceholderTimer = () => { if (typingTimer) { clearTimeout(typingTimer); typingTimer = null; } };
 
     async function ensurePlaceholder(channel) {
-      // Create a “typing…”-like placeholder via webhook (only if debounce elapsed)
       const { hook, message: ph } = await sendViaWebhook(channel, {
         username: MBELLA_NAME,
         avatarURL: MBELLA_AVATAR_URL,
-        content: '…' // simple dots feels like typing
+        content: '…' // typing dots
       });
       placeholderHook = hook || null;
       placeholder = ph || null;
     }
 
     async function editPlaceholderToEmbed(embed, channel) {
-      // If placeholder exists, edit it to final embed; else send fresh embed
       if (placeholder && placeholderHook) {
         try {
-          // Edit the existing webhook message to become the final embed
-          await placeholderHook.editMessage(placeholder.id, {
-            content: null,
-            embeds: [embed],
-          });
+          await placeholderHook.editMessage(placeholder.id, { content: null, embeds: [embed] });
           return true;
         } catch (e) {
-          // Fallback: try sending a new webhook message
           try {
             const { message: fresh } = await sendViaWebhook(channel, {
               username: MBELLA_NAME,
@@ -465,14 +466,12 @@ module.exports = (client) => {
               embeds: [embed]
             });
             if (fresh) {
-              // Attempt to delete the placeholder to avoid clutter
               try { await placeholderHook.deleteMessage(placeholder.id); } catch {}
               return true;
             }
           } catch {}
         }
       } else {
-        // No placeholder was created—just send the final embed now
         try {
           const { message: finalMsg } = await sendViaWebhook(channel, {
             username: MBELLA_NAME,
@@ -521,13 +520,14 @@ module.exports = (client) => {
         setTimeout(() => cooldown.delete(message.author.id), COOLDOWN_MS);
       }
 
-      // ✅ Show main bot typing right away (single pulse)
+      // ✅ Show main bot typing right away (single pulse) and remember when
       try { await message.channel.sendTyping(); } catch {}
+      typingStartMs = Date.now(); // NEW: record typing start
 
       // 🔕 Suppress MuscleMB typing spam (from other listener) during this turn
       setTypingSuppress(client, message.channel.id, 12000);
 
-      // Debounce the “typing” placeholder; only create it if LLM takes longer than threshold
+      // Debounce the webhook "…" placeholder — only if LLM is slow
       typingTimer = setTimeout(() => {
         ensurePlaceholder(message.channel).catch(() => {});
       }, MBELLA_TYPING_DEBOUNCE_MS);
@@ -586,7 +586,6 @@ module.exports = (client) => {
 
       if (!groqTry || groqTry.error) {
         console.error('❌ (MBella) network error:', groqTry?.error?.message || 'unknown');
-        // If a placeholder exists, turn it into a soft error; else reply
         const embedErr = new EmbedBuilder()
           .setColor('#e84393')
           .setAuthor({ name: MBELLA_NAME, iconURL: MBELLA_AVATAR_URL || undefined })
@@ -641,10 +640,15 @@ module.exports = (client) => {
         .setAuthor({ name: MBELLA_NAME, iconURL: MBELLA_AVATAR_URL || undefined })
         .setDescription(`💬 ${aiReply || '...'}`);
 
-      // Natural pacing + tiny offset
-      const baseDelay = Math.min((aiReply || '').length * MBELLA_MS_PER_CHAR, MBELLA_MAX_DELAY_MS);
-      const delayMs = baseDelay + MBELLA_DELAY_OFFSET_MS;
-      await new Promise(r => setTimeout(r, delayMs));
+      // Natural pacing
+      const plannedDelay = Math.min((aiReply || '').length * MBELLA_MS_PER_CHAR, MBELLA_MAX_DELAY_MS) + MBELLA_DELAY_OFFSET_MS;
+
+      // NEW: ensure total time since main-bot sendTyping() is at least MBELLA_TYPING_TARGET_MS
+      const sinceTyping = typingStartMs ? (Date.now() - typingStartMs) : 0;
+      const floorExtra = MBELLA_TYPING_TARGET_MS - sinceTyping;
+      const finalDelay = Math.max(0, Math.max(plannedDelay, floorExtra)); // wait enough to hit the floor
+
+      await sleep(finalDelay);
 
       // If placeholder exists, edit it to final embed; else send fresh embed now
       const edited = await editPlaceholderToEmbed(embed, message.channel);
