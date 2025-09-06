@@ -10,10 +10,10 @@ const GROQ_MODEL_ENV = (process.env.GROQ_MODEL || '').trim();
 const MBELLA_NAME = (process.env.MBELLA_NAME || 'MBella').trim();
 const MBELLA_AVATAR_URL = (process.env.MBELLA_AVATAR_URL || '').trim();
 
-// Typing delay: match MuscleMB by default (env overridable)
+// Typing delay (match MuscleMB defaults; env-overridable)
 const MBELLA_MS_PER_CHAR = Number(process.env.MBELLA_MS_PER_CHAR || '40');     // 40ms/char
 const MBELLA_MAX_DELAY_MS = Number(process.env.MBELLA_MAX_DELAY_MS || '5000'); // 5s cap
-// Make MuscleMB "typing" appear just before MBella message lands
+// Make the main bot typing appear just before MBella’s message lands
 const MBELLA_DELAY_OFFSET_MS = Number(process.env.MBELLA_DELAY_OFFSET_MS || '150'); // +150ms
 
 // Behavior config
@@ -59,6 +59,17 @@ function getBellaPartner(channelId) {
   return rec.userId;
 }
 function clearBellaPartner(channelId) { bellaPartners.delete(channelId); }
+
+// 🔕 Typing suppression window for this channel so MuscleMB won’t “type” too
+function setTypingSuppress(client, channelId, ms = 12000) {
+  if (!client.__mbTypingSuppress) client.__mbTypingSuppress = new Map();
+  const until = Date.now() + ms;
+  client.__mbTypingSuppress.set(channelId, until);
+  setTimeout(() => {
+    const exp = client.__mbTypingSuppress.get(channelId);
+    if (exp && exp <= Date.now()) client.__mbTypingSuppress.delete(channelId);
+  }, ms + 500);
+}
 
 // Activity trackers for periodic quotes
 const lastActiveByUser = new Map(); // key: `${guildId}:${userId}` -> { ts, channelId }
@@ -260,7 +271,7 @@ async function getOrCreateWebhook(channel) {
     const hooks = await channel.fetchWebhooks().catch(() => null);
     let hook = hooks?.find(h => h.owner?.id === channel.client.user.id);
 
-    // If exists, try to *update avatar* so Discord refreshes cached look
+    // If exists, try to update avatar so Discord refreshes cached look
     if (hook) {
       try {
         await hook.edit({
@@ -449,25 +460,32 @@ module.exports = (client) => {
         setTimeout(() => cooldown.delete(message.author.id), COOLDOWN_MS);
       }
 
-      // Show typing as the main bot account (Discord caps ~10s; refresh to keep alive)
+      // 🔕 Suppress MuscleMB typing in this channel while MBella handles it
+      setTypingSuppress(client, message.channel.id, 12000);
+
+      // Show typing as the main bot account while MBella thinks
       await message.channel.sendTyping();
       typingKeeper = setInterval(() => {
         message.channel.sendTyping().catch(() => {});
       }, 9000);
 
+      // Roast detection
       const mentionedUsers = message.mentions.users.filter(u => u.id !== client.user.id);
       const shouldRoast = (hasFemaleTrigger || (botMentioned && hintedBella) || replyAllowed) && mentionedUsers.size > 0;
       const isRoastingBot = shouldRoast && message.mentions.has(client.user) && mentionedUsers.size === 1 && mentionedUsers.has(client.user.id);
 
+      // Mode from DB (reuse mb_modes)
       let currentMode = 'default';
       try {
         const modeRes = await client.pg.query(`SELECT mode FROM mb_modes WHERE server_id = $1 LIMIT 1`, [message.guild.id]);
         currentMode = modeRes.rows[0]?.mode || 'default';
       } catch { console.warn('⚠️ (MBella) failed to fetch mb_mode, using default.'); }
 
+      // Awareness
       const [recentContext, referenceSnippet] = await Promise.all([ getRecentContext(message), getReferenceSnippet(message) ]);
       const awarenessContext = [recentContext, referenceSnippet].filter(Boolean).join('\n');
 
+      // Clean input: remove triggers & mentions
       let cleanedInput = lowered;
       for (const t of FEMALE_TRIGGERS) cleanedInput = cleanedInput.replaceAll(t, '');
       message.mentions.users.forEach(user => {
@@ -476,6 +494,7 @@ module.exports = (client) => {
       });
       cleanedInput = cleanedInput.replaceAll(`<@${client.user.id}>`, '').trim();
 
+      // Flavor intro
       let intro = '';
       if (hasFemaleTrigger) intro = `Detected trigger word: "${FEMALE_TRIGGERS.find(t => lowered.includes(t))}". `;
       else if (botMentioned && hintedBella) intro = `You called for MBella. `;
@@ -483,6 +502,7 @@ module.exports = (client) => {
       if (!cleanedInput) cleanedInput = shouldRoast ? 'Roast these fools.' : 'Your move, darling.';
       cleanedInput = `${intro}${cleanedInput}`;
 
+      // Build prompt
       const roastTargets = [...mentionedUsers.values()].map(u => u.username).join(', ');
       const systemPrompt = buildMBellaSystemPrompt({
         isRoast: (shouldRoast && !isRoastingBot),
