@@ -3,7 +3,7 @@ const { EmbedBuilder, ChannelType, PermissionsBitField } = require('discord.js')
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const cooldown = new Set();
-const TRIGGERS = ['musclemb', 'muscle mb', 'yo mb', 'mbbot', 'mb bro'];
+const TRIGGERS = ['musclemb', 'muscle mb', 'yo mb', 'mbbot', 'mb bro', 'mb', 'hey mb'];
 
 /** ===== Activity tracker for periodic nice messages ===== */
 const lastActiveByUser = new Map(); // key: `${guildId}:${userId}` -> { ts, channelId }
@@ -12,6 +12,7 @@ const NICE_PING_EVERY_MS = 4 * 60 * 60 * 1000; // 4 hours
 const NICE_SCAN_EVERY_MS = 60 * 60 * 1000;     // scan hourly
 const NICE_ACTIVE_WINDOW_MS = 45 * 60 * 1000;  // “active” = last 45 minutes
 
+// Expanded, punchier lines. Kept original vibes, added variety & micro-coaching.
 const NICE_LINES = [
   "hydrate, hustle, and be kind today 💧💪",
   "tiny reps compound. keep going, legend ✨",
@@ -19,7 +20,37 @@ const NICE_LINES = [
   "posture check, water sip, breathe deep 🧘‍♂️",
   "you’re doing great. send a W to someone else too 🙌",
   "breaks are part of the grind — reset, then rip ⚡️",
+  "stack small dubs; the big ones follow 🧱",
+  "five deep breaths, then one brave action 🌬️➡️",
+  "skip the scroll, ship the thing 📦",
+  "water, walk, win — in that order 🚶‍♂️",
+  "write it down, knock it out, fist bump later ✍️👊",
+  "when in doubt, do the 2-minute version ⏱️",
+  "protect your morning; own your evening ☀️🌙",
+  "comparison is a trap — focus your lane 🛣️",
+  "be the calm in your chat today 🌊",
+  "ask a better question, get a better result ❓➡️🏆",
+  "show up messy, then refine 🧽",
+  "your future self is watching — impress ’em 👀",
+  "if it scares you a little, it’s probably right 🗺️",
+  "mood follows motion — move first 🕺",
 ];
+
+// Flavor emoji reactions by mode (gentle & occasional)
+const MODE_REACTIONS = {
+  chill: ['🫶', '🧊', '🌿'],
+  villain: ['🦹‍♂️', '🩸', '🕯️'],
+  motivator: ['💪', '🔥', '🚀'],
+  default: ['🟪', '🤖', '⚡'],
+};
+
+function maybeReact(message, mode = 'default') {
+  const pool = MODE_REACTIONS[mode] || MODE_REACTIONS.default;
+  if (Math.random() < 0.25) { // 25% chance to add a tiny vibe reaction
+    const emoji = pool[Math.floor(Math.random() * pool.length)];
+    message.react(emoji).catch(() => {});
+  }
+}
 
 /** Helper: safe channel to speak in */
 function findSpeakableChannel(guild, preferredChannelId = null) {
@@ -66,6 +97,69 @@ async function getRecentContext(message) {
 
 /** Random pick helper */
 function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+
+/** ====== Quick Actions (lightweight, non-breaking) ======
+ * Detects simple patterns and returns a short string “action result”
+ * that we’ll prepend to the prompt (so Groq can riff on it).
+ * We also optionally show a tiny inline embed before the main reply.
+ */
+function quickActionDetect(raw) {
+  const text = raw.toLowerCase();
+
+  // coin flip
+  if (/\b(coin|flip)\b/.test(text)) {
+    return { title: 'Coin Flip', result: Math.random() < 0.5 ? 'Heads' : 'Tails' };
+  }
+
+  // dice roll: d6 or d20
+  if (/\b(roll|dice)\b/.test(text)) {
+    const d = /d20\b/.test(text) ? 20 : 6;
+    const v = 1 + Math.floor(Math.random() * d);
+    return { title: `Dice Roll d${d}`, result: `${v}` };
+  }
+
+  // 8-ball
+  if (/\b(8ball|8-ball|eight ball)\b/.test(text)) {
+    const outs = [
+      'Yes.', 'No.', 'It is certain.', 'Very doubtful.', 'Ask again later.',
+      'Signs point to yes.', 'Outlook not so good.', 'Without a doubt.',
+      'Better not tell you now.', 'Concentrate and ask again.'
+    ];
+    return { title: '🎱 Magic 8-Ball', result: pick(outs) };
+  }
+
+  // pick between A or B
+  const orMatch = raw.match(/\b(.{1,40})\s+or\s+(.{1,40})\b/i);
+  if (orMatch && orMatch[1] && orMatch[2]) {
+    const a = orMatch[1].trim();
+    const b = orMatch[2].trim();
+    const choice = Math.random() < 0.5 ? a : b;
+    return { title: 'Random Pick', result: `I choose: **${choice}**` };
+  }
+
+  // hype line on demand
+  if (/\b(hype me|motivate me|pump me up)\b/.test(text)) {
+    const lines = [
+      'Add 10lbs to your day and lift it. You got this. 💪',
+      'You don’t need permission — you need reps. 🚀',
+      'Small steps, savage consistency. 🔥',
+      'Your ceiling is just your last excuse. Break it. 🧨',
+    ];
+    return { title: 'Hype', result: pick(lines) };
+  }
+
+  return null;
+}
+
+/** Build a tiny action embed */
+function buildActionEmbed(action) {
+  if (!action) return null;
+  return new EmbedBuilder()
+    .setColor('#2ecc71')
+    .setTitle(action.title)
+    .setDescription(action.result)
+    .setFooter({ text: 'MuscleMB quick action ✅' });
+}
 
 module.exports = (client) => {
   /** Periodic nice pings (lightweight) */
@@ -159,6 +253,12 @@ module.exports = (client) => {
     if (!cleanedInput) cleanedInput = shouldRoast ? 'Roast these fools.' : 'Speak your alpha.';
     cleanedInput = `${introLine}${cleanedInput}`;
 
+    // Detect quick actions (non-breaking). If present, we’ll:
+    // 1) send a small action embed first,
+    // 2) also feed action result back into the LLM for contextual riffing.
+    const action = quickActionDetect(message.content || '');
+    const actionEmbed = buildActionEmbed(action);
+
     try {
       await message.channel.sendTyping();
 
@@ -176,6 +276,9 @@ module.exports = (client) => {
       } catch (err) {
         console.warn('⚠️ Failed to fetch mb_mode, using default.');
       }
+
+      // Tiny mode-based reaction for flavor (non-blocking)
+      maybeReact(message, currentMode);
 
       // Lightweight recent context (gives MB more awareness)
       const recentContext = await getRecentContext(message);
@@ -208,12 +311,22 @@ module.exports = (client) => {
 
       // Add context & guardrails + brevity instruction
       const softGuard =
-        'Be kind by default, avoid insults unless explicitly roasting. No private data. Keep it 1–2 short sentences.';
+        'Be kind by default, avoid insults unless explicitly roasting. No private data. Keep it 1–3 short sentences max.';
       const fullSystemPrompt = [systemPrompt, softGuard, recentContext].filter(Boolean).join('\n\n');
 
       let temperature = 0.7;
       if (currentMode === 'villain') temperature = 0.5;
       if (currentMode === 'motivator') temperature = 0.9;
+
+      // If an action was detected, fold its result into the user content so MB riffs with it
+      const userMsg = action
+        ? `${cleanedInput}\n\n(Quick action performed: ${action.title} => ${action.result})`
+        : cleanedInput;
+
+      // Optional: post the quick action embed before the main reply (non-blocking if it fails)
+      if (actionEmbed) {
+        message.reply({ embeds: [actionEmbed] }).catch(() => {});
+      }
 
       const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
@@ -224,10 +337,10 @@ module.exports = (client) => {
         body: JSON.stringify({
           model: 'llama3-70b-8192',
           temperature,
-          max_tokens: 100,
+          max_tokens: 160, // a bit more space for better jokes/answers, still concise
           messages: [
             { role: 'system', content: fullSystemPrompt },
-            { role: 'user', content: cleanedInput },
+            { role: 'user', content: userMsg },
           ],
         }),
       });
@@ -269,7 +382,7 @@ module.exports = (client) => {
       }
 
     } catch (err) {
-      console.error('❌ MuscleMB error:', err.message);
+      console.error('❌ MuscleMB error:', err?.stack || err?.message || String(err));
       try {
         await message.reply('⚠️ MuscleMB pulled a hammy 🦵. Try again soon.');
       } catch (fallbackErr) {
@@ -278,3 +391,4 @@ module.exports = (client) => {
     }
   });
 };
+
