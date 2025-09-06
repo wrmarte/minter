@@ -1,8 +1,9 @@
 const fetch = require('node-fetch');
-const { EmbedBuilder, ChannelType, PermissionsBitField } = require('discord.js');
+const { EmbedBuilder, PermissionsBitField } = require('discord.js');
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const GROQ_MODEL_ENV = (process.env.GROQ_MODEL || '').trim();
+
 const cooldown = new Set();
 const TRIGGERS = ['musclemb', 'muscle mb', 'yo mb', 'mbbot', 'mb bro'];
 
@@ -49,7 +50,7 @@ async function getRecentContext(message) {
     const fetched = await message.channel.messages.fetch({ limit: 8 });
     const lines = [];
     for (const [, m] of fetched) {
-      if (m.id === message.id) continue;
+      if (m.id === message.id) continue; // avoid echoing the current message
       if (m.author?.bot) continue;
       const txt = (m.content || '').trim();
       if (!txt) continue;
@@ -59,7 +60,6 @@ async function getRecentContext(message) {
     }
     if (!lines.length) return '';
     const joined = lines.join('\n');
-    // keep the prompt small even if we ever change fetch limit
     return `Recent context:\n${joined}`.slice(0, 1200);
   } catch {
     return '';
@@ -104,9 +104,71 @@ if (!GROQ_API_KEY || GROQ_API_KEY.trim().length < 10) {
   console.warn('⚠️ GROQ_API_KEY is missing or too short. Verify Railway env.');
 }
 
-/** Build Groq payload once (model injected later) */
-function buildGroqBody(model, systemPrompt, userContent, temperature, maxTokens = 120) {
-  // keep payload lean; trim user content hard just in case
+/** ---------------- Dynamic model discovery & fallback ---------------- */
+let MODEL_CACHE = { ts: 0, models: [] };         // {ts, models: string[]}
+const MODEL_TTL_MS = 6 * 60 * 60 * 1000;         // 6 hours
+
+function preferOrder(a, b) {
+  // Heuristic: prefer larger/newer first: extract number like 90b/70b/8b, prefer "3.2" > "3.1" > "3"
+  const size = (id) => {
+    const m = id.match(/(\d+)\s*b|\b(\d+)[bB]\b|-(\d+)b/);
+    return m ? parseInt(m[1] || m[2] || m[3] || '0', 10) : 0;
+  };
+  const ver = (id) => {
+    const m = id.match(/(\d+(?:\.\d+)?)/);
+    return m ? parseFloat(m[1]) : 0;
+  };
+  const szDiff = size(b) - size(a);
+  if (szDiff) return szDiff;
+  return ver(b) - ver(a);
+}
+
+async function fetchGroqModels() {
+  try {
+    const { res, bodyText } = await fetchWithTimeout(
+      'https://api.groq.com/openai/v1/models',
+      { headers: { 'Authorization': `Bearer ${GROQ_API_KEY}` } },
+      20000
+    );
+    if (!res.ok) {
+      console.error(`❌ Groq /models HTTP ${res.status}: ${bodyText?.slice(0, 300)}`);
+      return [];
+    }
+    const data = safeJsonParse(bodyText);
+    if (!data || !Array.isArray(data.data)) return [];
+    // Prefer llama-* and mixtral-*/gemma-* if present; sort by heuristic
+    const ids = data.data.map(x => x.id).filter(Boolean);
+    const chatLikely = ids.filter(id =>
+      /llama|mixtral|gemma|qwen|deepseek/i.test(id) // broad match for chat-capable families
+    ).sort(preferOrder);
+    // Fallback to all if filter too strict
+    const ordered = chatLikely.length ? chatLikely : ids.sort(preferOrder);
+    return ordered;
+  } catch (e) {
+    console.error('❌ Failed to list Groq models:', e.message);
+    return [];
+  }
+}
+
+async function getModelsToTry() {
+  const list = [];
+  if (GROQ_MODEL_ENV) list.push(GROQ_MODEL_ENV);
+
+  const now = Date.now();
+  if (!MODEL_CACHE.models.length || (now - MODEL_CACHE.ts) > MODEL_TTL_MS) {
+    const models = await fetchGroqModels();
+    if (models.length) {
+      MODEL_CACHE = { ts: now, models };
+    }
+  }
+  // Merge env + cached unique
+  for (const id of MODEL_CACHE.models) {
+    if (!list.includes(id)) list.push(id);
+  }
+  return list;
+}
+
+function buildGroqBody(model, systemPrompt, userContent, temperature, maxTokens = 140) {
   const cleanUser = String(userContent || '').slice(0, 4000);
   return JSON.stringify({
     model,
@@ -119,8 +181,7 @@ function buildGroqBody(model, systemPrompt, userContent, temperature, maxTokens 
   });
 }
 
-/** Try Groq once with the provided model id */
-async function groqOnce(model, systemPrompt, userContent, temperature) {
+async function groqTryModel(model, systemPrompt, userContent, temperature) {
   const { res, bodyText } = await fetchWithTimeout(
     'https://api.groq.com/openai/v1/chat/completions',
     {
@@ -136,50 +197,45 @@ async function groqOnce(model, systemPrompt, userContent, temperature) {
   return { res, bodyText };
 }
 
-/** Try Groq with model fallback (ENV -> llama3-70b-8192 -> llama-3.1-70b-versatile) */
-async function groqWithFallback(systemPrompt, userContent, temperature, authorId) {
-  const modelsToTry = [];
-  if (GROQ_MODEL_ENV) modelsToTry.push(GROQ_MODEL_ENV);
-  modelsToTry.push('llama3-70b-8192', 'llama-3.1-70b-versatile');
-
+async function groqWithDiscovery(systemPrompt, userContent, temperature) {
+  const models = await getModelsToTry();
+  if (!models.length) {
+    return { error: new Error('No Groq models available') };
+  }
   let last = null;
-  for (const m of modelsToTry) {
+  for (const m of models) {
     try {
-      const r = await groqOnce(m, systemPrompt, userContent, temperature);
+      const r = await groqTryModel(m, systemPrompt, userContent, temperature);
       if (!r.res.ok) {
-        // Owner hint for obvious config issues
-        if (r.res.status === 401 || r.res.status === 403) {
-          r.ownerHint = '⚠️ MB auth error with Groq (401/403). Verify GROQ_API_KEY & project permissions.';
-        } else if (r.res.status === 400 || r.res.status === 404) {
-          r.ownerHint = `⚠️ Model issue (${r.res.status}). Set a valid GROQ_MODEL or try 'llama-3.1-70b-versatile'.`;
-        }
-        last = { model: m, ...r };
         console.error(`❌ Groq HTTP ${r.res.status} on model "${m}": ${r.bodyText?.slice(0, 400)}`);
-        // If 400/404, try next model automatically
-        if (r.res.status === 400 || r.res.status === 404) continue;
-        // For other codes, break and surface
-        break;
-      } else {
+        // If model is decommissioned or 400/404, try next
+        if (r.res.status === 400 || r.res.status === 404) {
+          last = { model: m, ...r };
+          continue;
+        }
+        // For 401/403/429/5xx, stop & surface
         return { model: m, ...r };
       }
+      return { model: m, ...r }; // success
     } catch (e) {
       console.error(`❌ Groq fetch error on model "${m}":`, e.message);
       last = { model: m, error: e };
-      // try next model
+      // try next
     }
   }
-  return last;
+  return last || { error: new Error('All models failed') };
 }
 
+/** ---------------- Module export: keeps your original logic ---------------- */
 module.exports = (client) => {
   /** Periodic nice pings (lightweight) */
   setInterval(async () => {
     const now = Date.now();
     const byGuild = new Map(); // guildId -> [{userId, channelId, ts}]
     for (const [key, info] of lastActiveByUser.entries()) {
-      const [guildId, userId] = key.split(':');
+      const [guildId] = key.split(':');
       if (!byGuild.has(guildId)) byGuild.set(guildId, []);
-      byGuild.get(guildId).push({ userId, channelId: info.channelId, ts: info.ts });
+      byGuild.get(guildId).push({ channelId: info.channelId, ts: info.ts });
     }
 
     for (const [guildId, entries] of byGuild.entries()) {
@@ -192,17 +248,7 @@ module.exports = (client) => {
       const active = entries.filter(e => now - e.ts <= NICE_ACTIVE_WINDOW_MS);
       if (!active.length) continue;
 
-      const targets = [pick(active)];
-      if (active.length > 3 && Math.random() < 0.5) {
-        let candidate = pick(active);
-        let attempts = 0;
-        while (attempts++ < 5 && targets.find(t => t.userId === candidate.userId)) {
-          candidate = pick(active);
-        }
-        if (!targets.find(t => t.userId === candidate.userId)) targets.push(candidate);
-      }
-
-      const preferredChannel = targets[0]?.channelId || null;
+      const preferredChannel = active[0]?.channelId || null;
       const channel = findSpeakableChannel(guild, preferredChannel);
       if (!channel) continue;
 
@@ -305,7 +351,6 @@ module.exports = (client) => {
         }
       }
 
-      // Add context & guardrails + brevity instruction
       const softGuard =
         'Be kind by default, avoid insults unless explicitly roasting. No private data. Keep it 1–2 short sentences.';
       const fullSystemPrompt = [systemPrompt, softGuard, recentContext].filter(Boolean).join('\n\n');
@@ -314,8 +359,8 @@ module.exports = (client) => {
       if (currentMode === 'villain') temperature = 0.5;
       if (currentMode === 'motivator') temperature = 0.9;
 
-      // ---- Groq with model fallback & clear diagnostics ----
-      const groqTry = await groqWithFallback(fullSystemPrompt, cleanedInput, temperature, message.author.id);
+      // ---- Groq with dynamic model discovery & clear diagnostics ----
+      const groqTry = await groqWithDiscovery(fullSystemPrompt, cleanedInput, temperature);
 
       // Network/timeout error path
       if (!groqTry || groqTry.error) {
@@ -334,9 +379,8 @@ module.exports = (client) => {
         } else if (groqTry.res.status === 429) {
           hint = '⚠️ Rate limited. Short breather—then we rip again. ⏱️';
         } else if (groqTry.res.status === 400 || groqTry.res.status === 404) {
-          // Owner-only config hint for model issues
           if (message.author.id === process.env.BOT_OWNER_ID) {
-            hint = `⚠️ Model issue (${groqTry.res.status}). Set GROQ_MODEL or try 'llama-3.1-70b-versatile'.`;
+            hint = `⚠️ Model issue (${groqTry.res.status}). Set GROQ_MODEL in Railway or rely on auto-discovery.`;
           } else {
             hint = '⚠️ MB switched plates. One more shot. 🏋️';
           }
@@ -413,4 +457,3 @@ module.exports = (client) => {
     }
   });
 };
-
