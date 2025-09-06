@@ -1,0 +1,419 @@
+// listeners/mbella.js
+const fetch = require('node-fetch');
+const { EmbedBuilder, PermissionsBitField } = require('discord.js');
+
+/** ================= ENV & CONFIG ================= */
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const GROQ_MODEL_ENV = (process.env.GROQ_MODEL || '').trim();
+
+const MBELLA_NAME = (process.env.MBELLA_NAME || 'MuscleMBella').trim();
+const MBELLA_AVATAR_URL = (process.env.MBELLA_AVATAR_URL || '').trim();
+
+const COOLDOWN_MS = 10_000;
+const FEMALE_TRIGGERS = ['mbella', 'mb ella', 'musclembella', 'lady mb', 'queen mb'];
+
+/** Guard rail: if env key looks bad, warn once */
+if (!GROQ_API_KEY || GROQ_API_KEY.trim().length < 10) {
+  console.warn('⚠️ GROQ_API_KEY missing/short for MBella. Check your env.');
+}
+
+/** ================== STATE ================== */
+const cooldown = new Set();
+const channelWebhookCache = new Map(); // channelId -> webhook
+
+// prevent double responses if both listeners are loaded and run in parallel
+function alreadyHandled(client, messageId) {
+  if (!client.__mbHandled) client.__mbHandled = new Set();
+  return client.__mbHandled.has(messageId);
+}
+function markHandled(client, messageId) {
+  if (!client.__mbHandled) client.__mbHandled = new Set();
+  client.__mbHandled.add(messageId);
+  setTimeout(() => client.__mbHandled.delete(messageId), 60_000);
+}
+
+/** ================== UTILS ================== */
+function safeJsonParse(text) { try { return JSON.parse(text); } catch { return null; } }
+
+async function fetchWithTimeout(url, opts = {}, timeoutMs = 25_000) {
+  const hasAbort = typeof globalThis.AbortController === 'function';
+  if (hasAbort) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { ...opts, signal: controller.signal });
+      const bodyText = await res.text();
+      return { res, bodyText };
+    } finally { clearTimeout(timer); }
+  } else {
+    return await Promise.race([
+      (async () => {
+        const res = await fetch(url, opts);
+        const bodyText = await res.text();
+        return { res, bodyText };
+      })(),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('Timeout')), timeoutMs))
+    ]);
+  }
+}
+
+function preferOrder(a, b) {
+  const size = (id) => {
+    const m = id.match(/(\d+)\s*b|\b(\d+)[bB]\b|-(\d+)b/);
+    return m ? parseInt(m[1] || m[2] || m[3] || '0', 10) : 0;
+  };
+  const ver = (id) => {
+    const m = id.match(/(\d+(?:\.\d+)?)/);
+    return m ? parseFloat(m[1]) : 0;
+  };
+  const szDiff = size(b) - size(a);
+  if (szDiff) return szDiff;
+  return ver(b) - ver(a);
+}
+
+/** ================== GROQ MODEL DISCOVERY ================== */
+let MODEL_CACHE = { ts: 0, models: [] };
+const MODEL_TTL_MS = 6 * 60 * 60 * 1000;
+
+async function fetchGroqModels() {
+  try {
+    const { res, bodyText } = await fetchWithTimeout(
+      'https://api.groq.com/openai/v1/models',
+      { headers: { 'Authorization': `Bearer ${GROQ_API_KEY}` } },
+      20_000
+    );
+    if (!res.ok) {
+      console.error(`❌ Groq /models HTTP ${res.status}: ${bodyText?.slice(0, 300)}`);
+      return [];
+    }
+    const data = safeJsonParse(bodyText);
+    if (!data || !Array.isArray(data.data)) return [];
+    const ids = data.data.map(x => x.id).filter(Boolean);
+    const chatLikely = ids.filter(id => /llama|mixtral|gemma|qwen|deepseek/i.test(id)).sort(preferOrder);
+    return chatLikely.length ? chatLikely : ids.sort(preferOrder);
+  } catch (e) {
+    console.error('❌ Failed to list Groq models:', e.message);
+    return [];
+  }
+}
+
+async function getModelsToTry() {
+  const list = [];
+  if (GROQ_MODEL_ENV) list.push(GROQ_MODEL_ENV);
+  const now = Date.now();
+  if (!MODEL_CACHE.models.length || (now - MODEL_CACHE.ts) > MODEL_TTL_MS) {
+    const models = await fetchGroqModels();
+    if (models.length) MODEL_CACHE = { ts: now, models };
+  }
+  for (const id of MODEL_CACHE.models) if (!list.includes(id)) list.push(id);
+  return list;
+}
+
+function buildGroqBody(model, systemPrompt, userContent, temperature, maxTokens = 140) {
+  const cleanUser = String(userContent || '').slice(0, 4000);
+  return JSON.stringify({
+    model,
+    temperature,
+    max_tokens: maxTokens,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: cleanUser },
+    ],
+  });
+}
+
+async function groqTryModel(model, systemPrompt, userContent, temperature) {
+  const { res, bodyText } = await fetchWithTimeout(
+    'https://api.groq.com/openai/v1/chat/completions',
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${GROQ_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: buildGroqBody(model, systemPrompt, userContent, temperature, 140),
+    },
+    25_000
+  );
+  return { res, bodyText };
+}
+
+async function groqWithDiscovery(systemPrompt, userContent, temperature) {
+  if (!GROQ_API_KEY || GROQ_API_KEY.trim().length < 10) {
+    return { error: new Error('Missing GROQ_API_KEY') };
+  }
+  const models = await getModelsToTry();
+  if (!models.length) return { error: new Error('No Groq models available') };
+
+  let last = null;
+  for (const m of models) {
+    try {
+      const r = await groqTryModel(m, systemPrompt, userContent, temperature);
+      if (!r.res.ok) {
+        console.error(`❌ Groq (MBella) HTTP ${r.res.status} on model "${m}": ${r.bodyText?.slice(0, 400)}`);
+        if (r.res.status === 400 || r.res.status === 404) { last = { model: m, ...r }; continue; }
+        return { model: m, ...r };
+      }
+      return { model: m, ...r };
+    } catch (e) {
+      console.error(`❌ Groq (MBella) fetch error on model "${m}":`, e.message);
+      last = { model: m, error: e };
+    }
+  }
+  return last || { error: new Error('All models failed') };
+}
+
+/** ================== DISCORD HELPERS ================== */
+async function getRecentContext(message) {
+  try {
+    const fetched = await message.channel.messages.fetch({ limit: 8 });
+    const lines = [];
+    for (const [, m] of fetched) {
+      if (m.id === message.id) continue;
+      if (m.author?.bot) continue;
+      const txt = (m.content || '').trim();
+      if (!txt) continue;
+      const oneLine = txt.replace(/\s+/g, ' ').slice(0, 200);
+      lines.push(`${m.author.username}: ${oneLine}`);
+      if (lines.length >= 6) break;
+    }
+    if (!lines.length) return '';
+    return `Recent context:\n${lines.join('\n')}`.slice(0, 1200);
+  } catch {
+    return '';
+  }
+}
+
+async function getOrCreateWebhook(channel) {
+  try {
+    if (!channel || !channel.guild) return null;
+
+    // cache
+    const cached = channelWebhookCache.get(channel.id);
+    if (cached) return cached;
+
+    // perms
+    const me = channel.guild.members.me;
+    if (!me) return null;
+    const perms = channel.permissionsFor(me);
+    if (!perms?.has(PermissionsBitField.Flags.ManageWebhooks)) return null;
+
+    // find existing webhook owned by this bot
+    const hooks = await channel.fetchWebhooks().catch(() => null);
+    let hook = hooks?.find(h => h.owner?.id === channel.client.user.id);
+
+    if (!hook) {
+      hook = await channel.createWebhook({
+        name: 'MB Relay',
+        avatar: MBELLA_AVATAR_URL || undefined
+      }).catch(() => null);
+    }
+    if (hook) channelWebhookCache.set(channel.id, hook);
+    return hook || null;
+  } catch {
+    return null;
+  }
+}
+
+async function sendViaWebhook(channel, { username, avatarURL, embeds, content }) {
+  const hook = await getOrCreateWebhook(channel);
+  if (!hook) return null;
+  try {
+    return await hook.send({
+      username,
+      avatarURL: avatarURL || undefined,
+      embeds,
+      content
+    });
+  } catch {
+    return null;
+  }
+}
+
+/** ================== CORE MBELLA PROMPT ================== */
+function buildMBellaSystemPrompt({ isRoast, isRoastingBot, roastTargets, currentMode, recentContext }) {
+  let systemPrompt = '';
+  if (isRoast) {
+    systemPrompt =
+      `You are MuscleMBella — a sharp, playful roastmistress. Roast these tagged degens: ${roastTargets}. ` +
+      `Keep it short, witty, and funny. Avoid slurs or harassment; punch up with humor. Spicy emojis ok. 💀🔥`;
+  } else if (isRoastingBot) {
+    systemPrompt =
+      `You are MuscleMBella — confident, clever, and unbothered. Someone tried to roast you; clap back with playful swagger, not mean. ✨`;
+  } else {
+    let modeLayer = '';
+    switch (currentMode) {
+      case 'chill':     modeLayer = 'Chill, friendly, helpful. Keep replies concise. 🧘‍♀️'; break;
+      case 'villain':   modeLayer = 'Theatrical villain. Ominous but playful; concise & entertaining. 🦹‍♀️'; break;
+      case 'motivator': modeLayer = 'Motivational coach. Short hype lines, workout metaphors, energy. 🔥'; break;
+      default:          modeLayer = 'Keep replies short, smart, and stylish (but not rude).';
+    }
+    systemPrompt = `You are MuscleMBella — a savvy, supportive degen AI with style. Be sharp, fun, and kind by default.\n${modeLayer}`;
+  }
+  const softGuard =
+    'Be kind by default, avoid insults unless explicitly roasting. No private data. Keep it 1–3 short sentences max.';
+  return [systemPrompt, softGuard, recentContext || ''].filter(Boolean).join('\n\n');
+}
+
+/** ================== EXPORT LISTENER ================== */
+module.exports = (client) => {
+  client.on('messageCreate', async (message) => {
+    try {
+      if (message.author.bot || !message.guild) return;
+      if (alreadyHandled(client, message.id)) return;
+
+      // only act if a female trigger is present OR user mentioned bot AND referenced "bella"
+      const lowered = (message.content || '').toLowerCase();
+      const hasFemaleTrigger = FEMALE_TRIGGERS.some(t => lowered.includes(t));
+      const botMentioned = message.mentions.has(client.user);
+      const hintedBella = /\bbella\b/.test(lowered);
+
+      if (!hasFemaleTrigger && !(botMentioned && hintedBella)) return;
+      if (message.mentions.everyone || message.mentions.roles.size > 0) return;
+
+      // simple per-user cooldown (owner bypass)
+      const isOwner = message.author.id === process.env.BOT_OWNER_ID;
+      if (cooldown.has(message.author.id) && !isOwner) return;
+      cooldown.add(message.author.id);
+      setTimeout(() => cooldown.delete(message.author.id), COOLDOWN_MS);
+
+      await message.channel.sendTyping();
+
+      // roast logic (same pattern as your MB listener)
+      const mentionedUsers = message.mentions.users.filter(u => u.id !== client.user.id);
+      const shouldRoast = (hasFemaleTrigger || (botMentioned && hintedBella)) && mentionedUsers.size > 0;
+      const isRoastingBot = shouldRoast && message.mentions.has(client.user) && mentionedUsers.size === 1 && mentionedUsers.has(client.user.id);
+
+      // mode from DB if available (reuse your mb_modes table)
+      let currentMode = 'default';
+      try {
+        const modeRes = await client.pg.query(
+          `SELECT mode FROM mb_modes WHERE server_id = $1 LIMIT 1`,
+          [message.guild.id]
+        );
+        currentMode = modeRes.rows[0]?.mode || 'default';
+      } catch {
+        console.warn('⚠️ (MBella) failed to fetch mb_mode, using default.');
+      }
+
+      // recent context
+      const recentContext = await getRecentContext(message);
+
+      // clean input: remove triggers & mentions
+      let cleanedInput = lowered;
+      for (const t of FEMALE_TRIGGERS) cleanedInput = cleanedInput.replaceAll(t, '');
+      message.mentions.users.forEach(user => {
+        cleanedInput = cleanedInput.replaceAll(`<@${user.id}>`, '');
+        cleanedInput = cleanedInput.replaceAll(`<@!${user.id}>`, '');
+      });
+      cleanedInput = cleanedInput.replaceAll(`<@${client.user.id}>`, '').trim();
+
+      // intro line for flavor
+      let intro = '';
+      if (hasFemaleTrigger) intro = `Detected trigger word: "${FEMALE_TRIGGERS.find(t => lowered.includes(t))}". `;
+      else if (botMentioned && hintedBella) intro = `You called for MBella. `;
+      if (!cleanedInput) cleanedInput = shouldRoast ? 'Roast these fools.' : 'Speak your shine.';
+      cleanedInput = `${intro}${cleanedInput}`;
+
+      // build prompt
+      const roastTargets = [...mentionedUsers.values()].map(u => u.username).join(', ');
+      const systemPrompt = buildMBellaSystemPrompt({
+        isRoast: (shouldRoast && !isRoastingBot),
+        isRoastingBot,
+        roastTargets,
+        currentMode,
+        recentContext
+      });
+
+      // temperature tuning
+      let temperature = 0.7;
+      if (currentMode === 'villain') temperature = 0.5;
+      if (currentMode === 'motivator') temperature = 0.9;
+
+      // Groq call with discovery
+      const groqTry = await groqWithDiscovery(systemPrompt, cleanedInput, temperature);
+
+      // network/timeout fail
+      if (!groqTry || groqTry.error) {
+        console.error('❌ (MBella) network error:', groqTry?.error?.message || 'unknown');
+        try { await message.reply('⚠️ MBella lag spike. One breath, one rep. ⏱️'); } catch {}
+        markHandled(client, message.id);
+        return;
+      }
+      // non-OK HTTP
+      if (!groqTry.res.ok) {
+        let hint = '⚠️ MBella jammed the rep rack (API). Try again shortly. 🏋️‍♀️';
+        if (groqTry.res.status === 401 || groqTry.res.status === 403) {
+          hint = (message.author.id === process.env.BOT_OWNER_ID)
+            ? '⚠️ MBella auth error (401/403). Verify GROQ_API_KEY & project/model access.'
+            : '⚠️ MBella auth blip. Re-racking plates. 🏋️‍♀️';
+        } else if (groqTry.res.status === 429) {
+          hint = '⚠️ Rate limited. Tiny breather, then we glow up. ⏱️';
+        } else if (groqTry.res.status === 400 || groqTry.res.status === 404) {
+          hint = (message.author.id === process.env.BOT_OWNER_ID)
+            ? '⚠️ Model issue. Set GROQ_MODEL or let auto-discovery handle it.'
+            : '⚠️ Cloud hiccup. One more shot. ✨';
+        } else if (groqTry.res.status >= 500) {
+          hint = '⚠️ Cloud cramps (server error). Try again soon. ☁️';
+        }
+        console.error(`❌ (MBella) HTTP ${groqTry.res.status} on "${groqTry.model}": ${groqTry.bodyText?.slice(0, 400)}`);
+        try { await message.reply(hint); } catch {}
+        markHandled(client, message.id);
+        return;
+      }
+
+      const groqData = safeJsonParse(groqTry.bodyText);
+      if (!groqData) {
+        console.error('❌ (MBella) non-JSON body:', groqTry.bodyText?.slice(0, 300));
+        try { await message.reply('⚠️ MBella static noise… say it simpler. 📻'); } catch {}
+        markHandled(client, message.id);
+        return;
+      }
+      if (groqData.error) {
+        console.error('❌ (MBella) API error:', groqData.error);
+        const hint = (message.author.id === process.env.BOT_OWNER_ID)
+          ? `⚠️ MBella Groq error: ${groqData.error?.message || 'unknown'}.`
+          : '⚠️ MBella slipped on a peel (API). One sec. 🍌';
+        try { await message.reply(hint); } catch {}
+        markHandled(client, message.id);
+        return;
+      }
+
+      const aiReply = groqData.choices?.[0]?.message?.content?.trim();
+
+      // Build embed (MBella style)
+      const embed = new EmbedBuilder()
+        .setColor('#e84393')
+        .setAuthor({ name: MBELLA_NAME, iconURL: MBELLA_AVATAR_URL || undefined })
+        .setDescription(`💬 ${aiReply || '...'}`
+        );
+
+      const delayMs = Math.min((aiReply || '').length * 40, 5000);
+      await new Promise(r => setTimeout(r, delayMs));
+
+      // Prefer webhook to “speak as MBella”
+      let sent = null;
+      try {
+        sent = await sendViaWebhook(message.channel, {
+          username: MBELLA_NAME,
+          avatarURL: MBELLA_AVATAR_URL,
+          embeds: [embed]
+        });
+      } catch {}
+
+      if (!sent) {
+        // Fallback: normal reply (still styled as MBella via author + color)
+        try { await message.reply({ embeds: [embed] }); } catch (err) {
+          console.warn('❌ (MBella) send fallback error:', err.message);
+          // Final fallback plain text
+          if (aiReply) { try { await message.reply(aiReply); } catch {} }
+        }
+      }
+
+      markHandled(client, message.id);
+    } catch (err) {
+      console.error('❌ MBella listener error:', err?.stack || err?.message || String(err));
+      try { await message.reply('⚠️ MBella pulled a hammy. BRB. 🦵'); } catch {}
+    }
+  });
+};
