@@ -27,6 +27,40 @@ const NICE_LINES = [
   "mood follows motion — move first 🕺",
 ];
 
+/** === MB timing (match MBella) & add-on quotes config === */
+const MB_MS_PER_CHAR = Number(process.env.MB_MS_PER_CHAR || '40');     // 40ms/char
+const MB_MAX_DELAY_MS = Number(process.env.MB_MAX_DELAY_MS || '5000'); // 5s cap
+const MB_ADDON_QUOTES_CHANCE = Number(process.env.MB_ADDON_QUOTES_CHANCE || '0.6'); // 60%
+
+/** Non-gym, short, witty add-on quotes (randomly appended) */
+const MB_ADDON_QUOTES = [
+  'Confidence is a language—speak it fluently. ✨',
+  'Curiosity prints its own passport. 🌍',
+  'Distraction is expensive. Focus is luxury. 💡',
+  'Be so honest it feels like innovation. 🔧',
+  'Make the room warmer, then say less. 🕯️',
+  'Silence carries farther than shouting. 🤫',
+  'Your attention is currency—invest wisely. 💳',
+  'Elegance is refusing to rush the magic. ⏳',
+  'Edit your life like a good sentence. ✂️',
+  'Small doors often lead to big rooms. 🚪',
+  'Audacity pairs well with restraint. 🎭',
+  'Mystery tastes better than certainty. 🥂',
+  'Maps are suggestions; instincts are GPS. 🧭',
+  'The plot thickens when you do. 📚',
+  'Romance the process, not the outcome. 💫',
+  'Taste is a muscle—train it gently. 🎨',
+  'Leave room for echo. The message grows. 📡',
+  'Move like you already know the ending. 🎬',
+  'Craft a life that fits like custom. 🧵',
+  'Polish is louder than volume. ✨',
+  'Simplicity is the most dramatic outfit. 🖤',
+  'Let your choices have good aftertaste. 🍷',
+  'Momentum is a love letter to tomorrow. 💌',
+  'Kindness is the ultimate flex. 🌿',
+  'Your future self is watching—impress them. 👀',
+];
+
 /** Helper: safe channel to speak in */
 function findSpeakableChannel(guild, preferredChannelId = null) {
   const me = guild.members.me;
@@ -392,7 +426,7 @@ module.exports = (client) => {
         return;
       }
 
-      const groqData = safeJsonParse(groqTry.bodyText);
+      let groqData = safeJsonParse(groqTry.bodyText);
       if (!groqData) {
         console.error('❌ Groq returned non-JSON/empty:', groqTry.bodyText?.slice(0, 300));
         try { await message.reply('⚠️ MB static noise… say that again or keep it simple. 📻'); } catch {}
@@ -407,9 +441,15 @@ module.exports = (client) => {
         return;
       }
 
-      const aiReply = groqData.choices?.[0]?.message?.content?.trim();
+      // === Build reply (with optional non-gym quote add-on) ===
+      let aiReply = groqData.choices?.[0]?.message?.content?.trim();
 
       if (aiReply?.length) {
+        // Add-on quote (random)
+        if (Math.random() < MB_ADDON_QUOTES_CHANCE) {
+          aiReply += `\n\n_“${pick(MB_ADDON_QUOTES)}”_`;
+        }
+
         let embedColor = '#9b59b6';
         const modeColorMap = {
           chill: '#3498db',
@@ -432,7 +472,8 @@ module.exports = (client) => {
           .setDescription(`💬 ${aiReply}`)
           .setFooter({ text: `Mode: ${currentMode} ${footerEmoji}` });
 
-        const delayMs = Math.min(aiReply.length * 40, 5000);
+        // Typing delay (matches MBella; env-overridable)
+        const delayMs = Math.min(aiReply.length * MB_MS_PER_CHAR, MB_MAX_DELAY_MS);
         await new Promise(resolve => setTimeout(resolve, delayMs));
 
         try {
@@ -457,3 +498,4 @@ module.exports = (client) => {
     }
   });
 };
+
