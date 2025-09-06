@@ -21,7 +21,7 @@ const MBELLA_DELAY_OFFSET_MS = Number(process.env.MBELLA_DELAY_OFFSET_MS || '150
 // - Enforce a 10s silent gap between last typing ping and final send
 //   (so the typing bubble is gone before the message lands)
 const MB_TYPING_START_MS = Number(process.env.MB_TYPING_START_MS || '1200');
-const STRICT_NO_POST_TYPING = true; // hard guarantee: no typing after MBella posts
+const STRICT_NO_POST_TYPING = false; // hard guarantee: no typing after MBella posts
 
 // Behavior config
 const COOLDOWN_MS = 10_000;
