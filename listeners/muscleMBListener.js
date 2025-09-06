@@ -29,7 +29,7 @@ const NICE_LINES = [
 
 /** === MB timing (match MBella) & periodic quote config === */
 const MB_MS_PER_CHAR = Number(process.env.MB_MS_PER_CHAR || '40');     // 40ms/char
-const MB_MAX_DELAY_MS = Number(process.env.MB_MAX_DELAY_MS || '5000'); // 5s cap
+const MB_MAX_DELAY_MS = Number(process.env.MB_MAX_DELAY_MS || '4000'); // 5s cap
 const MB_WISDOM_PINGS_RATIO = Number(process.env.MB_WISDOM_PINGS_RATIO || '0.6'); // 60% of pings use quotes
 
 /** Non-gym, short, witty quotes for periodic auto-posts (NOT appended to replies) */
