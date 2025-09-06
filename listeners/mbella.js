@@ -14,17 +14,21 @@ const MBELLA_AVATAR_URL = (process.env.MBELLA_AVATAR_URL || '').trim();
 // Pace (match MuscleMB by default)
 const MBELLA_MS_PER_CHAR = Number(process.env.MBELLA_MS_PER_CHAR || '40');     // 40ms/char
 const MBELLA_MAX_DELAY_MS = Number(process.env.MBELLA_MAX_DELAY_MS || '5000'); // 5s cap
-const MBELLA_DELAY_OFFSET_MS = Number(process.env.MBELLA_DELAY_OFFSET_MS || '150'); // small “land after thinking” offset
+const MBELLA_DELAY_OFFSET_MS = Number(process.env.MBELLA_DELAY_OFFSET_MS || '150');
 
-// Simulated typing: create a webhook placeholder only if LLM is slow
-const MBELLA_TYPING_DEBOUNCE_MS = Number(process.env.MBELLA_TYPING_DEBOUNCE_MS || '1200');
+// Typing policy:
+// - Start main-bot typing after a small delay (feels natural)
+// - Enforce a 10s silent gap between last typing ping and final send
+//   (so the typing bubble is gone before the message lands)
+const MB_TYPING_START_MS = Number(process.env.MB_TYPING_START_MS || '1200');
+const STRICT_NO_POST_TYPING = true; // hard guarantee: no typing after MBella posts
 
 // Behavior config
 const COOLDOWN_MS = 10_000;
 const FEMALE_TRIGGERS = ['mbella', 'mb ella', 'lady mb', 'queen mb', 'bella'];
 const RELEASE_REGEX = /\b(stop|bye bella|goodbye bella|end chat|silence bella)\b/i;
 
-// Periodic quotes (sexy lines) every ~4h in active guilds
+// Periodic quotes (sexy lines) every ~4h in active guilds (webhook as MBella)
 const MBELLA_PERIODIC_QUOTES = /^true$/i.test(process.env.MBELLA_PERIODIC_QUOTES || 'true');
 const NICE_PING_EVERY_MS = 4 * 60 * 60 * 1000; // 4 hours
 const NICE_SCAN_EVERY_MS = 60 * 60 * 1000;     // scan hourly
@@ -63,7 +67,7 @@ function getBellaPartner(channelId) {
 }
 function clearBellaPartner(channelId) { bellaPartners.delete(channelId); }
 
-// 🔕 Typing suppression window so MuscleMB won’t “type” in this channel
+// 🔕 Typing suppression window for this channel so MuscleMB won’t “type” too
 function setTypingSuppress(client, channelId, ms = 12000) {
   if (!client.__mbTypingSuppress) client.__mbTypingSuppress = new Map();
   const until = Date.now() + ms;
@@ -274,16 +278,12 @@ async function getOrCreateWebhook(channel) {
     const hooks = await channel.fetchWebhooks().catch(() => null);
     let hook = hooks?.find(h => h.owner?.id === channel.client.user.id);
 
-    // Refresh name/avatar so cached look stays current
+    // refresh avatar/name so Discord caches new avatar
     if (hook) {
       try {
-        await hook.edit({
-          name: 'MB Relay',
-          avatar: MBELLA_AVATAR_URL || undefined
-        });
+        await hook.edit({ name: 'MB Relay', avatar: MBELLA_AVATAR_URL || undefined });
       } catch {}
     }
-
     if (!hook) {
       hook = await channel.createWebhook({
         name: 'MB Relay',
@@ -315,7 +315,6 @@ async function sendViaWebhook(channel, { username, avatarURL, embeds, content })
   }
 }
 
-/** detect if this message is a reply to MBella (webhook or fallback) */
 async function isReplyToMBella(message, client) {
   const ref = message.reference;
   if (!ref?.messageId) return false;
@@ -404,10 +403,9 @@ function schedulePeriodicQuotes(client) {
           .setAuthor({ name: MBELLA_NAME, iconURL: MBELLA_AVATAR_URL || undefined })
           .setDescription(`✨ ${quote}`);
 
-        // Try webhook (speaks as MBella)
         let sentMsg = null;
         try {
-          const { hook, message } = await sendViaWebhook(channel, {
+          const { message } = await sendViaWebhook(channel, {
             username: MBELLA_NAME,
             avatarURL: MBELLA_AVATAR_URL,
             embeds: [embed],
@@ -429,57 +427,53 @@ module.exports = (client) => {
   schedulePeriodicQuotes(client);
 
   client.on('messageCreate', async (message) => {
-    let typingTimer = null;      // debounce timer
-    let placeholder = null;      // the temporary "..." webhook msg
-    let placeholderHook = null;  // the webhook used to send it
+    // timers & placeholders for the strict no-post-typing flow
+    let typingStartTimer = null;
+    let lastTypingAt = 0;
+    let placeholder = null;
+    let placeholderHook = null;
 
-    const clearPlaceholderTimer = () => { if (typingTimer) { clearTimeout(typingTimer); typingTimer = null; } };
+    const clearTypingTimer = () => { if (typingStartTimer) { clearTimeout(typingStartTimer); typingStartTimer = null; } };
+
+    async function sendTypingPulse() {
+      try { await message.channel.sendTyping(); lastTypingAt = Date.now(); } catch {}
+    }
 
     async function ensurePlaceholder(channel) {
-      // Create a “typing…”-like placeholder via webhook (only if debounce elapsed)
+      // visible while we wait for the typing bubble to expire
       const { hook, message: ph } = await sendViaWebhook(channel, {
         username: MBELLA_NAME,
         avatarURL: MBELLA_AVATAR_URL,
-        content: '…' // simple dots feels like typing
+        content: '…' // dots = feels like typing
       });
       placeholderHook = hook || null;
       placeholder = ph || null;
     }
 
     async function editPlaceholderToEmbed(embed, channel) {
-      // If placeholder exists, edit it to final embed; else send fresh embed
       if (placeholder && placeholderHook) {
         try {
-          // Edit the existing webhook message to become the final embed
-          await placeholderHook.editMessage(placeholder.id, {
-            content: null,
-            embeds: [embed],
-          });
+          await placeholderHook.editMessage(placeholder.id, { content: null, embeds: [embed] });
           return true;
         } catch (e) {
-          // Fallback: try sending a new webhook message
           try {
             const { message: fresh } = await sendViaWebhook(channel, {
               username: MBELLA_NAME,
               avatarURL: MBELLA_AVATAR_URL,
               embeds: [embed]
             });
-            if (fresh) {
-              // Attempt to delete the placeholder to avoid clutter
-              try { await placeholderHook.deleteMessage(placeholder.id); } catch {}
-              return true;
-            }
+            if (fresh) { try { await placeholderHook.deleteMessage(placeholder.id); } catch {} }
+            return !!fresh;
           } catch {}
         }
       } else {
-        // No placeholder was created—just send the final embed now
         try {
           const { message: finalMsg } = await sendViaWebhook(channel, {
             username: MBELLA_NAME,
             avatarURL: MBELLA_AVATAR_URL,
             embeds: [embed]
           });
-          if (finalMsg) return true;
+          return !!finalMsg;
         } catch {}
       }
       return false;
@@ -524,15 +518,14 @@ module.exports = (client) => {
       // 🔕 Suppress MuscleMB typing in this channel while MBella handles it
       setTypingSuppress(client, message.channel.id, 12000);
 
-      // Debounce the “typing” placeholder; only create it if LLM takes longer than threshold
-      typingTimer = setTimeout(() => {
-        ensurePlaceholder(message.channel).catch(() => {});
-      }, MBELLA_TYPING_DEBOUNCE_MS);
+      // Schedule a single typing pulse by the main bot (starts after MB_TYPING_START_MS)
+      // We will guarantee a 10s silent gap before sending the final message.
+      typingStartTimer = setTimeout(() => { sendTypingPulse(); }, MB_TYPING_START_MS);
 
       // Roast detection
       const mentionedUsers = message.mentions.users.filter(u => u.id !== client.user.id);
       const shouldRoast = (hasFemaleTrigger || (botMentioned && hintedBella) || replyAllowed) && mentionedUsers.size > 0;
-      const isRoastingBot = shouldRoast && message.mentions.has(client.user) && mentionedUsers.size === 1 && message.mentions.has(client.user);
+      const isRoastingBot = shouldRoast && message.mentions.has(client.user) && mentionedUsers.size === 1 && mentionedUsers.has(client.user.id);
 
       // Mode from DB (reuse mb_modes)
       let currentMode = 'default';
@@ -576,25 +569,35 @@ module.exports = (client) => {
       if (currentMode === 'villain') temperature = 0.6;
       if (currentMode === 'motivator') temperature = 0.9;
 
+      const tStart = Date.now();
       const groqTry = await groqWithDiscovery(systemPrompt, cleanedInput, temperature);
+      clearTypingTimer();
 
-      // Stop the debounce timer if result returned fast
-      clearPlaceholderTimer();
+      // Ensure we have a placeholder visible if we used typing and must wait out the bubble
+      const usedTyping = lastTypingAt > 0;
 
       if (!groqTry || groqTry.error) {
-        console.error('❌ (MBella) network error:', groqTry?.error?.message || 'unknown');
-        // If a placeholder exists, turn it into a soft error; else reply
-        const embedErr = new EmbedBuilder()
+        // If typing was used, show placeholder and then a soft error embed after silent gap
+        if (usedTyping && STRICT_NO_POST_TYPING) { try { await ensurePlaceholder(message.channel); } catch {} }
+        const errEmbed = new EmbedBuilder()
           .setColor('#e84393')
           .setAuthor({ name: MBELLA_NAME, iconURL: MBELLA_AVATAR_URL || undefined })
           .setDescription('⚠️ MBella lag spike. One breath, one rep. ⏱️');
-        if (!(await editPlaceholderToEmbed(embedErr, message.channel))) {
-          try { await message.reply({ embeds: [embedErr] }); } catch {}
+
+        if (STRICT_NO_POST_TYPING && usedTyping) {
+          const elapsedSinceTyping = Date.now() - lastTypingAt;
+          const waitMs = Math.max(0, 10000 - elapsedSinceTyping);
+          if (waitMs > 0) await new Promise(r => setTimeout(r, waitMs));
+          if (!(await editPlaceholderToEmbed(errEmbed, message.channel))) {
+            try { await message.reply({ embeds: [errEmbed] }); } catch {}
+          }
+        } else {
+          try { await message.reply({ embeds: [errEmbed] }); } catch {}
         }
         return;
       }
+
       if (!groqTry.res.ok) {
-        console.error(`❌ (MBella) HTTP ${groqTry.res.status} on "${groqTry.model}": ${groqTry.bodyText?.slice(0, 400)}`);
         let hint = '⚠️ MBella jammed the rep rack (API). Try again shortly. 🏋️‍♀️';
         if (groqTry.res.status === 401 || groqTry.res.status === 403) {
           hint = (message.author.id === process.env.BOT_OWNER_ID)
@@ -609,43 +612,72 @@ module.exports = (client) => {
         } else if (groqTry.res.status >= 500) {
           hint = '⚠️ Cloud cramps (server error). Try again soon. ☁️';
         }
-        const embedErr = new EmbedBuilder()
+        const errEmbed = new EmbedBuilder()
           .setColor('#e84393')
           .setAuthor({ name: MBELLA_NAME, iconURL: MBELLA_AVATAR_URL || undefined })
           .setDescription(hint);
-        if (!(await editPlaceholderToEmbed(embedErr, message.channel))) {
-          try { await message.reply({ embeds: [embedErr] }); } catch {}
+
+        if (STRICT_NO_POST_TYPING && usedTyping) {
+          try { await ensurePlaceholder(message.channel); } catch {}
+          const elapsedSinceTyping = Date.now() - lastTypingAt;
+          const waitMs = Math.max(0, 10000 - elapsedSinceTyping);
+          if (waitMs > 0) await new Promise(r => setTimeout(r, waitMs));
+          if (!(await editPlaceholderToEmbed(errEmbed, message.channel))) {
+            try { await message.reply({ embeds: [errEmbed] }); } catch {}
+          }
+        } else {
+          try { await message.reply({ embeds: [errEmbed] }); } catch {}
         }
         return;
       }
 
       const groqData = safeJsonParse(groqTry.bodyText);
       if (!groqData || groqData.error) {
-        console.error('❌ (MBella) API body error:', groqData?.error || groqTry.bodyText?.slice(0, 300));
-        const embedErr = new EmbedBuilder()
+        const errEmbed = new EmbedBuilder()
           .setColor('#e84393')
           .setAuthor({ name: MBELLA_NAME, iconURL: MBELLA_AVATAR_URL || undefined })
           .setDescription('⚠️ MBella static noise… say it simpler. 📻');
-        if (!(await editPlaceholderToEmbed(embedErr, message.channel))) {
-          try { await message.reply({ embeds: [embedErr] }); } catch {}
+
+        if (STRICT_NO_POST_TYPING && usedTyping) {
+          try { await ensurePlaceholder(message.channel); } catch {}
+          const elapsedSinceTyping = Date.now() - lastTypingAt;
+          const waitMs = Math.max(0, 10000 - elapsedSinceTyping);
+          if (waitMs > 0) await new Promise(r => setTimeout(r, waitMs));
+          if (!(await editPlaceholderToEmbed(errEmbed, message.channel))) {
+            try { await message.reply({ embeds: [errEmbed] }); } catch {}
+          }
+        } else {
+          try { await message.reply({ embeds: [errEmbed] }); } catch {}
         }
         return;
       }
 
       let aiReply = groqData.choices?.[0]?.message?.content?.trim() || '';
+
       const embed = new EmbedBuilder()
         .setColor('#e84393')
         .setAuthor({ name: MBELLA_NAME, iconURL: MBELLA_AVATAR_URL || undefined })
         .setDescription(`💬 ${aiReply || '...'}`);
 
-      // Natural pacing + tiny offset
+      // Natural pacing + small offset
       const baseDelay = Math.min((aiReply || '').length * MBELLA_MS_PER_CHAR, MBELLA_MAX_DELAY_MS);
       const delayMs = baseDelay + MBELLA_DELAY_OFFSET_MS;
       await new Promise(r => setTimeout(r, delayMs));
 
-      // If placeholder exists, edit it to final embed; else send fresh embed now
-      const edited = await editPlaceholderToEmbed(embed, message.channel);
-      if (!edited) {
+      if (STRICT_NO_POST_TYPING && usedTyping) {
+        // Show placeholder while we let the typing bubble expire
+        if (!placeholder) { try { await ensurePlaceholder(message.channel); } catch {} }
+        const elapsedSinceTyping = Date.now() - lastTypingAt;
+        const waitMs = Math.max(0, 10000 - elapsedSinceTyping);
+        if (waitMs > 0) await new Promise(r => setTimeout(r, waitMs));
+        if (!(await editPlaceholderToEmbed(embed, message.channel))) {
+          try { await message.reply({ embeds: [embed] }); } catch (err) {
+            console.warn('❌ (MBella) send fallback error:', err.message);
+            if (aiReply) { try { await message.reply(aiReply); } catch {} }
+          }
+        }
+      } else {
+        // Non-strict path (not recommended if you truly never want post-typing)
         try { await message.reply({ embeds: [embed] }); } catch (err) {
           console.warn('❌ (MBella) send fallback error:', err.message);
           if (aiReply) { try { await message.reply(aiReply); } catch {} }
@@ -655,22 +687,18 @@ module.exports = (client) => {
       setBellaPartner(message.channel.id, message.author.id);
       markHandled(client, message.id);
     } catch (err) {
-      clearPlaceholderTimer();
       console.error('❌ MBella listener error:', err?.stack || err?.message || String(err));
       try {
-        const embedErr = new EmbedBuilder()
+        const errEmbed = new EmbedBuilder()
           .setColor('#e84393')
           .setAuthor({ name: MBELLA_NAME, iconURL: MBELLA_AVATAR_URL || undefined })
           .setDescription('⚠️ MBella pulled a hammy. BRB. 🦵');
-        if (placeholder && placeholderHook) {
-          try { await placeholderHook.editMessage(placeholder.id, { content: null, embeds: [embedErr] }); } catch {}
-        } else {
-          await message.reply({ embeds: [embedErr] });
-        }
+        await message.reply({ embeds: [errEmbed] });
       } catch {}
     }
   });
 };
+
 
 
 
