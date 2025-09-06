@@ -12,7 +12,6 @@ const NICE_PING_EVERY_MS = 4 * 60 * 60 * 1000; // 4 hours
 const NICE_SCAN_EVERY_MS = 60 * 60 * 1000;     // scan hourly
 const NICE_ACTIVE_WINDOW_MS = 45 * 60 * 1000;  // “active” = last 45 minutes
 
-// Expanded, punchier lines. Kept original vibes, added variety & micro-coaching.
 const NICE_LINES = [
   "hydrate, hustle, and be kind today 💧💪",
   "tiny reps compound. keep going, legend ✨",
@@ -36,7 +35,6 @@ const NICE_LINES = [
   "mood follows motion — move first 🕺",
 ];
 
-// Flavor emoji reactions by mode (gentle & occasional)
 const MODE_REACTIONS = {
   chill: ['🫶', '🧊', '🌿'],
   villain: ['🦹‍♂️', '🩸', '🕯️'],
@@ -46,7 +44,7 @@ const MODE_REACTIONS = {
 
 function maybeReact(message, mode = 'default') {
   const pool = MODE_REACTIONS[mode] || MODE_REACTIONS.default;
-  if (Math.random() < 0.25) { // 25% chance to add a tiny vibe reaction
+  if (Math.random() < 0.25) {
     const emoji = pool[Math.floor(Math.random() * pool.length)];
     message.react(emoji).catch(() => {});
   }
@@ -65,10 +63,7 @@ function findSpeakableChannel(guild, preferredChannelId = null) {
     const ch = guild.channels.cache.get(preferredChannelId);
     if (canSend(ch)) return ch;
   }
-  // system channel?
   if (guild.systemChannel && canSend(guild.systemChannel)) return guild.systemChannel;
-
-  // first sendable text channel
   return guild.channels.cache.find((c) => canSend(c)) || null;
 }
 
@@ -78,17 +73,15 @@ async function getRecentContext(message) {
     const fetched = await message.channel.messages.fetch({ limit: 8 });
     const lines = [];
     for (const [, m] of fetched) {
-      if (m.id === message.id) continue; // avoid echoing the current message
+      if (m.id === message.id) continue;
       if (m.author?.bot) continue;
       const txt = (m.content || '').trim();
       if (!txt) continue;
-      // Keep short snippets only
       const oneLine = txt.replace(/\s+/g, ' ').slice(0, 200);
       lines.push(`${m.author.username}: ${oneLine}`);
       if (lines.length >= 6) break;
     }
     if (!lines.length) return '';
-    // Most recent first
     return `Recent context:\n` + lines.join('\n');
   } catch {
     return '';
@@ -98,27 +91,18 @@ async function getRecentContext(message) {
 /** Random pick helper */
 function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 
-/** ====== Quick Actions (lightweight, non-breaking) ======
- * Detects simple patterns and returns a short string “action result”
- * that we’ll prepend to the prompt (so Groq can riff on it).
- * We also optionally show a tiny inline embed before the main reply.
- */
+/** Quick Actions */
 function quickActionDetect(raw) {
   const text = raw.toLowerCase();
 
-  // coin flip
   if (/\b(coin|flip)\b/.test(text)) {
     return { title: 'Coin Flip', result: Math.random() < 0.5 ? 'Heads' : 'Tails' };
   }
-
-  // dice roll: d6 or d20
   if (/\b(roll|dice)\b/.test(text)) {
     const d = /d20\b/.test(text) ? 20 : 6;
     const v = 1 + Math.floor(Math.random() * d);
     return { title: `Dice Roll d${d}`, result: `${v}` };
   }
-
-  // 8-ball
   if (/\b(8ball|8-ball|eight ball)\b/.test(text)) {
     const outs = [
       'Yes.', 'No.', 'It is certain.', 'Very doubtful.', 'Ask again later.',
@@ -127,8 +111,6 @@ function quickActionDetect(raw) {
     ];
     return { title: '🎱 Magic 8-Ball', result: pick(outs) };
   }
-
-  // pick between A or B
   const orMatch = raw.match(/\b(.{1,40})\s+or\s+(.{1,40})\b/i);
   if (orMatch && orMatch[1] && orMatch[2]) {
     const a = orMatch[1].trim();
@@ -136,8 +118,6 @@ function quickActionDetect(raw) {
     const choice = Math.random() < 0.5 ? a : b;
     return { title: 'Random Pick', result: `I choose: **${choice}**` };
   }
-
-  // hype line on demand
   if (/\b(hype me|motivate me|pump me up)\b/.test(text)) {
     const lines = [
       'Add 10lbs to your day and lift it. You got this. 💪',
@@ -147,11 +127,9 @@ function quickActionDetect(raw) {
     ];
     return { title: 'Hype', result: pick(lines) };
   }
-
   return null;
 }
 
-/** Build a tiny action embed */
 function buildActionEmbed(action) {
   if (!action) return null;
   return new EmbedBuilder()
@@ -161,12 +139,22 @@ function buildActionEmbed(action) {
     .setFooter({ text: 'MuscleMB quick action ✅' });
 }
 
+/** ---------- Robust fetch helpers ---------- */
+function withTimeout(ms) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), ms);
+  return { signal: controller.signal, cancel: () => clearTimeout(id) };
+}
+
+function safeJsonParse(text) {
+  try { return JSON.parse(text); } catch { return null; }
+}
+
 module.exports = (client) => {
   /** Periodic nice pings (lightweight) */
   setInterval(async () => {
     const now = Date.now();
-    // iterate guilds we’ve seen activity for
-    const byGuild = new Map(); // guildId -> [{userId, channelId, ts}]
+    const byGuild = new Map();
     for (const [key, info] of lastActiveByUser.entries()) {
       const [guildId, userId] = key.split(':');
       if (!byGuild.has(guildId)) byGuild.set(guildId, []);
@@ -178,16 +166,13 @@ module.exports = (client) => {
       if (!guild) continue;
 
       const lastPingTs = lastNicePingByGuild.get(guildId) || 0;
-      if (now - lastPingTs < NICE_PING_EVERY_MS) continue; // not time yet
+      if (now - lastPingTs < NICE_PING_EVERY_MS) continue;
 
-      // active within window
       const active = entries.filter(e => now - e.ts <= NICE_ACTIVE_WINDOW_MS);
       if (!active.length) continue;
 
-      // choose 1–2 random active members to nudge (not spammy)
       const targets = [pick(active)];
       if (active.length > 3 && Math.random() < 0.5) {
-        // maybe a second one, different channel if possible
         let candidate = pick(active);
         let attempts = 0;
         while (attempts++ < 5 && targets.find(t => t.userId === candidate.userId)) {
@@ -196,7 +181,6 @@ module.exports = (client) => {
         if (!targets.find(t => t.userId === candidate.userId)) targets.push(candidate);
       }
 
-      // Send one group message per guild, to a good channel
       const preferredChannel = targets[0]?.channelId || null;
       const channel = findSpeakableChannel(guild, preferredChannel);
       if (!channel) continue;
@@ -205,7 +189,7 @@ module.exports = (client) => {
       try {
         await channel.send(`✨ quick vibe check: ${nice}`);
         lastNicePingByGuild.set(guildId, now);
-      } catch {/* ignore */}
+      } catch {}
     }
   }, NICE_SCAN_EVERY_MS);
 
@@ -253,9 +237,6 @@ module.exports = (client) => {
     if (!cleanedInput) cleanedInput = shouldRoast ? 'Roast these fools.' : 'Speak your alpha.';
     cleanedInput = `${introLine}${cleanedInput}`;
 
-    // Detect quick actions (non-breaking). If present, we’ll:
-    // 1) send a small action embed first,
-    // 2) also feed action result back into the LLM for contextual riffing.
     const action = quickActionDetect(message.content || '');
     const actionEmbed = buildActionEmbed(action);
 
@@ -265,7 +246,7 @@ module.exports = (client) => {
       const isRoast = shouldRoast && !isRoastingBot;
       const roastTargets = [...mentionedUsers.values()].map(u => u.username).join(', ');
 
-      // ------ Mode from DB (no random override if DB has one) ------
+      // ------ Mode from DB ------
       let currentMode = 'default';
       try {
         const modeRes = await client.pg.query(
@@ -277,13 +258,10 @@ module.exports = (client) => {
         console.warn('⚠️ Failed to fetch mb_mode, using default.');
       }
 
-      // Tiny mode-based reaction for flavor (non-blocking)
       maybeReact(message, currentMode);
 
-      // Lightweight recent context (gives MB more awareness)
       const recentContext = await getRecentContext(message);
 
-      // Persona overlays kept minimal; nicer tone by default in non-roast modes
       let systemPrompt = '';
       if (isRoast) {
         systemPrompt =
@@ -309,7 +287,6 @@ module.exports = (client) => {
         }
       }
 
-      // Add context & guardrails + brevity instruction
       const softGuard =
         'Be kind by default, avoid insults unless explicitly roasting. No private data. Keep it 1–3 short sentences max.';
       const fullSystemPrompt = [systemPrompt, softGuard, recentContext].filter(Boolean).join('\n\n');
@@ -318,37 +295,72 @@ module.exports = (client) => {
       if (currentMode === 'villain') temperature = 0.5;
       if (currentMode === 'motivator') temperature = 0.9;
 
-      // If an action was detected, fold its result into the user content so MB riffs with it
       const userMsg = action
         ? `${cleanedInput}\n\n(Quick action performed: ${action.title} => ${action.result})`
         : cleanedInput;
 
-      // Optional: post the quick action embed before the main reply (non-blocking if it fails)
       if (actionEmbed) {
         message.reply({ embeds: [actionEmbed] }).catch(() => {});
       }
 
-      const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${GROQ_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: 'llama3-70b-8192',
-          temperature,
-          max_tokens: 160, // a bit more space for better jokes/answers, still concise
-          messages: [
-            { role: 'system', content: fullSystemPrompt },
-            { role: 'user', content: userMsg },
-          ],
-        }),
-      });
+      // ---- Robust Groq request with timeout + explicit checks ----
+      const { signal, cancel } = withTimeout(12000); // 12s safety timeout
+      let text;
+      try {
+        const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${GROQ_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: 'llama3-70b-8192',
+            temperature,
+            max_tokens: 160,
+            messages: [
+              { role: 'system', content: fullSystemPrompt },
+              { role: 'user', content: userMsg },
+            ],
+          }),
+          signal,
+        });
 
-      const data = await response.json();
+        text = await response.text();
+        if (!response.ok) {
+          console.error(`❌ Groq HTTP ${response.status}: ${text?.slice(0, 300)}`);
+          throw new Error(`Groq HTTP ${response.status}`);
+        }
+      } catch (e) {
+        cancel();
+        console.error('❌ Groq fetch error:', e.message);
+        // Guaranteed visible fallback:
+        try {
+          await message.reply('⚠️ MB lag spike. Using backup braincell: stay hydrated, ship one small W. 💧⚙️');
+        } catch {}
+        return;
+      } finally {
+        cancel();
+      }
+
+      const data = safeJsonParse(text);
+      if (!data) {
+        console.error('❌ Groq returned non-JSON or empty body:', text?.slice(0, 200));
+        try {
+          await message.reply('⚠️ MB static noise… say that again or try a simpler ask. 📻');
+        } catch {}
+        return;
+      }
+      if (data.error) {
+        console.error('❌ Groq API error:', data.error);
+        try {
+          await message.reply('⚠️ MB jammed the reps rack (API error). Try again in a sec. 🏋️');
+        } catch {}
+        return;
+      }
+
       const aiReply = data.choices?.[0]?.message?.content?.trim();
 
-      if (aiReply?.length) {
+      if (aiReply && aiReply.length) {
         let embedColor = '#9b59b6';
         const modeColorMap = {
           chill: '#3498db',
@@ -378,7 +390,16 @@ module.exports = (client) => {
           await message.reply({ embeds: [embed] });
         } catch (err) {
           console.warn('❌ MuscleMB embed reply error:', err.message);
+          // If embed fails (permissions/format), send plain text fallback:
+          try {
+            await message.reply(aiReply);
+          } catch {}
         }
+      } else {
+        // Absolute fallback: never leave the channel silent
+        try {
+          await message.reply('💬 (silent set) MB heard you but returned no sauce. Try again with fewer words.');
+        } catch {}
       }
 
     } catch (err) {
