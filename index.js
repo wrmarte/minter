@@ -1,6 +1,6 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, Collection, REST, Routes } = require('discord.js');
-const { Client: PgClient } = require('pg');
+const { Pool } = require('pg');
 const fs = require('fs');
 const path = require('path');
 
@@ -10,7 +10,7 @@ require('./services/logScanner');
 
 console.log("👀 Booting from:", __dirname);
 
-// ✅ Create Discord client
+/* ===================== Discord Client ===================== */
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -19,98 +19,140 @@ const client = new Client({
   ]
 });
 
-// ✅ Load MuscleMB trigger
-require('./listeners/muscleMBListener')(client);
-require('./listeners/mbella')(client);
-
-
-// ✅ Load FF Trigger listener
-require('./listeners/fftrigger')(client);
-
-// ✅ Load Welcome Listener
-require('./listeners/welcomeListener')(client);
-
-// ✅ PostgreSQL connection
-const pg = new PgClient({
+/* ===================== Postgres (Resilient Pool) ===================== */
+// Pool config works well on Railway/Neon/Supabase, etc.
+// - For serverless PG: leave SSL on but don't verify the chain.
+// - For local dev without SSL: set PGSSL_DISABLE=1 in .env
+const pgConfig = {
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
-});
-pg.connect();
-client.pg = pg;
+  ssl: process.env.PGSSL_DISABLE ? false : { rejectUnauthorized: false },
+  max: Number(process.env.PG_POOL_MAX || 5),
+  idleTimeoutMillis: Number(process.env.PG_IDLE_TIMEOUT_MS || 30_000),
+  connectionTimeoutMillis: Number(process.env.PG_CONN_TIMEOUT_MS || 10_000),
+  keepAlive: true,
+  allowExitOnIdle: true,
+};
 
-// ✅ Initialize staking-related tables
-require('./db/initStakingTables')(pg).catch(console.error);
+function createPool() {
+  const pool = new Pool(pgConfig);
+  // Never crash the process on idle client error (ECONNRESET, etc.)
+  pool.on('error', (err) => {
+    console.error('⚠️ pg idle client error (ignored):', err?.code || err?.message);
+  });
+  return pool;
+}
 
-// ✅ Core bot tables
-pg.query(`CREATE TABLE IF NOT EXISTS contract_watchlist (
-  name TEXT PRIMARY KEY,
-  address TEXT NOT NULL,
-  mint_price NUMERIC NOT NULL,
-  mint_token TEXT DEFAULT 'ETH',
-  mint_token_symbol TEXT DEFAULT 'ETH',
-  channel_ids TEXT[],
-  chain TEXT DEFAULT 'base'
-)`);
+client.pg = createPool();
 
-pg.query(`CREATE TABLE IF NOT EXISTS tracked_tokens (
-  name TEXT,
-  address TEXT NOT NULL,
-  guild_id TEXT NOT NULL,
-  channel_id TEXT,
-  PRIMARY KEY (address, guild_id)
-)`);
-pg.query(`ALTER TABLE tracked_tokens ADD COLUMN IF NOT EXISTS channel_id TEXT`);
+/** Self-healing healthcheck: if queries fail, rebuild pool */
+(function wirePgHealth(bot, makePool) {
+  let backoff = 10_000;        // 10s
+  const maxBackoff = 60_000;   // 60s
 
-pg.query(`CREATE TABLE IF NOT EXISTS flex_projects (
-  name TEXT PRIMARY KEY,
-  address TEXT NOT NULL,
-  network TEXT NOT NULL
-)`);
+  async function check() {
+    try {
+      await bot.pg.query('SELECT 1'); // cheap health probe
+      backoff = 10_000;
+    } catch (err) {
+      console.warn('⚠️ pg healthcheck failed:', err?.code || err?.message, 'recreating pool…');
+      try { await bot.pg.end().catch(() => {}); } catch {}
+      bot.pg = makePool();
+    }
+    setTimeout(check, Math.min(backoff *= 1.5, maxBackoff));
+  }
+  setTimeout(check, backoff);
+})(client, createPool);
 
-pg.query(`CREATE TABLE IF NOT EXISTS expressions (
-  name TEXT NOT NULL,
-  type TEXT NOT NULL,
-  content TEXT NOT NULL,
-  guild_id TEXT,
-  PRIMARY KEY (name, guild_id)
-)`);
-pg.query(`ALTER TABLE expressions ADD COLUMN IF NOT EXISTS guild_id TEXT`);
+/* ===================== DB Setup (Tables) ===================== */
+// use the pool directly (no .connect() needed)
+(async () => {
+  try {
+    await require('./db/initStakingTables')(client.pg);
 
-pg.query(`CREATE TABLE IF NOT EXISTS premium_servers (
-  server_id TEXT PRIMARY KEY,
-  tier TEXT NOT NULL DEFAULT 'free'
-)`);
+    await client.pg.query(`CREATE TABLE IF NOT EXISTS contract_watchlist (
+      name TEXT PRIMARY KEY,
+      address TEXT NOT NULL,
+      mint_price NUMERIC NOT NULL,
+      mint_token TEXT DEFAULT 'ETH',
+      mint_token_symbol TEXT DEFAULT 'ETH',
+      channel_ids TEXT[],
+      chain TEXT DEFAULT 'base'
+    )`);
 
-pg.query(`CREATE TABLE IF NOT EXISTS premium_users (
-  user_id TEXT PRIMARY KEY,
-  tier TEXT NOT NULL DEFAULT 'free'
-)`);
+    await client.pg.query(`CREATE TABLE IF NOT EXISTS tracked_tokens (
+      name TEXT,
+      address TEXT NOT NULL,
+      guild_id TEXT NOT NULL,
+      channel_id TEXT,
+      PRIMARY KEY (address, guild_id)
+    )`);
+    await client.pg.query(`ALTER TABLE tracked_tokens ADD COLUMN IF NOT EXISTS channel_id TEXT`);
 
-pg.query(`CREATE TABLE IF NOT EXISTS mb_modes (
-  server_id TEXT PRIMARY KEY,
-  mode TEXT NOT NULL DEFAULT 'default'
-)`);
+    await client.pg.query(`CREATE TABLE IF NOT EXISTS flex_projects (
+      name TEXT PRIMARY KEY,
+      address TEXT NOT NULL,
+      network TEXT NOT NULL
+    )`);
 
-pg.query(`CREATE TABLE IF NOT EXISTS server_themes (
-  server_id TEXT PRIMARY KEY,
-  bg_color TEXT DEFAULT '#4e7442',
-  accent_color TEXT DEFAULT '#294f30'
-)`);
+    await client.pg.query(`CREATE TABLE IF NOT EXISTS expressions (
+      name TEXT NOT NULL,
+      type TEXT NOT NULL,
+      content TEXT NOT NULL,
+      guild_id TEXT,
+      PRIMARY KEY (name, guild_id)
+    )`);
+    await client.pg.query(`ALTER TABLE expressions ADD COLUMN IF NOT EXISTS guild_id TEXT`);
 
-pg.query(`CREATE TABLE IF NOT EXISTS welcome_settings (
-  guild_id TEXT PRIMARY KEY,
-  enabled BOOLEAN DEFAULT FALSE,
-  welcome_channel_id TEXT
-)`);
+    await client.pg.query(`CREATE TABLE IF NOT EXISTS premium_servers (
+      server_id TEXT PRIMARY KEY,
+      tier TEXT NOT NULL DEFAULT 'free'
+    )`);
 
-pg.query(`CREATE TABLE IF NOT EXISTS dummy_info (
-  name TEXT NOT NULL,
-  content TEXT NOT NULL,
-  guild_id TEXT NOT NULL,
-  PRIMARY KEY (name, guild_id)
-)`);
+    await client.pg.query(`CREATE TABLE IF NOT EXISTS premium_users (
+      user_id TEXT PRIMARY KEY,
+      tier TEXT NOT NULL DEFAULT 'free'
+    )`);
 
-// ✅ Load slash & prefix commands
+    await client.pg.query(`CREATE TABLE IF NOT EXISTS mb_modes (
+      server_id TEXT PRIMARY KEY,
+      mode TEXT NOT NULL DEFAULT 'default'
+    )`);
+
+    await client.pg.query(`CREATE TABLE IF NOT EXISTS server_themes (
+      server_id TEXT PRIMARY KEY,
+      bg_color TEXT DEFAULT '#4e7442',
+      accent_color TEXT DEFAULT '#294f30'
+    )`);
+
+    await client.pg.query(`CREATE TABLE IF NOT EXISTS welcome_settings (
+      guild_id TEXT PRIMARY KEY,
+      enabled BOOLEAN DEFAULT FALSE,
+      welcome_channel_id TEXT
+    )`);
+
+    await client.pg.query(`CREATE TABLE IF NOT EXISTS dummy_info (
+      name TEXT NOT NULL,
+      content TEXT NOT NULL,
+      guild_id TEXT NOT NULL,
+      PRIMARY KEY (name, guild_id)
+    )`);
+  } catch (err) {
+    console.error('❌ DB init error:', err);
+  }
+})();
+
+/* ===================== Listeners (load after client.pg exists) ===================== */
+try {
+  require('./listeners/muscleMBListener')(client);
+  require('./listeners/mbella')(client);
+  require('./listeners/fftrigger')(client);
+  require('./listeners/welcomeListener')(client);
+  console.log('🎧 Listeners loaded.');
+} catch (err) {
+  console.error('❌ Error loading listeners:', err);
+}
+
+/* ===================== Commands ===================== */
 client.commands = new Collection();
 client.prefixCommands = new Collection();
 
@@ -132,27 +174,26 @@ try {
   console.error('❌ Error loading commands:', err);
 }
 
-// ✅ Load event handlers
-const eventFiles = fs.readdirSync(path.join(__dirname, 'events')).filter(file => file.endsWith('.js'));
-for (const file of eventFiles) {
-  try {
+/* ===================== Events ===================== */
+try {
+  const eventFiles = fs.readdirSync(path.join(__dirname, 'events')).filter(file => file.endsWith('.js'));
+  for (const file of eventFiles) {
     const registerEvent = require(`./events/${file}`);
-    registerEvent(client, pg);
+    registerEvent(client, client.pg);
     console.log(`📡 Event loaded: ${file}`);
-  } catch (err) {
-    console.error(`❌ Failed to load event ${file}:`, err);
   }
+} catch (err) {
+  console.error('❌ Error loading events:', err);
 }
 
-// ✅ Mint/Sale Trackers
+/* ===================== Services ===================== */
 const { trackAllContracts } = require('./services/mintRouter');
 trackAllContracts(client);
 
-// ✅ Global Token Scanner
 const processUnifiedBlock = require('./services/globalProcessor');
 const { getProvider } = require('./services/providerM');
 
-setInterval(async () => {
+const globalScanner = setInterval(async () => {
   try {
     const latestBlock = await getProvider().getBlockNumber();
     await processUnifiedBlock(client, latestBlock - 5, latestBlock);
@@ -161,14 +202,12 @@ setInterval(async () => {
   }
 }, 15000); // every 15 sec
 
-// ✅ Auto Reward Payout System
 const autoRewardPayout = require('./services/autoRewardPayout');
-setInterval(() => {
+const payoutTimer = setInterval(() => {
   console.log('💸 Running autoRewardPayout...');
   autoRewardPayout(client).catch(console.error);
 }, 24 * 60 * 60 * 1000); // every 24 hours
 
-// ✅ Conditional Mint Processor Ape Loader
 if (process.env.APE_ENABLED === 'true') {
   console.log('🔄 Loading Mint Processor Ape...');
   require('./services/mintProcessorApe')(client);
@@ -176,12 +215,12 @@ if (process.env.APE_ENABLED === 'true') {
   console.log('⛔ Mint Processor Ape disabled by config.');
 }
 
-// ✅ Login to Discord
+/* ===================== Discord Login ===================== */
 client.login(process.env.DISCORD_BOT_TOKEN)
   .then(() => console.log(`✅ Logged in as ${client.user.tag}`))
   .catch(err => console.error('❌ Discord login failed:', err));
 
-// ✅ Auto-register slash commands on bot ready
+/* ===================== Slash Commands Auto-Register ===================== */
 client.once('ready', async () => {
   const token = process.env.DISCORD_BOT_TOKEN;
   const clientId = process.env.CLIENT_ID;
@@ -209,6 +248,30 @@ client.once('ready', async () => {
     console.error('❌ Failed to register slash commands:', err);
   }
 });
+
+/* ===================== Safety Nets & Graceful Shutdown ===================== */
+// Don’t let a stray error kill the process
+process.on('uncaughtException', (err) => {
+  console.error('UNCAUGHT', err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('UNHANDLED', reason);
+});
+
+// Graceful shutdown for Railway/containers
+async function shutdown(sig) {
+  try {
+    console.log(`${sig} received. Shutting down…`);
+    clearInterval(globalScanner);
+    clearInterval(payoutTimer);
+    try { await client.destroy(); } catch {}
+    try { await client.pg.end(); } catch {}
+  } finally {
+    process.exit(0);
+  }
+}
+['SIGINT', 'SIGTERM'].forEach(sig => process.on(sig, () => shutdown(sig)));
+
 
 
 
