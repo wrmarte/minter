@@ -10,7 +10,7 @@ require('./services/logScanner');
 
 console.log("👀 Booting from:", __dirname);
 
-/* ===================== Discord Client ===================== */
+// ✅ Create Discord client
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -19,57 +19,36 @@ const client = new Client({
   ]
 });
 
-/* ===================== Postgres (Resilient Pool) ===================== */
-// Pool config works well on Railway/Neon/Supabase, etc.
-// - For serverless PG: leave SSL on but don't verify the chain.
-// - For local dev without SSL: set PGSSL_DISABLE=1 in .env
-const pgConfig = {
+// ✅ Load listeners (order matters if you coordinate typing suppress, etc.)
+require('./listeners/muscleMBListener')(client);
+require('./listeners/mbella')(client);
+require('./listeners/fftrigger')(client);
+require('./listeners/welcomeListener')(client);
+
+// ====================== PostgreSQL (pool) ======================
+const wantSsl = !/^1|true$/i.test(process.env.PGSSL_DISABLE || '');
+const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.PGSSL_DISABLE ? false : { rejectUnauthorized: false },
-  max: Number(process.env.PG_POOL_MAX || 5),
-  idleTimeoutMillis: Number(process.env.PG_IDLE_TIMEOUT_MS || 30_000),
-  connectionTimeoutMillis: Number(process.env.PG_CONN_TIMEOUT_MS || 10_000),
-  keepAlive: true,
-  allowExitOnIdle: true,
-};
+  max: Number(process.env.PG_POOL_MAX || '5'),
+  idleTimeoutMillis: Number(process.env.PG_IDLE_TIMEOUT_MS || '30000'),
+  connectionTimeoutMillis: Number(process.env.PG_CONN_TIMEOUT_MS || '10000'),
+  ssl: wantSsl ? { rejectUnauthorized: false } : false
+});
 
-function createPool() {
-  const pool = new Pool(pgConfig);
-  // Never crash the process on idle client error (ECONNRESET, etc.)
-  pool.on('error', (err) => {
-    console.error('⚠️ pg idle client error (ignored):', err?.code || err?.message);
-  });
-  return pool;
-}
+// Prevent unhandled 'error' on pool idle clients from crashing the process
+pool.on('error', (err) => {
+  console.error('🛑 PG pool idle client error:', err?.stack || err?.message || err);
+});
 
-client.pg = createPool();
+client.pg = pool;
 
-/** Self-healing healthcheck: if queries fail, rebuild pool */
-(function wirePgHealth(bot, makePool) {
-  let backoff = 10_000;        // 10s
-  const maxBackoff = 60_000;   // 60s
+// ✅ Initialize staking-related tables
+require('./db/initStakingTables')(pool).catch(console.error);
 
-  async function check() {
-    try {
-      await bot.pg.query('SELECT 1'); // cheap health probe
-      backoff = 10_000;
-    } catch (err) {
-      console.warn('⚠️ pg healthcheck failed:', err?.code || err?.message, 'recreating pool…');
-      try { await bot.pg.end().catch(() => {}); } catch {}
-      bot.pg = makePool();
-    }
-    setTimeout(check, Math.min(backoff *= 1.5, maxBackoff));
-  }
-  setTimeout(check, backoff);
-})(client, createPool);
-
-/* ===================== DB Setup (Tables) ===================== */
-// use the pool directly (no .connect() needed)
+// ✅ Core bot tables
 (async () => {
   try {
-    await require('./db/initStakingTables')(client.pg);
-
-    await client.pg.query(`CREATE TABLE IF NOT EXISTS contract_watchlist (
+    await pool.query(`CREATE TABLE IF NOT EXISTS contract_watchlist (
       name TEXT PRIMARY KEY,
       address TEXT NOT NULL,
       mint_price NUMERIC NOT NULL,
@@ -79,80 +58,69 @@ client.pg = createPool();
       chain TEXT DEFAULT 'base'
     )`);
 
-    await client.pg.query(`CREATE TABLE IF NOT EXISTS tracked_tokens (
+    await pool.query(`CREATE TABLE IF NOT EXISTS tracked_tokens (
       name TEXT,
       address TEXT NOT NULL,
       guild_id TEXT NOT NULL,
       channel_id TEXT,
       PRIMARY KEY (address, guild_id)
     )`);
-    await client.pg.query(`ALTER TABLE tracked_tokens ADD COLUMN IF NOT EXISTS channel_id TEXT`);
+    await pool.query(`ALTER TABLE tracked_tokens ADD COLUMN IF NOT EXISTS channel_id TEXT`);
 
-    await client.pg.query(`CREATE TABLE IF NOT EXISTS flex_projects (
+    await pool.query(`CREATE TABLE IF NOT EXISTS flex_projects (
       name TEXT PRIMARY KEY,
       address TEXT NOT NULL,
       network TEXT NOT NULL
     )`);
 
-    await client.pg.query(`CREATE TABLE IF NOT EXISTS expressions (
+    await pool.query(`CREATE TABLE IF NOT EXISTS expressions (
       name TEXT NOT NULL,
       type TEXT NOT NULL,
       content TEXT NOT NULL,
       guild_id TEXT,
       PRIMARY KEY (name, guild_id)
     )`);
-    await client.pg.query(`ALTER TABLE expressions ADD COLUMN IF NOT EXISTS guild_id TEXT`);
+    await pool.query(`ALTER TABLE expressions ADD COLUMN IF NOT EXISTS guild_id TEXT`);
 
-    await client.pg.query(`CREATE TABLE IF NOT EXISTS premium_servers (
+    await pool.query(`CREATE TABLE IF NOT EXISTS premium_servers (
       server_id TEXT PRIMARY KEY,
       tier TEXT NOT NULL DEFAULT 'free'
     )`);
 
-    await client.pg.query(`CREATE TABLE IF NOT EXISTS premium_users (
+    await pool.query(`CREATE TABLE IF NOT EXISTS premium_users (
       user_id TEXT PRIMARY KEY,
       tier TEXT NOT NULL DEFAULT 'free'
     )`);
 
-    await client.pg.query(`CREATE TABLE IF NOT EXISTS mb_modes (
+    await pool.query(`CREATE TABLE IF NOT EXISTS mb_modes (
       server_id TEXT PRIMARY KEY,
       mode TEXT NOT NULL DEFAULT 'default'
     )`);
 
-    await client.pg.query(`CREATE TABLE IF NOT EXISTS server_themes (
+    await pool.query(`CREATE TABLE IF NOT EXISTS server_themes (
       server_id TEXT PRIMARY KEY,
       bg_color TEXT DEFAULT '#4e7442',
       accent_color TEXT DEFAULT '#294f30'
     )`);
 
-    await client.pg.query(`CREATE TABLE IF NOT EXISTS welcome_settings (
+    await pool.query(`CREATE TABLE IF NOT EXISTS welcome_settings (
       guild_id TEXT PRIMARY KEY,
       enabled BOOLEAN DEFAULT FALSE,
       welcome_channel_id TEXT
     )`);
 
-    await client.pg.query(`CREATE TABLE IF NOT EXISTS dummy_info (
+    await pool.query(`CREATE TABLE IF NOT EXISTS dummy_info (
       name TEXT NOT NULL,
       content TEXT NOT NULL,
       guild_id TEXT NOT NULL,
       PRIMARY KEY (name, guild_id)
     )`);
   } catch (err) {
-    console.error('❌ DB init error:', err);
+    console.error('❌ DB bootstrap error:', err);
   }
 })();
 
-/* ===================== Listeners (load after client.pg exists) ===================== */
-try {
-  require('./listeners/muscleMBListener')(client);
-  require('./listeners/mbella')(client);
-  require('./listeners/fftrigger')(client);
-  require('./listeners/welcomeListener')(client);
-  console.log('🎧 Listeners loaded.');
-} catch (err) {
-  console.error('❌ Error loading listeners:', err);
-}
-
-/* ===================== Commands ===================== */
+// =================== Commands loader ===================
 client.commands = new Collection();
 client.prefixCommands = new Collection();
 
@@ -174,26 +142,32 @@ try {
   console.error('❌ Error loading commands:', err);
 }
 
-/* ===================== Events ===================== */
+// =================== Events loader ===================
 try {
   const eventFiles = fs.readdirSync(path.join(__dirname, 'events')).filter(file => file.endsWith('.js'));
   for (const file of eventFiles) {
     const registerEvent = require(`./events/${file}`);
-    registerEvent(client, client.pg);
+    registerEvent(client, pool);
     console.log(`📡 Event loaded: ${file}`);
   }
 } catch (err) {
-  console.error('❌ Error loading events:', err);
+  console.error('❌ Events load error:', err);
 }
 
-/* ===================== Services ===================== */
+// =================== Services / timers ===================
 const { trackAllContracts } = require('./services/mintRouter');
 trackAllContracts(client);
 
 const processUnifiedBlock = require('./services/globalProcessor');
 const { getProvider } = require('./services/providerM');
 
-const globalScanner = setInterval(async () => {
+// keep references so we can clear them on shutdown
+const timers = {
+  globalScan: null,
+  rewardPayout: null
+};
+
+timers.globalScan = setInterval(async () => {
   try {
     const latestBlock = await getProvider().getBlockNumber();
     await processUnifiedBlock(client, latestBlock - 5, latestBlock);
@@ -203,7 +177,7 @@ const globalScanner = setInterval(async () => {
 }, 15000); // every 15 sec
 
 const autoRewardPayout = require('./services/autoRewardPayout');
-const payoutTimer = setInterval(() => {
+timers.rewardPayout = setInterval(() => {
   console.log('💸 Running autoRewardPayout...');
   autoRewardPayout(client).catch(console.error);
 }, 24 * 60 * 60 * 1000); // every 24 hours
@@ -215,12 +189,12 @@ if (process.env.APE_ENABLED === 'true') {
   console.log('⛔ Mint Processor Ape disabled by config.');
 }
 
-/* ===================== Discord Login ===================== */
+// =================== Discord login ===================
 client.login(process.env.DISCORD_BOT_TOKEN)
   .then(() => console.log(`✅ Logged in as ${client.user.tag}`))
   .catch(err => console.error('❌ Discord login failed:', err));
 
-/* ===================== Slash Commands Auto-Register ===================== */
+// =================== Slash registration ===================
 client.once('ready', async () => {
   const token = process.env.DISCORD_BOT_TOKEN;
   const clientId = process.env.CLIENT_ID;
@@ -249,49 +223,41 @@ client.once('ready', async () => {
   }
 });
 
-/* ===================== Safety Nets & Graceful Shutdown ===================== */
-// Don’t let a stray error kill the process
+// =================== Robust process handling ===================
+
+// Catch async errors to avoid hard-crash
+process.on('unhandledRejection', (err) => {
+  console.error('🚨 Unhandled Rejection:', err?.stack || err?.message || err);
+});
 process.on('uncaughtException', (err) => {
-  console.error('UNCAUGHT', err);
-});
-process.on('unhandledRejection', (reason) => {
-  console.error('UNHANDLED', reason);
+  console.error('🚨 Uncaught Exception:', err?.stack || err?.message || err);
 });
 
-// Graceful shutdown for Railway/containers
-async function shutdown(sig) {
-  try {
-    console.log(`${sig} received. Shutting down…`);
-    clearInterval(globalScanner);
-    clearInterval(payoutTimer);
-    try { await client.destroy(); } catch {}
-    try { await client.pg.end(); } catch {}
-  } finally {
-    process.exit(0);
-  }
+// Graceful shutdown so NPM doesn’t print an error on SIGTERM (exit 0)
+let shuttingDown = false;
+async function gracefulShutdown(reason) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`🛑 Shutting down (${reason})…`);
+
+  // Stop timers
+  try { if (timers.globalScan) clearInterval(timers.globalScan); } catch {}
+  try { if (timers.rewardPayout) clearInterval(timers.rewardPayout); } catch {}
+
+  // Close Discord (stops websocket cleanly)
+  try { await client.destroy(); } catch (e) { console.warn('⚠️ Discord destroy:', e?.message || e); }
+
+  // Close DB pool
+  try { await pool.end(); } catch (e) { console.warn('⚠️ PG pool end:', e?.message || e); }
+
+  // Exit success so npm doesn’t print an error block
+  process.exit(0);
 }
-['SIGINT', 'SIGTERM'].forEach(sig => process.on(sig, () => shutdown(sig)));
 
+// Railway & many platforms send SIGTERM on redeploy/scale down
+process.once('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.once('SIGINT',  () => gracefulShutdown('SIGINT'));
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+// Failsafe: if shutdown stalls, force exit after 10s
+process.once('SIGTERM', () => setTimeout(() => process.exit(0), 10000));
+process.once('SIGINT',  () => setTimeout(() => process.exit(0), 10000));
