@@ -25,7 +25,7 @@ const PAIR_COUNT  = Math.max(1, Number(process.env.TICKER_PAIR_COUNT || '2')); /
 const ACTIVITY_TYPES = { Playing: 0, Streaming: 1, Listening: 2, Watching: 3, Competing: 5 };
 const ACTIVITY_TYPE  = ACTIVITY_TYPES[process.env.TICKER_ACTIVITY_TYPE || 'Watching'] ?? 3;
 
-const RAW_ASSETS = (process.env.TICKER_ASSETS || 'btc,eth')
+const RAW_ASSETS = (process.env.TICKER_ASSETS || 'btc,eth,sol,ape')
   .split(',')
   .map(s => s.trim().toLowerCase())
   .filter(Boolean);
