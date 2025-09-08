@@ -1,31 +1,33 @@
 {
-  "name": "Muscle MB",
+  "name": "muscle-mb",
   "version": "4.5.0",
   "description": "A Discord bot that tracks CryptoPimps mints.",
   "main": "index.js",
+  "license": "UNLICENSED",
   "scripts": {
-    "start": "node --no-deprecation index.js",
+    "start": "node index.js",
     "deploy": "node registerCommands.js",
     "build": "npm install",
     "preinstall": "npm config set legacy-peer-deps true"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20 <23"
   },
   "dependencies": {
-    "discord.js": "^14.14.1",
-    "ethers": "^6.10.0",
-    "dotenv": "^16.3.1",
-    "node-fetch": "^2.6.12",
     "@napi-rs/canvas": "^0.1.43",
-    "fs-extra": "^11.2.0",
-    "pg": "^8.11.3",
-    "openai": "^4.43.0",
-    "qrcode": "^1.5.1",
-    "graphql-request": "^6.1.0",
     "date-fns": "^3.0.0",
-    "node-cache": "^5.1.2"
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.3.1",
+    "ethers": "^6.10.0",
+    "fs-extra": "^11.2.0",
+    "graphql-request": "^6.1.0",
+    "node-cache": "^5.1.2",
+    "node-fetch": "^2.6.12",
+    "openai": "^4.43.0",
+    "pg": "^8.11.3",
+    "qrcode": "^1.5.1"
   }
 }
+
 
 
