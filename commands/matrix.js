@@ -39,7 +39,6 @@ const keepAliveHttps = new https.Agent({ keepAlive: true, maxSockets: 128 });
 
 /* ===================== Small Utils ===================== */
 function padTopicAddress(addr) {
-  // 32-byte left-padded address topic
   return '0x' + addr.toLowerCase().replace(/^0x/, '').padStart(64, '0');
 }
 function clamp(n, a, b){ return Math.max(a, Math.min(b, n)); }
@@ -71,10 +70,14 @@ const IPFS_GATES = [
   'https://dweb.link/ipfs/',
   'https://gateway.pinata.cloud/ipfs/',
   'https://nftstorage.link/ipfs/',
-  'https://cf-ipfs.com/ipfs/'
+  'https://cf-ipfs.com/ipfs/',
+  // Extra healthy CDNs
+  'https://ipfs.filebase.io/ipfs/',
+  'https://4everland.io/ipfs/',
+  'https://hardbin.com/ipfs/'
 ];
 function ipfsToHttp(path) {
-  const cidAndPath = path.replace(/^ipfs:\/\//, ''); // CID or CID/path
+  const cidAndPath = path.replace(/^ipfs:\/\//, '');
   return IPFS_GATES.map(g => g + cidAndPath);
 }
 function arToHttp(u) {
@@ -118,7 +121,7 @@ function looksLikeImage(buf) {
   if (buf.slice(0,3).equals(Buffer.from([0xFF,0xD8,0xFF]))) return true; // JPG
   if (buf.slice(0,3).equals(Buffer.from([0x47,0x49,0x46]))) return true; // GIF
   if (sig.startsWith('52494646') && sig.includes('57454250')) return true; // WEBP
-  const head = buf.slice(0, 256).toString('utf8').trim().toLowerCase(); // SVG/XML
+  const head = buf.slice(0, 256).toString('utf8').trim().toLowerCase();
   if (head.startsWith('<svg') || head.startsWith('<?xml')) return true;
   return false;
 }
@@ -139,7 +142,7 @@ async function fetchJsonWithFallback(urlOrList, timeoutMs = 8000) {
       const ctrl = new AbortController();
       const t = setTimeout(() => ctrl.abort(), timeoutMs);
       const agent = u.startsWith('http:') ? keepAliveHttp : keepAliveHttps;
-      const res = await fetch(u, { signal: ctrl.signal, agent });
+      const res = await fetch(u, { signal: ctrl.signal, agent, headers: { 'Accept': 'application/json,*/*;q=0.8' } });
       clearTimeout(t);
       if (!res.ok) continue;
       const data = await res.json().catch(() => null);
@@ -150,8 +153,7 @@ async function fetchJsonWithFallback(urlOrList, timeoutMs = 8000) {
 }
 
 /* ===================== Deep metadata image extractor ===================== */
-// Recursively collect every plausible image URL from arbitrary metadata shapes
-function collectAllImageCandidates(meta, limit = 40) {
+function collectAllImageCandidates(meta, limit = 60) {
   const out = new Set();
   const seen = new Set();
   const queue = [meta];
@@ -165,7 +167,7 @@ function collectAllImageCandidates(meta, limit = 40) {
     }
   };
 
-  while (queue.length && out.size < limit && visits < 5000) {
+  while (queue.length && out.size < limit && visits < 8000) {
     const cur = queue.shift();
     visits++;
     if (cur == null) continue;
@@ -181,7 +183,8 @@ function collectAllImageCandidates(meta, limit = 40) {
     const prioritize = [
       'image','image_url','imageUrl','imageURI','image_uri',
       'imagePreviewUrl','image_preview_url','thumbnail','thumbnail_url',
-      'displayUri','artifactUri','animation_url','content','uri','url','src'
+      'displayUri','artifactUri','animation_url','content','uri','url','src',
+      'media','mediaUrl','original_media_url','metadata_image','image_data'
     ];
     for (const k of prioritize) {
       if (k in cur) pushUrl(cur[k]);
@@ -413,7 +416,7 @@ async function fetchOwnerTokens721Rolling({ chain, contract, owner, maxWant = EN
   return { items: slice, total: all.length || slice.length };
 }
 
-// ERC1155: TransferSingle / TransferBatch (ids in data)
+// ERC1155: TransferSingle / TransferBatch
 async function fetchOwnerTokens1155Rolling({ chain, contract, owner, maxWant = ENV_MAX, deep = false, onProgress }) {
   const provider = getProvider(chain);
   if (!provider) return { items: [], total: 0 };
@@ -480,7 +483,6 @@ async function fetchOwnerTokens1155Rolling({ chain, contract, owner, maxWant = E
       }
       await update();
     }));
-    // cannot early-stop reliably for 1155; need full history to compute balances
   }
 
   const ownedIds = [];
@@ -494,10 +496,7 @@ function idHex64(tokenId) {
   const bn = BigInt(tokenId);
   return bn.toString(16).padStart(64, '0');
 }
-
-// Per-process lightweight cache for token URI lists (safe, small)
-const RESOLVED_URI_CACHE = new Map(); // key -> Array<string>
-
+const RESOLVED_URI_CACHE = new Map();
 async function resolveMetadataURI({ chain, contract, tokenId, is1155 }) {
   const key = `${chain}:${contract}:${String(tokenId)}:${is1155 ? '1155' : '721'}`;
   const cached = RESOLVED_URI_CACHE.get(key);
@@ -510,7 +509,7 @@ async function resolveMetadataURI({ chain, contract, tokenId, is1155 }) {
     const c = new Contract(contract, ['function uri(uint256) view returns (string)'], provider);
     let uri = await safeRpcCall(chain, p => c.connect(p).uri(tokenId));
     if (!uri) return null;
-    uri = uri.replace(/\{id\}/gi, idHex64(tokenId)); // ERC1155 {id} substitution
+    uri = uri.replace(/\{id\}/gi, idHex64(tokenId));
     const list = uri.startsWith('ipfs://') ? ipfsToHttp(uri) : [uri];
     RESOLVED_URI_CACHE.set(key, list);
     return list;
@@ -542,7 +541,7 @@ async function enrichImages({ chain, contract, items, is1155, onProgress }) {
           try { meta = JSON.parse(parsed.buffer.toString('utf8')); } catch {}
         }
       }
-      if (!meta) meta = await fetchJsonWithFallback(uriList);
+      if (!meta) meta = await fetchJsonWithFallback(uriList, chain === 'base' ? 12000 : 8000);
 
       let img =
         meta?.image ||
@@ -579,7 +578,7 @@ async function enrichImages({ chain, contract, items, is1155, onProgress }) {
   return results;
 }
 
-/* ===================== Backfill missing images via Reservoir (progress) ===================== */
+/* ===================== Backfills: Reservoir (existing) + Moralis + OpenSea ===================== */
 async function backfillImagesFromReservoir({ chain, contract, items, onProgress }) {
   const chainHeader = chain === 'eth' ? 'ethereum' : chain === 'base' ? 'base' : null;
   if (!chainHeader) return items;
@@ -624,9 +623,100 @@ async function backfillImagesFromReservoir({ chain, contract, items, onProgress 
   });
 }
 
+// Optional Moralis fallback (needs MORALIS_API_KEY)
+async function backfillImagesFromMoralis({ chain, contract, items }) {
+  const key = process.env.MORALIS_API_KEY;
+  if (!key) return items;
+  const chainName = chain === 'base' ? 'base' : chain === 'eth' ? 'eth' : null;
+  if (!chainName) return items;
+
+  const targets = items.filter(i => !i.image);
+  if (!targets.length) return items;
+
+  const headers = { 'accept': 'application/json', 'X-API-Key': key };
+  const out = [...items];
+
+  // batch by 25 to be gentle
+  const BATCH = 25;
+  for (let i = 0; i < targets.length; i += BATCH) {
+    const chunk = targets.slice(i, i + BATCH);
+    await Promise.all(chunk.map(async (it) => {
+      try {
+        const url = new URL(`https://deep-index.moralis.io/api/v2.2/nft/${contract}/${it.tokenId}`);
+        url.searchParams.set('chain', chainName);
+        url.searchParams.set('format', 'decimal');
+        const res = await fetch(url.toString(), { headers });
+        if (!res.ok) return;
+        const j = await res.json();
+        // Moralis returns .normalized_metadata or .metadata
+        const metaRaw = j?.normalized_metadata || j?.metadata;
+        let img = null;
+        if (metaRaw) {
+          let meta = typeof metaRaw === 'string' ? (() => { try { return JSON.parse(metaRaw); } catch { return null; } })() : metaRaw;
+          if (meta) {
+            img = meta.image || meta.image_url || meta.imageUrl || meta.animation_url || meta.image_data || null;
+            const cands = img ? expandImageCandidates(img) : collectAllImageCandidates(meta);
+            if (cands?.length) {
+              const idx = out.findIndex(x => x.tokenId === it.tokenId);
+              if (idx >= 0) out[idx] = { ...out[idx], image: cands };
+            }
+          }
+        }
+        // fallback to Moralis top-level fields if present
+        const timg = j?.media?.media_collection?.high?.url || j?.media?.original_media_url || j?.image || null;
+        if (!img && timg) {
+          const cands = expandImageCandidates(timg);
+          const idx = out.findIndex(x => x.tokenId === it.tokenId);
+          if (idx >= 0 && cands.length) out[idx] = { ...out[idx], image: cands };
+        }
+      } catch {}
+    }));
+  }
+  return out;
+}
+
+// Optional OpenSea fallback (needs OPENSEA_API_KEY)
+async function backfillImagesFromOpenSea({ chain, contract, items }) {
+  const key = process.env.OPENSEA_API_KEY;
+  if (!key) return items;
+  const chainKey = chain === 'base' ? 'base' : chain === 'eth' ? 'ethereum' : null;
+  if (!chainKey) return items;
+
+  const headers = { 'accept': 'application/json', 'x-api-key': key };
+  const targets = items.filter(i => !i.image);
+  if (!targets.length) return items;
+
+  const out = [...items];
+  const BATCH = 20;
+  for (let i = 0; i < targets.length; i += BATCH) {
+    const chunk = targets.slice(i, i + BATCH);
+    await Promise.all(chunk.map(async (it) => {
+      try {
+        const url = `https://api.opensea.io/api/v2/chain/${chainKey}/contract/${contract}/nfts/${it.tokenId}`;
+        const res = await fetch(url, { headers });
+        if (!res.ok) return;
+        const j = await res.json();
+        const nft = j?.nft || {};
+        const img = nft?.image_url || nft?.display_image_url || nft?.metadata_url || null;
+        if (img) {
+          const cands = expandImageCandidates(img);
+          if (cands.length) {
+            const idx = out.findIndex(x => x.tokenId === it.tokenId);
+            if (idx >= 0) out[idx] = { ...out[idx], image: cands };
+          }
+        }
+      } catch {}
+    }));
+  }
+  return out;
+}
+
 /* ===================== Robust image loading ===================== */
-async function loadImageWithCandidates(candidates, perTryMs = 8000) {
-  // Try URL route first
+async function loadImageWithCandidates(candidates, perTryMs = 8000, isBaseChain = false) {
+  const timeoutA = isBaseChain ? Math.max(perTryMs, 12000) : perTryMs;
+  const timeoutB = isBaseChain ? Math.max(perTryMs, 15000) : Math.max(perTryMs, 10000);
+
+  // Pass A: let canvas loadImage try direct URL/data
   for (const u of candidates) {
     try {
       if (isDataUrl(u)) {
@@ -638,18 +728,18 @@ async function loadImageWithCandidates(candidates, perTryMs = 8000) {
       } else {
         const img = await Promise.race([
           loadImage(u),
-          new Promise(res => setTimeout(() => res(null), perTryMs))
+          new Promise(res => setTimeout(() => res(null), timeoutA))
         ]);
         if (img && img.width > 0 && img.height > 0) return img;
       }
     } catch {}
   }
-  // Fallback: fetch buffer
+  // Pass B: fetch as buffer with Accept header then decode
   for (const u of candidates) {
     if (isDataUrl(u)) continue;
     try {
       const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), perTryMs);
+      const t = setTimeout(() => ctrl.abort(), timeoutB);
       const agent = u.startsWith('http:') ? keepAliveHttp : keepAliveHttps;
       const res = await fetch(u, { signal: ctrl.signal, agent, headers: { 'Accept': 'image/*' } });
       clearTimeout(t);
@@ -663,13 +753,13 @@ async function loadImageWithCandidates(candidates, perTryMs = 8000) {
   }
   return null;
 }
-async function preloadImages(items, onProgress) {
+async function preloadImages(items, onProgress, isBaseChain = false) {
   let done = 0;
   const imgs = await runPool(IMAGE_CONCURRENCY, items, async (it) => {
     const candidates =
       Array.isArray(it.image) ? it.image :
       (typeof it.image === 'string' ? expandImageCandidates(it.image) : []);
-    const img = candidates && candidates.length ? await loadImageWithCandidates(candidates) : null;
+    const img = candidates && candidates.length ? await loadImageWithCandidates(candidates, 8000, isBaseChain) : null;
     done++; onProgress?.(done, items.length);
     return img;
   });
@@ -706,21 +796,20 @@ async function composeGrid(items, preloadedImgs) {
 
     const img = preloadedImgs?.[i];
     if (!img || !img.width || !img.height) {
-      // always show something (token #)
-      ctx.fillStyle = '#161a24'; ctx.fillRect(x, y, tile, tile);
-      ctx.fillStyle = '#c9d3e3';
-      ctx.font = `bold ${Math.max(16, Math.round(tile * 0.16))}px sans-serif`;
+      // fallback tile (higher contrast so it doesn't look like a "black hole")
+      ctx.fillStyle = '#151a23'; ctx.fillRect(x, y, tile, tile);
+      ctx.fillStyle = '#e2ebff';
+      ctx.font = `bold ${Math.max(18, Math.round(tile * 0.18))}px sans-serif`;
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillText(`#${items[i]?.tokenId ?? '?'}`, x + tile / 2, y + tile / 2);
       continue;
     }
 
-    // cover-fit crop with guards
     const scale = Math.max(tile / img.width, tile / img.height);
     if (!isFinite(scale) || scale <= 0) {
-      ctx.fillStyle = '#161a24'; ctx.fillRect(x, y, tile, tile);
-      ctx.fillStyle = '#c9d3e3';
-      ctx.font = `bold ${Math.max(16, Math.round(tile * 0.16))}px sans-serif`;
+      ctx.fillStyle = '#151a23'; ctx.fillRect(x, y, tile, tile);
+      ctx.fillStyle = '#e2ebff';
+      ctx.font = `bold ${Math.max(18, Math.round(tile * 0.18))}px sans-serif`;
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillText(`#${items[i]?.tokenId ?? '?'}`, x + tile / 2, y + tile / 2);
       continue;
@@ -869,7 +958,6 @@ module.exports = {
     status.step = 'Fetching tokens (API)…';
     await pushStatus();
 
-    // resolve project ONLY if tracked by this server
     const { project, error } = await resolveProjectForGuild(pg, interaction.client, guildId, projectInput);
     if (error) return interaction.editReply(error);
 
@@ -877,7 +965,6 @@ module.exports = {
     const contract = (project.address || '').toLowerCase();
     const maxWant = Math.min(userLimit || ENV_MAX, ENV_MAX);
 
-    // Detect standard
     const std = await detectTokenStandard(chain, contract);
 
     // Try Reservoir first
@@ -928,7 +1015,7 @@ module.exports = {
       return interaction.editReply(`❌ No ${project.name} NFTs found for \`${ownerDisplay}\` on ${chain}. (Checked ERC721/1155 paths)`);
     }
 
-    // Enrich images (ERC721 tokenURI OR ERC1155 uri with {id}) + progress
+    // Enrich images (tokenURI/uri) + progress
     let lastEnPct = -1;
     status.step = 'Enriching images (metadata)…';
     status.enrich = '0% [────────────────]';
@@ -941,7 +1028,7 @@ module.exports = {
       }
     });
 
-    // Backfill missing images via Reservoir (progress)
+    // Reservoir backfill
     if (items.some(i => !i.image) && (chain === 'eth' || chain === 'base')) {
       let lastBF = -1;
       status.step = 'Backfilling images (Reservoir)…';
@@ -950,13 +1037,27 @@ module.exports = {
       const totalMissing = items.filter(i => !i.image).length;
       items = await backfillImagesFromReservoir({
         chain, contract, items,
-        onProgress: async (done /* chunk count */, total) => {
+        onProgress: async (done, total) => {
           const pct = totalMissing ? clamp(Math.floor((Math.min(done, totalMissing)/totalMissing)*100), 0, 100) : 100;
           if (pct !== lastBF) { lastBF = pct; status.backfill = `${pct}% [${bar(pct)}]`; await pushStatus(); }
         }
       });
       status.backfill = 'done';
       await pushStatus();
+    }
+
+    // NEW: Moralis fallback (optional)
+    if (items.some(i => !i.image)) {
+      status.step = 'Backfilling images (Moralis)…';
+      await pushStatus();
+      items = await backfillImagesFromMoralis({ chain, contract, items });
+    }
+
+    // NEW: OpenSea fallback (optional)
+    if (items.some(i => !i.image)) {
+      status.step = 'Backfilling images (OpenSea)…';
+      await pushStatus();
+      items = await backfillImagesFromOpenSea({ chain, contract, items });
     }
 
     // Image preload with visible percent (robust loader)
@@ -975,26 +1076,23 @@ module.exports = {
         status.backfill && `Backfill: ${status.backfill}`,
         `Images:   ${status.images}`
       ].filter(Boolean)) }); })();
-    });
+    }, chain === 'base');
 
-    // Last-chance recovery for missing images: re-fetch metadata deeply and try again
+    // Last-chance recovery for missing images: deep re-fetch metadata then try again
     const missingIdx = [];
     for (let i = 0; i < items.length; i++) {
       if (!preloadedImgs[i]) missingIdx.push(i);
     }
     if (missingIdx.length) {
-      // optionally update status here if you want
       await Promise.all(missingIdx.map(async (i) => {
         try {
           const uriList = await resolveMetadataURI({ chain, contract, tokenId: items[i].tokenId, is1155: std.is1155 });
-        const meta = uriList ? await fetchJsonWithFallback(uriList) : null;
+          const meta = uriList ? await fetchJsonWithFallback(uriList, chain === 'base' ? 12000 : 8000) : null;
           const cands = meta ? collectAllImageCandidates(meta) : [];
-          if (cands.length) {
-            items[i] = { ...items[i], image: cands };
-          }
+          if (cands.length) items[i] = { ...items[i], image: cands };
         } catch {}
       }));
-      const recovered = await preloadImages(missingIdx.map(i => items[i]), () => {});
+      const recovered = await preloadImages(missingIdx.map(i => items[i]), () => {}, chain === 'base');
       for (let k = 0; k < missingIdx.length; k++) {
         preloadedImgs[ missingIdx[k] ] = recovered[k] || preloadedImgs[ missingIdx[k] ];
       }
