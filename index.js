@@ -19,8 +19,12 @@ if (!process.env.DISCORD_BOT_TOKEN) {
   process.exit(1);
 }
 
+// Helper services
 require('./services/providerM');
 require('./services/logScanner');
+
+// ⬇️ NEW: presence ticker (BTC/ETH in member list)
+const { startPresenceTicker, stopPresenceTicker } = require('./services/presenceTicker');
 
 console.log("👀 Booting from:", __dirname);
 
@@ -213,39 +217,47 @@ client.login(process.env.DISCORD_BOT_TOKEN)
     process.exit(1);
   });
 
-// =================== Slash registration ===================
-// Use the new alias to silence deprecation warning
-client.once('clientReady', async () => {
+// =================== Slash registration + presence ticker ===================
+async function onClientReady() {
+  if (client.__readyRan) return; // guard against double-run
+  client.__readyRan = true;
+
   const token = process.env.DISCORD_BOT_TOKEN;
   const clientId = process.env.CLIENT_ID;
 
   if (!clientId) {
     console.warn('⚠️ CLIENT_ID not set — skipping slash command registration.');
-    return;
-  }
+  } else {
+    const testGuildIds = (process.env.TEST_GUILD_IDS || '')
+      .split(',')
+      .map(id => id.trim())
+      .filter(id => /^\d{17,20}$/.test(id));
 
-  const testGuildIds = (process.env.TEST_GUILD_IDS || '')
-    .split(',')
-    .map(id => id.trim())
-    .filter(id => /^\d{17,20}$/.test(id));
+    const rest = new REST({ version: '10' }).setToken(token);
+    const commands = client.commands.map(cmd => cmd.data?.toJSON?.()).filter(Boolean);
 
-  const rest = new REST({ version: '10' }).setToken(token);
-  const commands = client.commands.map(cmd => cmd.data?.toJSON?.()).filter(Boolean);
+    try {
+      console.log('⚙️ Auto-registering slash commands...');
 
-  try {
-    console.log('⚙️ Auto-registering slash commands...');
+      for (const guildId of testGuildIds) {
+        await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commands });
+        console.log(`✅ Registered ${commands.length} slash cmds in test guild (${guildId})`);
+      }
 
-    for (const guildId of testGuildIds) {
-      await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body: commands });
-      console.log(`✅ Registered ${commands.length} slash cmds in test guild (${guildId})`);
+      await rest.put(Routes.applicationCommands(clientId), { body: commands });
+      console.log(`🌐 Registered ${commands.length} global slash cmds`);
+    } catch (err) {
+      console.error('❌ Failed to register slash commands:', err);
     }
-
-    await rest.put(Routes.applicationCommands(clientId), { body: commands });
-    console.log(`🌐 Registered ${commands.length} global slash cmds`);
-  } catch (err) {
-    console.error('❌ Failed to register slash commands:', err);
   }
-});
+
+  // ⬇️ Start the presence ticker (BTC/ETH)
+  try { startPresenceTicker(client); } catch (e) { console.warn('⚠️ presence ticker start:', e?.message || e); }
+}
+
+// Use both names; DJS v14 warns about future rename. Guard prevents double exec.
+client.once('clientReady', onClientReady);
+client.once('ready', onClientReady);
 
 // =================== Robust process handling ===================
 
@@ -266,6 +278,7 @@ async function gracefulShutdown(reason) {
 
   try { if (timers.globalScan) clearInterval(timers.globalScan); } catch {}
   try { if (timers.rewardPayout) clearInterval(timers.rewardPayout); } catch {}
+  try { stopPresenceTicker(); } catch {}
 
   try { await client.destroy(); } catch (e) { console.warn('⚠️ Discord destroy:', e?.message || e); }
   try { await pool.end(); } catch (e) { console.warn('⚠️ PG pool end:', e?.message || e); }
@@ -282,3 +295,14 @@ function armSignal(sig) {
 
 armSignal('SIGTERM');
 armSignal('SIGINT');
+
+/*
+.env knobs for the presence ticker:
+
+TICKER_ENABLED=true
+TICKER_MODE=rotate           # rotate | pair
+TICKER_INTERVAL_MS=60000
+TICKER_SOURCE=coingecko      # coingecko | coincap
+TICKER_ASSETS=btc,eth
+*/
+
