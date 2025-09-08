@@ -1,196 +1,194 @@
 // services/presenceTicker.js
 const fetch = require('node-fetch');
-const { ActivityType } = require('discord.js');
 
 /**
+ * Presence Price Ticker
+ * - Shows BTC/ETH prices in the member list presence
+ * - Source: coingecko (primary) -> coincap (fallback)
+ * - Modes: rotate (show one asset at a time) | pair (both in one line)
+ *
  * ENV (optional):
- * TICKER_ENABLED=true           // default true
- * TICKER_INTERVAL_MS=60000      // default 60000 (1 min)
- * TICKER_MODE=rotate            // rotate | pair
- * TICKER_SOURCE=coingecko       // coingecko | coincap
- * TICKER_ASSETS=btc,eth         // supports btc,eth  (extensible later)
+ *   TICKER_ENABLED=true
+ *   TICKER_MODE=rotate           # rotate | pair
+ *   TICKER_INTERVAL_MS=60000     # 60s (avoid spamming to respect Discord rate limits)
+ *   TICKER_SOURCE=coingecko      # coingecko | coincap
+ *   TICKER_ASSETS=btc,eth        # comma list
+ *   TICKER_STATUS=online         # online | idle | dnd | invisible
+ *   TICKER_ACTIVITY_TYPE=Watching # Playing | Streaming | Listening | Watching | Competing
  */
 
-const ENABLED = !/^false$/i.test(process.env.TICKER_ENABLED || 'true');
-const INTERVAL_MS = Math.max(15_000, Number(process.env.TICKER_INTERVAL_MS || '60000')); // rate friendly
-const MODE = (process.env.TICKER_MODE || 'rotate').toLowerCase(); // rotate | pair
-const SOURCE = (process.env.TICKER_SOURCE || 'coingecko').toLowerCase();
-const WANTED = (process.env.TICKER_ASSETS || 'btc,eth')
-  .split(',')
-  .map(s => s.trim().toLowerCase())
-  .filter(Boolean);
+let timer = null;
+let rotatingIndex = 0;
 
-const SUPPORTED = {
-  btc: { coingeckoId: 'bitcoin', coincapId: 'bitcoin', symbol: 'BTC' },
-  eth: { coingeckoId: 'ethereum', coincapId: 'ethereum', symbol: 'ETH' },
+const DEFAULT_ENABLED = /^true$/i.test(process.env.TICKER_ENABLED || 'true');
+const MODE = (process.env.TICKER_MODE || 'rotate').toLowerCase();
+const INTERVAL = Math.max(15000, Number(process.env.TICKER_INTERVAL_MS || '60000')); // >=15s
+const SOURCE = (process.env.TICKER_SOURCE || 'coingecko').toLowerCase();
+const RAW_ASSETS = (process.env.TICKER_ASSETS || 'btc,eth').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+const STATUS = (process.env.TICKER_STATUS || 'online').toLowerCase();
+
+const ACTIVITY_TYPES = { Playing: 0, Streaming: 1, Listening: 2, Watching: 3, Competing: 5 };
+const ACTIVITY_TYPE = ACTIVITY_TYPES[process.env.TICKER_ACTIVITY_TYPE || 'Watching'] ?? 3;
+
+// Minimal common asset id maps
+const CG_IDS = {
+  btc: 'bitcoin',
+  eth: 'ethereum',
+  sol: 'solana',
+  doge: 'dogecoin',
+  link: 'chainlink',
+  pepe: 'pepe'
+};
+const CC_IDS = {
+  btc: 'bitcoin',
+  eth: 'ethereum',
+  sol: 'solana',
+  doge: 'dogecoin',
+  link: 'chainlink',
+  pepe: 'pepe'
 };
 
-const ASSETS = WANTED
-  .map(k => SUPPORTED[k])
-  .filter(Boolean);
-
-let timer = null;
-let lastPrices = {};
-let rotateIndex = 0;
-let lastLogAt = 0; // throttle noisy logs
-
-function nowLog(...args) {
-  const t = Date.now();
-  if (t - lastLogAt > 10_000) { // at most one every 10s
-    console.log(...args);
-    lastLogAt = t;
-  }
+// -------------- helpers --------------
+function pickSourceIds(source, assets) {
+  const map = source === 'coincap' ? CC_IDS : CG_IDS;
+  return assets.map(a => map[a]).filter(Boolean);
 }
 
-function fmtUsd(n) {
-  if (!isFinite(n)) return '$—';
-  if (n >= 100000) return `$${Math.round(n).toLocaleString('en-US')}`;
-  if (n >= 1000) return `$${n.toLocaleString('en-US', { maximumFractionDigits: 0 })}`;
-  if (n >= 100)  return `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-  return `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+function formatUSD(n) {
+  const x = Number(n);
+  if (!isFinite(x)) return '?';
+  if (x >= 1000) return x.toLocaleString('en-US', { maximumFractionDigits: 0 });
+  if (x >= 100)  return x.toFixed(2);
+  if (x >= 1)    return x.toFixed(2);
+  if (x >= 0.01) return x.toFixed(4);
+  return x.toFixed(6);
 }
 
-function arrowFor(symbol, price) {
-  const prev = lastPrices[symbol];
-  if (typeof prev !== 'number') return '→';
-  if (price > prev) return '↗';
-  if (price < prev) return '↘';
-  return '→';
-}
-
-async function fetchWithTimeout(url, opts = {}, timeoutMs = 12_000) {
-  const hasAbort = typeof globalThis.AbortController === 'function';
-  if (!hasAbort) {
-    return await Promise.race([
-      (async () => {
-        const res = await fetch(url, opts);
-        const text = await res.text();
-        return { res, text };
-      })(),
-      new Promise((_, rej) => setTimeout(() => rej(new Error('Timeout')), timeoutMs))
-    ]);
-  }
-  const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, { ...opts, signal: controller.signal });
-    const text = await res.text();
-    return { res, text };
-  } finally {
-    clearTimeout(t);
-  }
-}
-
-function safeJson(text) {
-  try { return JSON.parse(text); } catch { return null; }
-}
-
-async function fetchPricesCoingecko() {
-  const ids = ASSETS.map(a => a.coingeckoId).join(',');
-  const url = `https://api.coingecko.com/api/v3/simple/price?ids=${encodeURIComponent(ids)}&vs_currencies=usd`;
-  const { res, text } = await fetchWithTimeout(url, {}, 12_000);
-  if (!res.ok) throw new Error(`coingecko ${res.status}: ${text?.slice(0,200)}`);
-  const data = safeJson(text);
+async function fetchCoingecko(assets) {
+  const ids = pickSourceIds('coingecko', assets);
+  if (!ids.length) throw new Error('No supported assets for Coingecko');
+  const url = `https://api.coingecko.com/api/v3/simple/price?ids=${encodeURIComponent(ids.join(','))}&vs_currencies=usd`;
+  const res = await fetch(url, { timeout: 10000 });
+  if (!res.ok) throw new Error(`Coingecko HTTP ${res.status}`);
+  const data = await res.json();
   const out = {};
-  for (const a of ASSETS) {
-    const p = data?.[a.coingeckoId]?.usd;
-    if (typeof p === 'number') out[a.symbol] = p;
+  for (let i = 0; i < assets.length; i++) {
+    const a = assets[i];
+    const id = CG_IDS[a];
+    const p = data?.[id]?.usd;
+    if (typeof p === 'number') out[a] = p;
   }
   return out;
 }
 
-async function fetchPricesCoincap() {
-  const ids = ASSETS.map(a => a.coincapId).join(',');
-  const url = `https://api.coincap.io/v2/assets?ids=${encodeURIComponent(ids)}`;
-  const { res, text } = await fetchWithTimeout(url, {}, 12_000);
-  if (!res.ok) throw new Error(`coincap ${res.status}: ${text?.slice(0,200)}`);
-  const data = safeJson(text);
+async function fetchCoincap(assets) {
+  const ids = pickSourceIds('coincap', assets);
+  if (!ids.length) throw new Error('No supported assets for CoinCap');
+  const url = `https://api.coincap.io/v2/assets?ids=${encodeURIComponent(ids.join(','))}`;
+  const res = await fetch(url, { timeout: 10000 });
+  if (!res.ok) throw new Error(`CoinCap HTTP ${res.status}`);
+  const data = await res.json();
   const out = {};
-  for (const row of (data?.data || [])) {
-    const a = ASSETS.find(x => x.coincapId === row.id);
-    if (!a) continue;
-    const p = Number(row.priceUsd);
-    if (isFinite(p)) out[a.symbol] = p;
+  for (const row of data?.data || []) {
+    // reverse-map to our symbol
+    const sym = Object.keys(CC_IDS).find(k => CC_IDS[k] === row.id);
+    if (sym) out[sym] = Number(row.priceUsd);
   }
   return out;
 }
 
-async function getPrices() {
+async function getPrices(assets) {
+  // primary chosen by env; fallback to the other source if primary fails
+  const primary = SOURCE === 'coincap' ? 'coincap' : 'coingecko';
+  const secondary = primary === 'coincap' ? 'coingecko' : 'coincap';
+
   try {
-    if (SOURCE === 'coincap') return await fetchPricesCoincap();
-    // default to coingecko, fallback to coincap
+    return primary === 'coincap' ? await fetchCoincap(assets) : await fetchCoingecko(assets);
+  } catch (e1) {
     try {
-      return await fetchPricesCoingecko();
-    } catch (e) {
-      nowLog('⚠️ Coingecko fetch failed; falling back to CoinCap:', e.message);
-      return await fetchPricesCoincap();
+      return secondary === 'coincap' ? await fetchCoincap(assets) : await fetchCoingecko(assets);
+    } catch (e2) {
+      throw new Error(`${e1.message} | fallback failed: ${e2.message}`);
     }
+  }
+}
+
+function labelFor(asset, price) {
+  const upper = asset.toUpperCase();
+  return `${upper} $${formatUSD(price)}`;
+}
+
+function toPresenceActivities(text) {
+  return [{ type: ACTIVITY_TYPE, name: text }];
+}
+
+function safeSetPresence(client, presence) {
+  if (!client?.user) return;
+  try {
+    client.user.setPresence(presence); // NOT a Promise in djs v14
   } catch (e) {
+    // surface upstream; caller can decide
     throw e;
   }
 }
 
-function makeActivity(mode, prices) {
-  if (mode === 'pair' && ASSETS.length >= 2) {
-    // BTC $xx | ETH $yy
-    const parts = ASSETS.slice(0, 2).map(a => {
-      const sym = a.symbol;
-      const p = prices[sym];
-      const arr = arrowFor(sym, p);
-      return `${sym} ${arr} ${fmtUsd(p)}`;
-    });
-    return parts.join(' | ').slice(0, 120); // presence name limit ~128
+// -------------- ticker logic --------------
+async function tickOnce(client) {
+  const prices = await getPrices(RAW_ASSETS);
+  const have = RAW_ASSETS.filter(a => typeof prices[a] === 'number');
+
+  if (!have.length) {
+    // nothing fetched; clear activity but keep status
+    safeSetPresence(client, { activities: [], status: STATUS });
+    return;
   }
 
-  // rotate one at a time
-  const a = ASSETS[rotateIndex % ASSETS.length];
-  const sym = a.symbol;
-  const p = prices[sym];
-  const arr = arrowFor(sym, p);
-  return `${sym} ${arr} ${fmtUsd(p)}`.slice(0, 120);
-}
-
-async function tick(client) {
-  if (!client?.user) return;
-  try {
-    const prices = await getPrices();
-    // remember for deltas:
-    for (const [sym, p] of Object.entries(prices)) lastPrices[sym] = p;
-
-    const name = makeActivity(MODE, prices);
-    // Watch "BTC ↗ $xx" etc.
-    client.user.setPresence({
-      status: 'online',
-      activities: [{ name, type: ActivityType.Watching }]
-    }).catch(() => {});
-
-    rotateIndex++;
-  } catch (e) {
-    nowLog('⚠️ Price ticker error:', e.message);
-    // Optional: set an "offline" hint only if repeated failures
-    // client.user.setPresence({ status: 'idle', activities: [{ name: 'price feed…', type: ActivityType.Watching }] }).catch(()=>{});
+  if (MODE === 'pair' && have.length >= 2) {
+    // show first two
+    const a = have[0], b = have[1];
+    const text = `${labelFor(a, prices[a])} | ${labelFor(b, prices[b])}`;
+    safeSetPresence(client, { activities: toPresenceActivities(text), status: STATUS });
+    return;
   }
+
+  // rotate mode (default)
+  if (rotatingIndex >= have.length) rotatingIndex = 0;
+  const a = have[rotatingIndex++];
+  const text = labelFor(a, prices[a]);
+  safeSetPresence(client, { activities: toPresenceActivities(text), status: STATUS });
 }
 
 function startPresenceTicker(client) {
-  if (!ENABLED) {
-    console.log('ℹ️ Price ticker disabled (TICKER_ENABLED=false).');
+  if (!DEFAULT_ENABLED) {
+    console.log('⏭️ Presence ticker disabled by TICKER_ENABLED=false');
     return;
   }
-  if (!ASSETS.length) {
-    console.log('ℹ️ Price ticker has no valid assets; set TICKER_ASSETS=btc,eth');
-    return;
+  if (timer) return; // already running
+  if (!client?.isReady?.()) {
+    console.warn('⚠️ Presence ticker started before client ready; it will update on next interval.');
   }
-  // First tick quickly, then at interval
-  tick(client);
-  timer = setInterval(() => tick(client), INTERVAL_MS);
-  console.log(`📈 Presence ticker ON (${MODE}) every ${INTERVAL_MS}ms via ${SOURCE}.`);
+
+  // First run asap with a tiny jitter to avoid starting at the same time as other tasks
+  setTimeout(async () => {
+    try { await tickOnce(client); }
+    catch (e) { console.warn('⚠️ Price ticker error (initial):', e?.message || e); }
+  }, 1500 + Math.floor(Math.random() * 800));
+
+  timer = setInterval(async () => {
+    try { await tickOnce(client); }
+    catch (e) { console.warn('⚠️ Price ticker error:', e?.message || e); }
+  }, INTERVAL);
+
+  console.log(`📈 Presence ticker started (${MODE}, ${INTERVAL}ms, source=${SOURCE}, assets=${RAW_ASSETS.join(',')})`);
 }
 
 function stopPresenceTicker() {
-  if (timer) clearInterval(timer);
-  timer = null;
-  console.log('📉 Presence ticker OFF.');
+  if (timer) {
+    clearInterval(timer);
+    timer = null;
+    console.log('🛑 Presence ticker stopped');
+  }
 }
 
 module.exports = { startPresenceTicker, stopPresenceTicker };
+
