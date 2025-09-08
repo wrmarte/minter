@@ -19,7 +19,6 @@ if (!process.env.DISCORD_BOT_TOKEN) {
   process.exit(1);
 }
 
-// Load helper services
 require('./services/providerM');
 require('./services/logScanner');
 
@@ -131,12 +130,6 @@ require('./db/initStakingTables')(pool).catch(console.error);
   }
 })();
 
-// ✅ Load listeners (order matters if you coordinate typing suppress, etc.)
-require('./listeners/muscleMBListener')(client);
-require('./listeners/mbella')(client);
-require('./listeners/fftrigger')(client);
-require('./listeners/welcomeListener')(client);
-
 // =================== Commands loader ===================
 client.commands = new Collection();
 client.prefixCommands = new Collection();
@@ -170,6 +163,12 @@ try {
 } catch (err) {
   console.error('❌ Events load error:', err);
 }
+
+// =================== Listeners (after DB ready) ===================
+require('./listeners/muscleMBListener')(client);
+require('./listeners/mbella')(client);
+require('./listeners/fftrigger')(client);
+require('./listeners/welcomeListener')(client);
 
 // =================== Services / timers ===================
 const { trackAllContracts } = require('./services/mintRouter');
@@ -215,7 +214,8 @@ client.login(process.env.DISCORD_BOT_TOKEN)
   });
 
 // =================== Slash registration ===================
-client.once('ready', async () => {
+// Use the new alias to silence deprecation warning
+client.once('clientReady', async () => {
   const token = process.env.DISCORD_BOT_TOKEN;
   const clientId = process.env.CLIENT_ID;
 
@@ -230,7 +230,7 @@ client.once('ready', async () => {
     .filter(id => /^\d{17,20}$/.test(id));
 
   const rest = new REST({ version: '10' }).setToken(token);
-  const commands = client.commands.map(cmd => cmd.data.toJSON?.() || null).filter(Boolean);
+  const commands = client.commands.map(cmd => cmd.data?.toJSON?.()).filter(Boolean);
 
   try {
     console.log('⚙️ Auto-registering slash commands...');
@@ -257,35 +257,28 @@ process.on('uncaughtException', (err) => {
   console.error('🚨 Uncaught Exception:', err?.stack || err?.message || err);
 });
 
-// Graceful shutdown so NPM doesn’t print an error on SIGTERM (exit 0)
+// Graceful shutdown so Node exits cleanly
 let shuttingDown = false;
 async function gracefulShutdown(reason) {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`🛑 Shutting down (${reason})…`);
 
-  // Stop timers
   try { if (timers.globalScan) clearInterval(timers.globalScan); } catch {}
   try { if (timers.rewardPayout) clearInterval(timers.rewardPayout); } catch {}
 
-  // Close Discord (stops websocket cleanly)
   try { await client.destroy(); } catch (e) { console.warn('⚠️ Discord destroy:', e?.message || e); }
-
-  // Close DB pool
   try { await pool.end(); } catch (e) { console.warn('⚠️ PG pool end:', e?.message || e); }
 
-  // Exit success so npm doesn’t print an error block
   process.exit(0);
 }
 
 function armSignal(sig) {
   process.once(sig, () => {
     gracefulShutdown(sig);
-    // Failsafe: if shutdown stalls, force exit after 10s
-    setTimeout(() => process.exit(0), 10000);
+    setTimeout(() => process.exit(0), 10000); // failsafe
   });
 }
 
-// Railway & many platforms send SIGTERM on redeploy/scale down
 armSignal('SIGTERM');
 armSignal('SIGINT');
