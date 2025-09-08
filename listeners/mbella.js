@@ -19,19 +19,13 @@ const MBELLA_DELAY_OFFSET_MS = Number(process.env.MBELLA_DELAY_OFFSET_MS || '150
 // Simulated typing: create a webhook placeholder only if LLM is slow
 const MBELLA_TYPING_DEBOUNCE_MS = Number(process.env.MBELLA_TYPING_DEBOUNCE_MS || '1200');
 
-// NEW: ensure MBella sends only after at least this many ms have passed since main-bot sendTyping()
+// Ensure MBella sends only after at least this many ms have passed since main-bot sendTyping()
 const MBELLA_TYPING_TARGET_MS = Number(process.env.MBELLA_TYPING_TARGET_MS || '9200'); // ~9.2s
 
 // Behavior config
 const COOLDOWN_MS = 10_000;
 const FEMALE_TRIGGERS = ['mbella', 'mb ella', 'lady mb', 'queen mb', 'bella'];
 const RELEASE_REGEX = /\b(stop|bye bella|goodbye bella|end chat|silence bella)\b/i;
-
-// Periodic quotes (sexy lines) every ~4h in active guilds
-const MBELLA_PERIODIC_QUOTES = /^true$/i.test(process.env.MBELLA_PERIODIC_QUOTES || 'true');
-const NICE_PING_EVERY_MS = 4 * 60 * 60 * 1000; // 4 hours
-const NICE_SCAN_EVERY_MS = 60 * 60 * 1000;     // scan hourly
-const NICE_ACTIVE_WINDOW_MS = 45 * 60 * 1000;  // “active” = last 45 minutes
 
 /** Guard rail */
 if (!GROQ_API_KEY || GROQ_API_KEY.trim().length < 10) {
@@ -77,26 +71,7 @@ function setTypingSuppress(client, channelId, ms = 12000) {
   }, ms + 500);
 }
 
-// Activity trackers for periodic quotes
-const lastActiveByUser = new Map(); // key: `${guildId}:${userId}` -> { ts, channelId }
-const lastNicePingByGuild = new Map(); // guildId -> ts
-
-/** ================== QUOTES ================== */
-const SEXY_QUOTES = [
-  'Confidence is the best outfit—wear it and own the room. ✨',
-  'Slow breath, bold move. I like that combo. 😉',
-  'Soft voice, sharp mind, unstoppable energy. That’s the vibe. 💋',
-  'Discipline is a love language. Show up for yourself first. ❤️',
-  'Flirt with your goals like you mean it. They’ll chase you back. 🔥',
-  'Elegance is refusing to rush the magic. We’re cooking. ✨',
-  'You don’t need permission to glow—just decide and do. 🌶️',
-  'Mischief + mastery = unfair advantage. Use both. 😼',
-  'Touch the task. The task touches back. Momentum is romantic. 💞',
-  'Hydrate, stretch, then wreck your todo list—sensually. 💦',
-];
-
 /** ================== UTILS ================== */
-function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 function safeJsonParse(text) { try { return JSON.parse(text); } catch { return null; } }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -256,17 +231,6 @@ function canSendInChannel(guild, channel) {
   return channel.isTextBased?.() && channel.permissionsFor(me)?.has(PermissionsBitField.Flags.SendMessages);
 }
 
-function findSpeakableChannel(guild, preferredChannelId = null) {
-  const me = guild.members.me;
-  if (!me) return null;
-  if (preferredChannelId) {
-    const ch = guild.channels.cache.get(preferredChannelId);
-    if (canSendInChannel(guild, ch)) return ch;
-  }
-  if (guild.systemChannel && canSendInChannel(guild, guild.systemChannel)) return guild.systemChannel;
-  return guild.channels.cache.find((c) => canSendInChannel(guild, c)) || null;
-}
-
 async function getOrCreateWebhook(channel) {
   try {
     if (!channel || !channel.guild) return null;
@@ -378,68 +342,15 @@ function buildMBellaSystemPrompt({ isRoast, isRoastingBot, roastTargets, current
   return [systemPrompt, styleDeck, softGuard, convoNudge, recentContext || ''].filter(Boolean).join('\n\n');
 }
 
-/** ================== OPTIONAL PERIODIC QUOTES ================== */
-function schedulePeriodicQuotes(client) {
-  if (!MBELLA_PERIODIC_QUOTES) return;
-  setInterval(async () => {
-    try {
-      const now = Date.now();
-      const byGuild = new Map();
-      for (const [key, info] of lastActiveByUser.entries()) {
-        const [guildId] = key.split(':');
-        if (!byGuild.has(guildId)) byGuild.set(guildId, []);
-        byGuild.get(guildId).push(info);
-      }
-
-      for (const [guildId, entries] of byGuild.entries()) {
-        const guild = client.guilds.cache.get(guildId);
-        if (!guild) continue;
-
-        const lastPingTs = lastNicePingByGuild.get(guildId) || 0;
-        if (now - lastPingTs < NICE_PING_EVERY_MS) continue;
-
-        const active = entries.filter(e => now - e.ts <= NICE_ACTIVE_WINDOW_MS);
-        if (!active.length) continue;
-
-        const preferredChannel = active[0]?.channelId || null;
-        const channel = findSpeakableChannel(guild, preferredChannel);
-        if (!channel) continue;
-
-        const quote = pick(SEXY_QUOTES);
-        const embed = new EmbedBuilder()
-          .setColor('#e84393')
-          .setAuthor({ name: MBELLA_NAME, iconURL: MBELLA_AVATAR_URL || undefined })
-          .setDescription(`✨ ${quote}`);
-
-        // Try webhook (speaks as MBella)
-        let sentMsg = null;
-        try {
-          const { hook, message } = await sendViaWebhook(channel, {
-            username: MBELLA_NAME,
-            avatarURL: MBELLA_AVATAR_URL,
-            embeds: [embed],
-          });
-          sentMsg = message;
-        } catch {}
-        if (!sentMsg) { try { await channel.send({ embeds: [embed] }); } catch {} }
-
-        lastNicePingByGuild.set(guildId, now);
-      }
-    } catch (e) {
-      console.warn('⚠️ MBella periodic quote error:', e.message);
-    }
-  }, NICE_SCAN_EVERY_MS);
-}
-
 /** ================== EXPORT LISTENER ================== */
 module.exports = (client) => {
-  schedulePeriodicQuotes(client);
+  // (Periodic 4h quotes removed)
 
   client.on('messageCreate', async (message) => {
     let typingTimer = null;      // debounce timer
     let placeholder = null;      // the temporary "..." webhook msg
     let placeholderHook = null;  // the webhook used to send it
-    let typingStartMs = 0;       // NEW: when we sent main-bot typing()
+    let typingStartMs = 0;       // when we sent main-bot sendTyping()
 
     const clearPlaceholderTimer = () => { if (typingTimer) { clearTimeout(typingTimer); typingTimer = null; } };
 
@@ -486,13 +397,6 @@ module.exports = (client) => {
 
     try {
       if (message.author.bot || !message.guild) return;
-
-      // Track activity for periodic quotes
-      lastActiveByUser.set(`${message.guild.id}:${message.author.id}`, {
-        ts: Date.now(),
-        channelId: message.channel.id,
-      });
-
       if (alreadyHandled(client, message.id)) return;
 
       const lowered = (message.content || '').toLowerCase();
@@ -520,11 +424,11 @@ module.exports = (client) => {
         setTimeout(() => cooldown.delete(message.author.id), COOLDOWN_MS);
       }
 
-      // ✅ Show main bot typing right away (single pulse) and remember when
+      // Show main bot typing right away (single pulse) and remember when
       try { await message.channel.sendTyping(); } catch {}
-      typingStartMs = Date.now(); // NEW: record typing start
+      typingStartMs = Date.now();
 
-      // 🔕 Suppress MuscleMB typing spam (from other listener) during this turn
+      // Suppress MuscleMB typing spam (from other listener) during this turn
       setTypingSuppress(client, message.channel.id, 12000);
 
       // Debounce the webhook "…" placeholder — only if LLM is slow
@@ -643,10 +547,10 @@ module.exports = (client) => {
       // Natural pacing
       const plannedDelay = Math.min((aiReply || '').length * MBELLA_MS_PER_CHAR, MBELLA_MAX_DELAY_MS) + MBELLA_DELAY_OFFSET_MS;
 
-      // NEW: ensure total time since main-bot sendTyping() is at least MBELLA_TYPING_TARGET_MS
+      // Ensure total time since main-bot sendTyping() is at least MBELLA_TYPING_TARGET_MS
       const sinceTyping = typingStartMs ? (Date.now() - typingStartMs) : 0;
       const floorExtra = MBELLA_TYPING_TARGET_MS - sinceTyping;
-      const finalDelay = Math.max(0, Math.max(plannedDelay, floorExtra)); // wait enough to hit the floor
+      const finalDelay = Math.max(0, Math.max(plannedDelay, floorExtra));
 
       await sleep(finalDelay);
 
@@ -678,3 +582,4 @@ module.exports = (client) => {
     }
   });
 };
+
