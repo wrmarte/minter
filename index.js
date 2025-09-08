@@ -4,6 +4,21 @@ const { Pool } = require('pg');
 const fs = require('fs');
 const path = require('path');
 
+// ---------- Auto-integrate PG knobs & required envs ----------
+process.env.PGSSL_DISABLE      ??= '0';      // 0 = SSL ON (hosted PG), 1 = SSL OFF (local dev)
+process.env.PG_POOL_MAX        ??= '5';
+process.env.PG_IDLE_TIMEOUT_MS ??= '30000';
+process.env.PG_CONN_TIMEOUT_MS ??= '10000';
+
+if (!process.env.DATABASE_URL) {
+  console.error('❌ DATABASE_URL is required. Set it in your env or .env file.');
+  process.exit(1);
+}
+if (!process.env.DISCORD_BOT_TOKEN) {
+  console.error('❌ DISCORD_BOT_TOKEN is required. Set it in your env or .env file.');
+  process.exit(1);
+}
+
 // Load helper services
 require('./services/providerM');
 require('./services/logScanner');
@@ -19,19 +34,15 @@ const client = new Client({
   ]
 });
 
-// ✅ Load listeners (order matters if you coordinate typing suppress, etc.)
-require('./listeners/muscleMBListener')(client);
-require('./listeners/mbella')(client);
-require('./listeners/fftrigger')(client);
-require('./listeners/welcomeListener')(client);
-
 // ====================== PostgreSQL (pool) ======================
 const wantSsl = !/^1|true$/i.test(process.env.PGSSL_DISABLE || '');
+console.log(`📦 PG SSL: ${wantSsl ? 'ON' : 'OFF'} | Pool max=${process.env.PG_POOL_MAX}`);
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  max: Number(process.env.PG_POOL_MAX || '5'),
-  idleTimeoutMillis: Number(process.env.PG_IDLE_TIMEOUT_MS || '30000'),
-  connectionTimeoutMillis: Number(process.env.PG_CONN_TIMEOUT_MS || '10000'),
+  max: Number(process.env.PG_POOL_MAX),
+  idleTimeoutMillis: Number(process.env.PG_IDLE_TIMEOUT_MS),
+  connectionTimeoutMillis: Number(process.env.PG_CONN_TIMEOUT_MS),
   ssl: wantSsl ? { rejectUnauthorized: false } : false
 });
 
@@ -120,6 +131,12 @@ require('./db/initStakingTables')(pool).catch(console.error);
   }
 })();
 
+// ✅ Load listeners (order matters if you coordinate typing suppress, etc.)
+require('./listeners/muscleMBListener')(client);
+require('./listeners/mbella')(client);
+require('./listeners/fftrigger')(client);
+require('./listeners/welcomeListener')(client);
+
 // =================== Commands loader ===================
 client.commands = new Collection();
 client.prefixCommands = new Collection();
@@ -192,12 +209,20 @@ if (process.env.APE_ENABLED === 'true') {
 // =================== Discord login ===================
 client.login(process.env.DISCORD_BOT_TOKEN)
   .then(() => console.log(`✅ Logged in as ${client.user.tag}`))
-  .catch(err => console.error('❌ Discord login failed:', err));
+  .catch(err => {
+    console.error('❌ Discord login failed:', err);
+    process.exit(1);
+  });
 
 // =================== Slash registration ===================
 client.once('ready', async () => {
   const token = process.env.DISCORD_BOT_TOKEN;
   const clientId = process.env.CLIENT_ID;
+
+  if (!clientId) {
+    console.warn('⚠️ CLIENT_ID not set — skipping slash command registration.');
+    return;
+  }
 
   const testGuildIds = (process.env.TEST_GUILD_IDS || '')
     .split(',')
@@ -205,7 +230,7 @@ client.once('ready', async () => {
     .filter(id => /^\d{17,20}$/.test(id));
 
   const rest = new REST({ version: '10' }).setToken(token);
-  const commands = client.commands.map(cmd => cmd.data.toJSON());
+  const commands = client.commands.map(cmd => cmd.data.toJSON?.() || null).filter(Boolean);
 
   try {
     console.log('⚙️ Auto-registering slash commands...');
@@ -217,7 +242,6 @@ client.once('ready', async () => {
 
     await rest.put(Routes.applicationCommands(clientId), { body: commands });
     console.log(`🌐 Registered ${commands.length} global slash cmds`);
-
   } catch (err) {
     console.error('❌ Failed to register slash commands:', err);
   }
@@ -254,10 +278,14 @@ async function gracefulShutdown(reason) {
   process.exit(0);
 }
 
-// Railway & many platforms send SIGTERM on redeploy/scale down
-process.once('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.once('SIGINT',  () => gracefulShutdown('SIGINT'));
+function armSignal(sig) {
+  process.once(sig, () => {
+    gracefulShutdown(sig);
+    // Failsafe: if shutdown stalls, force exit after 10s
+    setTimeout(() => process.exit(0), 10000);
+  });
+}
 
-// Failsafe: if shutdown stalls, force exit after 10s
-process.once('SIGTERM', () => setTimeout(() => process.exit(0), 10000));
-process.once('SIGINT',  () => setTimeout(() => process.exit(0), 10000));
+// Railway & many platforms send SIGTERM on redeploy/scale down
+armSignal('SIGTERM');
+armSignal('SIGINT');
