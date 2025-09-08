@@ -20,7 +20,7 @@ const INTERVAL    = Math.max(15000, Number(process.env.TICKER_INTERVAL_MS || '60
 const SOURCE      = (process.env.TICKER_SOURCE || 'coingecko').toLowerCase(); // coingecko | coincap
 const STATUS      = (process.env.TICKER_STATUS || 'online').toLowerCase();
 const UPDOWN_MODE = (process.env.TICKER_UPDOWN || '24h').toLowerCase(); // 24h | tick
-const PAIR_COUNT  = Math.max(1, Number(process.env.TICKER_PAIR_COUNT || '2')); // how many to show in pair mode
+const PAIR_COUNT  = Math.max(1, Number(process.env.TICKER_PAIR_COUNT || '1')); // how many to show in pair mode
 
 const ACTIVITY_TYPES = { Playing: 0, Streaming: 1, Listening: 2, Watching: 3, Competing: 5 };
 const ACTIVITY_TYPE  = ACTIVITY_TYPES[process.env.TICKER_ACTIVITY_TYPE || 'Watching'] ?? 3;
@@ -31,8 +31,8 @@ const RAW_ASSETS = (process.env.TICKER_ASSETS || 'btc,eth,sol,ape')
   .filter(Boolean);
 
 // Maps for both sources (extend as needed)
-const CG_IDS = { btc: 'bitcoin', eth: 'ethereum', sol: 'solana', doge: 'dogecoin', link: 'chainlink', pepe: 'pepe' };
-const CC_IDS = { btc: 'bitcoin', eth: 'ethereum', sol: 'solana', doge: 'dogecoin', link: 'chainlink', pepe: 'pepe' };
+const CG_IDS = { btc: 'bitcoin', eth: 'ethereum', sol: 'solana', doge: 'dogecoin', link: 'chainlink', ape: 'apecoin' };
+const CC_IDS = { btc: 'bitcoin', eth: 'ethereum', sol: 'solana', doge: 'dogecoin', link: 'chainlink', ape: 'apecoin' };
 
 // ----------- helpers -----------
 function pickSourceIds(source, assets) {
