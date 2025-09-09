@@ -6,6 +6,30 @@ const { buildFloppyCard } = require('../utils/canvas/floppyRenderer');
 const BOT_OWNER_ID = process.env.BOT_OWNER_ID;
 const ADRIAN_GUILD_ID = process.env.ADRIAN_GUILD_ID;
 
+// Normalize Token ID input → decimal string (supports decimal or 0x-hex; no precision loss)
+function normalizeTokenIdInput(input) {
+  const raw = String(input || '').trim();
+  if (!raw) throw new Error('Invalid token ID: empty');
+
+  // hex (0x...)
+  if (/^0x[0-9a-f]+$/i.test(raw)) {
+    try {
+      return BigInt(raw).toString(10);
+    } catch {
+      throw new Error('Invalid token ID: bad hex');
+    }
+  }
+
+  // pure decimal
+  if (/^\d+$/.test(raw)) {
+    // strip leading zeros but keep "0" if all zeros
+    const dec = raw.replace(/^0+/, '') || '0';
+    return dec;
+  }
+
+  throw new Error('Invalid token ID: use decimal or 0x-hex (e.g., 1234 or 0x4d2)');
+}
+
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('flexfloppy')
@@ -16,9 +40,10 @@ module.exports = {
         .setRequired(true)
         .setAutocomplete(true)
     )
-    .addIntegerOption(opt =>
+    // 🛠️ Change: tokenid is now STRING to avoid numeric overflow that breaks rarity/rank
+    .addStringOption(opt =>
       opt.setName('tokenid')
-        .setDescription('Token ID')
+        .setDescription('Token ID (decimal or 0x-hex)')
         .setRequired(true)
     )
     .addStringOption(opt =>
@@ -33,11 +58,14 @@ module.exports = {
 
     if (focused.name === 'name') {
       try {
-        const res = await pg.query(`SELECT name FROM flex_projects WHERE (guild_id = $1 OR guild_id IS NULL) AND network = 'base'`, [guildId]);
+        const res = await pg.query(
+          `SELECT name FROM flex_projects WHERE (guild_id = $1 OR guild_id IS NULL) AND network = 'base'`,
+          [guildId]
+        );
         const projectNames = res.rows
           .map(row => row.name)
           .filter(Boolean)
-          .filter(name => name.toLowerCase().includes(focused.value.toLowerCase()))
+          .filter(name => name.toLowerCase().includes((focused.value || '').toLowerCase()))
           .slice(0, 25)
           .map(name => ({ name, value: name }));
         await interaction.respond(projectNames);
@@ -53,7 +81,7 @@ module.exports = {
       userId: interaction.user.id,
       guildId: interaction.guild?.id,
       name: interaction.options.getString('name'),
-      tokenId: interaction.options.getInteger('tokenid'),
+      tokenId: interaction.options.getString('tokenid'), // ← string now
       color: interaction.options.getString('color')?.toLowerCase() || null,
       deferReply: true,
       replyMethod: (content) => interaction.reply(content),
@@ -77,26 +105,42 @@ module.exports = {
         await interactionOrMessage.deferReply({ flags: 0 }).catch(() => {});
       }
 
+      // Case-insensitive project selection (keeps your existing precedence: guild-specific beats global)
       const result = await pg.query(
-        `SELECT * FROM flex_projects WHERE (guild_id = $1 OR guild_id IS NULL) AND name = $2 AND network = 'base' ORDER BY guild_id DESC LIMIT 1`,
-        [guildId, name.toLowerCase()]
+        `SELECT * FROM flex_projects
+         WHERE (guild_id = $1 OR guild_id IS NULL) AND LOWER(name) = LOWER($2) AND network = 'base'
+         ORDER BY guild_id DESC LIMIT 1`,
+        [guildId, name]
       );
 
       if (!result.rows.length) {
         return await editReplyMethod('❌ Project not found. Use `/addflex` first.');
       }
 
-      const { address, display_name, name: storedName, network } = result.rows[0];
-      const contractAddress = address;
-      const collectionName = display_name || storedName;
-      const chain = network.toLowerCase();
+      const row = result.rows[0];
+      const contractAddress = row.address;
+      const collectionName = row.display_name || row.name;
+      const chain = (row.network || 'base').toLowerCase();
 
       if (chain !== 'base') {
         return await editReplyMethod('⚠️ FlexFloppy is only supported for Base network NFTs right now.');
       }
 
-      const floppyPath = color ? path.resolve(__dirname, `../assets/floppies/floppy-${color}.png`) : null;
-      const imageBuffer = await buildFloppyCard(contractAddress, tokenId, collectionName, chain, floppyPath);
+      // 🔒 Token ID normalization to a safe decimal string (prevents rank mismatch)
+      let tokenIdDec;
+      try {
+        tokenIdDec = normalizeTokenIdInput(tokenId);
+      } catch (e) {
+        return await editReplyMethod(`❌ ${e.message}`);
+      }
+
+      // Color validation (optional)
+      const allowed = new Set(['red','yellow','green','blue','purple','black']);
+      const picked = color && allowed.has(color) ? color : null;
+      const floppyPath = picked ? path.resolve(__dirname, `../assets/floppies/floppy-${picked}.png`) : null;
+
+      // Pass a DECIMAL STRING tokenId to the renderer so any rarity/rank API matches the correct token
+      const imageBuffer = await buildFloppyCard(contractAddress, tokenIdDec, collectionName, chain, floppyPath);
 
       const attachment = new AttachmentBuilder(imageBuffer, { name: `floppyflexcard.png` });
       return await editReplyMethod({ files: [attachment] });
