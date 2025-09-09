@@ -9,13 +9,17 @@ const IV_LENGTH = 16;
 function normalizeAddr(a) { try { return ethers.getAddress(a); } catch { return null; } }
 function short(a) { const s = String(a || ''); return s ? `${s.slice(0,6)}...${s.slice(-4)}` : 'N/A'; }
 
-// Accept raw, hex(64), base64 keys; otherwise derive via sha256 to 32 bytes
+// Accept raw, hex(64), or base64; otherwise derive 32 bytes via sha256
 function keyTo32Bytes(keyStr) {
   const raw = String(keyStr || '');
-  try { if (/^[0-9a-f]{64}$/i.test(raw)) return Buffer.from(raw, 'hex'); } catch {}
-  try { const b = Buffer.from(raw, 'base64'); if (b.length === 32) return b; } catch {}
+  try {
+    if (/^[0-9a-f]{64}$/i.test(raw)) return Buffer.from(raw, 'hex');
+    const b = Buffer.from(raw, 'base64');
+    if (b.length === 32) return b;
+  } catch {}
   return crypto.createHash('sha256').update(raw).digest();
 }
+
 function encryptPrivateKey(pk) {
   if (!ENCRYPTION_KEY) throw new Error('ENCRYPTION_KEY missing in env');
   const iv = crypto.randomBytes(IV_LENGTH);
@@ -75,7 +79,6 @@ module.exports = {
       return interaction.reply({ content: '❌ Only server admins or the bot owner can use this command.', ephemeral: true });
     }
 
-    // Validate key format
     if (!/^0x[0-9a-fA-F]{64}$/.test(privateKey)) {
       return interaction.reply({ content: '❌ Invalid private key. It must start with `0x` and be 66 characters long.', ephemeral: true });
     }
@@ -86,13 +89,12 @@ module.exports = {
     await interaction.deferReply({ ephemeral: true });
 
     try {
-      // Resolve target staking project for this guild
+      // Resolve target project
       let contract;
       if (contractIn) {
         const norm = normalizeAddr(contractIn);
         if (!norm) return interaction.editReply('❌ Invalid `contract` address.');
         contract = norm.toLowerCase();
-        // Check that this guild actually has that project on this network
         const proj = await pg.query(
           `SELECT 1 FROM staking_projects WHERE guild_id = $1 AND contract_address = $2 AND network = $3 LIMIT 1`,
           [guildId, contract, network]
@@ -101,7 +103,6 @@ module.exports = {
           return interaction.editReply('❌ No staking project found for that contract on this server/network.');
         }
       } else {
-        // If only one project exists for this guild+network, use it; otherwise require contract
         const found = await pg.query(
           `SELECT contract_address FROM staking_projects WHERE guild_id = $1 AND network = $2`,
           [guildId, network]
@@ -116,19 +117,20 @@ module.exports = {
         contract = String(found.rows[0].contract_address).toLowerCase();
       }
 
-      // Check column existence upfront
+      // Ensure column exists — show EXACT message requested if missing
       const hasVaultCol = await tableHasColumn(pg, 'staking_config', 'vault_private_key');
       if (!hasVaultCol) {
-        return interaction.editReply(
-          '❌ Database missing column `staking_config.vault_private_key`.\n' +
+        const msg =
+          ' Database missing column staking_config.vault_private_key.\n' +
           'Run this migration and try again:\n' +
-          '```sql\nALTER TABLE staking_config\n  ADD COLUMN IF NOT EXISTS vault_private_key text;\n```'
-        );
+          'ALTER TABLE staking_config\n' +
+          '  ADD COLUMN IF NOT EXISTS vault_private_key text;';
+        return interaction.editReply(msg); // ephemeral
       }
 
-      // Load current config for contract+network
+      // Load current config
       const cfgRes = await pg.query(
-        `SELECT vault_wallet, token_contract FROM staking_config WHERE contract_address = $1 AND network = $2 LIMIT 1`,
+        `SELECT vault_wallet FROM staking_config WHERE contract_address = $1 AND network = $2 LIMIT 1`,
         [contract, network]
       );
       if (cfgRes.rowCount === 0) {
@@ -136,7 +138,7 @@ module.exports = {
       }
       const currentVaultWallet = cfgRes.rows[0].vault_wallet ? normalizeAddr(cfgRes.rows[0].vault_wallet) : null;
 
-      // Derive address from provided private key
+      // Derive address from provided key
       let derivedAddress;
       try {
         const w = new Wallet(privateKey.trim());
@@ -145,7 +147,7 @@ module.exports = {
         return interaction.editReply('❌ Provided private key is invalid.');
       }
 
-      // Ensure key matches configured vault wallet, or update if asked
+      // Wallet match or update if allowed
       if (currentVaultWallet && derivedAddress !== currentVaultWallet) {
         if (!updateWallet) {
           return interaction.editReply(
@@ -154,7 +156,12 @@ module.exports = {
             `Re-run with \`update_wallet:true\` to update the vault wallet, or update the vault wallet via \`/updatestaking\` first.`
           );
         }
-        // Update vault wallet to match the key
+        await pg.query(
+          `UPDATE staking_config SET vault_wallet = $1 WHERE contract_address = $2 AND network = $3`,
+          [derivedAddress.toLowerCase(), contract, network]
+        );
+      } else if (!currentVaultWallet) {
+        // If not set at all, set it to derived
         await pg.query(
           `UPDATE staking_config SET vault_wallet = $1 WHERE contract_address = $2 AND network = $3`,
           [derivedAddress.toLowerCase(), contract, network]
