@@ -2,38 +2,52 @@
 const fetch = require('node-fetch');
 
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24h
-const rarityCache = new Map(); // key: `${chain}:${contract}` -> { ts, tokenToRank: Map, totalSupply }
+const rarityCache = new Map(); // key: `${chain}:${contract}` -> { ts, tokenToRank: Map<string,number>, totalSupply:number|null }
+
+function now() { return Date.now(); }
+function toReservoirChain(chain) {
+  const c = (chain || '').toLowerCase();
+  if (c === 'base') return 'base';
+  if (c === 'eth' || c === 'ethereum') return 'ethereum';
+  return null;
+}
+function baseHeaders(chainKey) {
+  const h = { 'Content-Type': 'application/json', 'x-reservoir-chain': chainKey };
+  if (process.env.RESERVOIR_API_KEY) h['x-api-key'] = process.env.RESERVOIR_API_KEY;
+  return h;
+}
+function toBigIntSafe(x) { try { return BigInt(String(x)); } catch { return 0n; } }
+
+module.exports = { getTokenRank };
 
 /**
- * Main entry: get rank for one token. Tries provider rank, otherwise computes locally.
- * Returns: { rank: number|null, totalSupply: number|null, source: string }
+ * Main: returns { rank:number|null, totalSupply:number|null, source:'reservoir'|'opensea'|'local'|'local-cache'|'none' }
  */
 async function getTokenRank({ chain, contract, tokenId }) {
-  const chainKey = toReservoirChain(chain); // 'base' | 'ethereum' | null
+  const chainKey = toReservoirChain(chain);
   const tokenIdStr = String(tokenId);
+  const cc = String(contract).toLowerCase();
 
-  // 1) Provider rank (fast path)
-  const fromProvider = await fetchRankFromProviders({ chain, chainKey, contract, tokenId: tokenIdStr });
-  if (fromProvider?.rank != null) return fromProvider;
+  // Fast path: provider rarity if available
+  const provider = await fetchRankFromProviders({ chain, chainKey, contract: cc, tokenId: tokenIdStr }).catch(() => null);
+  if (provider?.rank != null) return provider;
 
-  // 2) Local rank (fallback)
-  const local = await getLocalRank({ chain, chainKey, contract, tokenId: tokenIdStr });
+  // Local rank (cached or compute)
+  const local = await getLocalRank({ chainKey, contract: cc, tokenId: tokenIdStr }).catch(() => null);
   if (local?.rank != null) return local;
 
   return { rank: null, totalSupply: local?.totalSupply ?? null, source: 'none' };
 }
 
-/* ---------------- Provider rank (Reservoir primary, OpenSea optional) ---------------- */
+/* ========================= Provider rank ========================= */
 
 async function fetchRankFromProviders({ chain, chainKey, contract, tokenId }) {
-  // Reservoir first
   const resv = await fetchRankReservoir({ chainKey, contract, tokenId }).catch(() => null);
   if (resv?.rank != null) return resv;
 
-  // Optional OpenSea fallback (only if API key present)
-  const oseakey = process.env.OPENSEA_API_KEY;
-  if (oseakey && (chain === 'base' || chain === 'eth' || chain === 'ethereum')) {
-    const os = await fetchRankOpenSea({ chain, contract, tokenId, apiKey: oseakey }).catch(() => null);
+  const osKey = process.env.OPENSEA_API_KEY;
+  if (osKey && (chain === 'base' || chain === 'eth' || chain === 'ethereum')) {
+    const os = await fetchRankOpenSea({ chain, contract, tokenId, apiKey: osKey }).catch(() => null);
     if (os?.rank != null) return os;
   }
   return null;
@@ -51,12 +65,8 @@ async function fetchRankReservoir({ chainKey, contract, tokenId }) {
   if (!r.ok) return null;
   const j = await r.json().catch(() => null);
   const t = j?.tokens?.[0]?.token;
-  const rank =
-    t?.rarityRank ??
-    t?.rarity?.rank ??
-    null;
+  const rank = t?.rarityRank ?? t?.rarity?.rank ?? null;
 
-  // totalSupply (nice for UI)
   const { totalSupply } = await fetchCollectionStats({ chainKey, contract }).catch(() => ({ totalSupply: null }));
   return { rank: rank != null ? Number(rank) : null, totalSupply, source: 'reservoir' };
 }
@@ -70,90 +80,98 @@ async function fetchRankOpenSea({ chain, contract, tokenId, apiKey }) {
   if (!r.ok) return null;
   const j = await r.json().catch(() => null);
   const nft = j?.nft;
-  const rank =
-    nft?.rarity?.rank ??
-    nft?.rarity_rank ??
-    null;
+  const rank = nft?.rarity?.rank ?? nft?.rarity_rank ?? null;
 
   const totalSupply = nft?.collection?.total_supply ? Number(nft.collection.total_supply) : null;
   return { rank: rank != null ? Number(rank) : null, totalSupply, source: 'opensea' };
 }
 
-/* ---------------- Local rank fallback (compute from trait frequencies) ---------------- */
+/* ========================= Local rank (fallback) ========================= */
 
-async function getLocalRank({ chain, chainKey, contract, tokenId }) {
-  const cacheKey = `${(chain || '').toLowerCase()}:${contract.toLowerCase()}`;
-  const now = Date.now();
-
-  // Use cached ranks if fresh
-  const cached = rarityCache.get(cacheKey);
-  if (cached && (now - cached.ts) < CACHE_TTL_MS) {
-    const rank = cached.tokenToRank.get(tokenId) ?? null;
-    return { rank, totalSupply: cached.totalSupply ?? null, source: 'local-cache' };
+async function getLocalRank({ chainKey, contract, tokenId }) {
+  const cacheKey = `${chainKey}:${contract}`;
+  const c = rarityCache.get(cacheKey);
+  if (c && (now() - c.ts) < CACHE_TTL_MS) {
+    return { rank: c.tokenToRank.get(tokenId) ?? null, totalSupply: c.totalSupply ?? null, source: 'local-cache' };
   }
-
   if (!chainKey) return { rank: null, totalSupply: null, source: 'local' };
+
   const headers = baseHeaders(chainKey);
 
-  // 1) Collection stats (total supply)
+  // 1) Total supply
   const { totalSupply } = await fetchCollectionStats({ chainKey, contract, headers }).catch(() => ({ totalSupply: null }));
 
-  // 2) Page through all tokens, gather per-token attributes and tokenCount (frequency)
-  const tokens = await fetchAllTokensWithAttributes({ contract, headers }).catch(() => []);
+  // 2) Pull ALL tokens’ attributes. Try collection= first; if empty, try contracts=
+  let tokens = await fetchAllTokensWithAttributes({ headers, contract, useCollectionParam: true }).catch(() => []);
+  if (!tokens.length) tokens = await fetchAllTokensWithAttributes({ headers, contract, useCollectionParam: false }).catch(() => []);
+
   if (!tokens.length) {
+    // nothing to rank
     return { rank: null, totalSupply, source: 'local' };
   }
 
-  // 3) Compute rarity score per token using tokenCount from attributes
-  // Score = sum over traits of log(totalSupply / tokenCount)   (higher is rarer)
+  // 3) Build frequency map if tokenCount missing
+  // Structure we want per attribute: (key,value) -> frequency count
+  const freq = new Map(); // "key::value" -> count
+  let anyTokenCountPresent = false;
+
+  for (const t of tokens) {
+    const attrs = Array.isArray(t.attributes) ? t.attributes : [];
+    for (const a of attrs) {
+      if (a && (a.tokenCount != null || a.count != null)) anyTokenCountPresent = true;
+    }
+  }
+
+  if (!anyTokenCountPresent) {
+    for (const t of tokens) {
+      const attrs = Array.isArray(t.attributes) ? t.attributes : [];
+      for (const a of attrs) {
+        const k = sanitizeAttrKey(a?.key ?? a?.trait_type);
+        const v = sanitizeAttrVal(a?.value);
+        if (!k || v == null) continue;
+        const key = `${k}::${v}`;
+        freq.set(key, (freq.get(key) || 0) + 1);
+      }
+    }
+  }
+
+  // 4) Compute score per token: sum log(total/attrCount); fall back to freq map if tokenCount missing
   const ts = Number(totalSupply) || guessTotalSupply(tokens);
   const scores = new Map(); // tokenId -> score
   for (const t of tokens) {
     const attrs = Array.isArray(t.attributes) ? t.attributes : [];
     let score = 0;
     for (const a of attrs) {
-      const count = Number(a?.tokenCount || a?.count || 0);
+      let count = Number(a?.tokenCount ?? a?.count ?? 0);
+      if (!count && !anyTokenCountPresent) {
+        const k = sanitizeAttrKey(a?.key ?? a?.trait_type);
+        const v = sanitizeAttrVal(a?.value);
+        if (!k || v == null) continue;
+        const key = `${k}::${v}`;
+        count = Number(freq.get(key) || 0);
+      }
       if (!count || !Number.isFinite(count)) continue;
-      const freq = count / ts;
-      if (freq > 0) score += Math.log(ts / count);
+      score += Math.log(ts / count);
     }
     scores.set(String(t.tokenId), score);
   }
 
-  // 4) Rank by score desc (break ties by numeric tokenId asc)
-  const arr = Array.from(scores.entries()); // [tokenId, score][]
-  arr.sort((a, b) => {
+  // 5) Rank: higher score = rarer; tie-break on numeric tokenId asc
+  const list = Array.from(scores.entries()); // [tokenId, score]
+  list.sort((a, b) => {
     if (b[1] !== a[1]) return b[1] - a[1];
-    // tie-break: numeric tokenId ascending
-    const ai = toBigIntSafe(a[0]);
-    const bi = toBigIntSafe(b[0]);
-    if (ai < bi) return -1;
-    if (ai > bi) return 1;
-    return 0;
+    const ai = toBigIntSafe(a[0]), bi = toBigIntSafe(b[0]);
+    if (ai < bi) return -1; if (ai > bi) return 1; return 0;
   });
 
   const tokenToRank = new Map();
-  for (let i = 0; i < arr.length; i++) tokenToRank.set(arr[i][0], i + 1);
+  for (let i = 0; i < list.length; i++) tokenToRank.set(list[i][0], i + 1);
 
-  // Cache
-  rarityCache.set(cacheKey, { ts: now, tokenToRank, totalSupply: ts });
-
+  rarityCache.set(cacheKey, { ts: now(), tokenToRank, totalSupply: ts });
   return { rank: tokenToRank.get(tokenId) ?? null, totalSupply: ts, source: 'local' };
 }
 
-/* ---------------- Helpers ---------------- */
-
-function toReservoirChain(chain) {
-  const c = (chain || '').toLowerCase();
-  if (c === 'base') return 'base';
-  if (c === 'eth' || c === 'ethereum') return 'ethereum';
-  return null;
-}
-function baseHeaders(chainKey) {
-  const h = { 'Content-Type': 'application/json', 'x-reservoir-chain': chainKey };
-  if (process.env.RESERVOIR_API_KEY) h['x-api-key'] = process.env.RESERVOIR_API_KEY;
-  return h;
-}
+/* ========================= Reservoir helpers ========================= */
 
 async function fetchCollectionStats({ chainKey, contract, headers }) {
   const h = headers || baseHeaders(chainKey);
@@ -168,17 +186,20 @@ async function fetchCollectionStats({ chainKey, contract, headers }) {
 }
 
 /**
- * Fetch all tokens in a collection with attributes (paged).
- * Returns array: [{ tokenId, attributes }]
+ * Pulls all tokens with attributes.
+ *  - If useCollectionParam = true: ?collection=<contract>
+ *  - Else: ?contracts=<contract>
+ * Returns [{ tokenId, attributes }]
  */
-async function fetchAllTokensWithAttributes({ contract, headers }) {
+async function fetchAllTokensWithAttributes({ headers, contract, useCollectionParam }) {
   const out = [];
   let continuation = null;
-  let safety = 200; // up to 200k tokens (1000 per page) — adjust if needed
+  let safety = 300; // up to 300k tokens @ 1000/page
 
   do {
     const url = new URL('https://api.reservoir.tools/tokens/v7');
-    url.searchParams.append('collection', contract);
+    if (useCollectionParam) url.searchParams.append('collection', contract);
+    else url.searchParams.append('contracts', contract);
     url.searchParams.set('includeAttributes', 'true');
     url.searchParams.set('limit', '1000');
     if (continuation) url.searchParams.set('continuation', continuation);
@@ -189,28 +210,39 @@ async function fetchAllTokensWithAttributes({ contract, headers }) {
     const tokens = j?.tokens || [];
     continuation = j?.continuation || null;
 
-    for (const t of tokens) {
-      const tok = t?.token || {};
-      const tokenId = String(tok.tokenId || tok.id || '');
+    for (const row of tokens) {
+      const tok = row?.token || {};
+      const tokenId = String(tok.tokenId ?? tok.id ?? '');
       if (!tokenId) continue;
-      // attributes usually in tok.attributes as [{key, value, tokenCount}, ...]
-      const attributes = Array.isArray(tok.attributes) ? tok.attributes : [];
-      out.push({ tokenId, attributes });
+      // Normalize attribute shape: prefer {key, value, tokenCount}
+      const attrs = Array.isArray(tok.attributes)
+        ? tok.attributes.map(a => ({
+            key: a?.key ?? a?.trait_type ?? null,
+            value: a?.value ?? a?.trait_value ?? null,
+            tokenCount: a?.tokenCount ?? a?.count ?? null
+          }))
+        : [];
+      out.push({ tokenId, attributes: attrs });
     }
   } while (continuation && safety-- > 0);
 
   return out;
 }
 
+/* ========================= Local helpers ========================= */
+
 function guessTotalSupply(tokens) {
-  // Fallback: approximate supply from distinct tokenIds count
-  const s = new Set(tokens.map(t => t.tokenId));
+  const s = new Set(tokens.map(t => String(t.tokenId)));
   return s.size || tokens.length || 1;
 }
-
-function toBigIntSafe(x) {
-  try { return BigInt(String(x)); } catch { return 0n; }
+function sanitizeAttrKey(k) {
+  if (k == null) return null;
+  const s = String(k).trim();
+  return s ? s : null;
 }
-
-module.exports = { getTokenRank };
+function sanitizeAttrVal(v) {
+  if (v == null) return null;
+  const s = String(v).trim();
+  return s ? s : null;
+}
 
