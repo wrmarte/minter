@@ -8,6 +8,7 @@ const fetch = require('node-fetch');
    - Auto-fetch RPC lists at startup & every 6h
    - Per-endpoint backoff + per-chain cooldown + timeouts
    - Static network hints (no ethers network-detect retries)
+   - Batching caps (Base=10, Ape=3) to avoid provider limits
    - Never throws from public APIs; returns null on failure
 ========================================================= */
 
@@ -121,14 +122,12 @@ function withTimeout(resultOrPromise, ms, reason = 'timeout') {
   });
 }
 
-/* ---------- Error classification helpers (new) ---------- */
+/* ---------- Error classification helpers ---------- */
 function isLogicalRevert(err) {
-  // Ethers v6: CALL_EXCEPTION on revert (including "missing revert data")
   const code = err?.code || err?.error?.code || '';
   if (code === 'CALL_EXCEPTION' || code === 'UNPREDICTABLE_GAS_LIMIT') return true;
   const msg = String(err?.shortMessage || err?.reason || err?.message || '').toLowerCase();
   if (msg.includes('execution reverted') || msg.includes('missing revert data') || msg.includes('reverted')) return true;
-  // Some providers bury the revert
   const body = String(err?.info?.responseBody || '').toLowerCase();
   if (body.includes('execution reverted') || body.includes('revert')) return true;
   return false;
@@ -147,6 +146,24 @@ function isNetworkishError(err) {
     msg.includes('econnreset') || msg.includes('enotfound') ||
     msg.includes('fetch failed') || msg.includes('failed to fetch')
   );
+}
+
+// Per-chain batch caps to satisfy provider limits
+function getBatchConfig(key) {
+  switch ((key || 'base').toLowerCase()) {
+    case 'ape':  return { batchMaxCount: 3,  batchStallTime: 8 };  // ApeChain strict
+    case 'base': return { batchMaxCount: 10, batchStallTime: 8 };  // Base: "maximum 10 calls in 1 batch"
+    case 'eth':  return { batchMaxCount: 25, batchStallTime: 8 };
+    default:     return { batchMaxCount: 10, batchStallTime: 8 };
+  }
+}
+
+function isBatchLimitError(err) {
+  const msg = (err?.message || err?.shortMessage || '').toLowerCase();
+  const body = (err?.info?.responseBody || '').toLowerCase();
+  return msg.includes('maximum 10 calls in 1 batch') || body.includes('maximum 10 calls in 1 batch') ||
+         (msg.includes('batch') && msg.includes('maximum')) ||
+         (String(err?.code || '').toUpperCase() === 'BAD_DATA' && (body.includes('maximum') || msg.includes('maximum')));
 }
 
 /* ---------- Init & rebuild ---------- */
@@ -184,7 +201,20 @@ function rebuildChainEndpoints(key) {
 function makeProvider(key, url) {
   const meta = CHAIN_META[key] || {};
   const u = normalizeUrl(url);
-  const p = new JsonRpcProvider(u, meta.network, { staticNetwork: !!meta.network });
+
+  // Enforce per-chain batching caps to avoid provider rejections
+  const batch = getBatchConfig(key);
+
+  const p = new JsonRpcProvider(
+    u,
+    meta.network,
+    {
+      staticNetwork: !!meta.network,
+      batchMaxCount: batch.batchMaxCount,   // max requests per JSON-RPC batch
+      batchStallTime: batch.batchStallTime, // ms to coalesce batch; small to prevent over-accumulation
+      // batchMaxSize left as default
+    }
+  );
   p._rpcUrl = u;
   p.pollingInterval = 8000;
   return p;
@@ -298,7 +328,8 @@ async function rotateProvider(chain = 'base') {
  * safeRpcCall(chain, callFn, retries=4, perCallTimeoutMs=6000)
  * OR safeRpcCall(chain, callFn, { retries, perCallTimeoutMs, allowRevert=true, retryOnceOnNetwork=true })
  *
- * - Logical contract reverts (e.g., ownerOf(nonexistent)) are treated as non-fatal and return null when allowRevert=true (default).
+ * - Logical contract reverts (e.g., ownerOf(nonexistent)) are non-fatal; return null when allowRevert=true.
+ * - Batch-limit errors (e.g., "maximum 10 calls in 1 batch") are retried with tiny jitter, no rotate.
  * - Only rotates provider on network-ish failures (timeouts, rate limits, gateway errors).
  * - Never throws; returns null on failure.
  */
@@ -345,12 +376,17 @@ async function safeRpcCall(chain, callFn, retries = 4, perCallTimeoutMs = 6000) 
 
       // logical revert? (e.g., ownerOf for non-existent token)
       if (allowRevert && isLogicalRevert(err)) {
-        // Don’t rotate/log as failure; just return null to signal "not found / reverted"
-        return null;
+        return null; // not an RPC outage; just "not found / reverted"
       }
 
-      // Ape special-case
-      if (key === 'ape' && String(msg).includes('Batch of more than 3 requests')) {
+      // batch-limit error – do NOT rotate; micro-jitter and retry so next tick doesn't coalesce too many calls
+      if (isBatchLimitError(err)) {
+        await sleep(jitter(6)); // ~5-8ms
+        continue;
+      }
+
+      // Ape special-case (some nodes return different wording)
+      if (key === 'ape' && String(msg).toLowerCase().includes('batch of more than 3 requests')) {
         console.warn('⛔ ApeChain batch limit hit — skip batch, no retry');
         return null;
       }
@@ -500,5 +536,6 @@ module.exports = {
   safeRpcCall,
   getMaxBatchSize
 };
+
 
 
