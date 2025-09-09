@@ -1,84 +1,70 @@
 // commands/stake.js
-const { SlashCommandBuilder } = require('discord.js');
-const fetch = require('node-fetch');
+const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 const { Contract, Interface, ethers } = require('ethers');
+const fetch = require('node-fetch');
 const { getProvider, safeRpcCall } = require('../services/providerM');
 
-const ERC721_ABI = [
-  'function ownerOf(uint256 tokenId) view returns (address)',
-  'function balanceOf(address owner) view returns (uint256)',
-  'function tokenOfOwnerByIndex(address owner, uint256 index) view returns (uint256)',
-  'function supportsInterface(bytes4 interfaceId) view returns (bool)',
-];
-const IFACE_ERC165_ENUM = '0x780e9d63'; // ERC721Enumerable
+/* ===================== Tunables ===================== */
+const ENV_MAX_STAKE = Math.max(1, Math.min(Number(process.env.STAKE_MAX || 300), 1000)); // hard cap for safety
+const LOG_WINDOW_BASE = Math.max(10000, Number(process.env.MATRIX_LOG_WINDOW_BASE || 200000));
+const LOG_CONCURRENCY = Math.max(1, Number(process.env.MATRIX_LOG_CONCURRENCY || 4));
+const VERIFY_CONCURRENCY = Math.max(4, Number(process.env.STAKE_VERIFY_CONCURRENCY || 8));
+const VERIFY_LIMIT = Math.max(50, Number(process.env.STAKE_VERIFY_LIMIT || 400)); // cap ownerOf verifications
 
-const DEFAULT_MAX_SCAN = Math.max(1000, Number(process.env.STAKE_MAX_SCAN || 1000));
-const OWNEROF_CONCURRENCY = Math.max(4, Number(process.env.STAKE_OWNEROF_CONCURRENCY || 12));
-
+/* ===================== Small utils ===================== */
+function padTopicAddress(addr) { return '0x' + addr.toLowerCase().replace(/^0x/, '').padStart(64, '0'); }
 function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
-function bar(pct, len = 18) {
-  const filled = clamp(Math.round((pct / 100) * len), 0, len);
-  return '█'.repeat(filled) + '░'.repeat(len - filled);
-}
-
 async function runPool(limit, items, worker) {
   const ret = new Array(items.length);
   let i = 0;
   const next = async () => {
-    const idx = i++;
-    if (idx >= items.length) return;
-    try { ret[idx] = await worker(items[idx], idx); }
-    catch { ret[idx] = null; }
+    const idx = i++; if (idx >= items.length) return;
+    try { ret[idx] = await worker(items[idx], idx); } catch { ret[idx] = null; }
     return next();
   };
   await Promise.all(new Array(Math.min(limit, items.length)).fill(0).map(next));
   return ret;
 }
+function short(a){ const s=String(a||''); return s?`${s.slice(0,6)}...${s.slice(-4)}`:'N/A'; }
 
-function normalizeAddr(a) {
-  try { return ethers.getAddress(a); } catch { return null; }
-}
-
-async function supportsEnumerable(network, contract) {
-  const provider = getProvider(network);
-  if (!provider) return false;
-  const c = new Contract(contract, ERC721_ABI, provider);
+/* ===================== Standard detection ===================== */
+async function detectTokenStandard(chain, contract) {
+  const provider = getProvider(chain);
+  if (!provider) return { is721: false, is1155: false };
+  const erc165 = new Contract(contract, ['function supportsInterface(bytes4) view returns (bool)'], provider);
+  const out = { is721: false, is1155: false };
   try {
-    const ok = await safeRpcCall(network, (p) => c.connect(p).supportsInterface(IFACE_ERC165_ENUM));
+    const s721  = await safeRpcCall(chain, p => erc165.connect(p).supportsInterface('0x80ac58cd'));
+    const s1155 = await safeRpcCall(chain, p => erc165.connect(p).supportsInterface('0xd9b67a26'));
+    out.is721 = !!s721;
+    out.is1155 = !!s1155 && !s721;
+  } catch {}
+  return out;
+}
+async function detectEnumerable(chain, contract) {
+  const provider = getProvider(chain);
+  if (!provider) return false;
+  const erc165 = new Contract(contract, ['function supportsInterface(bytes4) view returns (bool)'], provider);
+  try {
+    const ok = await safeRpcCall(chain, p => erc165.connect(p).supportsInterface('0x780e9d63'));
     return !!ok;
   } catch { return false; }
 }
 
-async function enumerableTokensOfOwner(network, contract, owner, maxWant = 10000) {
-  const provider = getProvider(network);
-  const c = new Contract(contract, ERC721_ABI, provider);
-  try {
-    const balRaw = await safeRpcCall(network, (p) => c.connect(p).balanceOf(owner));
-    const bal = Number(balRaw?.toString?.() ?? balRaw ?? 0);
-    if (!Number.isFinite(bal) || bal <= 0) return [];
-    const want = Math.min(bal, maxWant);
-    const ids = [];
-    for (let i = 0; i < want; i++) {
-      try {
-        const id = await safeRpcCall(network, (p) => c.connect(p).tokenOfOwnerByIndex(owner, i));
-        ids.push(id.toString());
-      } catch { break; }
-    }
-    return ids;
-  } catch { return []; }
-}
-
-async function fetchOwnerTokensReservoir({ chain, contract, owner, maxWant = 5000 }) {
-  const chainHeader = chain === 'base' ? 'base' : (chain === 'eth' || chain === 'ethereum') ? 'ethereum' : null;
-  if (!chainHeader) return [];
+/* ===================== Reservoir (ETH/Base) ===================== */
+async function fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant }) {
+  const chainHeader = chain === 'eth' ? 'ethereum' : chain === 'base' ? 'base' : null;
+  if (!chainHeader) return { items: [], total: 0 };
   const headers = { 'Content-Type': 'application/json', 'x-reservoir-chain': chainHeader };
   if (process.env.RESERVOIR_API_KEY) headers['x-api-key'] = process.env.RESERVOIR_API_KEY;
 
-  const ids = [];
   let continuation = null;
-  let safety = 40; // 40 * 50 = 2k tokens; adjust if needed
-  while (safety-- > 0 && ids.length < maxWant) {
-    const limit = Math.min(50, maxWant - ids.length);
+  const items = [];
+  let safety = 16;
+  let total = 0;
+
+  while (safety-- > 0 && items.length < maxWant) {
+    const limit = Math.min(50, maxWant - items.length);
     const url = new URL(`https://api.reservoir.tools/users/${owner}/tokens/v10`);
     url.searchParams.set('collection', contract);
     url.searchParams.set('limit', String(limit));
@@ -87,225 +73,276 @@ async function fetchOwnerTokensReservoir({ chain, contract, owner, maxWant = 500
     if (continuation) url.searchParams.set('continuation', continuation);
 
     try {
-      const r = await fetch(url.toString(), { headers });
-      if (!r.ok) break;
-      const j = await r.json();
-      const arr = j?.tokens || [];
-      continuation = j?.continuation || null;
-      for (const t of arr) {
-        if (t?.token?.tokenId) ids.push(String(t.token.tokenId));
-        if (ids.length >= maxWant) break;
+      const res = await fetch(url.toString(), { headers });
+      if (!res.ok) break;
+      const json = await res.json();
+      const tokens = json?.tokens || [];
+      continuation = json?.continuation || null;
+
+      total = typeof json?.count === 'number'
+        ? json.count
+        : (total || (tokens.length < limit && !continuation ? items.length + tokens.length : 0));
+
+      for (const t of tokens) {
+        if (!t?.token?.tokenId) continue;
+        items.push({ tokenId: String(t.token.tokenId) });
+        if (items.length >= maxWant) break;
       }
-      if (!continuation || arr.length === 0) break;
+      if (!continuation || tokens.length === 0) break;
     } catch { break; }
   }
-  return Array.from(new Set(ids));
+  if (!total) total = items.length;
+  return { items, total };
 }
 
-async function bruteScanOwnerOf({ network, contract, owner, maxScan, progressCb }) {
-  const ids = [];
-  const provider = getProvider(network);
-  const c = new Contract(contract, ERC721_ABI, provider);
+/* ===================== Enumerable fast path ===================== */
+async function fetchOwnerTokensEnumerable({ chain, contract, owner, maxWant }) {
+  const provider = getProvider(chain);
+  if (!provider) return { items: [], total: 0, enumerable: false };
+  const nft = new Contract(contract, [
+    'function balanceOf(address) view returns (uint256)',
+    'function tokenOfOwnerByIndex(address,uint256) view returns (uint256)'
+  ], provider);
 
-  const range = Array.from({ length: maxScan }, (_, i) => i);
-  let done = 0;
-  await runPool(OWNEROF_CONCURRENCY, range, async (id) => {
-    try {
-      const who = await safeRpcCall(network, (p) => c.connect(p).ownerOf(id));
-      if (who && String(who).toLowerCase() === owner.toLowerCase()) ids.push(String(id));
-    } catch { /* non-existent or revert */ }
-    done++;
-    if (progressCb && (done % 25 === 0 || done === maxScan)) {
-      const pct = Math.floor((done / maxScan) * 100);
-      progressCb(pct);
-    }
-  });
-
-  return ids.sort((a, b) => {
-    const ai = BigInt(a), bi = BigInt(b);
-    return ai < bi ? -1 : ai > bi ? 1 : 0;
-  });
-}
-
-async function saveStake(pg, { wallet, contract, network, tokenIds }) {
-  // Normalize rows in staked_nfts (one row per token), and keep staked_wallets in sync.
-  const client = pg;
-  const w = wallet.toLowerCase();
-  const c = contract.toLowerCase();
-  const n = network.toLowerCase();
-
-  // Start a light transaction
-  await client.query('BEGIN');
   try {
-    // Delete rows no longer owned
-    await client.query(
-      `DELETE FROM staked_nfts
-       WHERE wallet_address = $1 AND contract_address = $2 AND network = $3
-         AND token_id <> ALL ($4)`,
-      [w, c, n, tokenIds.length ? tokenIds : ['-1']]
-    );
-
-    // Upsert current set
-    for (const tid of tokenIds) {
-      await client.query(
-        `INSERT INTO staked_nfts (wallet_address, contract_address, network, token_id, staked_at)
-         VALUES ($1, $2, $3, $4, NOW())
-         ON CONFLICT (wallet_address, contract_address, network, token_id)
-         DO UPDATE SET staked_at = EXCLUDED.staked_at`,
-        [w, c, n, tid]
-      );
+    const balRaw = await safeRpcCall(chain, p => nft.connect(p).balanceOf(owner));
+    const bal = Number(balRaw?.toString?.() ?? balRaw ?? 0);
+    if (!Number.isFinite(bal) || bal <= 0) return { items: [], total: 0, enumerable: true };
+    const want = Math.min(bal, maxWant);
+    const ids = [];
+    for (let i = 0; i < want; i++) {
+      try {
+        const tid = await safeRpcCall(chain, p => nft.connect(p).tokenOfOwnerByIndex(owner, i));
+        if (tid == null) break;
+        ids.push(String(tid));
+      } catch { break; }
     }
-
-    // Keep aggregated table (if you use it)
-    await client.query(
-      `INSERT INTO staked_wallets (wallet_address, contract_address, network, token_ids, staked_at)
-       VALUES ($1, $2, $3, $4, NOW())
-       ON CONFLICT (wallet_address, contract_address, network)
-       DO UPDATE SET token_ids = EXCLUDED.token_ids, staked_at = EXCLUDED.staked_at`,
-      [w, c, n, tokenIds]
-    );
-
-    await client.query('COMMIT');
-    return true;
-  } catch (e) {
-    await client.query('ROLLBACK');
-    console.error('❌ saveStake failed:', e.message);
-    return false;
+    return { items: ids.map(id => ({ tokenId: id })), total: bal, enumerable: true };
+  } catch {
+    return { items: [], total: 0, enumerable: false };
   }
 }
 
+/* ===================== On-chain deep scan (logs) ===================== */
+async function fetchOwnerTokens721Rolling({ chain, contract, owner, maxWant, deep = false }) {
+  const provider = getProvider(chain);
+  if (!provider) return { items: [], total: 0 };
+  const iface = new Interface(['event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)']);
+  const head = await safeRpcCall(chain, p => p.getBlockNumber()) || 0;
+
+  const isBase = chain === 'base';
+  const WINDOW = isBase ? LOG_WINDOW_BASE : 60000;
+  const MAX_WINDOWS = deep ? 500 : (isBase ? 80 : 120);
+
+  const topic0   = ethers.id('Transfer(address,address,uint256)');
+  const topicTo   = padTopicAddress(owner);
+  const topicFrom = padTopicAddress(owner);
+
+  const windows = [];
+  for (let i = 0; i < MAX_WINDOWS; i++) {
+    const toBlock = head - i * WINDOW;
+    const fromBlock = Math.max(0, toBlock - WINDOW + 1);
+    if (toBlock <= 0) break;
+    windows.push({ fromBlock, toBlock });
+  }
+
+  const owned = new Set();
+  for (let i = 0; i < windows.length; i += LOG_CONCURRENCY) {
+    const chunk = windows.slice(i, i + LOG_CONCURRENCY);
+    await Promise.all(chunk.map(async ({ fromBlock, toBlock }) => {
+      let inLogs = [], outLogs = [];
+      try {
+        inLogs = await safeRpcCall(chain, p => p.getLogs({ address: contract, topics: [topic0, null, topicTo], fromBlock, toBlock }));
+      } catch {}
+      try {
+        outLogs = await safeRpcCall(chain, p => p.getLogs({ address: contract, topics: [topic0, topicFrom, null], fromBlock, toBlock }));
+      } catch {}
+      for (const log of inLogs || []) { let parsed; try { parsed = iface.parseLog(log); } catch { continue; } owned.add(parsed.args.tokenId.toString()); }
+      for (const log of outLogs || []) { let parsed; try { parsed = iface.parseLog(log); } catch { continue; } owned.delete(parsed.args.tokenId.toString()); }
+    }));
+    if (!deep && owned.size >= maxWant) break;
+  }
+
+  const all = Array.from(owned);
+  return { items: all.slice(0, maxWant).map(id => ({ tokenId: id })), total: all.length || 0 };
+}
+
+/* ===================== Ownership (Matrix-grade) ===================== */
+async function getOwnedTokenIdsMatrixLike({ chain, contract, owner, maxWant = ENV_MAX_STAKE }) {
+  const std = await detectTokenStandard(chain, contract);
+  if (!std.is721) {
+    // staking system is 721-only (your payout uses ownerOf)
+    return { tokenIds: [], total: 0, note: 'Not ERC721' };
+  }
+
+  // 1) Reservoir (ETH/Base)
+  let items = [], total = 0;
+  if (chain === 'eth' || chain === 'base') {
+    const r = await fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant });
+    items = r.items;
+    total = r.total || items.length;
+  }
+
+  // 2) ERC721Enumerable
+  if (items.length < maxWant) {
+    const en = await fetchOwnerTokensEnumerable({ chain, contract, owner, maxWant });
+    const byId = new Set(items.map(t => String(t.tokenId)));
+    for (const it of en.items) { const k = String(it.tokenId); if (!byId.has(k)) items.push({ tokenId: k }); }
+    total = Math.max(total, en.total || 0, items.length);
+  }
+
+  // 3) On-chain deep log scan (Base uses wider windows)
+  if (items.length < maxWant) {
+    const on = await fetchOwnerTokens721Rolling({ chain, contract, owner, maxWant, deep: chain === 'base' });
+    const byId = new Set(items.map(t => String(t.tokenId)));
+    for (const it of on.items) { const k = String(it.tokenId); if (!byId.has(k)) items.push({ tokenId: k }); }
+    total = Math.max(total, on.total || 0, items.length);
+  }
+
+  const tokenIds = items.map(t => String(t.tokenId));
+  return { tokenIds, total };
+}
+
+/* ===================== ownerOf verification pass ===================== */
+async function verifyCurrentOwnership({ chain, contract, owner, tokenIds }) {
+  const provider = getProvider(chain);
+  if (!provider) return tokenIds;
+  const nft = new Contract(contract, ['function ownerOf(uint256) view returns (address)'], provider);
+
+  const toVerify = tokenIds.slice(0, VERIFY_LIMIT);
+  const kept = new Set();
+
+  await runPool(VERIFY_CONCURRENCY, toVerify, async (id) => {
+    try {
+      const who = await safeRpcCall(chain, p => nft.connect(p).ownerOf(id), {
+        allowRevert: true,
+        perCallTimeoutMs: 12000
+      });
+      if (who && String(who).toLowerCase() === owner.toLowerCase()) kept.add(String(id));
+    } catch {}
+  });
+
+  // Keep verified + any beyond VERIFY_LIMIT (best-effort; optional strictness)
+  const final = tokenIds.filter(id => kept.has(String(id)) || tokenIds.indexOf(id) >= VERIFY_LIMIT);
+  return final;
+}
+
+/* ===================== Command ===================== */
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('stake')
-    .setDescription('Find and record your NFTs from this server’s staking contract')
-    .addStringOption(option =>
-      option.setName('wallet')
-        .setDescription('Your wallet address (0x...)')
+    .setDescription('Verify your NFTs for the server’s staking project and record them for rewards.')
+    .addStringOption(o =>
+      o.setName('wallet')
+        .setDescription('Your wallet address (0x… or ENS .eth)')
         .setRequired(true)
-    )
-    .addIntegerOption(o =>
-      o.setName('max')
-        .setDescription(`Max token IDs to brute-scan if needed (default ${DEFAULT_MAX_SCAN})`)
-        .setMinValue(50)
-        .setMaxValue(20000)
-        .setRequired(false)
     ),
 
   async execute(interaction) {
-    const rawWallet = interaction.options.getString('wallet') || '';
-    const maxOpt = interaction.options.getInteger('max');
-    const maxScan = Number.isInteger(maxOpt) ? maxOpt : DEFAULT_MAX_SCAN;
+    const walletIn = (interaction.options.getString('wallet') || '').trim();
+    const guildId = interaction.guild.id;
     const pg = interaction.client.pg;
 
     await interaction.deferReply({ ephemeral: true });
 
-    const wallet = normalizeAddr(rawWallet);
-    if (!wallet) {
-      return interaction.editReply('❌ Invalid wallet address. Please provide a valid 0x address.');
-    }
-
-    // Load staking project for this guild
-    const guildId = interaction.guild.id;
-    const proj = await pg.query(`SELECT * FROM staking_projects WHERE guild_id = $1 LIMIT 1`, [guildId]);
-    if (proj.rowCount === 0) {
+    // Load staking project (one per server)
+    const projRes = await pg.query(`SELECT * FROM staking_projects WHERE guild_id = $1 LIMIT 1`, [guildId]);
+    if (projRes.rowCount === 0) {
       return interaction.editReply('❌ No staking contract is set for this server. Ask an admin to use `/addstaking`.');
     }
+    const project = projRes.rows[0];
+    const chain = (project.network || 'base').toLowerCase();
+    const contract = String(project.contract_address || '').toLowerCase();
 
-    const project = proj.rows[0];
-    const contract = (project.contract_address || '').toLowerCase();
-    const network = (project.network || 'base').toLowerCase();
-
-    const provider = getProvider(network);
-    if (!provider) {
-      return interaction.editReply(`❌ No RPC provider configured for network \`${network}\`.`);
-    }
-
-    const nft = new Contract(contract, ERC721_ABI, provider);
-
-    // Progress helper
-    const setStatus = async (lines) => {
-      await interaction.editReply('```' + ['Staking Scan', '────────────────────', ...lines].join('\n') + '```');
-    };
-
-    await setStatus([`Wallet: ${wallet}`, `Contract: ${contract} (${network})`, `Status: starting…`]);
-
-    let foundIds = [];
-    let method = 'unknown';
-
-    // 1) Fast path: Reservoir
-    if (network === 'base' || network === 'eth' || network === 'ethereum') {
-      await setStatus([`Wallet: ${wallet}`, `Contract: ${contract} (${network})`, `Status: querying Reservoir…`]);
-      try {
-        const ids = await fetchOwnerTokensReservoir({ chain: network, contract, owner: wallet, maxWant: 5000 });
-        if (ids.length) {
-          foundIds = ids;
-          method = 'reservoir';
+    // Normalize wallet (supports ENS if you have ETH provider; otherwise require 0x)
+    let owner = walletIn;
+    try { owner = ethers.getAddress(walletIn); } catch {
+      // Try ENS via ETH provider if .eth
+      if (walletIn.toLowerCase().endsWith('.eth')) {
+        try {
+          const ethProv = getProvider('eth');
+          if (!ethProv) throw new Error('no eth provider');
+          const resolved = await safeRpcCall('eth', p => p.resolveName(walletIn), { perCallTimeoutMs: 8000 });
+          if (!resolved) throw new Error('ens-resolve-failed');
+          owner = ethers.getAddress(resolved);
+        } catch {
+          return interaction.editReply('❌ Could not resolve ENS. Please provide a 0x wallet address.');
         }
-      } catch (e) {
-        // ignore
+      } else {
+        return interaction.editReply('❌ Invalid wallet. Provide a 0x address or ENS (.eth).');
       }
     }
 
-    // 2) ERC721Enumerable fallback
-    if (!foundIds.length) {
-      await setStatus([`Wallet: ${wallet}`, `Contract: ${contract} (${network})`, `Status: checking enumerable…`]);
-      try {
-        const isEnum = await supportsEnumerable(network, contract);
-        if (isEnum) {
-          const ids = await enumerableTokensOfOwner(network, contract, wallet, 10000);
-          if (ids.length) {
-            foundIds = ids;
-            method = 'enumerable';
-          }
-        }
-      } catch {}
-    }
-
-    // 3) Brute ownerOf scan
-    if (!foundIds.length) {
-      let lastPct = -1;
-      await setStatus([
-        `Wallet: ${wallet}`,
-        `Contract: ${contract} (${network})`,
-        `Status: brute scanning 0..${maxScan - 1}`,
-        `Progress: 0% [${bar(0)}]`
-      ]);
-      foundIds = await bruteScanOwnerOf({
-        network, contract, owner: wallet.toLowerCase(), maxScan,
-        progressCb: async (pct) => {
-          if (pct === lastPct) return;
-          lastPct = pct;
-          await setStatus([
-            `Wallet: ${wallet}`,
-            `Contract: ${contract} (${network})`,
-            `Status: brute scanning 0..${maxScan - 1}`,
-            `Progress: ${pct}% [${bar(pct)}]`
-          ]);
-        }
-      });
-      method = 'ownerOf-scan';
-    }
-
-    if (!foundIds.length) {
-      return interaction.editReply(`❌ No NFTs found for \`${wallet.slice(0,6)}...${wallet.slice(-4)}\` in this collection.`);
-    }
-
-    // Save results
-    const ok = await saveStake(pg, {
-      wallet: wallet.toLowerCase(),
-      contract,
-      network,
-      tokenIds: foundIds
+    // Ownership discovery (Matrix-grade)
+    await interaction.editReply(`🔎 Verifying ownership for **${short(owner)}** on \`${chain}\`…`);
+    const { tokenIds, total } = await getOwnedTokenIdsMatrixLike({
+      chain, contract, owner, maxWant: ENV_MAX_STAKE
     });
-    if (!ok) {
-      return interaction.editReply('⚠️ Scan succeeded, but saving results failed (see logs).');
+
+    if (!tokenIds.length) {
+      return interaction.editReply(`❌ No NFTs from this contract found for \`${short(owner)}\` (checked API, enumerable, and logs).`);
     }
 
-    await interaction.editReply(
-      `✅ Found **${foundIds.length}** NFT(s) for \`${wallet.slice(0,6)}...${wallet.slice(-4)}\` ` +
-      `in this collection (method: ${method}).`
-    );
+    // On-chain verification pass (ownerOf) for current ownership
+    await interaction.editReply(`🧪 Verifying current ownership on-chain (${Math.min(tokenIds.length, VERIFY_LIMIT)} checks)…`);
+    const verifiedIds = await verifyCurrentOwnership({ chain, contract, owner, tokenIds });
+
+    if (!verifiedIds.length) {
+      return interaction.editReply(`❌ None of the discovered tokens are currently owned by \`${short(owner)}\` (on-chain check).`);
+    }
+
+    // Persist: compact (staked_wallets) + exploded (staked_nfts)
+    try {
+      // Compact upsert
+      await pg.query(`
+        INSERT INTO staked_wallets (wallet_address, contract_address, network, token_ids, staked_at)
+        VALUES ($1, $2, $3, $4, NOW())
+        ON CONFLICT (wallet_address, contract_address)
+        DO UPDATE SET token_ids = EXCLUDED.token_ids, staked_at = NOW()
+      `, [owner.toLowerCase(), contract, chain, verifiedIds]);
+
+      // Exploded table refresh (used by your payout job)
+      await pg.query(`
+        DELETE FROM staked_nfts
+        WHERE wallet_address = $1 AND contract_address = $2 AND network = $3
+      `, [owner.toLowerCase(), contract, chain]);
+
+      // Insert in chunks
+      const chunk = 200;
+      for (let i = 0; i < verifiedIds.length; i += chunk) {
+        const slice = verifiedIds.slice(i, i + chunk);
+        const values = slice.map((id, k) =>
+          `($1,$2,$3,$${4 + k})`
+        ).join(',');
+        const params = [owner.toLowerCase(), contract, chain, ...slice.map(String)];
+        await pg.query(
+          `INSERT INTO staked_nfts (wallet_address, contract_address, network, token_id) VALUES ${values}
+           ON CONFLICT DO NOTHING`,
+          params
+        );
+      }
+    } catch (e) {
+      console.error('❌ /stake DB write error:', e);
+      return interaction.editReply('⚠️ Verified, but failed to save staking records. Please try again.');
+    }
+
+    // Response
+    const embed = new EmbedBuilder()
+      .setTitle('✅ Staking Verified')
+      .setColor(0x00cc99)
+      .setDescription(`Project: **${project.name || 'Unnamed'}**`)
+      .addFields(
+        { name: 'Wallet', value: `\`${short(owner)}\``, inline: true },
+        { name: 'Network', value: `\`${chain}\``, inline: true },
+        { name: 'NFTs Found', value: `${tokenIds.length} (est. total: ${total || tokenIds.length})`, inline: true },
+        { name: 'NFTs Verified Now', value: `${verifiedIds.length}`, inline: true },
+        { name: 'Contract', value: `\`${contract}\`` }
+      )
+      .setFooter({ text: 'Ownership confirmed via API, enumerable, logs + on-chain ownerOf.' });
+
+    return interaction.editReply({ embeds: [embed] });
   }
 };
+
 
 
