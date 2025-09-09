@@ -80,12 +80,10 @@ function normalizeUrl(u) {
   u = u.trim();
   try {
     const url = new URL(u);
-    // remove trailing slashes on pathname (but keep root '/')
     if (url.pathname !== '/') {
       url.pathname = url.pathname.replace(/\/+$/, '');
       if (url.pathname === '') url.pathname = '/';
     }
-    // drop trailing slash on full URL
     return url.toString().replace(/\/+$/, '');
   } catch {
     return u.replace(/\/+$/, '');
@@ -118,9 +116,37 @@ function withTimeout(resultOrPromise, ms, reason = 'timeout') {
     const err = e => { if (!settled) { settled = true; clearTimeout(t); reject(e); } };
     try {
       if (isThenable(resultOrPromise)) resultOrPromise.then(ok, err);
-      else ok(resultOrPromise); // sync
+      else ok(resultOrPromise);
     } catch (e) { err(e); }
   });
+}
+
+/* ---------- Error classification helpers (new) ---------- */
+function isLogicalRevert(err) {
+  // Ethers v6: CALL_EXCEPTION on revert (including "missing revert data")
+  const code = err?.code || err?.error?.code || '';
+  if (code === 'CALL_EXCEPTION' || code === 'UNPREDICTABLE_GAS_LIMIT') return true;
+  const msg = String(err?.shortMessage || err?.reason || err?.message || '').toLowerCase();
+  if (msg.includes('execution reverted') || msg.includes('missing revert data') || msg.includes('reverted')) return true;
+  // Some providers bury the revert
+  const body = String(err?.info?.responseBody || '').toLowerCase();
+  if (body.includes('execution reverted') || body.includes('revert')) return true;
+  return false;
+}
+
+function isNetworkishError(err) {
+  const code = String(err?.code || err?.error?.code || '').toUpperCase();
+  const msg = String(err?.message || err?.shortMessage || '').toLowerCase();
+  return (
+    code === 'NETWORK_ERROR' ||
+    msg.includes('timeout') ||
+    msg.includes('rate limit') || msg.includes('too many requests') || msg.includes('429') ||
+    msg.includes('503') || msg.includes('502') || msg.includes('504') ||
+    msg.includes('gateway') || msg.includes('temporarily') ||
+    msg.includes('socket') || msg.includes('hang up') ||
+    msg.includes('econnreset') || msg.includes('enotfound') ||
+    msg.includes('fetch failed') || msg.includes('failed to fetch')
+  );
 }
 
 /* ---------- Init & rebuild ---------- */
@@ -158,7 +184,6 @@ function rebuildChainEndpoints(key) {
 function makeProvider(key, url) {
   const meta = CHAIN_META[key] || {};
   const u = normalizeUrl(url);
-  // staticNetwork:true prevents ethers network-detect retries
   const p = new JsonRpcProvider(u, meta.network, { staticNetwork: !!meta.network });
   p._rpcUrl = u;
   p.pollingInterval = 8000;
@@ -269,11 +294,31 @@ async function rotateProvider(chain = 'base') {
   await selectHealthy(key);
 }
 
+/**
+ * safeRpcCall(chain, callFn, retries=4, perCallTimeoutMs=6000)
+ * OR safeRpcCall(chain, callFn, { retries, perCallTimeoutMs, allowRevert=true, retryOnceOnNetwork=true })
+ *
+ * - Logical contract reverts (e.g., ownerOf(nonexistent)) are treated as non-fatal and return null when allowRevert=true (default).
+ * - Only rotates provider on network-ish failures (timeouts, rate limits, gateway errors).
+ * - Never throws; returns null on failure.
+ */
 async function safeRpcCall(chain, callFn, retries = 4, perCallTimeoutMs = 6000) {
   const key = (chain || 'base').toLowerCase();
   initChain(key);
 
-  for (let i = 0; i < retries; i++) {
+  // Backward-compatible options
+  let opts = {};
+  if (typeof retries === 'object' && retries !== null) {
+    opts = retries;
+  } else {
+    opts = { retries, perCallTimeoutMs };
+  }
+  const maxRetries = Number.isFinite(opts.retries) ? opts.retries : 4;
+  const timeoutMs = Number.isFinite(opts.perCallTimeoutMs) ? opts.perCallTimeoutMs : 6000;
+  const allowRevert = opts.allowRevert !== false; // default true
+  const retryOnceOnNetwork = opts.retryOnceOnNetwork !== false; // default true
+
+  for (let i = 0; i < maxRetries; i++) {
     let provider = getProvider(key);
     if (!provider) {
       provider = await selectHealthy(key);
@@ -281,8 +326,7 @@ async function safeRpcCall(chain, callFn, retries = 4, perCallTimeoutMs = 6000) 
     }
 
     try {
-      // accept sync or async result
-      const result = await withTimeout(callFn(provider), perCallTimeoutMs, 'rpc call timeout');
+      const result = await withTimeout(callFn(provider), timeoutMs, 'rpc call timeout');
 
       // mark success
       const st = chains[key];
@@ -298,24 +342,42 @@ async function safeRpcCall(chain, callFn, retries = 4, perCallTimeoutMs = 6000) 
     } catch (err) {
       const msg = err?.info?.responseBody || err?.message || '';
       const code = err?.code || 'UNKNOWN_ERROR';
-      console.warn(`⚠️ [${key}] RPC Error: ${err.message || code}`);
 
-      const current = getProvider(key);
-      const st = chains[key];
-      const failUrl =
-        current?._rpcUrl ||
-        (st.endpoints[st.pinnedIdx ?? -1] && st.endpoints[st.pinnedIdx ?? -1].url) ||
-        'unknown';
-      console.warn(`🔻 RPC failed [${key}]: ${failUrl}`);
+      // logical revert? (e.g., ownerOf for non-existent token)
+      if (allowRevert && isLogicalRevert(err)) {
+        // Don’t rotate/log as failure; just return null to signal "not found / reverted"
+        return null;
+      }
 
       // Ape special-case
-      if (key === 'ape' && msg.includes('Batch of more than 3 requests')) {
+      if (key === 'ape' && String(msg).includes('Batch of more than 3 requests')) {
         console.warn('⛔ ApeChain batch limit hit — skip batch, no retry');
         return null;
       }
 
-      await rotateProvider(key);
-      await sleep(jitter(300 + i * 200));
+      // Network-ish failures: rotate once per attempt
+      if (isNetworkishError(err) || String(msg).toLowerCase().includes('timeout')) {
+        const current = getProvider(key);
+        const st = chains[key];
+        const failUrl =
+          current?._rpcUrl ||
+          (st.endpoints[st.pinnedIdx ?? -1] && st.endpoints[st.pinnedIdx ?? -1].url) ||
+          'unknown';
+
+        console.warn(`⚠️ [${key}] RPC network issue: ${err.message || code}`);
+        console.warn(`🔻 RPC failed [${key}]: ${failUrl}`);
+
+        if (retryOnceOnNetwork) {
+          await rotateProvider(key);
+          await sleep(jitter(300 + i * 200));
+          continue;
+        }
+        return null;
+      }
+
+      // Non-network, non-logical error: do not rotate; stop and return null
+      console.warn(`⚠️ [${key}] Non-network RPC error (no rotate): ${err.message || code}`);
+      return null;
     }
   }
 
@@ -438,4 +500,5 @@ module.exports = {
   safeRpcCall,
   getMaxBatchSize
 };
+
 
