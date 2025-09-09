@@ -29,13 +29,32 @@ function encryptPrivateKey(pk) {
 }
 
 async function tableHasColumn(pg, table, column) {
+  // Use pg_catalog to respect current search_path schemas
   const q = `
     SELECT 1
-      FROM information_schema.columns
-     WHERE table_name = $1 AND column_name = $2
+      FROM pg_catalog.pg_attribute a
+      JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+     WHERE c.relkind = 'r'
+       AND c.relname = $1
+       AND a.attname = $2
+       AND n.nspname = ANY (current_schemas(true))
      LIMIT 1`;
   const r = await pg.query(q, [table, column]).catch(() => ({ rowCount: 0 }));
   return r.rowCount > 0;
+}
+
+async function ensureVaultColumn(pg) {
+  const has = await tableHasColumn(pg, 'staking_config', 'vault_private_key');
+  if (has) return true;
+  // Try to auto-create the column
+  try {
+    await pg.query(`ALTER TABLE staking_config ADD COLUMN IF NOT EXISTS vault_private_key text;`);
+    return true;
+  } catch (e) {
+    console.error('❌ Auto-migrate vault_private_key failed:', e.message);
+    return false;
+  }
 }
 
 module.exports = {
@@ -89,7 +108,7 @@ module.exports = {
     await interaction.deferReply({ ephemeral: true });
 
     try {
-      // Resolve target project
+      // Resolve target project for this guild/network
       let contract;
       if (contractIn) {
         const norm = normalizeAddr(contractIn);
@@ -117,9 +136,9 @@ module.exports = {
         contract = String(found.rows[0].contract_address).toLowerCase();
       }
 
-      // Ensure column exists — show EXACT message requested if missing
-      const hasVaultCol = await tableHasColumn(pg, 'staking_config', 'vault_private_key');
-      if (!hasVaultCol) {
+      // Ensure the column exists (auto-migrate)
+      const ok = await ensureVaultColumn(pg);
+      if (!ok) {
         const msg =
           ' Database missing column staking_config.vault_private_key.\n' +
           'Run this migration and try again:\n' +
@@ -188,6 +207,7 @@ module.exports = {
     }
   }
 };
+
 
 
 
