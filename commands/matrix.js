@@ -33,7 +33,8 @@ const BORDER = '#1f2230';
 
 const LOG_CONCURRENCY = Math.max(1, Number(process.env.MATRIX_LOG_CONCURRENCY || 3));
 const METADATA_CONCURRENCY  = Math.max(4, Number(process.env.MATRIX_METADATA_CONCURRENCY || 10));
-const IMAGE_CONCURRENCY     = Math.max(3, Number(process.env.MATRIX_IMAGE_CONCURRENCY || 8));
+// Lower default fan-out to reduce gateway rate-limits; override via env if you want more
+const IMAGE_CONCURRENCY     = Math.max(2, Number(process.env.MATRIX_IMAGE_CONCURRENCY || 6));
 
 /* ===================== Keep-Alive Agents ===================== */
 const keepAliveHttp = new http.Agent({ keepAlive: true, maxSockets: 128 });
@@ -63,13 +64,16 @@ async function runPool(limit, items, worker) {
 const IPFS_GATES = [
   'https://cloudflare-ipfs.com/ipfs/',
   'https://ipfs.io/ipfs/',
+  'https://gateway.ipfs.io/ipfs/',
   'https://dweb.link/ipfs/',
   'https://gateway.pinata.cloud/ipfs/',
   'https://nftstorage.link/ipfs/',
   'https://cf-ipfs.com/ipfs/',
   'https://ipfs.filebase.io/ipfs/',
+  'https://w3s.link/ipfs/',
   'https://4everland.io/ipfs/',
-  'https://hardbin.com/ipfs/'
+  'https://hardbin.com/ipfs/',
+  'https://ipfs.infura.io/ipfs/'
 ];
 function normalizeScheme(u) {
   if (typeof u !== 'string') return u;
@@ -101,6 +105,7 @@ function parseDataUrl(u) {
 // Improved: handle subdomain IPFS → path, rank candidates by image-likelihood, de-prioritize videos/json
 function expandImageCandidates(raw) {
   let u = normalizeScheme(raw);
+  if (typeof u === 'string') u = u.trim();
   if (!u || typeof u !== 'string') return [];
 
   if (isDataUrl(u)) return [u];
@@ -371,6 +376,15 @@ async function fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant = 
 
   if (!total) total = items.length;
   return { items, total };
+}
+
+// Reservoir redirect endpoints that 302 to a best-effort static preview
+function reservoirRedirectCandidates(chain, contract, tokenId) {
+  const id = `${contract}:${String(tokenId)}`;
+  return [
+    `https://api.reservoir.tools/redirect/tokens/${id}/image/v1`,
+    `https://api.reservoir.tools/redirect/tokens/${id}/image`,
+  ];
 }
 
 /* ===================== Standards & enumerable ===================== */
@@ -856,6 +870,26 @@ async function loadImageWithCandidates(candidates, perTryMs = 9000, isBaseChain 
         continue;
       }
 
+      // If AVIF, immediately try proxy transcode to PNG and load
+      if (ctype.includes('image/avif') || u.toLowerCase().split('?')[0].endsWith('.avif')) {
+        for (const xform of IMG_PROXIES) {
+          const prox = xform(u);
+          try {
+            const ctrl2 = new AbortController();
+            const t2 = setTimeout(() => ctrl2.abort(), isBaseChain ? 16000 : 11000);
+            const agent2 = prox.startsWith('http:') ? keepAliveHttp : keepAliveHttps;
+            const res2 = await fetch(prox, { signal: ctrl2.signal, agent: agent2, headers: { 'Accept': 'image/*', 'User-Agent': UA, 'Connection': 'keep-alive' } });
+            clearTimeout(t2);
+            if (!res2.ok) continue;
+            const buf2 = Buffer.from(await res2.arrayBuffer());
+            if (!looksLikeImage(buf2)) continue;
+            const img2 = await loadImage(buf2);
+            if (img2 && img2.width > 0 && img2.height > 0) return img2;
+          } catch {}
+        }
+        continue;
+      }
+
       const ab = await res.arrayBuffer();
       const buf = Buffer.from(ab);
       if (!looksLikeImage(buf)) continue;
@@ -1183,6 +1217,11 @@ module.exports = {
       items = await backfillImagesFromOpenSea({ chain, contract, items });
     }
 
+    // Reservoir redirect fallback for any still-missing images (ETH/Base)
+    if ((chain === 'eth' || chain === 'base') && items.some(i => !i.image)) {
+      items = items.map(it => it.image ? it : ({ ...it, image: reservoirRedirectCandidates(chain, contract, it.tokenId) }));
+    }
+
     // Image preload
     status.step = `Loading images (${items.length})…`;
     let imgPct = 0;
@@ -1219,7 +1258,7 @@ module.exports = {
       }
     }
 
-    // FINAL RESCUE: reshuffle gateways & prefer image extensions for still-missing tiles
+    // FINAL RESCUE: reshuffle gateways & prefer image extensions for still-missing tiles (plus Reservoir redirects)
     const stillMissing = [];
     for (let i = 0; i < items.length; i++) if (!preloadedImgs[i]) stillMissing.push(i);
     if (stillMissing.length) {
@@ -1244,6 +1283,9 @@ module.exports = {
       const candidateLists = stillMissing.map(i => {
         const it = items[i];
         const cands = Array.isArray(it.image) ? it.image.slice() : [];
+        if (chain === 'eth' || chain === 'base') {
+          for (const x of reservoirRedirectCandidates(chain, contract, it.tokenId)) cands.push(x);
+        }
         return prefer(shuffle(cands));
       });
       const rescued = await runPool(Math.min(IMAGE_CONCURRENCY, 6), candidateLists, async (candList) => {
@@ -1287,6 +1329,7 @@ module.exports = {
     finalized = true;
   }
 };
+
 
 
 
