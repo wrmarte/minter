@@ -2,11 +2,10 @@
 // Resilient multi-RPC provider pool with per-chain rotation, cooldowns, safe calls, and windowed getLogs.
 // Namespaced logs for "matrix" so you see lines like: ✅ matrix:base pinned RPC: ...
 const { JsonRpcProvider } = require('ethers');
-const fetch = require('node-fetch');
 
-const NS = 'matrix'; // namespace tag for logs from the matrix features
+const NS = 'matrix';
 
-/* ---------- Static RPC pools (always included) ---------- */
+/* ---------- Static RPC pools ---------- */
 const STATIC_RPCS = {
   eth: [
     'https://ethereum-rpc.publicnode.com',
@@ -22,15 +21,15 @@ const STATIC_RPCS = {
     'https://base.llamarpc.com'
   ],
   ape: [
-    // Add/confirm your ApeChain mainnet RPCs here:
-    'https://rpc.apechain.com',          // example
-    'https://apechain.caldera.dev',      // example
+    // Add/confirm ApeChain RPCs here if used:
+    'https://rpc.apechain.com',
+    'https://apechain.caldera.dev',
   ]
 };
 
 /* ---------- State ---------- */
-const pools = new Map();       // chain -> { urls: string[], idx: number, lastFail: Map<url, ts>, cooldownMs, pinned?: string }
-const providers = new Map();   // chain -> active JsonRpcProvider
+const pools = new Map();       // chain -> { urls, idx, lastFail: Map<url,ts>, cooldownMs, pinned?: url }
+const providers = new Map();   // chain -> JsonRpcProvider
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const PER_ENDPOINT_COOLDOWN_MS = 6_000;
@@ -69,10 +68,8 @@ function logDown(chain, url) {
 
 /* ---------- Provider management ---------- */
 function makeProvider(url) {
-  // Ethers v6 JsonRpcProvider; no network auto-detect to avoid delays
   return new JsonRpcProvider(url, undefined, { batchMaxCount: 1, staticNetwork: undefined, polling: false });
 }
-
 function setActiveProvider(chain, url) {
   const provider = makeProvider(url);
   providers.set(chain, provider);
@@ -81,12 +78,9 @@ function setActiveProvider(chain, url) {
   logInfo(chain, `pinned RPC: ${url}`);
   return provider;
 }
-
 function nextUrl(chain) {
   const pool = ensurePool(chain);
   const { urls, lastFail } = pool;
-
-  // Find next non-cooled endpoint
   for (let i = 0; i < urls.length; i++) {
     const url = urls[(pool.idx + i) % urls.length];
     const lf = lastFail.get(url) || 0;
@@ -95,49 +89,36 @@ function nextUrl(chain) {
       return url;
     }
   }
-  // If all cooled, just advance and return
   pool.idx = (pool.idx + 1) % urls.length;
   return urls[pool.idx];
 }
-
 function markFail(chain, url) {
   const pool = ensurePool(chain);
   pool.lastFail.set(url, now());
   logDown(chain, url);
 }
 
-/**
- * Get a provider for a chain. `purpose` is for logging namespace (e.g., 'matrix').
- * We always return a provider (if we have at least one URL), rotating and pinning on demand.
- */
-function getProvider(chain /* 'eth'|'base'|'ape' */, purpose = NS) {
-  // purpose is currently only used for log tag consistency; `NS` constants format logs.
+/* ---------- Public API ---------- */
+function getProvider(chain) {
   ensurePool(chain);
   let provider = providers.get(chain);
   if (provider) return provider;
-
   const url = nextUrl(chain);
   return setActiveProvider(chain, url);
 }
 
-/* ---------- Safe RPC calls with rotation ---------- */
 const NETWORK_ERROR_CODES = new Set([
   'ETIMEDOUT','ECONNRESET','ENETUNREACH','EHOSTUNREACH','ECONNABORTED','SERVER_ERROR','TIMEOUT','NETWORK_ERROR'
 ]);
 
-/**
- * safeRpcCall(chain, fn) -> returns fn(provider) or null on failure.
- * If a network error is detected, rotate provider and retry once.
- */
 async function safeRpcCall(chain, fn, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
-  const provider = getProvider(chain, NS);
+  const provider = getProvider(chain);
   const url = pools.get(chain)?.pinned;
 
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    // fn should accept a provider
     const res = await fn(provider);
     clearTimeout(t);
     return res;
@@ -154,25 +135,19 @@ async function safeRpcCall(chain, fn, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
       await sleep(pools.get(chain).cooldownMs);
       setActiveProvider(chain, url2);
       try {
-        const res2 = await fn(getProvider(chain, NS));
+        const res2 = await fn(getProvider(chain));
         return res2;
       } catch (err2) {
         logWarn(chain, `non-network RPC error: ${err2?.message || err2}`);
         return null;
       }
     } else {
-      // Non-network error (like CALL_EXCEPTION / revert)
       logWarn(chain, `non-network RPC error: ${msg || code || 'unknown'}`);
       return null;
     }
   }
 }
 
-/* ---------- getLogs with windowing (resilient on Base) ---------- */
-/**
- * Splits [from..to] into safe chunks and queries getLogs per chunk, rotating on failures.
- * Returns concatenated logs.
- */
 async function getLogsWindowed(chain, params, fromBlock, toBlock, windowSize) {
   const isBase = chain === 'base';
   const size = windowSize || (isBase ? 9000 : 50000);
@@ -184,7 +159,7 @@ async function getLogsWindowed(chain, params, fromBlock, toBlock, windowSize) {
   while (start <= end) {
     const chunkTo = Math.min(end, start + size);
     const tryOnce = async () => {
-      const prov = getProvider(chain, NS);
+      const prov = getProvider(chain);
       try {
         const logs = await prov.getLogs({ ...params, fromBlock: start, toBlock: chunkTo });
         return logs || [];
@@ -207,8 +182,8 @@ async function getLogsWindowed(chain, params, fromBlock, toBlock, windowSize) {
 
     let logs = await tryOnce();
     if (logs === null) {
-      logs = await tryOnce(); // one retry after rotation
-      if (logs === null) logs = []; // give up on this chunk
+      logs = await tryOnce();
+      if (logs === null) logs = [];
     }
     out.push(...logs);
     start = chunkTo + 1;
@@ -217,10 +192,6 @@ async function getLogsWindowed(chain, params, fromBlock, toBlock, windowSize) {
   return out;
 }
 
-/* ---------- Optional: periodically refresh RPC lists (noop here) ---------- */
-// If you want to auto-augment pools with fetched RPCs every few hours, add code here.
-
-/* ---------- Exports ---------- */
 module.exports = {
   getProvider,
   safeRpcCall,
