@@ -218,6 +218,36 @@ client.login(process.env.DISCORD_BOT_TOKEN)
   });
 
 // =================== Slash registration + presence ticker ===================
+
+// --- Normalizer: ensure required options come first (recursively) ---
+function sortOptions(options = []) {
+  if (!Array.isArray(options)) return options;
+  const required = [];
+  const optional = [];
+
+  for (const opt of options) {
+    // type: 1 = SUB_COMMAND, 2 = SUB_COMMAND_GROUP
+    if (opt.type === 1 || opt.type === 2) {
+      if (Array.isArray(opt.options)) {
+        opt.options = sortOptions(opt.options);
+      }
+      // Subcommands must not have "required"
+      if ('required' in opt) delete opt.required;
+      optional.push(opt); // subcommands are not "required" options
+    } else {
+      (opt.required ? required : optional).push(opt);
+    }
+  }
+  return [...required, ...optional];
+}
+
+function normalizeCommandJSON(cmdJson) {
+  if (Array.isArray(cmdJson?.options)) {
+    cmdJson.options = sortOptions(cmdJson.options);
+  }
+  return cmdJson;
+}
+
 async function onClientReady() {
   if (client.__readyRan) return; // guard against double-run
   client.__readyRan = true;
@@ -234,7 +264,14 @@ async function onClientReady() {
       .filter(id => /^\d{17,20}$/.test(id));
 
     const rest = new REST({ version: '10' }).setToken(token);
-    const commands = client.commands.map(cmd => cmd.data?.toJSON?.()).filter(Boolean);
+
+    // Build JSON and normalize options ordering for Discord validation
+    const commands = client.commands
+      .map(cmd => {
+        const json = cmd.data?.toJSON?.();
+        return json ? normalizeCommandJSON(json) : null;
+      })
+      .filter(Boolean);
 
     try {
       console.log('⚙️ Auto-registering slash commands...');
