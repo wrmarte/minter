@@ -38,7 +38,7 @@ const IMAGE_CONCURRENCY     = Math.max(3, Number(process.env.MATRIX_IMAGE_CONCUR
 /* ===================== Keep-Alive Agents ===================== */
 const keepAliveHttp = new http.Agent({ keepAlive: true, maxSockets: 128 });
 const keepAliveHttps = new https.Agent({ keepAlive: true, maxSockets: 128 });
-const UA = 'Mozilla/5.0 (compatible; MatrixBot/1.2; +https://github.com/pimpsdev)';
+const UA = 'Mozilla/5.0 (compatible; MatrixBot/1.3; +https://github.com/pimpsdev)';
 
 /* ===================== Small Utils ===================== */
 function padTopicAddress(addr) { return '0x' + addr.toLowerCase().replace(/^0x/, '').padStart(64, '0'); }
@@ -97,37 +97,70 @@ function parseDataUrl(u) {
     return { mime, buffer: buf };
   } catch { return null; }
 }
+
+// Improved: handle subdomain IPFS → path, rank candidates by image-likelihood, de-prioritize videos/json
 function expandImageCandidates(raw) {
   let u = normalizeScheme(raw);
   if (!u || typeof u !== 'string') return [];
+
   if (isDataUrl(u)) return [u];
   if (/^ipfs:\/\//i.test(u)) return ipfsToHttp(u);
   if (/^ar:\/\//i.test(u))   return arToHttp(u);
-  const variants = [u];
+
+  const out = new Set();
+  const tryPush = (x) => { try { if (typeof x === 'string' && x) out.add(x); } catch {} };
+  tryPush(u);
+
   try {
     const url = new URL(u);
-    if ((/ipfs/i).test(url.hostname) && url.pathname.includes('/ipfs/')) {
-      const cidPath = url.pathname.slice(url.pathname.indexOf('/ipfs/') + 6);
-      for (const g of IPFS_GATES) {
-        try { variants.push(new URL(cidPath, g).href); } catch {}
-      }
+    const host = url.hostname.toLowerCase();
+    const path = url.pathname || '/';
+
+    // Already /ipfs/<cid> → replicate to all gateways
+    const ipfsIndex = path.indexOf('/ipfs/');
+    if (ipfsIndex >= 0) {
+      const cidPath = path.slice(ipfsIndex + 6).replace(/^\/+/, '');
+      for (const g of IPFS_GATES) tryPush(new URL(cidPath, g).href);
+    }
+
+    // Subdomain: <cid>.ipfs.<gateway>/rest → /ipfs/<cid>/rest on all gateways
+    if (host.includes('.ipfs.')) {
+      const sub = host.split('.ipfs.')[0]; // CID-ish
+      const rest = path.replace(/^\/+/, '');
+      const candidatePath = sub + (rest ? `/${rest}` : '');
+      for (const g of IPFS_GATES) tryPush(g + candidatePath);
     }
   } catch {}
-  return Array.from(new Set(variants));
+
+  const exRank = (s) => {
+    const q = s.split('?')[0].toLowerCase();
+    if (q.endsWith('.png'))  return 1;
+    if (q.endsWith('.jpg') || q.endsWith('.jpeg')) return 2;
+    if (q.endsWith('.gif'))  return 3;
+    if (q.endsWith('.webp')) return 4;
+    if (q.endsWith('.svg'))  return 5;
+    if (q.endsWith('.avif')) return 6;
+    if (q.endsWith('.json')) return 99;
+    if (q.endsWith('.mp4') || q.endsWith('.webm') || q.endsWith('.mov')) return 100;
+    return 50;
+  };
+
+  return Array.from(out).sort((a, b) => exRank(a) - exRank(b));
 }
+
 function looksLikeImage(buf) {
   if (!Buffer.isBuffer(buf) || buf.length < 8) return false;
   const sig = buf.slice(0, 12).toString('hex');
   if (buf.slice(0,8).equals(Buffer.from([0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A]))) return true; // PNG
   if (buf.slice(0,3).equals(Buffer.from([0xFF,0xD8,0xFF]))) return true; // JPG
   if (buf.slice(0,3).equals(Buffer.from([0x47,0x49,0x46]))) return true; // GIF
-  if (sig.startsWith('52494646') && sig.includes('57454250')) return true; // WEBP (RIFF....WEBP)
+  if (sig.startsWith('52494646') && sig.includes('57454250')) return true; // WEBP
   const head = buf.slice(0, 256).toString('utf8').trim().toLowerCase();
-  if (head.startsWith('<svg') || head.startsWith('<?xml')) return true; // SVG
+  if (head.startsWith('<svg') || head.startsWith('<?xml')) return true; // SVG served as text/xml
   return false;
 }
 
-/* ===================== JSON fetch ===================== */
+/* ===================== JSON/HTML fetch helpers ===================== */
 async function fetchJsonWithFallback(urlOrList, timeoutMs = 9000) {
   const urls = Array.isArray(urlOrList) ? urlOrList : [urlOrList];
   for (const u0 of urls) {
@@ -160,6 +193,24 @@ async function fetchJsonWithFallback(urlOrList, timeoutMs = 9000) {
     } catch {}
   }
   return null;
+}
+
+// If an URL serves HTML, try to resolve <meta property="og:image"> or twitter:image
+async function fetchOgImageFromHtml(url, timeoutMs = 7000) {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+    const res = await fetch(url, {
+      signal: ctrl.signal,
+      headers: { 'User-Agent': UA, 'Accept': 'text/html,*/*;q=0.8', 'Connection': 'keep-alive' }
+    });
+    clearTimeout(t);
+    if (!res.ok) return null;
+    const html = await res.text();
+    const m = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i)
+            || html.match(/<meta[^>]+name=["']twitter:image["'][^>]+content=["']([^"']+)["']/i);
+    return m ? m[1].trim() : null;
+  } catch { return null; }
 }
 
 /* ===================== Deep metadata image extractor ===================== */
@@ -503,9 +554,34 @@ async function fetchOwnerTokens1155Rolling({ chain, contract, owner, maxWant = E
   return { items: slice, total: ownedIds.length || slice.length };
 }
 
-/* ===================== Resolve tokenURI/uri (dual-probe) ===================== */
-function idHex64(tokenId) { const bn = BigInt(tokenId); return bn.toString(16).padStart(64, '0'); }
+/* ===================== Resolve tokenURI/uri (dual-probe with permutations) ===================== */
+function idHex64Lower(tokenId) {
+  return BigInt(tokenId).toString(16).padStart(64, '0');
+}
+function idHex64Upper(tokenId) {
+  return idHex64Lower(tokenId).toUpperCase();
+}
 const RESOLVED_URI_CACHE = new Map();
+
+function applyIdPermutations(u, tokenId) {
+  const dec = String(BigInt(tokenId));
+  const hex64 = idHex64Lower(tokenId);
+  const hex64U = idHex64Upper(tokenId);
+  const hex = BigInt(tokenId).toString(16);
+  const hexU = hex.toUpperCase();
+
+  const variants = new Set();
+  if (/\{id\}/i.test(u)) {
+    variants.add(u.replace(/\{id\}/gi, hex64));
+    variants.add(u.replace(/\{id\}/gi, hex64U));
+    variants.add(u.replace(/\{id\}/gi, hex));
+    variants.add(u.replace(/\{id\}/gi, hexU));
+    variants.add(u.replace(/\{id\}/gi, dec));
+  } else {
+    variants.add(u);
+  }
+  return Array.from(variants);
+}
 
 async function resolveMetadataURI({ chain, contract, tokenId, is1155Hint }) {
   const key = `${chain}:${contract}:${String(tokenId)}:${is1155Hint ? '1155' : 'auto'}`;
@@ -531,13 +607,15 @@ async function resolveMetadataURI({ chain, contract, tokenId, is1155Hint }) {
       } else {
         let uri = await safeRpcCallMatrix(chain, p => c1155.connect(p).uri(tokenId));
         if (!uri) throw new Error('no uri');
-        uri = normalizeScheme(uri).replace(/\{id\}/gi, idHex64(tokenId));
-        const list = /^ipfs:\/\//i.test(uri) ? ipfsToHttp(uri) : [uri];
-        RESOLVED_URI_CACHE.set(key, list);
-        return list;
+        uri = normalizeScheme(uri);
+        const variants = applyIdPermutations(uri, tokenId)
+          .flatMap(x => /^ipfs:\/\//i.test(x) ? ipfsToHttp(x) : [x]);
+        const dedup = Array.from(new Set(variants));
+        RESOLVED_URI_CACHE.set(key, dedup);
+        return dedup;
       }
     } catch {
-      // CALL_EXCEPTION / missing revert data → try the other mode
+      // try the other mode
     }
   }
   return null;
@@ -753,16 +831,31 @@ async function loadImageWithCandidates(candidates, perTryMs = 9000, isBaseChain 
     } catch {}
   }
 
-  // 2) Try fetch → decode via buffer
+  // 2) Fetch → buffer decode (and rescue HTML via og:image)
   for (const u of candidates) {
     if (isDataUrl(u)) continue;
     try {
       const ctrl = new AbortController();
       const t = setTimeout(() => ctrl.abort(), timeoutB);
       const agent = u.startsWith('http:') ? keepAliveHttp : keepAliveHttps;
-      const res = await fetch(u, { signal: ctrl.signal, agent, headers: { 'Accept': 'image/*', 'User-Agent': UA, 'Connection': 'keep-alive' } });
+      const res = await fetch(u, {
+        signal: ctrl.signal,
+        agent,
+        headers: { 'Accept': 'image/*,text/html;q=0.8', 'User-Agent': UA, 'Connection': 'keep-alive' }
+      });
       clearTimeout(t);
       if (!res.ok) continue;
+
+      const ctype = (res.headers.get('content-type') || '').toLowerCase();
+      if (ctype.includes('text/html')) {
+        const og = await fetchOgImageFromHtml(u).catch(() => null);
+        if (og) {
+          const embedded = await loadImageWithCandidates([og], 7000, isBaseChain);
+          if (embedded) return embedded;
+        }
+        continue;
+      }
+
       const ab = await res.arrayBuffer();
       const buf = Buffer.from(ab);
       if (!looksLikeImage(buf)) continue;
@@ -1108,7 +1201,7 @@ module.exports = {
       ].filter(Boolean)) }); })();
     }, chain === 'base');
 
-    // Last-chance: deep poke for missing
+    // Last-chance: deep metadata poke for missing
     const missingIdx = [];
     for (let i = 0; i < items.length; i++) if (!preloadedImgs[i]) missingIdx.push(i);
     if (missingIdx.length) {
@@ -1123,6 +1216,52 @@ module.exports = {
       const recovered = await preloadImages(missingIdx.map(i => items[i]), () => {}, chain === 'base');
       for (let k = 0; k < missingIdx.length; k++) {
         preloadedImgs[ missingIdx[k] ] = recovered[k] || preloadedImgs[ missingIdx[k] ];
+      }
+    }
+
+    // FINAL RESCUE: reshuffle gateways & prefer image extensions for still-missing tiles
+    const stillMissing = [];
+    for (let i = 0; i < items.length; i++) if (!preloadedImgs[i]) stillMissing.push(i);
+    if (stillMissing.length) {
+      const shuffle = (arr) => {
+        const a = arr.slice();
+        for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+        return a;
+      };
+      const prefer = (cands) => {
+        const r = (u) => {
+          const q = u.split('?')[0].toLowerCase();
+          if (q.endsWith('.png')) return 1;
+          if (q.endsWith('.jpg') || q.endsWith('.jpeg')) return 2;
+          if (q.endsWith('.gif')) return 3;
+          if (q.endsWith('.webp')) return 4;
+          if (q.endsWith('.svg')) return 5;
+          if (q.endsWith('.avif')) return 6;
+          return 50;
+        };
+        return cands.slice().sort((a,b)=>r(a)-r(b));
+      };
+      const candidateLists = stillMissing.map(i => {
+        const it = items[i];
+        const cands = Array.isArray(it.image) ? it.image.slice() : [];
+        return prefer(shuffle(cands));
+      });
+      const rescued = await runPool(Math.min(IMAGE_CONCURRENCY, 6), candidateLists, async (candList) => {
+        return await loadImageWithCandidates(candList, 12000, chain === 'base');
+      });
+      for (let k = 0; k < stillMissing.length; k++) {
+        if (rescued[k]) preloadedImgs[ stillMissing[k] ] = rescued[k];
+      }
+
+      if (process.env.MATRIX_DEBUG_URLS === '1') {
+        const missingAfter = [];
+        for (let i = 0; i < items.length; i++) if (!preloadedImgs[i]) missingAfter.push(i);
+        if (missingAfter.length) {
+          console.warn('🔍 Matrix missing images for tokenIds:', missingAfter.map(i => items[i].tokenId));
+          for (const i of missingAfter) {
+            console.warn(`• #${items[i].tokenId}`, items[i].image);
+          }
+        }
       }
     }
 
@@ -1148,6 +1287,7 @@ module.exports = {
     finalized = true;
   }
 };
+
 
 
 
