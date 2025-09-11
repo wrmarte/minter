@@ -142,7 +142,14 @@ async function fetchJsonWithFallback(urlOrList, timeoutMs = 8000) {
       const ctrl = new AbortController();
       const t = setTimeout(() => ctrl.abort(), timeoutMs);
       const agent = u.startsWith('http:') ? keepAliveHttp : keepAliveHttps;
-      const res = await fetch(u, { signal: ctrl.signal, agent, headers: { 'Accept': 'application/json,*/*;q=0.8' } });
+      const res = await fetch(u, {
+        signal: ctrl.signal,
+        agent,
+        headers: {
+          'Accept': 'application/json,*/*;q=0.8',
+          'User-Agent': 'MatrixBot/1.0 (+https://discordapp.com)'
+        }
+      });
       clearTimeout(t);
       if (!res.ok) continue;
       const data = await res.json().catch(() => null);
@@ -218,17 +225,14 @@ const ENS_RPC_FALLBACKS = [
   'https://1rpc.io/eth',
   'https://ethereum-rpc.publicnode.com'
 ];
-function withTimeout(promise, ms = 4000, reason = 'ENS timeout') {
-  return Promise.race([
-    promise,
-    new Promise((_, rej) => setTimeout(() => rej(new Error(reason)), ms))
-  ]);
+function withENS(future, ms = 4000, reason = 'ENS timeout') {
+  return Promise.race([future, new Promise((_, rej) => setTimeout(() => rej(new Error(reason)), ms))]);
 }
 async function tryResolveWithCurrentProvider(name) {
   try {
     const prov = getProvider('eth');
     if (!prov) return null;
-    const addr = await withTimeout(prov.resolveName(name), 4000);
+    const addr = await withENS(prov.resolveName(name), 4000);
     return addr || null;
   } catch { return null; }
 }
@@ -236,7 +240,7 @@ async function tryResolveWithFallbacks(name) {
   for (const url of ENS_RPC_FALLBACKS) {
     try {
       const prov = new ethers.JsonRpcProvider(url);
-      const addr = await withTimeout(prov.resolveName(name), 4000);
+      const addr = await withENS(prov.resolveName(name), 4000);
       if (addr) return addr;
     } catch {}
   }
@@ -524,11 +528,12 @@ async function resolveMetadataURI({ chain, contract, tokenId, is1155 }) {
 }
 
 /* ===================== Enrich images (with progress + deep fallback) ===================== */
-async function enrichImages({ chain, contract, items, is1155, onProgress }) {
+async function enrichImages({ chain, contract, items, is1155, onProgress, concurrency }) {
+  const LIMIT = Math.max(1, concurrency || METADATA_CONCURRENCY);
   let done = 0;
   const upd = () => onProgress?.(++done, items.length);
 
-  const results = await runPool(METADATA_CONCURRENCY, items, async (it) => {
+  const results = await runPool(LIMIT, items, async (it) => {
     if (it.image) { upd(); return it; }
     try {
       const uriList = await resolveMetadataURI({ chain, contract, tokenId: it.tokenId, is1155 });
@@ -541,7 +546,9 @@ async function enrichImages({ chain, contract, items, is1155, onProgress }) {
           try { meta = JSON.parse(parsed.buffer.toString('utf8')); } catch {}
         }
       }
-      if (!meta) meta = await fetchJsonWithFallback(uriList, chain === 'base' ? 12000 : 8000);
+      // give Base a bit more time (some gateways are slower)
+      const jsonTimeout = chain === 'base' ? 14000 : 9000;
+      if (!meta) meta = await fetchJsonWithFallback(uriList, jsonTimeout);
 
       let img =
         meta?.image ||
@@ -648,7 +655,6 @@ async function backfillImagesFromMoralis({ chain, contract, items }) {
         const res = await fetch(url.toString(), { headers });
         if (!res.ok) return;
         const j = await res.json();
-        // Moralis returns .normalized_metadata or .metadata
         const metaRaw = j?.normalized_metadata || j?.metadata;
         let img = null;
         if (metaRaw) {
@@ -662,7 +668,6 @@ async function backfillImagesFromMoralis({ chain, contract, items }) {
             }
           }
         }
-        // fallback to Moralis top-level fields if present
         const timg = j?.media?.media_collection?.high?.url || j?.media?.original_media_url || j?.image || null;
         if (!img && timg) {
           const cands = expandImageCandidates(timg);
@@ -734,7 +739,7 @@ async function loadImageWithCandidates(candidates, perTryMs = 8000, isBaseChain 
       }
     } catch {}
   }
-  // Pass B: fetch as buffer with Accept header then decode
+  // Pass B: fetch buffer with Accept header then decode
   for (const u of candidates) {
     if (isDataUrl(u)) continue;
     try {
@@ -796,7 +801,7 @@ async function composeGrid(items, preloadedImgs) {
 
     const img = preloadedImgs?.[i];
     if (!img || !img.width || !img.height) {
-      // fallback tile (higher contrast so it doesn't look like a "black hole")
+      // fallback tile (high contrast)
       ctx.fillStyle = '#151a23'; ctx.fillRect(x, y, tile, tile);
       ctx.fillStyle = '#e2ebff';
       ctx.font = `bold ${Math.max(18, Math.round(tile * 0.18))}px sans-serif`;
@@ -805,6 +810,7 @@ async function composeGrid(items, preloadedImgs) {
       continue;
     }
 
+    // cover-fit crop with guards
     const scale = Math.max(tile / img.width, tile / img.height);
     if (!isFinite(scale) || scale <= 0) {
       ctx.fillStyle = '#151a23'; ctx.fillRect(x, y, tile, tile);
@@ -1020,8 +1026,12 @@ module.exports = {
     status.step = 'Enriching images (metadata)…';
     status.enrich = '0% [────────────────]';
     await pushStatus();
+
+    // Cap metadata concurrency on Base to avoid >10 batch coalescing
+    const metaLimit = chain === 'base' ? Math.min(METADATA_CONCURRENCY, 8) : METADATA_CONCURRENCY;
+
     items = await enrichImages({
-      chain, contract, items, is1155: std.is1155,
+      chain, contract, items, is1155: std.is1155, concurrency: metaLimit,
       onProgress: async (done, total) => {
         const pct = clamp(Math.floor((done/total)*100), 0, 100);
         if (pct !== lastEnPct) { lastEnPct = pct; status.enrich = `${pct}% [${bar(pct)}]`; await pushStatus(); }
@@ -1046,14 +1056,14 @@ module.exports = {
       await pushStatus();
     }
 
-    // NEW: Moralis fallback (optional)
+    // Optional Moralis fallback
     if (items.some(i => !i.image)) {
       status.step = 'Backfilling images (Moralis)…';
       await pushStatus();
       items = await backfillImagesFromMoralis({ chain, contract, items });
     }
 
-    // NEW: OpenSea fallback (optional)
+    // Optional OpenSea fallback
     if (items.some(i => !i.image)) {
       status.step = 'Backfilling images (OpenSea)…';
       await pushStatus();
@@ -1121,20 +1131,3 @@ module.exports = {
     finalized = true;
   }
 };
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
