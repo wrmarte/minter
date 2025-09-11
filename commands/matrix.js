@@ -38,7 +38,7 @@ const IMAGE_CONCURRENCY     = Math.max(3, Number(process.env.MATRIX_IMAGE_CONCUR
 /* ===================== Keep-Alive Agents ===================== */
 const keepAliveHttp = new http.Agent({ keepAlive: true, maxSockets: 128 });
 const keepAliveHttps = new https.Agent({ keepAlive: true, maxSockets: 128 });
-const UA = 'Mozilla/5.0 (compatible; MatrixBot/1.0; +https://github.com)';
+const UA = 'Mozilla/5.0 (compatible; MatrixBot/1.2; +https://github.com/pimpsdev)';
 
 /* ===================== Small Utils ===================== */
 function padTopicAddress(addr) { return '0x' + addr.toLowerCase().replace(/^0x/, '').padStart(64, '0'); }
@@ -121,9 +121,9 @@ function looksLikeImage(buf) {
   if (buf.slice(0,8).equals(Buffer.from([0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A]))) return true; // PNG
   if (buf.slice(0,3).equals(Buffer.from([0xFF,0xD8,0xFF]))) return true; // JPG
   if (buf.slice(0,3).equals(Buffer.from([0x47,0x49,0x46]))) return true; // GIF
-  if (sig.startsWith('52494646') && sig.includes('57454250')) return true; // WEBP
+  if (sig.startsWith('52494646') && sig.includes('57454250')) return true; // WEBP (RIFF....WEBP)
   const head = buf.slice(0, 256).toString('utf8').trim().toLowerCase();
-  if (head.startsWith('<svg') || head.startsWith('<?xml')) return true;
+  if (head.startsWith('<svg') || head.startsWith('<?xml')) return true; // SVG
   return false;
 }
 
@@ -503,34 +503,44 @@ async function fetchOwnerTokens1155Rolling({ chain, contract, owner, maxWant = E
   return { items: slice, total: ownedIds.length || slice.length };
 }
 
-/* ===================== Resolve tokenURI/uri ===================== */
+/* ===================== Resolve tokenURI/uri (dual-probe) ===================== */
 function idHex64(tokenId) { const bn = BigInt(tokenId); return bn.toString(16).padStart(64, '0'); }
 const RESOLVED_URI_CACHE = new Map();
-async function resolveMetadataURI({ chain, contract, tokenId, is1155 }) {
-  const key = `${chain}:${contract}:${String(tokenId)}:${is1155 ? '1155' : '721'}`;
+
+async function resolveMetadataURI({ chain, contract, tokenId, is1155Hint }) {
+  const key = `${chain}:${contract}:${String(tokenId)}:${is1155Hint ? '1155' : 'auto'}`;
   const cached = RESOLVED_URI_CACHE.get(key);
   if (cached) return cached;
 
   const provider = getProviderMatrix(chain);
   if (!provider) return null;
 
-  if (is1155) {
-    const c = new Contract(contract, ['function uri(uint256) view returns (string)'], provider);
-    let uri = await safeRpcCallMatrix(chain, p => c.connect(p).uri(tokenId));
-    if (!uri) return null;
-    uri = normalizeScheme(uri).replace(/\{id\}/gi, idHex64(tokenId));
-    const list = /^ipfs:\/\//i.test(uri) ? ipfsToHttp(uri) : [uri];
-    RESOLVED_URI_CACHE.set(key, list);
-    return list;
-  } else {
-    const c = new Contract(contract, ['function tokenURI(uint256) view returns (string)'], provider);
-    let uri = await safeRpcCallMatrix(chain, p => c.connect(p).tokenURI(tokenId));
-    if (!uri) return null;
-    uri = normalizeScheme(uri);
-    const list = /^ipfs:\/\//i.test(uri) ? ipfsToHttp(uri) : [uri];
-    RESOLVED_URI_CACHE.set(key, list);
-    return list;
+  const c721  = new Contract(contract, ['function tokenURI(uint256) view returns (string)'], provider);
+  const c1155 = new Contract(contract, ['function uri(uint256) view returns (string)'], provider);
+
+  const order = is1155Hint ? ['1155','721'] : ['721','1155'];
+  for (const mode of order) {
+    try {
+      if (mode === '721') {
+        let uri = await safeRpcCallMatrix(chain, p => c721.connect(p).tokenURI(tokenId));
+        if (!uri) throw new Error('no tokenURI');
+        uri = normalizeScheme(uri);
+        const list = /^ipfs:\/\//i.test(uri) ? ipfsToHttp(uri) : [uri];
+        RESOLVED_URI_CACHE.set(key, list);
+        return list;
+      } else {
+        let uri = await safeRpcCallMatrix(chain, p => c1155.connect(p).uri(tokenId));
+        if (!uri) throw new Error('no uri');
+        uri = normalizeScheme(uri).replace(/\{id\}/gi, idHex64(tokenId));
+        const list = /^ipfs:\/\//i.test(uri) ? ipfsToHttp(uri) : [uri];
+        RESOLVED_URI_CACHE.set(key, list);
+        return list;
+      }
+    } catch {
+      // CALL_EXCEPTION / missing revert data → try the other mode
+    }
   }
+  return null;
 }
 
 /* ===================== Image enrichment & backfills ===================== */
@@ -541,7 +551,9 @@ async function enrichImages({ chain, contract, items, is1155, onProgress }) {
   const results = await runPool(METADATA_CONCURRENCY, items, async (it) => {
     if (it.image) { upd(); return it; }
     try {
-      const uriList = await resolveMetadataURI({ chain, contract, tokenId: it.tokenId, is1155 });
+      const uriList = await resolveMetadataURI({
+        chain, contract, tokenId: it.tokenId, is1155Hint: is1155
+      });
       if (!uriList) { upd(); return it; }
 
       let meta = null;
@@ -716,10 +728,16 @@ async function backfillImagesFromOpenSea({ chain, contract, items }) {
 }
 
 /* ===================== Robust image loading ===================== */
+const IMG_PROXIES = [
+  // remove if you don't want a proxy fallback:
+  (u) => `https://images.weserv.nl/?url=${encodeURIComponent(u)}&output=png`
+];
+
 async function loadImageWithCandidates(candidates, perTryMs = 9000, isBaseChain = false) {
   const timeoutA = isBaseChain ? Math.max(perTryMs, 12000) : perTryMs;
   const timeoutB = isBaseChain ? Math.max(perTryMs, 16000) : Math.max(perTryMs, 11000);
 
+  // 1) Try direct loadImage
   for (const u of candidates) {
     try {
       if (isDataUrl(u)) {
@@ -734,6 +752,8 @@ async function loadImageWithCandidates(candidates, perTryMs = 9000, isBaseChain 
       }
     } catch {}
   }
+
+  // 2) Try fetch → decode via buffer
   for (const u of candidates) {
     if (isDataUrl(u)) continue;
     try {
@@ -749,6 +769,26 @@ async function loadImageWithCandidates(candidates, perTryMs = 9000, isBaseChain 
       const img = await loadImage(buf);
       if (img && img.width > 0 && img.height > 0) return img;
     } catch {}
+  }
+
+  // 3) Proxy fallback (optional)
+  for (const u0 of candidates) {
+    if (isDataUrl(u0)) continue;
+    for (const xform of IMG_PROXIES) {
+      const u = xform(u0);
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), isBaseChain ? 16000 : 11000);
+        const agent = u.startsWith('http:') ? keepAliveHttp : keepAliveHttps;
+        const res = await fetch(u, { signal: ctrl.signal, agent, headers: { 'Accept': 'image/*', 'User-Agent': UA, 'Connection': 'keep-alive' } });
+        clearTimeout(t);
+        if (!res.ok) continue;
+        const buf = Buffer.from(await res.arrayBuffer());
+        if (!looksLikeImage(buf)) continue;
+        const img = await loadImage(buf);
+        if (img && img.width > 0 && img.height > 0) return img;
+      } catch {}
+    }
   }
   return null;
 }
@@ -974,7 +1014,7 @@ module.exports = {
       totalOwned = Math.max(totalOwned, en.total || 0, items.length);
     }
 
-    // On-chain deep scan only if needed (skip on Base if Reservoir gave us results)
+    // On-chain deep scan only if needed (skip on Base if Reservoir gave enough images)
     if (items.length < maxWant && !(chain === 'base' && usedReservoir)) {
       let lastPct = -1;
       status.step = std.is1155 ? 'Deep scan (ERC1155)…' : (chain === 'base' ? 'Deep scan (Base-safe)…' : 'Scanning logs…');
@@ -1020,10 +1060,13 @@ module.exports = {
       await pushStatus();
     }
 
-    // Then tokenURI/uri metadata enrichment
-    if (items.some(i => !i.image)) {
+    // Only enrich on-chain on Base if we still miss a lot (avoid hammering during RPC issues)
+    const needOnChainMeta = items.some(i => !i.image);
+    const shouldEnrichOnChain = needOnChainMeta && !(chain === 'base' && items.filter(i => i.image).length >= Math.min(items.length, 12));
+
+    if (shouldEnrichOnChain) {
       let lastEnPct = -1;
-      status.step = 'Enriching images (tokenURI)…';
+      status.step = 'Enriching images (tokenURI/uri)…';
       status.enrich = '0% [────────────────]';
       await pushStatus();
       items = await enrichImages({
@@ -1071,7 +1114,7 @@ module.exports = {
     if (missingIdx.length) {
       await Promise.all(missingIdx.map(async (i) => {
         try {
-          const uriList = await resolveMetadataURI({ chain, contract, tokenId: items[i].tokenId, is1155: std.is1155 });
+          const uriList = await resolveMetadataURI({ chain, contract, tokenId: items[i].tokenId, is1155Hint: std.is1155 });
           const meta = uriList ? await fetchJsonWithFallback(uriList, chain === 'base' ? 13000 : 9000) : null;
           const cands = meta ? collectAllImageCandidates(meta) : [];
           if (cands.length) items[i] = { ...items[i], image: cands };
@@ -1090,7 +1133,7 @@ module.exports = {
       `Owner: \`${ownerDisplay}\`${ownerDisplay.endsWith('.eth') ? `\nResolved: \`${owner}\`` : ''}`,
       `Chain: \`${chain}\``,
       `**Showing ${items.length} of ${totalOwned || items.length} owned**`,
-      ...(chain === 'ape' && !usedReservoir ? ['*(ApeChain via on-chain scan)*'] : [])
+      ...(chain === 'ape' ? ['*(ApeChain may rely on on-chain scan)*'] : [])
     ].join('\n');
 
     const embed = new EmbedBuilder()
@@ -1105,5 +1148,6 @@ module.exports = {
     finalized = true;
   }
 };
+
 
 
