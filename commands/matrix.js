@@ -25,13 +25,14 @@ const GAP = 8;
 const BG = '#0f1115';
 const BORDER = '#1f2230';
 
-// Deep-scan tuning (env overridable)
-const LOG_WINDOW_BASE = Math.max(10000, Number(process.env.MATRIX_LOG_WINDOW_BASE || 200000));
-const LOG_CONCURRENCY = Math.max(1, Number(process.env.MATRIX_LOG_CONCURRENCY || 4));
+// Base chain log limits & concurrency tuning
+const BASE_LOG_WINDOW_SAFE = Math.max(1000, Math.min(Number(process.env.MATRIX_BASE_LOG_WINDOW || 9500), 9500));
+const BASE_LOG_CONCURRENCY = Math.max(1, Number(process.env.MATRIX_BASE_LOG_CONCURRENCY || 2));
 
 // Concurrency knobs (env overridable)
-const METADATA_CONCURRENCY = Math.max(4, Number(process.env.MATRIX_METADATA_CONCURRENCY || 12));
-const IMAGE_CONCURRENCY    = Math.max(4, Number(process.env.MATRIX_IMAGE_CONCURRENCY || 12));
+const LOG_CONCURRENCY       = Math.max(1, Number(process.env.MATRIX_LOG_CONCURRENCY || 4));
+const METADATA_CONCURRENCY  = Math.max(4, Number(process.env.MATRIX_METADATA_CONCURRENCY || 12));
+const IMAGE_CONCURRENCY     = Math.max(4, Number(process.env.MATRIX_IMAGE_CONCURRENCY || 12));
 
 /* ===================== Keep-Alive Agents ===================== */
 const keepAliveHttp = new http.Agent({ keepAlive: true, maxSockets: 128 });
@@ -142,14 +143,7 @@ async function fetchJsonWithFallback(urlOrList, timeoutMs = 8000) {
       const ctrl = new AbortController();
       const t = setTimeout(() => ctrl.abort(), timeoutMs);
       const agent = u.startsWith('http:') ? keepAliveHttp : keepAliveHttps;
-      const res = await fetch(u, {
-        signal: ctrl.signal,
-        agent,
-        headers: {
-          'Accept': 'application/json,*/*;q=0.8',
-          'User-Agent': 'MatrixBot/1.0 (+https://discordapp.com)'
-        }
-      });
+      const res = await fetch(u, { signal: ctrl.signal, agent, headers: { 'Accept': 'application/json,*/*;q=0.8' } });
       clearTimeout(t);
       if (!res.ok) continue;
       const data = await res.json().catch(() => null);
@@ -225,14 +219,17 @@ const ENS_RPC_FALLBACKS = [
   'https://1rpc.io/eth',
   'https://ethereum-rpc.publicnode.com'
 ];
-function withENS(future, ms = 4000, reason = 'ENS timeout') {
-  return Promise.race([future, new Promise((_, rej) => setTimeout(() => rej(new Error(reason)), ms))]);
+function withTimeout(promise, ms = 4000, reason = 'ENS timeout') {
+  return Promise.race([
+    promise,
+    new Promise((_, rej) => setTimeout(() => rej(new Error(reason)), ms))
+  ]);
 }
 async function tryResolveWithCurrentProvider(name) {
   try {
     const prov = getProvider('eth');
     if (!prov) return null;
-    const addr = await withENS(prov.resolveName(name), 4000);
+    const addr = await withTimeout(prov.resolveName(name), 4000);
     return addr || null;
   } catch { return null; }
 }
@@ -240,7 +237,7 @@ async function tryResolveWithFallbacks(name) {
   for (const url of ENS_RPC_FALLBACKS) {
     try {
       const prov = new ethers.JsonRpcProvider(url);
-      const addr = await withENS(prov.resolveName(name), 4000);
+      const addr = await withTimeout(prov.resolveName(name), 4000);
       if (addr) return addr;
     } catch {}
   }
@@ -332,15 +329,6 @@ async function detectTokenStandard(chain, contract) {
 }
 
 /* ===================== Enumerable (ERC721 only) ===================== */
-async function detectEnumerable(chain, contract) {
-  const provider = getProvider(chain);
-  if (!provider) return false;
-  const erc165 = new Contract(contract, ['function supportsInterface(bytes4) view returns (bool)'], provider);
-  try {
-    const ok = await safeRpcCall(chain, p => erc165.connect(p).supportsInterface('0x780e9d63')); // ERC721Enumerable
-    return !!ok;
-  } catch { return false; }
-}
 async function fetchOwnerTokensEnumerable({ chain, contract, owner, maxWant = ENV_MAX }) {
   const provider = getProvider(chain);
   if (!provider) return { items: [], total: 0, enumerable: false };
@@ -370,6 +358,42 @@ async function fetchOwnerTokensEnumerable({ chain, contract, owner, maxWant = EN
   }
 }
 
+/* ===================== getLogs windowing (Base-safe) ===================== */
+async function getLogsWindowed(chain, baseParams, fromBlock, toBlock, {
+  maxSpan = BASE_LOG_WINDOW_SAFE,
+  concurrency = BASE_LOG_CONCURRENCY
+} = {}) {
+  const spans = [];
+  let start = fromBlock;
+  while (start <= toBlock) {
+    const end = Math.min(toBlock, start + maxSpan - 1);
+    spans.push({ fromBlock: start, toBlock: end });
+    start = end + 1;
+  }
+
+  const out = [];
+  let i = 0;
+  async function worker() {
+    while (i < spans.length) {
+      const idx = i++;
+      const { fromBlock: fb, toBlock: tb } = spans[idx];
+      try {
+        const logs = await safeRpcCall(
+          chain,
+          p => p.getLogs({ ...baseParams, fromBlock: fb, toBlock: tb }),
+          { retries: 4, perCallTimeoutMs: 15000 }
+        );
+        if (Array.isArray(logs)) out.push(...logs);
+      } catch {}
+      await new Promise(r => setTimeout(r, 15 + Math.floor(Math.random() * 15)));
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(concurrency, spans.length) }, worker);
+  await Promise.all(workers);
+  return out;
+}
+
 /* ===================== On-chain deep scan ===================== */
 // ERC721: Transfer(address,address,uint256)
 async function fetchOwnerTokens721Rolling({ chain, contract, owner, maxWant = ENV_MAX, deep = false, onProgress }) {
@@ -379,8 +403,9 @@ async function fetchOwnerTokens721Rolling({ chain, contract, owner, maxWant = EN
   const head = await safeRpcCall(chain, p => p.getBlockNumber()) || 0;
 
   const isBase = chain === 'base';
-  const WINDOW = isBase ? LOG_WINDOW_BASE : 60000;
-  const MAX_WINDOWS = deep ? 500 : (isBase ? 80 : 120);
+  const WINDOW = isBase ? BASE_LOG_WINDOW_SAFE : 60000;
+  const LOG_CONC = isBase ? BASE_LOG_CONCURRENCY : LOG_CONCURRENCY;
+  const MAX_WINDOWS = deep ? 500 : (isBase ? 120 : 120);
 
   const topic0 = ethers.id('Transfer(address,address,uint256)');
   const topicTo   = padTopicAddress(owner);
@@ -398,17 +423,23 @@ async function fetchOwnerTokens721Rolling({ chain, contract, owner, maxWant = EN
   let processed = 0;
   const update = async () => { if (typeof onProgress === 'function') await onProgress(++processed, windows.length); };
 
-  for (let i = 0; i < windows.length; i += LOG_CONCURRENCY) {
-    const chunk = windows.slice(i, i + LOG_CONCURRENCY);
+  for (let i = 0; i < windows.length; i += LOG_CONC) {
+    const chunk = windows.slice(i, i + LOG_CONC);
     await Promise.all(chunk.map(async ({ fromBlock, toBlock }) => {
       let inLogs = [], outLogs = [];
       try {
-        inLogs = await safeRpcCall(chain, p => p.getLogs({ address: contract.toLowerCase(), topics: [topic0, null, topicTo], fromBlock, toBlock })) || [];
+        const paramsIn  = { address: contract.toLowerCase(), topics: [topic0, null, topicTo] };
+        const paramsOut = { address: contract.toLowerCase(), topics: [topic0, topicFrom, null] };
+        if (isBase) {
+          inLogs  = await getLogsWindowed(chain, paramsIn,  fromBlock, toBlock);
+          outLogs = await getLogsWindowed(chain, paramsOut, fromBlock, toBlock);
+        } else {
+          inLogs  = await safeRpcCall(chain, p => p.getLogs({ ...paramsIn,  fromBlock, toBlock }))  || [];
+          outLogs = await safeRpcCall(chain, p => p.getLogs({ ...paramsOut, fromBlock, toBlock })) || [];
+        }
       } catch {}
-      try {
-        outLogs = await safeRpcCall(chain, p => p.getLogs({ address: contract.toLowerCase(), topics: [topic0, topicFrom, null], fromBlock, toBlock })) || [];
-      } catch {}
-      for (const log of inLogs) { let parsed; try { parsed = iface.parseLog(log); } catch { continue; } owned.add(parsed.args.tokenId.toString()); }
+
+      for (const log of inLogs)  { let parsed; try { parsed = iface.parseLog(log); } catch { continue; } owned.add(parsed.args.tokenId.toString()); }
       for (const log of outLogs) { let parsed; try { parsed = iface.parseLog(log); } catch { continue; } owned.delete(parsed.args.tokenId.toString()); }
       await update();
     }));
@@ -431,7 +462,8 @@ async function fetchOwnerTokens1155Rolling({ chain, contract, owner, maxWant = E
   const head = await safeRpcCall(chain, p => p.getBlockNumber()) || 0;
 
   const isBase = chain === 'base';
-  const WINDOW = isBase ? LOG_WINDOW_BASE : 60000;
+  const WINDOW = isBase ? BASE_LOG_WINDOW_SAFE : 60000;
+  const LOG_CONC = isBase ? BASE_LOG_CONCURRENCY : LOG_CONCURRENCY;
   const MAX_WINDOWS = deep ? 500 : (isBase ? 120 : 160);
 
   const topicSingle = ethers.id('TransferSingle(address,address,address,uint256,uint256)');
@@ -458,28 +490,34 @@ async function fetchOwnerTokens1155Rolling({ chain, contract, owner, maxWant = E
     balances.set(key, next);
   };
 
-  for (let i = 0; i < windows.length; i += LOG_CONCURRENCY) {
-    const chunk = windows.slice(i, i + LOG_CONCURRENCY);
+  for (let i = 0; i < windows.length; i += LOG_CONC) {
+    const chunk = windows.slice(i, i + LOG_CONC);
     await Promise.all(chunk.map(async ({ fromBlock, toBlock }) => {
       let sIn = [], sOut = [], bIn = [], bOut = [];
       try {
-        sIn  = await safeRpcCall(chain, p => p.getLogs({ address: contract.toLowerCase(), topics: [topicSingle, null, null, topicTo],  fromBlock, toBlock })) || [];
-      } catch {}
-      try {
-        sOut = await safeRpcCall(chain, p => p.getLogs({ address: contract.toLowerCase(), topics: [topicSingle, null, topicFrom, null], fromBlock, toBlock })) || [];
-      } catch {}
-      try {
-        bIn  = await safeRpcCall(chain, p => p.getLogs({ address: contract.toLowerCase(), topics: [topicBatch,  null, null, topicTo],  fromBlock, toBlock })) || [];
-      } catch {}
-      try {
-        bOut = await safeRpcCall(chain, p => p.getLogs({ address: contract.toLowerCase(), topics: [topicBatch,  null, topicFrom, null], fromBlock, toBlock })) || [];
+        const paramsSingleIn  = { address: contract.toLowerCase(), topics: [topicSingle, null, null, topicTo] };
+        const paramsSingleOut = { address: contract.toLowerCase(), topics: [topicSingle, null, topicFrom, null] };
+        const paramsBatchIn   = { address: contract.toLowerCase(), topics: [topicBatch,  null, null, topicTo] };
+        const paramsBatchOut  = { address: contract.toLowerCase(), topics: [topicBatch,  null, topicFrom, null] };
+
+        if (isBase) {
+          sIn  = await getLogsWindowed(chain, paramsSingleIn,  fromBlock, toBlock);
+          sOut = await getLogsWindowed(chain, paramsSingleOut, fromBlock, toBlock);
+          bIn  = await getLogsWindowed(chain, paramsBatchIn,   fromBlock, toBlock);
+          bOut = await getLogsWindowed(chain, paramsBatchOut,  fromBlock, toBlock);
+        } else {
+          sIn  = await safeRpcCall(chain, p => p.getLogs({ ...paramsSingleIn,  fromBlock, toBlock })) || [];
+          sOut = await safeRpcCall(chain, p => p.getLogs({ ...paramsSingleOut, fromBlock, toBlock })) || [];
+          bIn  = await safeRpcCall(chain, p => p.getLogs({ ...paramsBatchIn,   fromBlock, toBlock })) || [];
+          bOut = await safeRpcCall(chain, p => p.getLogs({ ...paramsBatchOut,  fromBlock, toBlock })) || [];
+        }
       } catch {}
 
       for (const log of sIn)  { let parsed; try { parsed = iface.parseLog(log); } catch { continue; } add(parsed.args.id,  parsed.args.value); }
       for (const log of sOut) { let parsed; try { parsed = iface.parseLog(log); } catch { continue; } add(parsed.args.id, -parsed.args.value); }
       for (const log of bIn)  { let parsed; try { parsed = iface.parseLog(log); } catch { continue; }
         const ids = parsed.args.ids, vals = parsed.args.values;
-        for (let i = 0; i < ids.length; i++) add(ids[i], vals[i]);
+        for (let i = 0; i < ids.length; i++) add(ids[i],  vals[i]);
       }
       for (const log of bOut) { let parsed; try { parsed = iface.parseLog(log); } catch { continue; }
         const ids = parsed.args.ids, vals = parsed.args.values;
@@ -528,12 +566,11 @@ async function resolveMetadataURI({ chain, contract, tokenId, is1155 }) {
 }
 
 /* ===================== Enrich images (with progress + deep fallback) ===================== */
-async function enrichImages({ chain, contract, items, is1155, onProgress, concurrency }) {
-  const LIMIT = Math.max(1, concurrency || METADATA_CONCURRENCY);
+async function enrichImages({ chain, contract, items, is1155, onProgress }) {
   let done = 0;
   const upd = () => onProgress?.(++done, items.length);
 
-  const results = await runPool(LIMIT, items, async (it) => {
+  const results = await runPool(METADATA_CONCURRENCY, items, async (it) => {
     if (it.image) { upd(); return it; }
     try {
       const uriList = await resolveMetadataURI({ chain, contract, tokenId: it.tokenId, is1155 });
@@ -546,9 +583,7 @@ async function enrichImages({ chain, contract, items, is1155, onProgress, concur
           try { meta = JSON.parse(parsed.buffer.toString('utf8')); } catch {}
         }
       }
-      // give Base a bit more time (some gateways are slower)
-      const jsonTimeout = chain === 'base' ? 14000 : 9000;
-      if (!meta) meta = await fetchJsonWithFallback(uriList, jsonTimeout);
+      if (!meta) meta = await fetchJsonWithFallback(uriList, chain === 'base' ? 12000 : 8000);
 
       let img =
         meta?.image ||
@@ -585,7 +620,7 @@ async function enrichImages({ chain, contract, items, is1155, onProgress, concur
   return results;
 }
 
-/* ===================== Backfills: Reservoir (existing) + Moralis + OpenSea ===================== */
+/* ===================== Backfills: Reservoir + optional Moralis + OpenSea ===================== */
 async function backfillImagesFromReservoir({ chain, contract, items, onProgress }) {
   const chainHeader = chain === 'eth' ? 'ethereum' : chain === 'base' ? 'base' : null;
   if (!chainHeader) return items;
@@ -643,7 +678,6 @@ async function backfillImagesFromMoralis({ chain, contract, items }) {
   const headers = { 'accept': 'application/json', 'X-API-Key': key };
   const out = [...items];
 
-  // batch by 25 to be gentle
   const BATCH = 25;
   for (let i = 0; i < targets.length; i += BATCH) {
     const chunk = targets.slice(i, i + BATCH);
@@ -721,7 +755,6 @@ async function loadImageWithCandidates(candidates, perTryMs = 8000, isBaseChain 
   const timeoutA = isBaseChain ? Math.max(perTryMs, 12000) : perTryMs;
   const timeoutB = isBaseChain ? Math.max(perTryMs, 15000) : Math.max(perTryMs, 10000);
 
-  // Pass A: let canvas loadImage try direct URL/data
   for (const u of candidates) {
     try {
       if (isDataUrl(u)) {
@@ -739,7 +772,6 @@ async function loadImageWithCandidates(candidates, perTryMs = 8000, isBaseChain 
       }
     } catch {}
   }
-  // Pass B: fetch buffer with Accept header then decode
   for (const u of candidates) {
     if (isDataUrl(u)) continue;
     try {
@@ -801,7 +833,6 @@ async function composeGrid(items, preloadedImgs) {
 
     const img = preloadedImgs?.[i];
     if (!img || !img.width || !img.height) {
-      // fallback tile (high contrast)
       ctx.fillStyle = '#151a23'; ctx.fillRect(x, y, tile, tile);
       ctx.fillStyle = '#e2ebff';
       ctx.font = `bold ${Math.max(18, Math.round(tile * 0.18))}px sans-serif`;
@@ -810,7 +841,6 @@ async function composeGrid(items, preloadedImgs) {
       continue;
     }
 
-    // cover-fit crop with guards
     const scale = Math.max(tile / img.width, tile / img.height);
     if (!isFinite(scale) || scale <= 0) {
       ctx.fillStyle = '#151a23'; ctx.fillRect(x, y, tile, tile);
@@ -1026,12 +1056,8 @@ module.exports = {
     status.step = 'Enriching images (metadata)…';
     status.enrich = '0% [────────────────]';
     await pushStatus();
-
-    // Cap metadata concurrency on Base to avoid >10 batch coalescing
-    const metaLimit = chain === 'base' ? Math.min(METADATA_CONCURRENCY, 8) : METADATA_CONCURRENCY;
-
     items = await enrichImages({
-      chain, contract, items, is1155: std.is1155, concurrency: metaLimit,
+      chain, contract, items, is1155: std.is1155,
       onProgress: async (done, total) => {
         const pct = clamp(Math.floor((done/total)*100), 0, 100);
         if (pct !== lastEnPct) { lastEnPct = pct; status.enrich = `${pct}% [${bar(pct)}]`; await pushStatus(); }
@@ -1056,14 +1082,14 @@ module.exports = {
       await pushStatus();
     }
 
-    // Optional Moralis fallback
+    // Optional: Moralis fallback
     if (items.some(i => !i.image)) {
       status.step = 'Backfilling images (Moralis)…';
       await pushStatus();
       items = await backfillImagesFromMoralis({ chain, contract, items });
     }
 
-    // Optional OpenSea fallback
+    // Optional: OpenSea fallback
     if (items.some(i => !i.image)) {
       status.step = 'Backfilling images (OpenSea)…';
       await pushStatus();
@@ -1131,3 +1157,4 @@ module.exports = {
     finalized = true;
   }
 };
+
