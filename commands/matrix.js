@@ -8,7 +8,8 @@ const https = require('https');
 const { safeRpcCall, getProvider } = require('../services/providerM');
 
 /* ===================== Config ===================== */
-const ENV_MAX = Math.max(1, Math.min(Number(process.env.MATRIX_MAX_AUTO || 100), 300));
+const ENV_MAX = Math.max(1, Math.min(Number(process.env.MATRIX_MAX_AUTO || 80), 300));
+
 const GRID_PRESETS = [
   { max: 25,  cols: 5,  tile: 160 },
   { max: 49,  cols: 7,  tile: 120 },
@@ -21,18 +22,19 @@ const GRID_PRESETS = [
   { max: 256, cols: 16, tile: 64 },
   { max: 300, cols: 20, tile: 56 }
 ];
+
 const GAP = 8;
 const BG = '#0f1115';
 const BORDER = '#1f2230';
 
-// Base chain log limits & concurrency tuning
+/* ---- Base chain log limits & concurrency tuning ---- */
 const BASE_LOG_WINDOW_SAFE = Math.max(1000, Math.min(Number(process.env.MATRIX_BASE_LOG_WINDOW || 9500), 9500));
-const BASE_LOG_CONCURRENCY = Math.max(1, Number(process.env.MATRIX_BASE_LOG_CONCURRENCY || 2));
+const BASE_LOG_CONCURRENCY = Math.max(1, Number(process.env.MATRIX_BASE_LOG_CONCURRENCY || 1)); // keep low
 
-// Concurrency knobs (env overridable)
-const LOG_CONCURRENCY       = Math.max(1, Number(process.env.MATRIX_LOG_CONCURRENCY || 4));
-const METADATA_CONCURRENCY  = Math.max(4, Number(process.env.MATRIX_METADATA_CONCURRENCY || 12));
-const IMAGE_CONCURRENCY     = Math.max(4, Number(process.env.MATRIX_IMAGE_CONCURRENCY || 12));
+/* ---- General concurrency knobs ---- */
+const LOG_CONCURRENCY       = Math.max(1, Number(process.env.MATRIX_LOG_CONCURRENCY || 3));
+const METADATA_CONCURRENCY  = Math.max(4, Number(process.env.MATRIX_METADATA_CONCURRENCY || 10));
+const IMAGE_CONCURRENCY     = Math.max(3, Number(process.env.MATRIX_IMAGE_CONCURRENCY || 8));
 
 /* ===================== Keep-Alive Agents ===================== */
 const keepAliveHttp = new http.Agent({ keepAlive: true, maxSockets: 128 });
@@ -65,6 +67,8 @@ async function runPool(limit, items, worker) {
 }
 
 /* ===================== URL helpers (IPFS, Arweave, data) ===================== */
+const UA = 'Mozilla/5.0 (compatible; MatrixBot/1.0; +https://github.com)';
+
 const IPFS_GATES = [
   'https://cloudflare-ipfs.com/ipfs/',
   'https://ipfs.io/ipfs/',
@@ -77,12 +81,21 @@ const IPFS_GATES = [
   'https://4everland.io/ipfs/',
   'https://hardbin.com/ipfs/'
 ];
-function ipfsToHttp(path) {
-  const cidAndPath = path.replace(/^ipfs:\/\//, '');
-  return IPFS_GATES.map(g => g + cidAndPath);
+
+function normalizeScheme(u) {
+  if (typeof u !== 'string') return u;
+  return u.replace(/^IPFS:\/\//i, 'ipfs://')
+          .replace(/^AR:\/\//i,   'ar://');
+}
+
+function ipfsToHttp(input) {
+  let path = input.replace(/^ipfs:\/\//i, '');
+  // handle ipfs://ipfs/<cid> or ipfs:/ipfs/<cid>
+  path = path.replace(/^ipfs\//i, '');
+  return IPFS_GATES.map(g => g + path);
 }
 function arToHttp(u) {
-  const id = u.replace(/^ar:\/\//, '');
+  const id = u.replace(/^ar:\/\//i, '');
   return ['https://arweave.net/' + id];
 }
 function isDataUrl(u) { return typeof u === 'string' && u.startsWith('data:'); }
@@ -97,11 +110,12 @@ function parseDataUrl(u) {
     return { mime, buffer: buf };
   } catch { return null; }
 }
-function expandImageCandidates(u) {
+function expandImageCandidates(raw) {
+  let u = normalizeScheme(raw);
   if (!u || typeof u !== 'string') return [];
   if (isDataUrl(u)) return [u];
-  if (u.startsWith('ipfs://')) return ipfsToHttp(u);
-  if (u.startsWith('ar://')) return arToHttp(u);
+  if (/^ipfs:\/\//i.test(u)) return ipfsToHttp(u);
+  if (/^ar:\/\//i.test(u))   return arToHttp(u);
   const variants = [u];
   try {
     const url = new URL(u);
@@ -114,7 +128,6 @@ function expandImageCandidates(u) {
   } catch {}
   return Array.from(new Set(variants));
 }
-// light magic-bytes check
 function looksLikeImage(buf) {
   if (!Buffer.isBuffer(buf) || buf.length < 8) return false;
   const sig = buf.slice(0, 12).toString('hex');
@@ -128,14 +141,15 @@ function looksLikeImage(buf) {
 }
 
 /* ===================== JSON fetch (IPFS + data URLs) ===================== */
-async function fetchJsonWithFallback(urlOrList, timeoutMs = 8000) {
+async function fetchJsonWithFallback(urlOrList, timeoutMs = 9000) {
   const urls = Array.isArray(urlOrList) ? urlOrList : [urlOrList];
-  for (const u of urls) {
+  for (const u0 of urls) {
+    const u = normalizeScheme(u0);
     try {
       if (isDataUrl(u)) {
         const parsed = parseDataUrl(u);
         if (!parsed) continue;
-        if (/json/.test(parsed.mime)) {
+        if (/json/i.test(parsed.mime)) {
           try { return JSON.parse(parsed.buffer.toString('utf8')); } catch { continue; }
         }
         continue;
@@ -143,7 +157,15 @@ async function fetchJsonWithFallback(urlOrList, timeoutMs = 8000) {
       const ctrl = new AbortController();
       const t = setTimeout(() => ctrl.abort(), timeoutMs);
       const agent = u.startsWith('http:') ? keepAliveHttp : keepAliveHttps;
-      const res = await fetch(u, { signal: ctrl.signal, agent, headers: { 'Accept': 'application/json,*/*;q=0.8' } });
+      const res = await fetch(u, {
+        signal: ctrl.signal,
+        agent,
+        headers: {
+          'Accept': 'application/json,*/*;q=0.8',
+          'User-Agent': UA,
+          'Connection': 'keep-alive'
+        }
+      });
       clearTimeout(t);
       if (!res.ok) continue;
       const data = await res.json().catch(() => null);
@@ -161,11 +183,10 @@ function collectAllImageCandidates(meta, limit = 60) {
   let visits = 0;
 
   const pushUrl = (u) => {
+    u = normalizeScheme(u);
     if (!u || typeof u !== 'string') return;
     if (u.startsWith('data:image')) { out.add(u); return; }
-    if (u.startsWith('ipfs://') || u.startsWith('ar://') || u.startsWith('http://') || u.startsWith('https://')) {
-      out.add(u);
-    }
+    if (/^(ipfs|ar):\/\//i.test(u) || /^https?:\/\//i.test(u)) out.add(u);
   };
 
   while (queue.length && out.size < limit && visits < 8000) {
@@ -173,10 +194,7 @@ function collectAllImageCandidates(meta, limit = 60) {
     visits++;
     if (cur == null) continue;
 
-    if (typeof cur === 'string') {
-      pushUrl(cur);
-      continue;
-    }
+    if (typeof cur === 'string') { pushUrl(cur); continue; }
     if (typeof cur !== 'object') continue;
     if (seen.has(cur)) continue;
     seen.add(cur);
@@ -187,24 +205,21 @@ function collectAllImageCandidates(meta, limit = 60) {
       'displayUri','artifactUri','animation_url','content','uri','url','src',
       'media','mediaUrl','original_media_url','metadata_image','image_data'
     ];
-    for (const k of prioritize) {
-      if (k in cur) pushUrl(cur[k]);
-    }
+    for (const k of prioritize) if (k in cur) pushUrl(cur[k]);
 
     if (Array.isArray(cur)) {
       for (const v of cur) queue.push(v);
     } else {
-      for (const [, v] of Object.entries(cur)) {
-        queue.push(v);
-      }
+      for (const [, v] of Object.entries(cur)) queue.push(v);
     }
   }
 
   const expanded = [];
-  for (const u of out) {
+  for (let u of out) {
+    u = normalizeScheme(u);
     if (isDataUrl(u)) { expanded.push(u); continue; }
-    if (u.startsWith('ipfs://')) { expanded.push(...ipfsToHttp(u)); continue; }
-    if (u.startsWith('ar://')) { expanded.push(...arToHttp(u)); continue; }
+    if (/^ipfs:\/\//i.test(u)) { expanded.push(...ipfsToHttp(u)); continue; }
+    if (/^ar:\/\//i.test(u))   { expanded.push(...arToHttp(u)); continue; }
     expanded.push(u);
   }
   return Array.from(new Set(expanded));
@@ -264,6 +279,12 @@ async function resolveWalletInput(input) {
 }
 
 /* ===================== Reservoir (ETH/Base) ===================== */
+function pickReservoirImage(t) {
+  const tok = t?.token || t || {};
+  const m = tok.media || {};
+  return tok.image || m.imageUrl || m.thumbnail || m.small || m.medium || m.large || m.original || null;
+}
+
 async function fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant = ENV_MAX }) {
   const chainHeader = chain === 'eth' ? 'ethereum' : chain === 'base' ? 'base' : null;
   if (!chainHeader) return { items: [], total: 0 };
@@ -297,11 +318,13 @@ async function fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant = 
         : (total || (tokens.length < limit && !continuation ? items.length + tokens.length : 0));
 
       for (const t of tokens) {
-        if (!t?.token?.tokenId) continue;
+        const tok = t?.token;
+        if (!tok?.tokenId) continue;
+        const img = pickReservoirImage(t);
         items.push({
-          tokenId: t.token.tokenId,
-          image: t.token.image || null,
-          name: t.token.name || `${t.token.contract} #${t.token.tokenId}`
+          tokenId: String(tok.tokenId),
+          image: img ? expandImageCandidates(img) : null,
+          name: tok.name || `${tok.contract} #${tok.tokenId}`
         });
         if (items.length >= maxWant) break;
       }
@@ -320,8 +343,8 @@ async function detectTokenStandard(chain, contract) {
   const erc165 = new Contract(contract, ['function supportsInterface(bytes4) view returns (bool)'], provider);
   const out = { is721: false, is1155: false };
   try {
-    const s721  = await safeRpcCall(chain, p => erc165.connect(p).supportsInterface('0x80ac58cd')); // ERC721
-    const s1155 = await safeRpcCall(chain, p => erc165.connect(p).supportsInterface('0xd9b67a26')); // ERC1155
+    const s721  = await safeRpcCall(chain, p => erc165.connect(p).supportsInterface('0x80ac58cd'));
+    const s1155 = await safeRpcCall(chain, p => erc165.connect(p).supportsInterface('0xd9b67a26'));
     out.is721 = !!s721;
     out.is1155 = !!s1155 && !s721;
   } catch {}
@@ -358,7 +381,7 @@ async function fetchOwnerTokensEnumerable({ chain, contract, owner, maxWant = EN
   }
 }
 
-/* ===================== getLogs windowing (Base-safe) ===================== */
+/* ===================== Base-safe getLogs windowing ===================== */
 async function getLogsWindowed(chain, baseParams, fromBlock, toBlock, {
   maxSpan = BASE_LOG_WINDOW_SAFE,
   concurrency = BASE_LOG_CONCURRENCY
@@ -381,11 +404,11 @@ async function getLogsWindowed(chain, baseParams, fromBlock, toBlock, {
         const logs = await safeRpcCall(
           chain,
           p => p.getLogs({ ...baseParams, fromBlock: fb, toBlock: tb }),
-          { retries: 4, perCallTimeoutMs: 15000 }
+          { retries: 3, perCallTimeoutMs: 12000 }
         );
         if (Array.isArray(logs)) out.push(...logs);
       } catch {}
-      await new Promise(r => setTimeout(r, 15 + Math.floor(Math.random() * 15)));
+      await new Promise(r => setTimeout(r, 25 + Math.floor(Math.random() * 30)));
     }
   }
 
@@ -405,7 +428,7 @@ async function fetchOwnerTokens721Rolling({ chain, contract, owner, maxWant = EN
   const isBase = chain === 'base';
   const WINDOW = isBase ? BASE_LOG_WINDOW_SAFE : 60000;
   const LOG_CONC = isBase ? BASE_LOG_CONCURRENCY : LOG_CONCURRENCY;
-  const MAX_WINDOWS = deep ? 500 : (isBase ? 120 : 120);
+  const MAX_WINDOWS = deep ? 180 : (isBase ? 90 : 120); // keep smaller to avoid rate-limit
 
   const topic0 = ethers.id('Transfer(address,address,uint256)');
   const topicTo   = padTopicAddress(owner);
@@ -464,7 +487,7 @@ async function fetchOwnerTokens1155Rolling({ chain, contract, owner, maxWant = E
   const isBase = chain === 'base';
   const WINDOW = isBase ? BASE_LOG_WINDOW_SAFE : 60000;
   const LOG_CONC = isBase ? BASE_LOG_CONCURRENCY : LOG_CONCURRENCY;
-  const MAX_WINDOWS = deep ? 500 : (isBase ? 120 : 160);
+  const MAX_WINDOWS = deep ? 180 : (isBase ? 90 : 160);
 
   const topicSingle = ethers.id('TransferSingle(address,address,address,uint256,uint256)');
   const topicBatch  = ethers.id('TransferBatch(address,address,address,uint256[],uint256[])');
@@ -551,15 +574,16 @@ async function resolveMetadataURI({ chain, contract, tokenId, is1155 }) {
     const c = new Contract(contract, ['function uri(uint256) view returns (string)'], provider);
     let uri = await safeRpcCall(chain, p => c.connect(p).uri(tokenId));
     if (!uri) return null;
-    uri = uri.replace(/\{id\}/gi, idHex64(tokenId));
-    const list = uri.startsWith('ipfs://') ? ipfsToHttp(uri) : [uri];
+    uri = normalizeScheme(uri).replace(/\{id\}/gi, idHex64(tokenId));
+    const list = /^ipfs:\/\//i.test(uri) ? ipfsToHttp(uri) : [uri];
     RESOLVED_URI_CACHE.set(key, list);
     return list;
   } else {
     const c = new Contract(contract, ['function tokenURI(uint256) view returns (string)'], provider);
-    const uri = await safeRpcCall(chain, p => c.connect(p).tokenURI(tokenId));
+    let uri = await safeRpcCall(chain, p => c.connect(p).tokenURI(tokenId));
     if (!uri) return null;
-    const list = uri.startsWith('ipfs://') ? ipfsToHttp(uri) : [uri];
+    uri = normalizeScheme(uri);
+    const list = /^ipfs:\/\//i.test(uri) ? ipfsToHttp(uri) : [uri];
     RESOLVED_URI_CACHE.set(key, list);
     return list;
   }
@@ -579,11 +603,11 @@ async function enrichImages({ chain, contract, items, is1155, onProgress }) {
       let meta = null;
       if (isDataUrl(uriList[0])) {
         const parsed = parseDataUrl(uriList[0]);
-        if (parsed && /json/.test(parsed.mime)) {
+        if (parsed && /json/i.test(parsed.mime)) {
           try { meta = JSON.parse(parsed.buffer.toString('utf8')); } catch {}
         }
       }
-      if (!meta) meta = await fetchJsonWithFallback(uriList, chain === 'base' ? 12000 : 8000);
+      if (!meta) meta = await fetchJsonWithFallback(uriList, chain === 'base' ? 13000 : 9000);
 
       let img =
         meta?.image ||
@@ -620,7 +644,7 @@ async function enrichImages({ chain, contract, items, is1155, onProgress }) {
   return results;
 }
 
-/* ===================== Backfills: Reservoir + optional Moralis + OpenSea ===================== */
+/* ===================== Backfills ===================== */
 async function backfillImagesFromReservoir({ chain, contract, items, onProgress }) {
   const chainHeader = chain === 'eth' ? 'ethereum' : chain === 'base' ? 'base' : null;
   if (!chainHeader) return items;
@@ -646,9 +670,7 @@ async function backfillImagesFromReservoir({ chain, contract, items, onProgress 
       const arr = json?.tokens || [];
       for (const r of arr) {
         const id = `${(r?.token?.contract || contract).toLowerCase()}:${r?.token?.tokenId}`;
-        const t = r?.token || {};
-        const m = t.media || {};
-        const guess = t.image || m.imageUrl || m.thumbnail || m.small || m.medium || m.large || m.original || null;
+        const guess = pickReservoirImage(r);
         if (guess) images.set(id, guess);
       }
     } catch {}
@@ -675,7 +697,7 @@ async function backfillImagesFromMoralis({ chain, contract, items }) {
   const targets = items.filter(i => !i.image);
   if (!targets.length) return items;
 
-  const headers = { 'accept': 'application/json', 'X-API-Key': key };
+  const headers = { 'accept': 'application/json', 'X-API-Key': key, 'User-Agent': UA };
   const out = [...items];
 
   const BATCH = 25;
@@ -721,12 +743,12 @@ async function backfillImagesFromOpenSea({ chain, contract, items }) {
   const chainKey = chain === 'base' ? 'base' : chain === 'eth' ? 'ethereum' : null;
   if (!chainKey) return items;
 
-  const headers = { 'accept': 'application/json', 'x-api-key': key };
+  const headers = { 'accept': 'application/json', 'x-api-key': key, 'User-Agent': UA };
   const targets = items.filter(i => !i.image);
   if (!targets.length) return items;
 
   const out = [...items];
-  const BATCH = 20;
+  const BATCH = 18;
   for (let i = 0; i < targets.length; i += BATCH) {
     const chunk = targets.slice(i, i + BATCH);
     await Promise.all(chunk.map(async (it) => {
@@ -751,15 +773,16 @@ async function backfillImagesFromOpenSea({ chain, contract, items }) {
 }
 
 /* ===================== Robust image loading ===================== */
-async function loadImageWithCandidates(candidates, perTryMs = 8000, isBaseChain = false) {
+async function loadImageWithCandidates(candidates, perTryMs = 9000, isBaseChain = false) {
   const timeoutA = isBaseChain ? Math.max(perTryMs, 12000) : perTryMs;
-  const timeoutB = isBaseChain ? Math.max(perTryMs, 15000) : Math.max(perTryMs, 10000);
+  const timeoutB = isBaseChain ? Math.max(perTryMs, 16000) : Math.max(perTryMs, 11000);
 
+  // Pass A: direct loadImage
   for (const u of candidates) {
     try {
       if (isDataUrl(u)) {
         const parsed = parseDataUrl(u);
-        if (parsed && /^image\//.test(parsed.mime)) {
+        if (parsed && /^image\//i.test(parsed.mime)) {
           const img = await loadImage(parsed.buffer);
           if (img && img.width > 0 && img.height > 0) return img;
         }
@@ -772,13 +795,18 @@ async function loadImageWithCandidates(candidates, perTryMs = 8000, isBaseChain 
       }
     } catch {}
   }
+  // Pass B: fetch buffers with UA
   for (const u of candidates) {
     if (isDataUrl(u)) continue;
     try {
       const ctrl = new AbortController();
       const t = setTimeout(() => ctrl.abort(), timeoutB);
       const agent = u.startsWith('http:') ? keepAliveHttp : keepAliveHttps;
-      const res = await fetch(u, { signal: ctrl.signal, agent, headers: { 'Accept': 'image/*' } });
+      const res = await fetch(u, {
+        signal: ctrl.signal,
+        agent,
+        headers: { 'Accept': 'image/*', 'User-Agent': UA, 'Connection': 'keep-alive' }
+      });
       clearTimeout(t);
       if (!res.ok) continue;
       const ab = await res.arrayBuffer();
@@ -796,7 +824,7 @@ async function preloadImages(items, onProgress, isBaseChain = false) {
     const candidates =
       Array.isArray(it.image) ? it.image :
       (typeof it.image === 'string' ? expandImageCandidates(it.image) : []);
-    const img = candidates && candidates.length ? await loadImageWithCandidates(candidates, 8000, isBaseChain) : null;
+    const img = candidates && candidates.length ? await loadImageWithCandidates(candidates, 9000, isBaseChain) : null;
     done++; onProgress?.(done, items.length);
     return img;
   });
@@ -842,19 +870,10 @@ async function composeGrid(items, preloadedImgs) {
     }
 
     const scale = Math.max(tile / img.width, tile / img.height);
-    if (!isFinite(scale) || scale <= 0) {
-      ctx.fillStyle = '#151a23'; ctx.fillRect(x, y, tile, tile);
-      ctx.fillStyle = '#e2ebff';
-      ctx.font = `bold ${Math.max(18, Math.round(tile * 0.18))}px sans-serif`;
-      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText(`#${items[i]?.tokenId ?? '?'}`, x + tile / 2, y + tile / 2);
-      continue;
-    }
     const sw = Math.max(1, Math.floor(tile / scale));
     const sh = Math.max(1, Math.floor(tile / scale));
     const sx = Math.max(0, Math.floor((img.width  - sw) / 2));
     const sy = Math.max(0, Math.floor((img.height - sh) / 2));
-
     ctx.drawImage(img, sx, sy, Math.min(sw, img.width), Math.min(sh, img.height), x, y, tile, tile);
   }
 
@@ -910,7 +929,7 @@ async function resolveProjectForGuild(pg, client, guildId, projectInput) {
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('matrix')
-    .setDescription('Render a grid of a wallet’s NFTs for a project tracked by this server (ENS + auto-dense)')
+    .setDescription('Render a grid of a wallet’s NFTs for a project tracked by this server (fast + robust images)')
     .addStringOption(o =>
       o.setName('wallet')
         .setDescription('Wallet address or ENS (.eth)')
@@ -963,7 +982,7 @@ module.exports = {
 
     await interaction.deferReply({ ephemeral: false });
 
-    // Safe editor that won’t crash if the message is finalized
+    // Safe editor that won’t crash if the message finalizes
     let finalized = false;
     const safeEdit = async (payload) => { if (finalized) return; try { await interaction.editReply(payload); } catch {} };
 
@@ -1003,7 +1022,7 @@ module.exports = {
 
     const std = await detectTokenStandard(chain, contract);
 
-    // Try Reservoir first
+    // Try Reservoir first (fast path)
     let items = [], totalOwned = 0, usedReservoir = false;
     if (chain === 'eth' || chain === 'base') {
       const resv = await fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant });
@@ -1023,10 +1042,10 @@ module.exports = {
       totalOwned = Math.max(totalOwned, en.total || 0, items.length);
     }
 
-    // On-chain deep scan with progress
-    if (items.length < maxWant) {
+    // On-chain deep scan (only if we still need more AND Base didn’t give us enough via API)
+    if (items.length < maxWant && !(chain === 'base' && usedReservoir)) {
       let lastPct = -1;
-      status.step = std.is1155 ? 'Deep scan (ERC1155)…' : (chain === 'base' ? 'Deep scan (Base)…' : 'Scanning logs…');
+      status.step = std.is1155 ? 'Deep scan (ERC1155)…' : (chain === 'base' ? 'Deep scan (Base-safe)…' : 'Scanning logs…');
       status.scan = '0% [────────────────]';
       await pushStatus();
 
@@ -1036,8 +1055,8 @@ module.exports = {
       };
 
       const onch = std.is1155
-        ? await fetchOwnerTokens1155Rolling({ chain, contract, owner, maxWant, deep: chain === 'base', onProgress: onScanProgress })
-        : await fetchOwnerTokens721Rolling ({ chain, contract, owner, maxWant, deep: chain === 'base', onProgress: onScanProgress });
+        ? await fetchOwnerTokens1155Rolling({ chain, contract, owner, maxWant, deep: false, onProgress: onScanProgress })
+        : await fetchOwnerTokens721Rolling ({ chain, contract, owner, maxWant, deep: false, onProgress: onScanProgress });
 
       const byId = new Map(items.map(it => [String(it.tokenId), it]));
       for (const it of onch.items) { const key = String(it.tokenId); if (!byId.has(key)) byId.set(key, it); }
@@ -1048,23 +1067,10 @@ module.exports = {
     }
 
     if (!items.length) {
-      return interaction.editReply(`❌ No ${project.name} NFTs found for \`${ownerDisplay}\` on ${chain}. (Checked ERC721/1155 paths)`);
+      return interaction.editReply(`❌ No ${project.name} NFTs found for \`${ownerDisplay}\` on ${chain}.`);
     }
 
-    // Enrich images (tokenURI/uri) + progress
-    let lastEnPct = -1;
-    status.step = 'Enriching images (metadata)…';
-    status.enrich = '0% [────────────────]';
-    await pushStatus();
-    items = await enrichImages({
-      chain, contract, items, is1155: std.is1155,
-      onProgress: async (done, total) => {
-        const pct = clamp(Math.floor((done/total)*100), 0, 100);
-        if (pct !== lastEnPct) { lastEnPct = pct; status.enrich = `${pct}% [${bar(pct)}]`; await pushStatus(); }
-      }
-    });
-
-    // Reservoir backfill
+    /* --- Prefer fast image backfill first (Reservoir CDN) --- */
     if (items.some(i => !i.image) && (chain === 'eth' || chain === 'base')) {
       let lastBF = -1;
       status.step = 'Backfilling images (Reservoir)…';
@@ -1073,7 +1079,7 @@ module.exports = {
       const totalMissing = items.filter(i => !i.image).length;
       items = await backfillImagesFromReservoir({
         chain, contract, items,
-        onProgress: async (done, total) => {
+        onProgress: async (done) => {
           const pct = totalMissing ? clamp(Math.floor((Math.min(done, totalMissing)/totalMissing)*100), 0, 100) : 100;
           if (pct !== lastBF) { lastBF = pct; status.backfill = `${pct}% [${bar(pct)}]`; await pushStatus(); }
         }
@@ -1082,21 +1088,34 @@ module.exports = {
       await pushStatus();
     }
 
-    // Optional: Moralis fallback
+    /* --- Then tokenURI/uri metadata enrichment --- */
+    if (items.some(i => !i.image)) {
+      let lastEnPct = -1;
+      status.step = 'Enriching images (tokenURI)…';
+      status.enrich = '0% [────────────────]';
+      await pushStatus();
+      items = await enrichImages({
+        chain, contract, items, is1155: std.is1155,
+        onProgress: async (done, total) => {
+          const pct = clamp(Math.floor((done/total)*100), 0, 100);
+          if (pct !== lastEnPct) { lastEnPct = pct; status.enrich = `${pct}% [${bar(pct)}]`; await pushStatus(); }
+        }
+      });
+    }
+
+    // Optional fallbacks
     if (items.some(i => !i.image)) {
       status.step = 'Backfilling images (Moralis)…';
       await pushStatus();
       items = await backfillImagesFromMoralis({ chain, contract, items });
     }
-
-    // Optional: OpenSea fallback
     if (items.some(i => !i.image)) {
       status.step = 'Backfilling images (OpenSea)…';
       await pushStatus();
       items = await backfillImagesFromOpenSea({ chain, contract, items });
     }
 
-    // Image preload with visible percent (robust loader)
+    // Image preload
     status.step = `Loading images (${items.length})…`;
     let imgPct = 0;
     status.images = `0% [${bar(0)}]`;
@@ -1114,7 +1133,7 @@ module.exports = {
       ].filter(Boolean)) }); })();
     }, chain === 'base');
 
-    // Last-chance recovery for missing images: deep re-fetch metadata then try again
+    // Last-chance deep metadata poke for missing
     const missingIdx = [];
     for (let i = 0; i < items.length; i++) {
       if (!preloadedImgs[i]) missingIdx.push(i);
@@ -1123,7 +1142,7 @@ module.exports = {
       await Promise.all(missingIdx.map(async (i) => {
         try {
           const uriList = await resolveMetadataURI({ chain, contract, tokenId: items[i].tokenId, is1155: std.is1155 });
-          const meta = uriList ? await fetchJsonWithFallback(uriList, chain === 'base' ? 12000 : 8000) : null;
+          const meta = uriList ? await fetchJsonWithFallback(uriList, chain === 'base' ? 13000 : 9000) : null;
           const cands = meta ? collectAllImageCandidates(meta) : [];
           if (cands.length) items[i] = { ...items[i], image: cands };
         } catch {}
@@ -1134,7 +1153,6 @@ module.exports = {
       }
     }
 
-    // Compose grid
     const gridBuf = await composeGrid(items, preloadedImgs);
     const file = new AttachmentBuilder(gridBuf, { name: `matrix_${project.name}_${owner.slice(0,6)}.png` });
 
