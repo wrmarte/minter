@@ -210,9 +210,8 @@ function makeProvider(key, url) {
     meta.network,
     {
       staticNetwork: !!meta.network,
-      batchMaxCount: batch.batchMaxCount,   // max requests per JSON-RPC batch
-      batchStallTime: batch.batchStallTime, // ms to coalesce batch; small to prevent over-accumulation
-      // batchMaxSize left as default
+      batchMaxCount: batch.batchMaxCount,
+      batchStallTime: batch.batchStallTime
     }
   );
   p._rpcUrl = u;
@@ -329,7 +328,7 @@ async function rotateProvider(chain = 'base') {
  * OR safeRpcCall(chain, callFn, { retries, perCallTimeoutMs, allowRevert=true, retryOnceOnNetwork=true })
  *
  * - Logical contract reverts (e.g., ownerOf(nonexistent)) are non-fatal; return null when allowRevert=true.
- * - Batch-limit errors (e.g., "maximum 10 calls in 1 batch") are retried with tiny jitter, no rotate.
+ * - Batch-limit errors (e.g., "maximum 10 calls in 1 batch") are retried after sleeping past the batch window.
  * - Only rotates provider on network-ish failures (timeouts, rate limits, gateway errors).
  * - Never throws; returns null on failure.
  */
@@ -348,6 +347,9 @@ async function safeRpcCall(chain, callFn, retries = 4, perCallTimeoutMs = 6000) 
   const timeoutMs = Number.isFinite(opts.perCallTimeoutMs) ? opts.perCallTimeoutMs : 6000;
   const allowRevert = opts.allowRevert !== false; // default true
   const retryOnceOnNetwork = opts.retryOnceOnNetwork !== false; // default true
+
+  // read stall time for this chain so we can skip the current coalescer window on retry
+  const { batchStallTime } = getBatchConfig(key);
 
   for (let i = 0; i < maxRetries; i++) {
     let provider = getProvider(key);
@@ -379,9 +381,10 @@ async function safeRpcCall(chain, callFn, retries = 4, perCallTimeoutMs = 6000) 
         return null; // not an RPC outage; just "not found / reverted"
       }
 
-      // batch-limit error – do NOT rotate; micro-jitter and retry so next tick doesn't coalesce too many calls
+      // batch-limit error – do NOT rotate; sleep past the coalescer window and retry
       if (isBatchLimitError(err)) {
-        await sleep(jitter(6)); // ~5-8ms
+        const waitMs = Math.max(25, (batchStallTime || 8) * 4); // jump to a new batch window
+        await sleep(waitMs);
         continue;
       }
 
@@ -536,6 +539,7 @@ module.exports = {
   safeRpcCall,
   getMaxBatchSize
 };
+
 
 
 
