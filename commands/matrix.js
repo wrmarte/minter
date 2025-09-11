@@ -440,7 +440,7 @@ async function fetchOwnerTokens721Rolling({ chain, contract, owner, maxWant = EN
   const isBase = chain === 'base';
   const WINDOW = isBase ? 9500 : 60000;
   const LOG_CONC = isBase ? 1 : LOG_CONCURRENCY;
-  const MAX_WINDOWS = deep ? 180 : (isBase ? 90 : 120);
+  const MAX_WINDOWS = deep ? 750 : (isBase ? 90 : 120);
 
   const topic0 = ethers.id('Transfer(address,address,uint256)');
   const topicTo   = padTopicAddress(owner);
@@ -499,7 +499,7 @@ async function fetchOwnerTokens1155Rolling({ chain, contract, owner, maxWant = E
   const isBase = chain === 'base';
   const WINDOW = isBase ? 9500 : 60000;
   const LOG_CONC = isBase ? 1 : LOG_CONCURRENCY;
-  const MAX_WINDOWS = deep ? 180 : (isBase ? 90 : 160);
+  const MAX_WINDOWS = deep ? 750 : (isBase ? 90 : 160);
 
   const topicSingle = ethers.id('TransferSingle(address,address,address,uint256,uint256)');
   const topicBatch  = ethers.id('TransferBatch(address,address,address,uint256[],uint256[])');
@@ -566,6 +566,77 @@ async function fetchOwnerTokens1155Rolling({ chain, contract, owner, maxWant = E
   for (const [id, bal] of balances.entries()) if (bal > 0n) ownedIds.push(id);
   const slice = ownedIds.slice(0, maxWant).map(id => ({ tokenId: id, image: null, name: `#${id}` }));
   return { items: slice, total: ownedIds.length || slice.length };
+}
+
+/* ===================== Owner-token list fallbacks (Moralis / OpenSea) ===================== */
+// Return {items, total}
+async function fetchOwnerTokensMoralisList({ chain, contract, owner, maxWant = ENV_MAX }) {
+  const key = process.env.MORALIS_API_KEY;
+  const chainName = chain === 'base' ? 'base' : chain === 'eth' ? 'eth' : null;
+  if (!key || !chainName) return { items: [], total: 0 };
+
+  const headers = { 'accept': 'application/json', 'X-API-Key': key, 'User-Agent': UA };
+  const items = [];
+  let cursor = null;
+  let pages = 0;
+
+  while (items.length < maxWant && pages < 10) {
+    try {
+      const url = new URL(`https://deep-index.moralis.io/api/v2.2/${owner}/nft/${contract}`);
+      url.searchParams.set('chain', chainName);
+      url.searchParams.set('format', 'decimal');
+      url.searchParams.set('limit', '100');
+      if (cursor) url.searchParams.set('cursor', cursor);
+      const res = await fetch(url.toString(), { headers });
+      if (!res.ok) break;
+      const j = await res.json();
+      const arr = j?.result || j?.items || [];
+      for (const r of arr) {
+        const tid = r?.token_id || r?.tokenId || r?.token_id_decimals || null;
+        if (!tid) continue;
+        items.push({ tokenId: String(tid), image: null, name: `#${String(tid)}` });
+        if (items.length >= maxWant) break;
+      }
+      cursor = j?.cursor || j?.next || null;
+      pages++;
+      if (!cursor || arr.length === 0) break;
+    } catch { break; }
+  }
+  return { items, total: items.length };
+}
+
+async function fetchOwnerTokensOpenSeaList({ chain, contract, owner, maxWant = ENV_MAX }) {
+  const key = process.env.OPENSEA_API_KEY;
+  const chainKey = chain === 'base' ? 'base' : chain === 'eth' ? 'ethereum' : null;
+  if (!key || !chainKey) return { items: [], total: 0 };
+
+  const headers = { 'accept': 'application/json', 'x-api-key': key, 'User-Agent': UA };
+  const items = [];
+  let next = null;
+  let pages = 0;
+
+  while (items.length < maxWant && pages < 10) {
+    try {
+      const url = new URL(`https://api.opensea.io/api/v2/chain/${chainKey}/account/${owner}/nfts`);
+      url.searchParams.set('limit', '50');
+      url.searchParams.set('contract_address', contract);
+      if (next) url.searchParams.set('next', next);
+      const res = await fetch(url.toString(), { headers });
+      if (!res.ok) break;
+      const j = await res.json();
+      const arr = j?.nfts || [];
+      for (const n of arr) {
+        const tid = n?.identifier || n?.token_id || n?.tokenId || null;
+        if (!tid) continue;
+        items.push({ tokenId: String(tid), image: null, name: n?.name || `#${String(tid)}` });
+        if (items.length >= maxWant) break;
+      }
+      next = j?.next || null;
+      pages++;
+      if (!next || arr.length === 0) break;
+    } catch { break; }
+  }
+  return { items, total: items.length };
 }
 
 /* ===================== Resolve tokenURI/uri (dual-probe with permutations) ===================== */
@@ -1141,7 +1212,7 @@ module.exports = {
       totalOwned = Math.max(totalOwned, en.total || 0, items.length);
     }
 
-    // On-chain deep scan only if needed (skip on Base if Reservoir gave enough images)
+    // On-chain deep scan (rolling windows)
     if (items.length < maxWant && !(chain === 'base' && usedReservoir)) {
       let lastPct = -1;
       status.step = std.is1155 ? 'Deep scan (ERC1155)…' : (chain === 'base' ? 'Deep scan (Base-safe)…' : 'Scanning logs…');
@@ -1163,6 +1234,46 @@ module.exports = {
       totalOwned = Math.max(totalOwned, onch.total || 0, items.length);
       status.scan = 'done';
       await pushStatus();
+
+      // If still nothing on Base, escalate to a much deeper scan
+      if (chain === 'base' && items.length === 0) {
+        status.step = std.is1155 ? 'Deep scan (ERC1155, full)…' : 'Deep scan (full window)…';
+        status.scan = '0% [────────────────]';
+        await pushStatus();
+        let lastPct2 = -1;
+        const onScanProgress2 = async (done, total) => {
+          const pct = clamp(Math.floor((done/total)*100), 0, 100);
+          if (pct !== lastPct2) { lastPct2 = pct; status.scan = `${pct}% [${bar(pct)}]`; await pushStatus(); }
+        };
+        const onch2 = std.is1155
+          ? await fetchOwnerTokens1155Rolling({ chain, contract, owner, maxWant, deep: true, onProgress: onScanProgress2 })
+          : await fetchOwnerTokens721Rolling ({ chain, contract, owner, maxWant, deep: true, onProgress: onScanProgress2 });
+        for (const it of onch2.items) {
+          const k = String(it.tokenId);
+          if (!byId.has(k)) byId.set(k, it);
+        }
+        items = Array.from(byId.values()).slice(0, maxWant);
+        totalOwned = Math.max(totalOwned, onch2.total || 0, items.length);
+        status.scan = 'done';
+        await pushStatus();
+      }
+    }
+
+    // Owner-token list fallbacks if still empty (helps for older mints / index gaps)
+    if (items.length === 0) {
+      status.step = 'Fetching tokens (Moralis)…';
+      await pushStatus();
+      const m = await fetchOwnerTokensMoralisList({ chain, contract, owner, maxWant });
+      items = m.items;
+      totalOwned = Math.max(totalOwned, m.total || items.length);
+
+      if (items.length === 0) {
+        status.step = 'Fetching tokens (OpenSea)…';
+        await pushStatus();
+        const o = await fetchOwnerTokensOpenSeaList({ chain, contract, owner, maxWant });
+        items = o.items;
+        totalOwned = Math.max(totalOwned, o.total || items.length);
+      }
     }
 
     if (!items.length) {
@@ -1329,6 +1440,7 @@ module.exports = {
     finalized = true;
   }
 };
+
 
 
 
