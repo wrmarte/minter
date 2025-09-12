@@ -1,4 +1,18 @@
 // commands/matrix.js
+// Matrix (paged) — stable deep-scan, bigger holders support, and resilient image backfills.
+// - Auto-paginates large holders (configurable), so 400+ NFTs render across multiple images
+// - Deep scan progress never “hangs” (explicit done marks + circuit breakers)
+// - Broader Base scan and more robust fallbacks for tough collections
+//
+// Env knobs you may care about:
+//   MATRIX_MAX_AUTO           (default 196)  -> max tiles per *page* if user doesn’t pass /limit
+//   MATRIX_AUTO_PAGES         (default 3)    -> how many pages we’ll auto-fetch (total = MAX_AUTO * AUTO_PAGES)
+//   MATRIX_HARD_FETCH_CAP     (default 900)  -> absolute safety cap across all pages
+//   MATRIX_IMAGE_CONCURRENCY  (default 6)    -> simultaneous image loads
+//   MATRIX_METADATA_CONCURRENCY (default 10) -> simultaneous tokenURI fetches
+//   MATRIX_LOG_CONCURRENCY    (default 3)    -> getLogs fanout (non-Base)
+//   MATRIX_DEBUG_URLS=1                      -> log missing tokenIds with their image candidates
+//
 const { SlashCommandBuilder, AttachmentBuilder, EmbedBuilder } = require('discord.js');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
 const { Contract, Interface, ethers } = require('ethers');
@@ -12,7 +26,12 @@ const {
 } = require('../services/providerMatrix');
 
 /* ===================== Config ===================== */
-const ENV_MAX = Math.max(1, Math.min(Number(process.env.MATRIX_MAX_AUTO || 81), 400));
+// Per-page max (default bumped so big holders look good)
+const ENV_MAX = Math.max(1, Math.min(Number(process.env.MATRIX_MAX_AUTO || 196), 400));
+// How many pages we’ll auto-fetch if user does not pass /limit (total cap = ENV_MAX * AUTO_PAGES)
+const AUTO_PAGES = Math.max(1, Math.min(Number(process.env.MATRIX_AUTO_PAGES || 3), 6));
+// Absolute hard cap across all pages (safety)
+const HARD_FETCH_CAP = Math.max(50, Math.min(Number(process.env.MATRIX_HARD_FETCH_CAP || 900), 1500));
 
 const GRID_PRESETS = [
   { max: 25,  cols: 5,  tile: 160 },
@@ -33,13 +52,12 @@ const BORDER = '#1f2230';
 
 const LOG_CONCURRENCY = Math.max(1, Number(process.env.MATRIX_LOG_CONCURRENCY || 3));
 const METADATA_CONCURRENCY  = Math.max(4, Number(process.env.MATRIX_METADATA_CONCURRENCY || 10));
-// Lower default fan-out to reduce gateway rate-limits; override via env if you want more
 const IMAGE_CONCURRENCY     = Math.max(2, Number(process.env.MATRIX_IMAGE_CONCURRENCY || 6));
 
 /* ===================== Keep-Alive Agents ===================== */
 const keepAliveHttp = new http.Agent({ keepAlive: true, maxSockets: 128 });
 const keepAliveHttps = new https.Agent({ keepAlive: true, maxSockets: 128 });
-const UA = 'Mozilla/5.0 (compatible; MatrixBot/1.3; +https://github.com/pimpsdev)';
+const UA = 'Mozilla/5.0 (compatible; MatrixBot/1.4; +https://github.com/pimpsdev)';
 
 /* ===================== Small Utils ===================== */
 function padTopicAddress(addr) { return '0x' + addr.toLowerCase().replace(/^0x/, '').padStart(64, '0'); }
@@ -102,7 +120,7 @@ function parseDataUrl(u) {
   } catch { return null; }
 }
 
-// Improved: handle subdomain IPFS → path, rank candidates by image-likelihood, de-prioritize videos/json
+// Subdomain-IPFS support, ranking by image-likelihood
 function expandImageCandidates(raw) {
   let u = normalizeScheme(raw);
   if (typeof u === 'string') u = u.trim();
@@ -120,17 +138,13 @@ function expandImageCandidates(raw) {
     const url = new URL(u);
     const host = url.hostname.toLowerCase();
     const path = url.pathname || '/';
-
-    // Already /ipfs/<cid> → replicate to all gateways
     const ipfsIndex = path.indexOf('/ipfs/');
     if (ipfsIndex >= 0) {
       const cidPath = path.slice(ipfsIndex + 6).replace(/^\/+/, '');
       for (const g of IPFS_GATES) tryPush(new URL(cidPath, g).href);
     }
-
-    // Subdomain: <cid>.ipfs.<gateway>/rest → /ipfs/<cid>/rest on all gateways
     if (host.includes('.ipfs.')) {
-      const sub = host.split('.ipfs.')[0]; // CID-ish
+      const sub = host.split('.ipfs.')[0];
       const rest = path.replace(/^\/+/, '');
       const candidatePath = sub + (rest ? `/${rest}` : '');
       for (const g of IPFS_GATES) tryPush(g + candidatePath);
@@ -200,7 +214,6 @@ async function fetchJsonWithFallback(urlOrList, timeoutMs = 9000) {
   return null;
 }
 
-// If an URL serves HTML, try to resolve <meta property="og:image"> or twitter:image
 async function fetchOgImageFromHtml(url, timeoutMs = 7000) {
   try {
     const ctrl = new AbortController();
@@ -327,7 +340,7 @@ function pickReservoirImage(t) {
   const m = tok.media || {};
   return tok.image || m.imageUrl || m.thumbnail || m.small || m.medium || m.large || m.original || null;
 }
-async function fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant = ENV_MAX }) {
+async function fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant }) {
   const chainHeader = chain === 'eth' ? 'ethereum' : chain === 'base' ? 'base' : null;
   if (!chainHeader) return { items: [], total: 0 };
 
@@ -336,7 +349,7 @@ async function fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant = 
 
   let continuation = null;
   const items = [];
-  let safety = 16;
+  let safety = 20;
   let total = 0;
 
   while (safety-- > 0 && items.length < maxWant) {
@@ -377,8 +390,6 @@ async function fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant = 
   if (!total) total = items.length;
   return { items, total };
 }
-
-// Reservoir redirect endpoints that 302 to a best-effort static preview
 function reservoirRedirectCandidates(chain, contract, tokenId) {
   const id = `${contract}:${String(tokenId)}`;
   return [
@@ -401,7 +412,7 @@ async function detectTokenStandard(chain, contract) {
   } catch {}
   return out;
 }
-async function fetchOwnerTokensEnumerable({ chain, contract, owner, maxWant = ENV_MAX }) {
+async function fetchOwnerTokensEnumerable({ chain, contract, owner, maxWant }) {
   const provider = getProviderMatrix(chain);
   if (!provider) return { items: [], total: 0, enumerable: false };
   const nft = new Contract(contract, [
@@ -430,8 +441,8 @@ async function fetchOwnerTokensEnumerable({ chain, contract, owner, maxWant = EN
   }
 }
 
-/* ===================== On-chain deep scans (windowed on Base) ===================== */
-async function fetchOwnerTokens721Rolling({ chain, contract, owner, maxWant = ENV_MAX, deep = false, onProgress }) {
+/* ===================== On-chain deep scans (windowed; broader for Base) ===================== */
+async function fetchOwnerTokens721Rolling({ chain, contract, owner, maxWant, deep = false, onProgress }) {
   const provider = getProviderMatrix(chain);
   if (!provider) return { items: [], total: 0 };
   const iface = new Interface(['event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)']);
@@ -440,7 +451,11 @@ async function fetchOwnerTokens721Rolling({ chain, contract, owner, maxWant = EN
   const isBase = chain === 'base';
   const WINDOW = isBase ? 9500 : 60000;
   const LOG_CONC = isBase ? 1 : LOG_CONCURRENCY;
-  const MAX_WINDOWS = deep ? 750 : (isBase ? 90 : 120);
+
+  // If deep, expand until genesis (with a sane hard limit)
+  const MAX_WINDOWS = deep
+    ? (isBase ? 1200 : 240) // ~11.4M blocks on Base; 1200 * 9.5k ~= 11.4M
+    : (isBase ? 90 : 120);
 
   const topic0 = ethers.id('Transfer(address,address,uint256)');
   const topicTo   = padTopicAddress(owner);
@@ -465,7 +480,7 @@ async function fetchOwnerTokens721Rolling({ chain, contract, owner, maxWant = EN
       try {
         const paramsIn  = { address: contract.toLowerCase(), topics: [topic0, null, topicTo] };
         const paramsOut = { address: contract.toLowerCase(), topics: [topic0, topicFrom, null] };
-
+        // Always use windowed helper on Base; keep direct on others for speed
         if (isBase) {
           inLogs  = await getLogsWindowed(chain, paramsIn,  fromBlock, toBlock);
           outLogs = await getLogsWindowed(chain, paramsOut, fromBlock, toBlock);
@@ -487,7 +502,7 @@ async function fetchOwnerTokens721Rolling({ chain, contract, owner, maxWant = EN
   return { items: slice, total: all.length || slice.length };
 }
 
-async function fetchOwnerTokens1155Rolling({ chain, contract, owner, maxWant = ENV_MAX, deep = false, onProgress }) {
+async function fetchOwnerTokens1155Rolling({ chain, contract, owner, maxWant, deep = false, onProgress }) {
   const provider = getProviderMatrix(chain);
   if (!provider) return { items: [], total: 0 };
   const iface = new Interface([
@@ -499,7 +514,7 @@ async function fetchOwnerTokens1155Rolling({ chain, contract, owner, maxWant = E
   const isBase = chain === 'base';
   const WINDOW = isBase ? 9500 : 60000;
   const LOG_CONC = isBase ? 1 : LOG_CONCURRENCY;
-  const MAX_WINDOWS = deep ? 750 : (isBase ? 90 : 160);
+  const MAX_WINDOWS = deep ? (isBase ? 1200 : 260) : (isBase ? 90 : 160);
 
   const topicSingle = ethers.id('TransferSingle(address,address,address,uint256,uint256)');
   const topicBatch  = ethers.id('TransferBatch(address,address,address,uint256[],uint256[])');
@@ -569,8 +584,7 @@ async function fetchOwnerTokens1155Rolling({ chain, contract, owner, maxWant = E
 }
 
 /* ===================== Owner-token list fallbacks (Moralis / OpenSea) ===================== */
-// Return {items, total}
-async function fetchOwnerTokensMoralisList({ chain, contract, owner, maxWant = ENV_MAX }) {
+async function fetchOwnerTokensMoralisList({ chain, contract, owner, maxWant }) {
   const key = process.env.MORALIS_API_KEY;
   const chainName = chain === 'base' ? 'base' : chain === 'eth' ? 'eth' : null;
   if (!key || !chainName) return { items: [], total: 0 };
@@ -580,7 +594,7 @@ async function fetchOwnerTokensMoralisList({ chain, contract, owner, maxWant = E
   let cursor = null;
   let pages = 0;
 
-  while (items.length < maxWant && pages < 10) {
+  while (items.length < maxWant && pages < 12) {
     try {
       const url = new URL(`https://deep-index.moralis.io/api/v2.2/${owner}/nft/${contract}`);
       url.searchParams.set('chain', chainName);
@@ -605,7 +619,7 @@ async function fetchOwnerTokensMoralisList({ chain, contract, owner, maxWant = E
   return { items, total: items.length };
 }
 
-async function fetchOwnerTokensOpenSeaList({ chain, contract, owner, maxWant = ENV_MAX }) {
+async function fetchOwnerTokensOpenSeaList({ chain, contract, owner, maxWant }) {
   const key = process.env.OPENSEA_API_KEY;
   const chainKey = chain === 'base' ? 'base' : chain === 'eth' ? 'ethereum' : null;
   if (!key || !chainKey) return { items: [], total: 0 };
@@ -615,7 +629,7 @@ async function fetchOwnerTokensOpenSeaList({ chain, contract, owner, maxWant = E
   let next = null;
   let pages = 0;
 
-  while (items.length < maxWant && pages < 10) {
+  while (items.length < maxWant && pages < 12) {
     try {
       const url = new URL(`https://api.opensea.io/api/v2/chain/${chainKey}/account/${owner}/nfts`);
       url.searchParams.set('limit', '50');
@@ -639,22 +653,16 @@ async function fetchOwnerTokensOpenSeaList({ chain, contract, owner, maxWant = E
   return { items, total: items.length };
 }
 
-/* ===================== Resolve tokenURI/uri (dual-probe with permutations) ===================== */
-function idHex64Lower(tokenId) {
-  return BigInt(tokenId).toString(16).padStart(64, '0');
-}
-function idHex64Upper(tokenId) {
-  return idHex64Lower(tokenId).toUpperCase();
-}
+/* ===================== Resolve tokenURI/uri (with 1155 {id} permutations) ===================== */
+function idHex64Lower(tokenId) { return BigInt(tokenId).toString(16).padStart(64, '0'); }
+function idHex64Upper(tokenId) { return idHex64Lower(tokenId).toUpperCase(); }
 const RESOLVED_URI_CACHE = new Map();
-
 function applyIdPermutations(u, tokenId) {
   const dec = String(BigInt(tokenId));
   const hex64 = idHex64Lower(tokenId);
   const hex64U = idHex64Upper(tokenId);
   const hex = BigInt(tokenId).toString(16);
   const hexU = hex.toUpperCase();
-
   const variants = new Set();
   if (/\{id\}/i.test(u)) {
     variants.add(u.replace(/\{id\}/gi, hex64));
@@ -667,7 +675,6 @@ function applyIdPermutations(u, tokenId) {
   }
   return Array.from(variants);
 }
-
 async function resolveMetadataURI({ chain, contract, tokenId, is1155Hint }) {
   const key = `${chain}:${contract}:${String(tokenId)}:${is1155Hint ? '1155' : 'auto'}`;
   const cached = RESOLVED_URI_CACHE.get(key);
@@ -678,8 +685,8 @@ async function resolveMetadataURI({ chain, contract, tokenId, is1155Hint }) {
 
   const c721  = new Contract(contract, ['function tokenURI(uint256) view returns (string)'], provider);
   const c1155 = new Contract(contract, ['function uri(uint256) view returns (string)'], provider);
-
   const order = is1155Hint ? ['1155','721'] : ['721','1155'];
+
   for (const mode of order) {
     try {
       if (mode === '721') {
@@ -699,9 +706,7 @@ async function resolveMetadataURI({ chain, contract, tokenId, is1155Hint }) {
         RESOLVED_URI_CACHE.set(key, dedup);
         return dedup;
       }
-    } catch {
-      // try the other mode
-    }
+    } catch {}
   }
   return null;
 }
@@ -805,7 +810,6 @@ async function backfillImagesFromReservoir({ chain, contract, items, onProgress 
   });
 }
 
-// Optional Moralis fallback (needs MORALIS_API_KEY)
 async function backfillImagesFromMoralis({ chain, contract, items }) {
   const key = process.env.MORALIS_API_KEY;
   if (!key) return items;
@@ -854,7 +858,6 @@ async function backfillImagesFromMoralis({ chain, contract, items }) {
   return out;
 }
 
-// Optional OpenSea fallback (needs OPENSEA_API_KEY)
 async function backfillImagesFromOpenSea({ chain, contract, items }) {
   const key = process.env.OPENSEA_API_KEY;
   if (!key) return items;
@@ -892,7 +895,6 @@ async function backfillImagesFromOpenSea({ chain, contract, items }) {
 
 /* ===================== Robust image loading ===================== */
 const IMG_PROXIES = [
-  // remove if you don't want a proxy fallback:
   (u) => `https://images.weserv.nl/?url=${encodeURIComponent(u)}&output=png`
 ];
 
@@ -900,7 +902,7 @@ async function loadImageWithCandidates(candidates, perTryMs = 9000, isBaseChain 
   const timeoutA = isBaseChain ? Math.max(perTryMs, 12000) : perTryMs;
   const timeoutB = isBaseChain ? Math.max(perTryMs, 16000) : Math.max(perTryMs, 11000);
 
-  // 1) Try direct loadImage
+  // Direct
   for (const u of candidates) {
     try {
       if (isDataUrl(u)) {
@@ -916,7 +918,7 @@ async function loadImageWithCandidates(candidates, perTryMs = 9000, isBaseChain 
     } catch {}
   }
 
-  // 2) Fetch → buffer decode (and rescue HTML via og:image)
+  // Buffer+OG
   for (const u of candidates) {
     if (isDataUrl(u)) continue;
     try {
@@ -941,7 +943,6 @@ async function loadImageWithCandidates(candidates, perTryMs = 9000, isBaseChain 
         continue;
       }
 
-      // If AVIF, immediately try proxy transcode to PNG and load
       if (ctype.includes('image/avif') || u.toLowerCase().split('?')[0].endsWith('.avif')) {
         for (const xform of IMG_PROXIES) {
           const prox = xform(u);
@@ -969,7 +970,7 @@ async function loadImageWithCandidates(candidates, perTryMs = 9000, isBaseChain 
     } catch {}
   }
 
-  // 3) Proxy fallback (optional)
+  // Proxy fallback
   for (const u0 of candidates) {
     if (isDataUrl(u0)) continue;
     for (const xform of IMG_PROXIES) {
@@ -989,18 +990,6 @@ async function loadImageWithCandidates(candidates, perTryMs = 9000, isBaseChain 
     }
   }
   return null;
-}
-async function preloadImages(items, onProgress, isBaseChain = false) {
-  let done = 0;
-  const imgs = await runPool(IMAGE_CONCURRENCY, items, async (it) => {
-    const candidates =
-      Array.isArray(it.image) ? it.image :
-      (typeof it.image === 'string' ? expandImageCandidates(it.image) : []);
-    const img = candidates && candidates.length ? await loadImageWithCandidates(candidates, 9000, isBaseChain) : null;
-    done++; onProgress?.(done, items.length);
-    return img;
-  });
-  return imgs;
 }
 
 /* ===================== Image composition ===================== */
@@ -1101,7 +1090,7 @@ async function resolveProjectForGuild(pg, client, guildId, projectInput) {
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('matrix')
-    .setDescription('Render a grid of a wallet’s NFTs for a project tracked by this server (fast + robust images)')
+    .setDescription('Render a grid (paged) of a wallet’s NFTs for a tracked project (fast + robust images)')
     .addStringOption(o =>
       o.setName('wallet')
         .setDescription('Wallet address or ENS (.eth)')
@@ -1115,9 +1104,9 @@ module.exports = {
     )
     .addIntegerOption(o =>
       o.setName('limit')
-        .setDescription(`Max tiles (auto up to ${ENV_MAX} if omitted)`)
+        .setDescription(`Tiles per page (default ${ENV_MAX}, max ${GRID_PRESETS[GRID_PRESETS.length-1].max})`)
         .setMinValue(1)
-        .setMaxValue(ENV_MAX)
+        .setMaxValue(GRID_PRESETS[GRID_PRESETS.length-1].max)
         .setRequired(false)
     ),
 
@@ -1150,7 +1139,7 @@ module.exports = {
     const guildId = interaction.guild?.id;
     const walletInput = interaction.options.getString('wallet');
     const projectInput = interaction.options.getString('project') || '';
-    const userLimit = interaction.options.getInteger('limit') || null;
+    const userPerPage = interaction.options.getInteger('limit') || null;
 
     await interaction.deferReply({ ephemeral: false });
 
@@ -1188,32 +1177,35 @@ module.exports = {
 
     const chain = (project.chain || 'base').toLowerCase();
     const contract = (project.address || '').toLowerCase();
-    const maxWant = Math.min(userLimit || ENV_MAX, ENV_MAX);
+
+    // Figure out how many tokens to fetch overall (pages * perPage) and per page size
+    const perPage = clamp(userPerPage || ENV_MAX, 1, GRID_PRESETS[GRID_PRESETS.length-1].max);
+    const wantOverall = clamp(perPage * AUTO_PAGES, perPage, HARD_FETCH_CAP);
 
     const std = await detectTokenStandard(chain, contract);
 
     // Try Reservoir first (fast path)
     let items = [], totalOwned = 0, usedReservoir = false;
     if (chain === 'eth' || chain === 'base') {
-      const resv = await fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant });
+      const resv = await fetchOwnerTokensReservoirAll({ chain, contract, owner, maxWant: wantOverall });
       items = resv.items;
       totalOwned = resv.total || items.length;
       usedReservoir = items.length > 0;
     }
 
     // Enumerable ERC721
-    if (std.is721 && items.length < maxWant) {
+    if (std.is721 && items.length < wantOverall) {
       status.step = 'Fetching tokens (enumerable)…';
       await pushStatus();
-      const en = await fetchOwnerTokensEnumerable({ chain, contract, owner, maxWant });
+      const en = await fetchOwnerTokensEnumerable({ chain, contract, owner, maxWant: wantOverall });
       const byId = new Map(items.map(it => [String(it.tokenId), it]));
       for (const it of en.items) { const k = String(it.tokenId); if (!byId.has(k)) byId.set(k, it); }
-      items = Array.from(byId.values()).slice(0, maxWant);
+      items = Array.from(byId.values()).slice(0, wantOverall);
       totalOwned = Math.max(totalOwned, en.total || 0, items.length);
     }
 
-    // On-chain deep scan (rolling windows)
-    if (items.length < maxWant && !(chain === 'base' && usedReservoir)) {
+    // On-chain deep scan (rolling windows). Two-tier for Base if we’re empty after first pass.
+    if (items.length < wantOverall && !(chain === 'base' && usedReservoir)) {
       let lastPct = -1;
       status.step = std.is1155 ? 'Deep scan (ERC1155)…' : (chain === 'base' ? 'Deep scan (Base-safe)…' : 'Scanning logs…');
       status.scan = '0% [────────────────]';
@@ -1225,17 +1217,16 @@ module.exports = {
       };
 
       const onch = std.is1155
-        ? await fetchOwnerTokens1155Rolling({ chain, contract, owner, maxWant, deep: false, onProgress: onScanProgress })
-        : await fetchOwnerTokens721Rolling ({ chain, contract, owner, maxWant, deep: false, onProgress: onScanProgress });
+        ? await fetchOwnerTokens1155Rolling({ chain, contract, owner, maxWant: wantOverall, deep: false, onProgress: onScanProgress })
+        : await fetchOwnerTokens721Rolling ({ chain, contract, owner, maxWant: wantOverall, deep: false, onProgress: onScanProgress });
 
       const byId = new Map(items.map(it => [String(it.tokenId), it]));
       for (const it of onch.items) { const key = String(it.tokenId); if (!byId.has(key)) byId.set(key, it); }
-      items = Array.from(byId.values()).slice(0, maxWant);
+      items = Array.from(byId.values()).slice(0, wantOverall);
       totalOwned = Math.max(totalOwned, onch.total || 0, items.length);
       status.scan = 'done';
       await pushStatus();
 
-      // If still nothing on Base, escalate to a much deeper scan
       if (chain === 'base' && items.length === 0) {
         status.step = std.is1155 ? 'Deep scan (ERC1155, full)…' : 'Deep scan (full window)…';
         status.scan = '0% [────────────────]';
@@ -1246,31 +1237,33 @@ module.exports = {
           if (pct !== lastPct2) { lastPct2 = pct; status.scan = `${pct}% [${bar(pct)}]`; await pushStatus(); }
         };
         const onch2 = std.is1155
-          ? await fetchOwnerTokens1155Rolling({ chain, contract, owner, maxWant, deep: true, onProgress: onScanProgress2 })
-          : await fetchOwnerTokens721Rolling ({ chain, contract, owner, maxWant, deep: true, onProgress: onScanProgress2 });
+          ? await fetchOwnerTokens1155Rolling({ chain, contract, owner, maxWant: wantOverall, deep: true, onProgress: onScanProgress2 })
+          : await fetchOwnerTokens721Rolling ({ chain, contract, owner, maxWant: wantOverall, deep: true, onProgress: onScanProgress2 });
+
+        const byId2 = new Map(items.map(it => [String(it.tokenId), it]));
         for (const it of onch2.items) {
           const k = String(it.tokenId);
-          if (!byId.has(k)) byId.set(k, it);
+          if (!byId2.has(k)) byId2.set(k, it);
         }
-        items = Array.from(byId.values()).slice(0, maxWant);
+        items = Array.from(byId2.values()).slice(0, wantOverall);
         totalOwned = Math.max(totalOwned, onch2.total || 0, items.length);
         status.scan = 'done';
         await pushStatus();
       }
     }
 
-    // Owner-token list fallbacks if still empty (helps for older mints / index gaps)
+    // Owner-token list fallbacks if still empty
     if (items.length === 0) {
       status.step = 'Fetching tokens (Moralis)…';
       await pushStatus();
-      const m = await fetchOwnerTokensMoralisList({ chain, contract, owner, maxWant });
+      const m = await fetchOwnerTokensMoralisList({ chain, contract, owner, maxWant: wantOverall });
       items = m.items;
       totalOwned = Math.max(totalOwned, m.total || items.length);
 
       if (items.length === 0) {
         status.step = 'Fetching tokens (OpenSea)…';
         await pushStatus();
-        const o = await fetchOwnerTokensOpenSeaList({ chain, contract, owner, maxWant });
+        const o = await fetchOwnerTokensOpenSeaList({ chain, contract, owner, maxWant: wantOverall });
         items = o.items;
         totalOwned = Math.max(totalOwned, o.total || items.length);
       }
@@ -1280,7 +1273,7 @@ module.exports = {
       return interaction.editReply(`❌ No ${project.name} NFTs found for \`${ownerDisplay}\` on ${chain}.`);
     }
 
-    // Prefer fast backfill first (Reservoir CDN)
+    // Backfill/Enrich once globally so pages inherit images
     if (items.some(i => !i.image) && (chain === 'eth' || chain === 'base')) {
       let lastBF = -1;
       status.step = 'Backfilling images (Reservoir)…';
@@ -1298,10 +1291,8 @@ module.exports = {
       await pushStatus();
     }
 
-    // Only enrich on-chain on Base if we still miss a lot (avoid hammering during RPC issues)
     const needOnChainMeta = items.some(i => !i.image);
     const shouldEnrichOnChain = needOnChainMeta && !(chain === 'base' && items.filter(i => i.image).length >= Math.min(items.length, 12));
-
     if (shouldEnrichOnChain) {
       let lastEnPct = -1;
       status.step = 'Enriching images (tokenURI/uri)…';
@@ -1314,9 +1305,10 @@ module.exports = {
           if (pct !== lastEnPct) { lastEnPct = pct; status.enrich = `${pct}% [${bar(pct)}]`; await pushStatus(); }
         }
       });
+      status.enrich = 'done';
+      await pushStatus();
     }
 
-    // Optional fallbacks
     if (items.some(i => !i.image)) {
       status.step = 'Backfilling images (Moralis)…';
       await pushStatus();
@@ -1327,116 +1319,115 @@ module.exports = {
       await pushStatus();
       items = await backfillImagesFromOpenSea({ chain, contract, items });
     }
-
-    // Reservoir redirect fallback for any still-missing images (ETH/Base)
     if ((chain === 'eth' || chain === 'base') && items.some(i => !i.image)) {
       items = items.map(it => it.image ? it : ({ ...it, image: reservoirRedirectCandidates(chain, contract, it.tokenId) }));
     }
 
-    // Image preload
-    status.step = `Loading images (${items.length})…`;
-    let imgPct = 0;
-    status.images = `0% [${bar(0)}]`;
-    await pushStatus();
-
-    let preloadedImgs = await preloadImages(items, (done, total) => {
-      imgPct = clamp(Math.floor((done/total)*100), 0, 100);
-      status.images = `${imgPct}% [${bar(imgPct)}]`;
-      (async () => { await safeEdit({ content: statusBlock([
-        `Wallet: ${status.step}`,
-        status.scan && `Scan:     ${status.scan}`,
-        status.enrich && `Metadata: ${status.enrich}`,
-        status.backfill && `Backfill: ${status.backfill}`,
-        `Images:   ${status.images}`
-      ].filter(Boolean)) }); })();
-    }, chain === 'base');
-
-    // Last-chance: deep metadata poke for missing
-    const missingIdx = [];
-    for (let i = 0; i < items.length; i++) if (!preloadedImgs[i]) missingIdx.push(i);
-    if (missingIdx.length) {
-      await Promise.all(missingIdx.map(async (i) => {
-        try {
-          const uriList = await resolveMetadataURI({ chain, contract, tokenId: items[i].tokenId, is1155Hint: std.is1155 });
-          const meta = uriList ? await fetchJsonWithFallback(uriList, chain === 'base' ? 13000 : 9000) : null;
-          const cands = meta ? collectAllImageCandidates(meta) : [];
-          if (cands.length) items[i] = { ...items[i], image: cands };
-        } catch {}
-      }));
-      const recovered = await preloadImages(missingIdx.map(i => items[i]), () => {}, chain === 'base');
-      for (let k = 0; k < missingIdx.length; k++) {
-        preloadedImgs[ missingIdx[k] ] = recovered[k] || preloadedImgs[ missingIdx[k] ];
-      }
+    // ==== PAGINATION ====
+    const allItems = items.slice(0, wantOverall);
+    const pages = [];
+    for (let i = 0; i < allItems.length; i += perPage) {
+      pages.push(allItems.slice(i, i + perPage));
     }
 
-    // FINAL RESCUE: reshuffle gateways & prefer image extensions for still-missing tiles (plus Reservoir redirects)
-    const stillMissing = [];
-    for (let i = 0; i < items.length; i++) if (!preloadedImgs[i]) stillMissing.push(i);
-    if (stillMissing.length) {
-      const shuffle = (arr) => {
-        const a = arr.slice();
-        for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
-        return a;
-      };
-      const prefer = (cands) => {
-        const r = (u) => {
-          const q = u.split('?')[0].toLowerCase();
-          if (q.endsWith('.png')) return 1;
-          if (q.endsWith('.jpg') || q.endsWith('.jpeg')) return 2;
-          if (q.endsWith('.gif')) return 3;
-          if (q.endsWith('.webp')) return 4;
-          if (q.endsWith('.svg')) return 5;
-          if (q.endsWith('.avif')) return 6;
-          return 50;
-        };
-        return cands.slice().sort((a,b)=>r(a)-r(b));
-      };
-      const candidateLists = stillMissing.map(i => {
-        const it = items[i];
-        const cands = Array.isArray(it.image) ? it.image.slice() : [];
-        if (chain === 'eth' || chain === 'base') {
-          for (const x of reservoirRedirectCandidates(chain, contract, it.tokenId)) cands.push(x);
-        }
-        return prefer(shuffle(cands));
-      });
-      const rescued = await runPool(Math.min(IMAGE_CONCURRENCY, 6), candidateLists, async (candList) => {
-        return await loadImageWithCandidates(candList, 12000, chain === 'base');
-      });
-      for (let k = 0; k < stillMissing.length; k++) {
-        if (rescued[k]) preloadedImgs[ stillMissing[k] ] = rescued[k];
-      }
+    const files = [];
+    const embeds = [];
 
-      if (process.env.MATRIX_DEBUG_URLS === '1') {
-        const missingAfter = [];
-        for (let i = 0; i < items.length; i++) if (!preloadedImgs[i]) missingAfter.push(i);
-        if (missingAfter.length) {
-          console.warn('🔍 Matrix missing images for tokenIds:', missingAfter.map(i => items[i].tokenId));
-          for (const i of missingAfter) {
-            console.warn(`• #${items[i].tokenId}`, items[i].image);
+    // Per-page preload+compose, so progress always completes and memory stays sane.
+    for (let pi = 0; pi < pages.length; pi++) {
+      const pageItems = pages[pi];
+
+      status.step = `Loading images (page ${pi+1}/${pages.length}, ${pageItems.length} tiles)…`;
+      status.images = `0% [${bar(0)}]`;
+      await pushStatus();
+
+      let imgPct = 0;
+      let preloaded = await runPool(1, [pageItems], async (arr) => {
+        return await runPool(IMAGE_CONCURRENCY, arr, async (it, _idx) => {
+          const cands =
+            Array.isArray(it.image) ? it.image :
+            (typeof it.image === 'string' ? expandImageCandidates(it.image) : []);
+          const img = cands && cands.length ? await loadImageWithCandidates(cands, 9000, chain === 'base') : null;
+          imgPct = clamp(Math.floor(((files.length + (_idx+1)/arr.length) / Math.max(1, pages.length)) * 100), 0, 100);
+          status.images = `${imgPct}% [${bar(imgPct)}]`;
+          (async () => { await safeEdit({ content: statusBlock([
+            `Wallet: ${status.step}`,
+            status.scan && `Scan:     ${status.scan}`,
+            status.enrich && `Metadata: ${status.enrich}`,
+            status.backfill && `Backfill: ${status.backfill}`,
+            `Images:   ${status.images}`
+          ].filter(Boolean)) }); })();
+          return img;
+        });
+      });
+      preloaded = preloaded[0];
+
+      // Last-chance rescue for this page
+      const missingIdx = [];
+      for (let i = 0; i < pageItems.length; i++) if (!preloaded[i]) missingIdx.push(i);
+      if (missingIdx.length) {
+        await Promise.all(missingIdx.map(async (i) => {
+          try {
+            const uriList = await resolveMetadataURI({ chain, contract, tokenId: pageItems[i].tokenId, is1155Hint: std.is1155 });
+            const meta = uriList ? await fetchJsonWithFallback(uriList, chain === 'base' ? 13000 : 9000) : null;
+            const cands = meta ? collectAllImageCandidates(meta) : [];
+            if (cands.length) pageItems[i] = { ...pageItems[i], image: cands };
+          } catch {}
+        }));
+        const recovered = await runPool(IMAGE_CONCURRENCY, missingIdx.map(i => pageItems[i]), async (it) => {
+          const cands =
+            Array.isArray(it.image) ? it.image :
+            (typeof it.image === 'string' ? expandImageCandidates(it.image) : []);
+          return await loadImageWithCandidates(cands, 12000, chain === 'base');
+        });
+        for (let k = 0; k < missingIdx.length; k++) {
+          preloaded[ missingIdx[k] ] = recovered[k] || preloaded[ missingIdx[k] ];
+        }
+
+        if (process.env.MATRIX_DEBUG_URLS === '1') {
+          const missingAfter = [];
+          for (let i = 0; i < pageItems.length; i++) if (!preloaded[i]) missingAfter.push(i);
+          if (missingAfter.length) {
+            console.warn('🔍 Matrix missing images (page) for tokenIds:', missingAfter.map(i => pageItems[i].tokenId));
+            for (const i of missingAfter) {
+              console.warn(`• #${pageItems[i].tokenId}`, pageItems[i].image);
+            }
           }
         }
       }
+
+      const gridBuf = await composeGrid(pageItems, preloaded);
+      const filename = `matrix_${project.name}_${owner.slice(0,6)}_p${pi+1}.png`
+        .replace(/[^\w.\-]+/g, '_');
+      const file = new AttachmentBuilder(gridBuf, { name: filename });
+      files.push(file);
+
+      const showingCount = pageItems.length;
+      const desc = [
+        `Owner: \`${ownerDisplay}\`${ownerDisplay.endsWith('.eth') ? `\nResolved: \`${owner}\`` : ''}`,
+        `Chain: \`${chain}\``,
+        `**Page ${pi+1}/${pages.length} — showing ${showingCount} of ${Math.max(totalOwned, allItems.length)} owned**`
+      ].join('\n');
+
+      const embed = new EmbedBuilder()
+        .setTitle(`🧩 ${project.name} — Page ${pi+1}/${pages.length}`)
+        .setDescription(desc)
+        .setColor(0x66ccff)
+        .setImage(`attachment://${file.name}`)
+        .setFooter({ text: `Matrix view • Paged • Powered by PimpsDev` })
+        .setTimestamp();
+
+      embeds.push(embed);
     }
 
-    const gridBuf = await composeGrid(items, preloadedImgs);
-    const file = new AttachmentBuilder(gridBuf, { name: `matrix_${project.name}_${owner.slice(0,6)}.png` });
+    status.step = 'Done.';
+    status.scan = status.scan || 'done';
+    status.enrich = status.enrich || 'done';
+    status.backfill = status.backfill || 'done';
+    status.images = `100% [${bar(100)}]`;
+    await pushStatus();
 
-    const desc = [
-      `Owner: \`${ownerDisplay}\`${ownerDisplay.endsWith('.eth') ? `\nResolved: \`${owner}\`` : ''}`,
-      `Chain: \`${chain}\``,
-      `**Showing ${items.length} of ${totalOwned || items.length} owned**`,
-      ...(chain === 'ape' ? ['*(ApeChain may rely on on-chain scan)*'] : [])
-    ].join('\n');
-
-    const embed = new EmbedBuilder()
-      .setTitle(`🧩 ${project.name}`)
-      .setDescription(desc)
-      .setColor(0x66ccff)
-      .setImage(`attachment://${file.name}`)
-      .setFooter({ text: `Matrix view • Powered by PimpsDev` })
-      .setTimestamp();
-
-    await interaction.editReply({ content: null, embeds: [embed], files: [file] });
+    await interaction.editReply({ content: null, embeds, files });
     finalized = true;
   }
 };
