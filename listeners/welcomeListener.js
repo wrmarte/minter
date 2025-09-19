@@ -1,30 +1,27 @@
 // listeners/welcomelisten.js
-const { EmbedBuilder } = require('discord.js');
+const { EmbedBuilder, PermissionFlagsBits } = require('discord.js');
 
-// Optional import: if you created services/welcome.js from earlier steps,
-// we'll use it so the test path and the real join path share the same logic.
+// Optional import: if you created services/welcome.js,
+// we'll use it so test path and real joins share the same logic.
 let sendWelcomeService = null;
 try {
   ({ sendWelcome: sendWelcomeService } = require('../services/welcome'));
 } catch {
-  // services/welcome not present; we'll use the local fallback sender below.
+  // no-op; we'll use the local fallback sender below.
 }
 
-// ---------- Config ----------
+/* ======================= Config ======================= */
 const TRIGGERS = new Set(['tt-welcome', 'test-welcome']);
-const COOLDOWN_MS = 5000;         // per-guild spam guard
-const SETTINGS_TTL_MS = 30_000;   // cache welcome_settings for 30s
+const COOLDOWN_MS = 5000;       // per-guild spam guard
+const SETTINGS_TTL_MS = 30_000; // cache welcome_settings for 30s
 
-// ---------- In-memory caches ----------
-const guildCooldown = new Map(); // guildId -> lastTimestamp
-const settingsCache = new Map(); // guildId -> { data, expiresAt }
+/* =================== In-memory caches =================== */
+const guildCooldown = new Map();  // guildId -> lastTimestamp
+const settingsCache = new Map();  // guildId -> { data, expiresAt }
 
-// ---------- Helpers ----------
-function now() { return Date.now(); }
-
-function pick(arr) {
-  return arr[Math.floor(Math.random() * arr.length)];
-}
+/* ======================== Helpers ======================== */
+const now = () => Date.now();
+const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 
 function safeAvatar(member) {
   try {
@@ -64,12 +61,22 @@ function formatTemplate(tpl, { member, guild, memberCount }) {
     .replaceAll('{member_count}', `${memberCount}`);
 }
 
-// Local fallback sender used only if services/welcome.js is not available
+/* ============== Local fallback welcome sender ============== */
+/* Used only when services/welcome.js is not available */
 async function sendWelcomeFallback({ member, guild, cfg }) {
   if (!cfg?.enabled) return;
 
   const channel = await guild.channels.fetch(cfg.welcome_channel_id).catch(() => null);
   if (!channel) return;
+
+  // Permission check
+  const me = guild.members.me || await guild.members.fetchMe().catch(() => null);
+  if (!me) return;
+  const perms = channel.permissionsFor(me);
+  if (!perms?.has(PermissionFlagsBits.ViewChannel) || !perms?.has(PermissionFlagsBits.SendMessages)) {
+    console.log(`[welcome:test] Missing perms in channel ${cfg.welcome_channel_id} (guild=${guild.id})`);
+    return;
+  }
 
   const memberCount = guild.memberCount ?? (await guild.members.fetch()).size;
 
@@ -85,7 +92,7 @@ async function sendWelcomeFallback({ member, guild, cfg }) {
     `📦 {user_mention} dropped in with the alpha. Give 'em love.`,
   ];
 
-  const template = cfg.message_template && cfg.message_template.trim().length > 0
+  const template = (cfg.message_template && cfg.message_template.trim().length > 0)
     ? cfg.message_template
     : pick(defaults);
 
@@ -104,7 +111,7 @@ async function sendWelcomeFallback({ member, guild, cfg }) {
 
   const contentBits = [];
   if (cfg.ping_role_id) contentBits.push(`<@&${cfg.ping_role_id}>`);
-  // if template didn't mention the user, tag them in content for visibility
+  // If template doesn’t mention the user, tag them in content for visibility
   if (!template.includes('{user_mention}')) contentBits.push(`<@${member.id}>`);
 
   const sent = await channel.send({
@@ -116,13 +123,14 @@ async function sendWelcomeFallback({ member, guild, cfg }) {
     setTimeout(() => sent.delete().catch(() => {}), cfg.delete_after_sec * 1000);
   }
 
-  // For "test" we usually skip DM to avoid surprising users; uncomment if desired:
+  // For "test" we skip DM to avoid surprising users; enable if you prefer:
   // if (cfg.dm_enabled) {
   //   await member.send({ embeds: [embed] }).catch(() => {});
   // }
 }
 
-module.exports = (client) => {
+/* ======================== Listener ======================== */
+module.exports = (client, pgFromCaller) => {
   client.on('messageCreate', async (message) => {
     try {
       if (message.author.bot || !message.guild) return;
@@ -135,23 +143,23 @@ module.exports = (client) => {
       if (now() - last < COOLDOWN_MS) return;
       guildCooldown.set(message.guild.id, now());
 
-      const pg = client.pg;
+      const pg = pgFromCaller || client.pg;
       const guild = message.guild;
       const member = message.member;
 
       // Load welcome settings (cached)
       const cfg = await getWelcomeSettings(pg, guild.id);
       if (!cfg || !cfg.enabled || !cfg.welcome_channel_id) {
-        // Silent return if not configured; or you can inform admins only:
-        // if (message.member.permissions.has('Administrator')) {
+        // Optional: inform admins only
+        // if (message.member.permissions.has(PermissionFlagsBits.Administrator)) {
         //   message.reply({ content: '⚠️ Welcome isn’t configured. Use /setwelcome first.', allowedMentions: { repliedUser: false } }).catch(() => {});
         // }
         return;
       }
 
-      // Prefer the shared service if available (keeps behavior identical to real joins)
+      // Prefer the shared service to keep behavior identical to real joins
       if (typeof sendWelcomeService === 'function') {
-        await sendWelcomeService({ client, pg, member });
+        await sendWelcomeService({ client, pg, member, preview: true });
       } else {
         // Fallback inline sender if the service isn’t present
         await sendWelcomeFallback({ member, guild, cfg });
