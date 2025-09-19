@@ -174,7 +174,25 @@ try {
 require('./listeners/muscleMBListener')(client);
 require('./listeners/mbella')(client);
 require('./listeners/fftrigger')(client);
-require('./listeners/welcomelisten')(client, pool); // pass PG to the welcome listener
+
+// Robust require for welcome listener (handles either file name)
+let welcomeLoader = null;
+try {
+  welcomeLoader = require('./listeners/welcomelisten');
+  console.log('📡 Loaded welcome listener: welcomelisten.js');
+} catch (e1) {
+  try {
+    welcomeLoader = require('./listeners/welcomeListener');
+    console.log('📡 Loaded welcome listener: welcomeListener.js');
+  } catch (e2) {
+    console.error('❌ Could not find welcome listener file. Expected one of:');
+    console.error('   - ./listeners/welcomelisten.js');
+    console.error('   - ./listeners/welcomeListener.js');
+    throw e2;
+  }
+}
+welcomeLoader(client, pool);
+
 
 
 // =================== Services / timers ===================
