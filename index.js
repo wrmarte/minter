@@ -125,6 +125,24 @@ require('./db/initStakingTables')(pool).catch(console.error);
       welcome_channel_id TEXT
     )`);
 
+    // 🔧 Ensure new welcome columns exist (safe to run every boot)
+    await pool.query(`
+      ALTER TABLE welcome_settings
+        ADD COLUMN IF NOT EXISTS dm_enabled BOOLEAN NOT NULL DEFAULT false,
+        ADD COLUMN IF NOT EXISTS delete_after_sec INTEGER,
+        ADD COLUMN IF NOT EXISTS message_template TEXT,
+        ADD COLUMN IF NOT EXISTS image_url TEXT,
+        ADD COLUMN IF NOT EXISTS ping_role_id TEXT
+    `);
+
+    await pool.query(`
+      UPDATE welcome_settings
+      SET message_template = COALESCE(
+        message_template,
+        '👋 Welcome {user_mention} to **{server}**!\nYou’re member #{member_count}. Make yourself at home 💎'
+      )
+    `);
+
     await pool.query(`CREATE TABLE IF NOT EXISTS dummy_info (
       name TEXT NOT NULL,
       content TEXT NOT NULL,
@@ -174,26 +192,7 @@ try {
 require('./listeners/muscleMBListener')(client);
 require('./listeners/mbella')(client);
 require('./listeners/fftrigger')(client);
-
-// Robust require for welcome listener (handles either file name)
-let welcomeLoader = null;
-try {
-  welcomeLoader = require('./listeners/welcomelisten');
-  console.log('📡 Loaded welcome listener: welcomelisten.js');
-} catch (e1) {
-  try {
-    welcomeLoader = require('./listeners/welcomeListener');
-    console.log('📡 Loaded welcome listener: welcomeListener.js');
-  } catch (e2) {
-    console.error('❌ Could not find welcome listener file. Expected one of:');
-    console.error('   - ./listeners/welcomelisten.js');
-    console.error('   - ./listeners/welcomeListener.js');
-    throw e2;
-  }
-}
-welcomeLoader(client, pool);
-
-
+require('./listeners/welcomeListener')(client, pool); // pass PG to the welcome listener
 
 // =================== Services / timers ===================
 const { trackAllContracts } = require('./services/mintRouter');
