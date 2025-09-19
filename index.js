@@ -174,7 +174,8 @@ try {
 require('./listeners/muscleMBListener')(client);
 require('./listeners/mbella')(client);
 require('./listeners/fftrigger')(client);
-require('./listeners/welcomeListener')(client, pool); // pass PG to the welcome listener
+require('./listeners/welcomelisten')(client, pool); // pass PG to the welcome listener
+
 
 // =================== Services / timers ===================
 const { trackAllContracts } = require('./services/mintRouter');
