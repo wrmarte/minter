@@ -1,6 +1,5 @@
 require('dotenv').config();
-- const { Client, GatewayIntentBits, Collection, REST, Routes } = require('discord.js');
-+ const { Client, GatewayIntentBits, Partials, Collection, REST, Routes } = require('discord.js');
+const { Client, GatewayIntentBits, Partials, Collection, REST, Routes } = require('discord.js');
 const { Pool } = require('pg');
 const fs = require('fs');
 const path = require('path');
@@ -33,11 +32,11 @@ console.log("👀 Booting from:", __dirname);
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-+   GatewayIntentBits.GuildMembers,   // ✅ REQUIRED for guildMemberAdd welcome events
+    GatewayIntentBits.GuildMembers,   // REQUIRED for guildMemberAdd welcome events
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent
   ],
-+  partials: [Partials.GuildMember, Partials.User] // ✅ Helps when joins arrive as partials
+  partials: [Partials.GuildMember, Partials.User] // Helps when joins arrive as partials
 });
 
 // ====================== PostgreSQL (pool) ======================
@@ -175,8 +174,7 @@ try {
 require('./listeners/muscleMBListener')(client);
 require('./listeners/mbella')(client);
 require('./listeners/fftrigger')(client);
-- require('./listeners/welcomeListener')(client);
-+ require('./listeners/welcomeListener')(client, pool); // ✅ pass PG to the welcome listener
+require('./listeners/welcomeListener')(client, pool); // pass PG to the welcome listener
 
 // =================== Services / timers ===================
 const { trackAllContracts } = require('./services/mintRouter');
