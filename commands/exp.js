@@ -12,30 +12,30 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
 const GROQ_MODEL_ENV = (process.env.GROQ_MODEL || '').trim(); // optional override
 
-// Try these Groq models in order (first available wins). Edit freely:
-const CANDIDATE_GROQ_MODELS = GROQ_MODEL_ENV
-  ? [GROQ_MODEL_ENV]
-  : [
-      'llama-3.1-70b-versatile',
-      'llama3-70b-8192',
-      'mixtral-8x7b-32768',
-      'llama-3.1-8b-instant',
-      'gemma-7b-it'
-    ];
+/* ============================= Discovery / Caching ============================= */
+// Cache discovered Groq models for 6h
+let MODEL_CACHE = { ts: 0, ids: [] };
+const MODEL_TTL_MS = 6 * 60 * 60 * 1000;
 
-/* ============================= Utils ============================= */
-function getRandomColor() {
-  const colors = [
-    0xFFD700, 0x66CCFF, 0xFF66CC, 0xFF4500,
-    0x00FF99, 0xFF69B4, 0x00CED1, 0xFFA500, 0x8A2BE2
-  ];
-  return colors[Math.floor(Math.random() * colors.length)];
-}
+// Avoid noisy repeat logs per model
+const MODEL_WARNED = new Set();
+// Track models that returned "model_decommissioned"
+const DECOMMISSIONED_MODELS = new Set();
 
-// Ephemeral helper (flags instead of deprecated "ephemeral" option)
-function asEphemeral(opts = {}) {
-  const EPHEMERAL = (MessageFlags && MessageFlags.Ephemeral) ? MessageFlags.Ephemeral : (1 << 6); // 64
-  return { ...opts, flags: EPHEMERAL };
+function nowMs() { return Date.now(); }
+
+function preferOrder(a, b) {
+  const size = (id) => {
+    const m = id.match(/(\d+)\s*b|\b(\d+)[bB]\b|-(\d+)b/);
+    return m ? parseInt(m[1] || m[2] || m[3] || '0', 10) : 0;
+  };
+  const ver = (id) => {
+    const m = id.match(/(\d+(?:\.\d+)?)/);
+    return m ? parseFloat(m[1]) : 0;
+  };
+  const szDiff = size(b) - size(a);
+  if (szDiff) return szDiff;
+  return ver(b) - ver(a);
 }
 
 function safeJsonParse(text) {
@@ -52,6 +52,85 @@ async function fetchWithTimeout(url, opts = {}, timeoutMs = 25000) {
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+async function fetchGroqModels() {
+  if (!GROQ_API_KEY) return [];
+  try {
+    const { res, bodyText } = await fetchWithTimeout(
+      'https://api.groq.com/openai/v1/models',
+      { headers: { 'Authorization': `Bearer ${GROQ_API_KEY}` } },
+      20000
+    );
+    if (!res.ok) {
+      if (!MODEL_WARNED.has('models')) {
+        console.warn(`Groq /models HTTP ${res.status}: ${bodyText?.slice(0, 300)}`);
+        MODEL_WARNED.add('models');
+      }
+      return [];
+    }
+    const data = safeJsonParse(bodyText);
+    if (!data || !Array.isArray(data.data)) return [];
+    const ids = data.data.map(x => x.id).filter(Boolean);
+
+    // Prefer chat-capable families
+    const chatLikely = ids
+      .filter(id => /llama|mixtral|gemma|qwen|deepseek|phi|mistral|gpt/i.test(id))
+      .filter(id => !DECOMMISSIONED_MODELS.has(id))
+      .sort(preferOrder);
+
+    return chatLikely.length ? chatLikely : ids.filter(id => !DECOMMISSIONED_MODELS.has(id)).sort(preferOrder);
+  } catch (e) {
+    if (!MODEL_WARNED.has('models_err')) {
+      console.warn('Groq /models fetch failed:', e.message);
+      MODEL_WARNED.add('models_err');
+    }
+    return [];
+  }
+}
+
+async function getGroqModelsToTry() {
+  // If env override is set and not decommissioned, use it first
+  const list = [];
+  if (GROQ_MODEL_ENV && !DECOMMISSIONED_MODELS.has(GROQ_MODEL_ENV)) list.push(GROQ_MODEL_ENV);
+
+  const now = nowMs();
+  if (!MODEL_CACHE.ids.length || (now - MODEL_CACHE.ts) > MODEL_TTL_MS) {
+    const discovered = await fetchGroqModels();
+    if (discovered.length) MODEL_CACHE = { ts: now, ids: discovered };
+  }
+  for (const id of MODEL_CACHE.ids) {
+    if (!list.includes(id) && !DECOMMISSIONED_MODELS.has(id)) list.push(id);
+  }
+
+  // Static last-resort guesses (kept minimal; filtered if decommissioned)
+  const FALLBACKS = [
+    'llama-3.1-70b-versatile',
+    'llama3-70b-8192',
+    'mixtral-8x7b-32768',
+    'llama-3.1-8b-instant',
+    'gemma-7b-it'
+  ].filter(id => !DECOMMISSIONED_MODELS.has(id));
+
+  // If we still have nothing, use fallbacks
+  if (!list.length) list.push(...FALLBACKS);
+
+  return list;
+}
+
+/* ============================= UI Utils ============================= */
+function getRandomColor() {
+  const colors = [
+    0xFFD700, 0x66CCFF, 0xFF66CC, 0xFF4500,
+    0x00FF99, 0xFF69B4, 0x00CED1, 0xFFA500, 0x8A2BE2
+  ];
+  return colors[Math.floor(Math.random() * colors.length)];
+}
+
+// Ephemeral helper (flags instead of deprecated "ephemeral" option)
+function asEphemeral(opts = {}) {
+  const EPHEMERAL = (MessageFlags && MessageFlags.Ephemeral) ? MessageFlags.Ephemeral : (1 << 6); // 64
+  return { ...opts, flags: EPHEMERAL };
 }
 
 /* ============================= Command ============================= */
@@ -359,7 +438,7 @@ function cleanQuotes(text) {
   return (text || '').replace(/^"(.*)"$/, '$1').trim();
 }
 
-/* ============================= AI Core (Groq multi-model + OpenAI) ============================= */
+/* ============================= AI Core (Groq discovery + OpenAI) ============================= */
 async function smartAIResponse(keyword, userMention, opts = {}) {
   const {
     mode = 'default',
@@ -389,6 +468,9 @@ async function getGroqAI(keyword, userMention, { mode, recentContext, guildName,
   const system = buildSystemPromptBase(mode, recentContext, guildName, wantVariants);
   const user = composeUserPrompt(keyword, wantVariants, semantic);
 
+  const models = await getGroqModelsToTry();
+  if (!models.length) throw new Error('No Groq models available');
+
   const bodyFor = (model) => JSON.stringify({
     model,
     messages: [
@@ -401,7 +483,7 @@ async function getGroqAI(keyword, userMention, { mode, recentContext, guildName,
 
   let lastErr = null;
 
-  for (const model of CANDIDATE_GROQ_MODELS) {
+  for (const model of models) {
     try {
       const { res, bodyText } = await fetchWithTimeout(
         'https://api.groq.com/openai/v1/chat/completions',
@@ -417,9 +499,23 @@ async function getGroqAI(keyword, userMention, { mode, recentContext, guildName,
       );
 
       if (!res.ok) {
-        const shortBody = (bodyText || '').slice(0, 300);
-        console.warn(`Groq ${model} HTTP ${res.status}: ${shortBody}`);
-        // 400/404: model not available → try next; 401/403/429/5xx: bail
+        // Parse error body for code and reduce noisy repeats
+        const parsed = safeJsonParse(bodyText);
+        const code = parsed?.error?.code || parsed?.error?.type || '';
+        const msg = parsed?.error?.message || bodyText?.slice(0, 300) || '';
+
+        // Track and silently skip decommissioned models next time
+        if (code === 'model_decommissioned' || /decommissioned/i.test(msg)) {
+          DECOMMISSIONED_MODELS.add(model);
+        }
+
+        const warnKey = `groq_${model}`;
+        if (!MODEL_WARNED.has(warnKey)) {
+          console.warn(`Groq ${model} HTTP ${res.status}: ${msg}`);
+          MODEL_WARNED.add(warnKey);
+        }
+
+        // 400/404: try next model; 401/403/429/5xx: bail out
         if (res.status === 400 || res.status === 404) { lastErr = new Error(`Groq ${model} unavailable`); continue; }
         throw new Error(`Groq ${model} HTTP ${res.status}`);
       }
@@ -436,7 +532,11 @@ async function getGroqAI(keyword, userMention, { mode, recentContext, guildName,
       return cleaned;
     } catch (e) {
       lastErr = e;
-      console.warn(`Groq model "${model}" failed: ${e.message}`);
+      const warnKey = `groq_err_${model}`;
+      if (!MODEL_WARNED.has(warnKey)) {
+        console.warn(`Groq model "${model}" failed: ${e.message}`);
+        MODEL_WARNED.add(warnKey);
+      }
       // try next model
     }
   }
@@ -545,5 +645,6 @@ function localSemanticVariants(keyword, userMention) {
 
   return variants.map(mk).join('\n---\n');
 }
+
 
 
