@@ -27,7 +27,7 @@ module.exports = {
     .setDescription('Show a visual experience vibe')
     .addStringOption(option =>
       option.setName('name')
-        .setDescription('Name of the expression (e.g. rich)')
+        .setDescription('Name of the expression (e.g. rich, loco, sigma)')
         .setRequired(true)
         .setAutocomplete(true)
     )
@@ -42,7 +42,7 @@ module.exports = {
     const isOwner = interaction.user.id === ownerId;
 
     const rawName = interaction.options.getString('name');
-    const name = (rawName || '').trim().toLowerCase(); // ✅ normalize
+    const name = (rawName || '').trim().toLowerCase(); // normalize any input
     const targetUser = interaction.options.getUser('target') || interaction.user;
     const userMention = `<@${targetUser.id}>`;
     const guildId = interaction.guild?.id ?? null;
@@ -75,7 +75,7 @@ module.exports = {
       console.error('❌ DB error in /exp:', err);
     }
 
-    // If nothing in DB and no built-in, ask AI; if AI fails, use local fallback variants
+    // If nothing in DB and no built-in, ask AI to interpret the word; if AI fails, use local semantic fallback
     if (!res.rows.length && !flavorMap[name]) {
       let textBlock = '';
       try {
@@ -86,17 +86,16 @@ module.exports = {
           recentContext,
           guildName,
           displayTarget,
-          wantVariants: true
+          wantVariants: true,      // return 3 variants
+          semantic: true           // interpret slang/foreign/meme
         });
       } catch (err) {
         console.error('❌ AI error in /exp:', err);
-        // use local fallback generator if AI throws
-        textBlock = localFallbackVariants(name, userMention);
+        textBlock = localSemanticVariants(name, userMention); // semantic local fallback
       }
 
-      // ensure we have something even if AI returned empty
       if (!textBlock || !textBlock.trim()) {
-        textBlock = localFallbackVariants(name, userMention);
+        textBlock = localSemanticVariants(name, userMention);
       }
 
       const aiPicked = pickVariant(textBlock, userMention);
@@ -270,11 +269,14 @@ function modeSystemFlavor(mode) {
   }
 }
 
+// 🔥 NEW: Semantic instruction layer so AI interprets "any word" (slang/foreign/meme)
 function buildSystemPromptBase(mode, recentContext, guildName, wantVariants = false) {
   const base = [
-    `You generate a short, stylish "expression vibe" for a Discord server (${guildName}).`,
+    `You generate a short, stylish "expression vibe" line for a Discord server (${guildName}).`,
     modeSystemFlavor(mode),
-    'Keep it to 1 sentence. Use Discord/Web3 slang tastefully. Avoid insults; be fun.',
+    'Your job: INTERPRET the given expression as a vibe. If it is slang/meme/other language, infer or briefly translate the meaning internally (DO NOT output a definition).',
+    'Then craft a one-line vibe targeting the mentioned user. Use the expression literally once and reflect its meaning (e.g., "loco" → wild/crazy; "sigma" → stoic boss energy).',
+    'Keep it to 1 sentence, under ~140 chars. Use Discord/Web3 slang tastefully. Avoid insults/slurs; keep it playful. Include {user} once.',
     recentContext ? recentContext : ''
   ].filter(Boolean).join('\n\n');
 
@@ -283,10 +285,11 @@ function buildSystemPromptBase(mode, recentContext, guildName, wantVariants = fa
   // Ask for 3 distinct variants; we’ll split on \n---\n later
   return base + `
 
-Return EXACTLY 3 distinct one-line variants, each under 160 characters.
+Return EXACTLY 3 distinct one-line variants, each under 140 characters.
 Separate variants with a single line containing three dashes exactly:
 ---
-Do not number them. Include {user} in each line where the mention should go.`;
+Do not number them. Include {user} in each line where the mention should go.
+Do NOT output definitions or explanations—only the final lines.`;
 }
 
 // Prepare multi-variant content strings (DB custom): split by || or \n---\n
@@ -306,31 +309,43 @@ function pickVariant(textOrGrouped, userMention) {
   return chosen.replace(/{user}/gi, userMention).slice(0, 240);
 }
 
-// ✅ Smart AI with Fallback Logic (context + mode aware, variant-capable)
+// ✅ Smart AI with Fallback Logic (context + mode aware, variant-capable, semantic)
 async function smartAIResponse(keyword, userMention, opts = {}) {
   const {
     mode = 'default',
     recentContext = '',
     guildName = 'this server',
     displayTarget = userMention,
-    wantVariants = false
+    wantVariants = false,
+    semantic = true
   } = opts;
 
   try {
-    return await getGroqAI(keyword, displayTarget, { mode, recentContext, guildName, wantVariants });
+    return await getGroqAI(keyword, displayTarget, { mode, recentContext, guildName, wantVariants, semantic });
   } catch {
     console.warn('❌ Groq failed, trying OpenAI');
     try {
-      return await getOpenAI(keyword, displayTarget, { mode, recentContext, guildName, wantVariants });
+      return await getOpenAI(keyword, displayTarget, { mode, recentContext, guildName, wantVariants, semantic });
     } catch {
-      console.warn('❌ OpenAI failed — using local fallback');
-      // return 3 local variants joined by '---' so pickVariant works the same
-      return localFallbackVariants(keyword, userMention);
+      console.warn('❌ OpenAI failed — using local semantic fallback');
+      return localSemanticVariants(keyword, userMention);
     }
   }
 }
 
-async function getGroqAI(keyword, userMention, { mode, recentContext, guildName, wantVariants }) {
+function composeUserPrompt(keyword, wantVariants, semantic) {
+  if (!semantic) {
+    return wantVariants
+      ? `Expression: "${keyword}". Give 3 vibe variants separated by '---' lines. Mention {user} in each.`
+      : `Expression: "${keyword}". Output a single, punchy vibe line. Mention {user} once.`;
+  }
+  // semantic mode: instruct to infer meaning/translation internally
+  return wantVariants
+    ? `Expression: "${keyword}". Interpret as slang/meme/foreign if needed; reflect its meaning in the line. Return 3 variants separated by '---'. Mention {user} each.`
+    : `Expression: "${keyword}". Interpret as slang/meme/foreign if needed; reflect its meaning in the line. Single line, mention {user} once.`;
+}
+
+async function getGroqAI(keyword, userMention, { mode, recentContext, guildName, wantVariants, semantic }) {
   const url = 'https://api.groq.com/openai/v1/chat/completions';
   const apiKey = process.env.GROQ_API_KEY;
 
@@ -338,12 +353,10 @@ async function getGroqAI(keyword, userMention, { mode, recentContext, guildName,
     model: 'llama3-70b-8192',
     messages: [
       { role: 'system', content: buildSystemPromptBase(mode, recentContext, guildName, wantVariants) },
-      { role: 'user', content: wantVariants
-          ? `Expression: "${keyword}". Give 3 variants separated by '---' lines. Mention {user} in each.`
-          : `Expression: "${keyword}". Output a single, punchy line. Mention {user} once.` }
+      { role: 'user', content: composeUserPrompt(keyword, wantVariants, semantic) }
     ],
-    max_tokens: wantVariants ? 160 : 60,
-    temperature: 0.9
+    max_tokens: wantVariants ? 180 : 80,
+    temperature: 0.95
   };
 
   const res = await fetch(url, {
@@ -368,7 +381,7 @@ async function getGroqAI(keyword, userMention, { mode, recentContext, guildName,
   return cleaned;
 }
 
-async function getOpenAI(keyword, userMention, { mode, recentContext, guildName, wantVariants }) {
+async function getOpenAI(keyword, userMention, { mode, recentContext, guildName, wantVariants, semantic }) {
   const res = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -379,12 +392,10 @@ async function getOpenAI(keyword, userMention, { mode, recentContext, guildName,
       model: OPENAI_MODEL,
       messages: [
         { role: 'system', content: buildSystemPromptBase(mode, recentContext, guildName, wantVariants) },
-        { role: 'user', content: wantVariants
-            ? `Expression: "${keyword}". Give 3 variants separated by '---' lines. Mention {user} in each.`
-            : `Expression: "${keyword}". Output a single, punchy line. Mention {user} once.` }
+        { role: 'user', content: composeUserPrompt(keyword, wantVariants, semantic) }
       ],
-      max_tokens: wantVariants ? 160 : 60,
-      temperature: 1.0
+      max_tokens: wantVariants ? 180 : 80,
+      temperature: 0.95
     })
   });
 
@@ -408,26 +419,65 @@ function cleanQuotes(text) {
   return (text || '').replace(/^"(.*)"$/, '$1').trim();
 }
 
-// Local, AI-free fallback: return 3+ variants joined by '---'
-function localFallbackVariants(keyword, userMention) {
+/**
+ * Local, AI-free semantic fallback: tries to infer simple meaning hints for common slang/foreign words,
+ * then crafts multiple variants. Always returns '---' separated block so pickVariant can choose one.
+ */
+function localSemanticVariants(keyword, userMention) {
   const k = (keyword || 'vibe').trim();
+
+  // Simple semantic hints (extend as needed)
+  const HINTS = {
+    loco: 'wild/crazy',
+    fuego: 'on fire',
+    tranquilo: 'calm/chill',
+    sigma: 'stoic boss energy',
+    based: 'unapologetically true',
+    cringe: 'awkward vibes',
+    rizz: 'charisma',
+    saucy: 'flashy/style',
+    zen: 'calm focus',
+    kaizen: 'continuous improvement',
+    yolo: 'reckless fun',
+    cozy: 'comfort mode',
+    alpha: 'leader energy',
+    giga: 'massive',
+    sus: 'suspicious',
+    drip: 'style',
+    lit: 'hype',
+    chad: 'confident unit',
+    icy: 'cool under pressure',
+    degen: 'chaotic trader energy',
+    tidy: 'clean & organized',
+    locohead: 'wild in the head' // playful example
+  };
+
+  // Pick a hint if we have one
+  const hint = HINTS[k] || null;
+
+  // Templates that read nicely whether or not we have a hint
+  const mk = (t) => t.replace(/{user}/gi, userMention).replace(/{k}/g, k).replace(/{hint}/g, hint || k);
+
   const variants = [
-    `{user} is pulling pure ${k} energy today. ⚡`,
-    `${k} mode: ON. {user} just flipped the switch.`,
-    `If ${k} had a soundtrack, {user} dropped the beat. 🎵`,
-    `{user} = ${k} with extra sparkle ✨`,
-    `Microdose of ${k}? Nah. {user} mainlined it.`,
-    `Proof of ${k}: {user} just minted the vibe. ✅`,
-    `{user} ate ${k} for breakfast and asked for seconds.`,
-    `{user} called. They want more ${k} in the roadmap. 🗺️`,
-    `Patch notes: +20% ${k} for {user} ⚙️`,
-    `{user} speedrunning ${k} any% 🏁`,
-    `Today’s theme for {user}: ${k} — ship it. 📦`,
-    `{user} distilled ${k} down to one line and made it art.`
+    hint ? `{user} is {k} in the head — ({hint}).`
+         : `Ohh {user} is {k} in the head.`,
+
+    hint ? `{user} just went full {k} — pure {hint}.`
+         : `{user} just went full {k}.`,
+
+    hint ? `{user} radiates {k} energy (aka {hint}).`
+         : `{user} radiates {k} energy.`,
+
+    hint ? `Patch notes: +20% {k} for {user} • {hint}.`
+         : `Patch notes: +20% {k} for {user}.`,
+
+    hint ? `{user} = {k} with extra sparkle ✨ ({hint}).`
+         : `{user} = {k} with extra sparkle ✨`,
+
+    hint ? `Status: {user} entered {k} mode • {hint}.`
+         : `Status: {user} entered {k} mode.`
   ];
 
-  // Return as '---' separated block so pickVariant can choose one
-  return variants
-    .map(v => v.replace(/{user}/gi, userMention))
-    .join('\n---\n');
+  return variants.map(mk).join('\n---\n');
 }
+
