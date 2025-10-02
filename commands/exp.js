@@ -1,8 +1,11 @@
-const { SlashCommandBuilder, AttachmentBuilder, EmbedBuilder } = require('discord.js');
+const { SlashCommandBuilder, AttachmentBuilder, EmbedBuilder, MessageFlags } = require('discord.js');
 const fetch = require('node-fetch');
 const { flavorMap, getRandomFlavor } = require('../utils/flavorMap');
 
 const guildNameCache = new Map();
+
+// Optional: allow overriding the OpenAI model via env
+const OPENAI_MODEL = (process.env.OPENAI_MODEL || 'gpt-3.5-turbo').trim();
 
 function getRandomColor() {
   const colors = [
@@ -10,6 +13,12 @@ function getRandomColor() {
     0x00FF99, 0xFF69B4, 0x00CED1, 0xFFA500, 0x8A2BE2
   ];
   return colors[Math.floor(Math.random() * colors.length)];
+}
+
+// Ephemeral helper (flags instead of deprecated "ephemeral" option)
+function asEphemeral(opts = {}) {
+  const EPHEMERAL = (MessageFlags && MessageFlags.Ephemeral) ? MessageFlags.Ephemeral : (1 << 6); // 64
+  return { ...opts, flags: EPHEMERAL };
 }
 
 module.exports = {
@@ -31,12 +40,15 @@ module.exports = {
   async execute(interaction, { pg }) {
     const ownerId = process.env.BOT_OWNER_ID;
     const isOwner = interaction.user.id === ownerId;
-    const name = interaction.options.getString('name').toLowerCase();
+
+    const rawName = interaction.options.getString('name');
+    const name = (rawName || '').trim().toLowerCase(); // ✅ normalize
     const targetUser = interaction.options.getUser('target') || interaction.user;
     const userMention = `<@${targetUser.id}>`;
     const guildId = interaction.guild?.id ?? null;
 
-    await interaction.deferReply({ ephemeral: true });
+    // Use flags for ephemeral (avoid deprecation warning), then delete the deferred reply
+    await interaction.deferReply(asEphemeral());
     await interaction.deleteReply().catch(() => {});
 
     // Friendly identity for embeds
@@ -63,30 +75,38 @@ module.exports = {
       console.error('❌ DB error in /exp:', err);
     }
 
-    // If nothing in DB and no built-in, ask AI (with context + mode awareness) — now returns 3 variants and we pick one
+    // If nothing in DB and no built-in, ask AI; if AI fails, use local fallback variants
     if (!res.rows.length && !flavorMap[name]) {
+      let textBlock = '';
       try {
         const mode = await getMbMode(pg, guildId);
         const recentContext = await getRecentContext(interaction);
-        const aiMulti = await smartAIResponse(name, userMention, {
+        textBlock = await smartAIResponse(name, userMention, {
           mode,
           recentContext,
           guildName,
           displayTarget,
-          wantVariants: true  // ← ask AI for 3 variants
+          wantVariants: true
         });
-        const aiPicked = pickVariant(aiMulti, userMention);
-
-        const embed = new EmbedBuilder()
-          .setColor(getRandomColor())
-          .setAuthor({ name: `For ${displayTarget} @ ${guildName}`, iconURL: avatar })
-          .setDescription(`💬 ${aiPicked}`);
-
-        return await interaction.channel.send({ embeds: [embed] });
       } catch (err) {
         console.error('❌ AI error in /exp:', err);
-        return await interaction.channel.send('❌ AI failed to respond.');
+        // use local fallback generator if AI throws
+        textBlock = localFallbackVariants(name, userMention);
       }
+
+      // ensure we have something even if AI returned empty
+      if (!textBlock || !textBlock.trim()) {
+        textBlock = localFallbackVariants(name, userMention);
+      }
+
+      const aiPicked = pickVariant(textBlock, userMention);
+
+      const embed = new EmbedBuilder()
+        .setColor(getRandomColor())
+        .setAuthor({ name: `For ${displayTarget} @ ${guildName}`, iconURL: avatar })
+        .setDescription(`💬 ${aiPicked}`);
+
+      return await interaction.channel.send({ embeds: [embed] });
     }
 
     // If we got a DB row (support multi-variant content via "||" or "\n---\n")
@@ -303,8 +323,9 @@ async function smartAIResponse(keyword, userMention, opts = {}) {
     try {
       return await getOpenAI(keyword, displayTarget, { mode, recentContext, guildName, wantVariants });
     } catch {
-      console.warn('❌ OpenAI failed');
-      return `🧠 ${displayTarget} tried to flex "${keyword}" but confused every AI out there.`;
+      console.warn('❌ OpenAI failed — using local fallback');
+      // return 3 local variants joined by '---' so pickVariant works the same
+      return localFallbackVariants(keyword, userMention);
     }
   }
 }
@@ -335,7 +356,16 @@ async function getGroqAI(keyword, userMention, { mode, recentContext, guildName,
   const rawReply = data?.choices?.[0]?.message?.content?.trim();
   if (!rawReply) throw new Error('Empty AI response');
 
-  return cleanQuotes(rawReply);
+  const cleaned = cleanQuotes(rawReply);
+
+  // If it doesn’t include '---' and we asked for variants, make quick splits
+  if (wantVariants && !/^\s*---\s*$/m.test(cleaned)) {
+    const lines = cleaned.split(/\n+/).map(s => s.trim()).filter(Boolean);
+    if (lines.length >= 3) {
+      return lines.slice(0, 3).join('\n---\n');
+    }
+  }
+  return cleaned;
 }
 
 async function getOpenAI(keyword, userMention, { mode, recentContext, guildName, wantVariants }) {
@@ -346,7 +376,7 @@ async function getOpenAI(keyword, userMention, { mode, recentContext, guildName,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      model: 'gpt-3.5-turbo',
+      model: OPENAI_MODEL,
       messages: [
         { role: 'system', content: buildSystemPromptBase(mode, recentContext, guildName, wantVariants) },
         { role: 'user', content: wantVariants
@@ -361,23 +391,43 @@ async function getOpenAI(keyword, userMention, { mode, recentContext, guildName,
   const json = await res.json();
   const rawReply = json?.choices?.[0]?.message?.content;
   if (!rawReply) throw new Error('OpenAI gave no response');
-  return cleanQuotes(rawReply);
+
+  const cleaned = cleanQuotes(rawReply);
+
+  // If it doesn’t include '---' and we asked for variants, make quick splits
+  if (wantVariants && !/^\s*---\s*$/m.test(cleaned)) {
+    const lines = cleaned.split(/\n+/).map(s => s.trim()).filter(Boolean);
+    if (lines.length >= 3) {
+      return lines.slice(0, 3).join('\n---\n');
+    }
+  }
+  return cleaned;
 }
 
 function cleanQuotes(text) {
   return (text || '').replace(/^"(.*)"$/, '$1').trim();
 }
 
+// Local, AI-free fallback: return 3+ variants joined by '---'
+function localFallbackVariants(keyword, userMention) {
+  const k = (keyword || 'vibe').trim();
+  const variants = [
+    `{user} is pulling pure ${k} energy today. ⚡`,
+    `${k} mode: ON. {user} just flipped the switch.`,
+    `If ${k} had a soundtrack, {user} dropped the beat. 🎵`,
+    `{user} = ${k} with extra sparkle ✨`,
+    `Microdose of ${k}? Nah. {user} mainlined it.`,
+    `Proof of ${k}: {user} just minted the vibe. ✅`,
+    `{user} ate ${k} for breakfast and asked for seconds.`,
+    `{user} called. They want more ${k} in the roadmap. 🗺️`,
+    `Patch notes: +20% ${k} for {user} ⚙️`,
+    `{user} speedrunning ${k} any% 🏁`,
+    `Today’s theme for {user}: ${k} — ship it. 📦`,
+    `{user} distilled ${k} down to one line and made it art.`
+  ];
 
-
-
-
-
-
-
-
-
-
-
-
-
+  // Return as '---' separated block so pickVariant can choose one
+  return variants
+    .map(v => v.replace(/{user}/gi, userMention))
+    .join('\n---\n');
+}
