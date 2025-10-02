@@ -2,18 +2,22 @@ const { flavorMap, getRandomFlavor } = require('../utils/flavorMap');
 const { AttachmentBuilder, EmbedBuilder } = require('discord.js');
 const fetch = require('node-fetch');
 
-/* ============================= Config / Env ============================= */
+/* ============================= Env knobs ============================= */
+/** IMPORTANT: If EXP_PREFIX_ENABLED=true (default), expPrefix.js handles !exp.
+ *  This file will then SKIP handling !exp to avoid double posts.
+ *  Set EXP_PREFIX_ENABLED=false if you want THIS file to handle !exp instead.
+ */
+const EXP_PREFIX_ENABLED = process.env.EXP_PREFIX_ENABLED !== 'false'; // default true
+const EXP_PREFIX = (process.env.EXP_PREFIX || '!exp').trim();
+
 const GROQ_API_KEY   = process.env.GROQ_API_KEY || '';
-const GROQ_MODEL_ENV = (process.env.GROQ_MODEL || '').trim(); // optional override
+const GROQ_MODEL_ENV = (process.env.GROQ_MODEL || '').trim();
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const OPENAI_MODEL   = (process.env.OPENAI_MODEL || 'gpt-3.5-turbo').trim();
 
 /* ============================= Discovery / Caching ============================= */
-// Cache discovered Groq models for 6h
 let MODEL_CACHE = { ts: 0, ids: [] };
 const MODEL_TTL_MS = 6 * 60 * 60 * 1000;
-
-// Track models decommissioned; throttle noisy logs
 const DECOMMISSIONED_MODELS = new Set();
 const MODEL_WARNED = new Set();
 
@@ -84,7 +88,6 @@ async function getGroqModelsToTry() {
     if (!list.includes(id) && !DECOMMISSIONED_MODELS.has(id)) list.push(id);
   }
 
-  // Minimal static fallbacks as absolute last resort (filtered)
   const FALLBACKS = [
     'llama-3.1-8b-instant',
     'gemma-7b-it'
@@ -151,7 +154,6 @@ function composeUserPrompt(keyword, wantVariants) {
 
 /* ============================= AI Core ============================= */
 async function smartAIResponse(keyword, { userMention, guildName, recentContext, wantVariants = true }) {
-  // Try Groq first with discovery; then OpenAI; then local fallback
   try {
     return await getGroqAI(keyword, { guildName, recentContext, wantVariants });
   } catch {
@@ -238,7 +240,6 @@ async function getGroqAI(keyword, { guildName, recentContext, wantVariants }) {
         console.warn(`Groq model "${model}" failed: ${e.message}`);
         MODEL_WARNED.add(warnKey);
       }
-      // try next model
     }
   }
 
@@ -284,7 +285,7 @@ async function getOpenAI(keyword, { guildName, recentContext, wantVariants }) {
 
   const cleaned = cleanQuotes(raw);
   if (wantVariants && !/^\s*---\s*$/m.test(cleaned)) {
-    const lines = cleaned.split(/\n+/).map(s => s.trim()).filter(Boolean);
+    const lines = cleaned split(/\n+/).map(s => s.trim()).filter(Boolean);
     if (lines.length >= 3) return lines.slice(0, 3).join('\n---\n');
   }
   return cleaned;
@@ -364,13 +365,17 @@ module.exports = (client, pg) => {
   client.on('messageCreate', async message => {
     if (message.author.bot) return;
 
-    const prefix = '!exp';
-    if (!message.content.toLowerCase().startsWith(prefix)) return;
+    // If prefix listener is enabled, DO NOT handle here to avoid double posting
+    if (EXP_PREFIX_ENABLED) return;
+
+    const prefix = EXP_PREFIX.toLowerCase();
+    const content = (message.content || '').trim().toLowerCase();
+    if (!content.startsWith(prefix)) return;
 
     // Parse: !exp <word or "phrase"> [@mention?]
     let rest = message.content.slice(prefix.length).trim();
     if (!rest.length) {
-      return message.reply({ content: '❌ Please provide an expression. Example: `!exp "sigma" @user` or `!exp loco`' });
+      return message.reply({ content: `❌ Please provide an expression. Example: \`${EXP_PREFIX} "sigma" @user\` or \`${EXP_PREFIX} loco\`` });
     }
 
     // quoted phrase first
@@ -386,10 +391,9 @@ module.exports = (client, pg) => {
     }
 
     if (!keyword) {
-      return message.reply({ content: '❌ Please provide an expression. Example: `!exp rich`' });
+      return message.reply({ content: `❌ Please provide an expression. Example: \`${EXP_PREFIX} rich\`` });
     }
 
-    // Resolve target: first mention or the author
     const targetUser  = message.mentions.users.first() || message.author;
     const userMention = `<@${targetUser.id}>`;
     const guildId     = message.guild?.id ?? null;
@@ -404,7 +408,7 @@ module.exports = (client, pg) => {
         return message.reply({ embeds: [embed] });
       }
 
-      // 2) DB lookup (supports images + {user} replacement)
+      // 2) DB lookup
       let dbRes = { rows: [] };
       try {
         dbRes = await pg.query(
@@ -436,7 +440,7 @@ module.exports = (client, pg) => {
         return message.reply({ embeds: [embed] });
       }
 
-      // 3) AI path (Groq discovery → OpenAI → local semantic)
+      // 3) AI path
       try {
         const recentContext = await getRecentContextFromMessage(message);
         const textBlock = await smartAIResponse(keyword, {
@@ -463,7 +467,6 @@ module.exports = (client, pg) => {
     }
   });
 };
-
 
 
 
