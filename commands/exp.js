@@ -1,12 +1,29 @@
+// commands/exp.js
 const { SlashCommandBuilder, AttachmentBuilder, EmbedBuilder, MessageFlags } = require('discord.js');
 const fetch = require('node-fetch');
 const { flavorMap, getRandomFlavor } = require('../utils/flavorMap');
 
 const guildNameCache = new Map();
 
-// Optional: allow overriding the OpenAI model via env
+/* ============================= Config / Env ============================= */
 const OPENAI_MODEL = (process.env.OPENAI_MODEL || 'gpt-3.5-turbo').trim();
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 
+const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
+const GROQ_MODEL_ENV = (process.env.GROQ_MODEL || '').trim(); // optional override
+
+// Try these Groq models in order (first available wins). Edit freely:
+const CANDIDATE_GROQ_MODELS = GROQ_MODEL_ENV
+  ? [GROQ_MODEL_ENV]
+  : [
+      'llama-3.1-70b-versatile',
+      'llama3-70b-8192',
+      'mixtral-8x7b-32768',
+      'llama-3.1-8b-instant',
+      'gemma-7b-it'
+    ];
+
+/* ============================= Utils ============================= */
 function getRandomColor() {
   const colors = [
     0xFFD700, 0x66CCFF, 0xFF66CC, 0xFF4500,
@@ -21,6 +38,23 @@ function asEphemeral(opts = {}) {
   return { ...opts, flags: EPHEMERAL };
 }
 
+function safeJsonParse(text) {
+  try { return JSON.parse(text); } catch { return null; }
+}
+
+async function fetchWithTimeout(url, opts = {}, timeoutMs = 25000) {
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  try {
+    const res = await fetch(url, { ...opts, signal: controller?.signal });
+    const bodyText = await res.text();
+    return { res, bodyText };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/* ============================= Command ============================= */
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('exp')
@@ -269,7 +303,7 @@ function modeSystemFlavor(mode) {
   }
 }
 
-// 🔥 NEW: Semantic instruction layer so AI interprets "any word" (slang/foreign/meme)
+// Semantic instruction layer so AI interprets "any word" (slang/foreign/meme)
 function buildSystemPromptBase(mode, recentContext, guildName, wantVariants = false) {
   const base = [
     `You generate a short, stylish "expression vibe" line for a Discord server (${guildName}).`,
@@ -292,6 +326,18 @@ Do not number them. Include {user} in each line where the mention should go.
 Do NOT output definitions or explanations—only the final lines.`;
 }
 
+function composeUserPrompt(keyword, wantVariants, semantic) {
+  if (!semantic) {
+    return wantVariants
+      ? `Expression: "${keyword}". Give 3 vibe variants separated by '---' lines. Mention {user} in each.`
+      : `Expression: "${keyword}". Output a single, punchy vibe line. Mention {user} once.`;
+  }
+  // semantic mode: instruct to infer meaning/translation internally
+  return wantVariants
+    ? `Expression: "${keyword}". Interpret as slang/meme/foreign if needed; reflect its meaning in the line. Return 3 variants separated by '---'. Mention {user} each.`
+    : `Expression: "${keyword}". Interpret as slang/meme/foreign if needed; reflect its meaning in the line. Single line, mention {user} once.`;
+}
+
 // Prepare multi-variant content strings (DB custom): split by || or \n---\n
 function prepareVariants(content, userMention) {
   if (!content) return '';
@@ -309,7 +355,11 @@ function pickVariant(textOrGrouped, userMention) {
   return chosen.replace(/{user}/gi, userMention).slice(0, 240);
 }
 
-// ✅ Smart AI with Fallback Logic (context + mode aware, variant-capable, semantic)
+function cleanQuotes(text) {
+  return (text || '').replace(/^"(.*)"$/, '$1').trim();
+}
+
+/* ============================= AI Core (Groq multi-model + OpenAI) ============================= */
 async function smartAIResponse(keyword, userMention, opts = {}) {
   const {
     mode = 'default',
@@ -333,79 +383,104 @@ async function smartAIResponse(keyword, userMention, opts = {}) {
   }
 }
 
-function composeUserPrompt(keyword, wantVariants, semantic) {
-  if (!semantic) {
-    return wantVariants
-      ? `Expression: "${keyword}". Give 3 vibe variants separated by '---' lines. Mention {user} in each.`
-      : `Expression: "${keyword}". Output a single, punchy vibe line. Mention {user} once.`;
-  }
-  // semantic mode: instruct to infer meaning/translation internally
-  return wantVariants
-    ? `Expression: "${keyword}". Interpret as slang/meme/foreign if needed; reflect its meaning in the line. Return 3 variants separated by '---'. Mention {user} each.`
-    : `Expression: "${keyword}". Interpret as slang/meme/foreign if needed; reflect its meaning in the line. Single line, mention {user} once.`;
-}
-
 async function getGroqAI(keyword, userMention, { mode, recentContext, guildName, wantVariants, semantic }) {
-  const url = 'https://api.groq.com/openai/v1/chat/completions';
-  const apiKey = process.env.GROQ_API_KEY;
+  if (!GROQ_API_KEY) throw new Error('GROQ_API_KEY missing');
 
-  const body = {
-    model: 'llama3-70b-8192',
+  const system = buildSystemPromptBase(mode, recentContext, guildName, wantVariants);
+  const user = composeUserPrompt(keyword, wantVariants, semantic);
+
+  const bodyFor = (model) => JSON.stringify({
+    model,
     messages: [
-      { role: 'system', content: buildSystemPromptBase(mode, recentContext, guildName, wantVariants) },
-      { role: 'user', content: composeUserPrompt(keyword, wantVariants, semantic) }
+      { role: 'system', content: system },
+      { role: 'user', content: user }
     ],
     max_tokens: wantVariants ? 180 : 80,
     temperature: 0.95
-  };
-
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
   });
 
-  const data = await res.json();
-  const rawReply = data?.choices?.[0]?.message?.content?.trim();
-  if (!rawReply) throw new Error('Empty AI response');
+  let lastErr = null;
 
-  const cleaned = cleanQuotes(rawReply);
+  for (const model of CANDIDATE_GROQ_MODELS) {
+    try {
+      const { res, bodyText } = await fetchWithTimeout(
+        'https://api.groq.com/openai/v1/chat/completions',
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${GROQ_API_KEY}`,
+            'Content-Type': 'application/json'
+          },
+          body: bodyFor(model)
+        },
+        25000
+      );
 
-  // If it doesn’t include '---' and we asked for variants, make quick splits
-  if (wantVariants && !/^\s*---\s*$/m.test(cleaned)) {
-    const lines = cleaned.split(/\n+/).map(s => s.trim()).filter(Boolean);
-    if (lines.length >= 3) {
-      return lines.slice(0, 3).join('\n---\n');
+      if (!res.ok) {
+        const shortBody = (bodyText || '').slice(0, 300);
+        console.warn(`Groq ${model} HTTP ${res.status}: ${shortBody}`);
+        // 400/404: model not available → try next; 401/403/429/5xx: bail
+        if (res.status === 400 || res.status === 404) { lastErr = new Error(`Groq ${model} unavailable`); continue; }
+        throw new Error(`Groq ${model} HTTP ${res.status}`);
+      }
+
+      const data = safeJsonParse(bodyText);
+      const rawReply = data?.choices?.[0]?.message?.content?.trim();
+      if (!rawReply) { lastErr = new Error('Groq empty'); continue; }
+
+      const cleaned = cleanQuotes(rawReply);
+      if (wantVariants && !/^\s*---\s*$/m.test(cleaned)) {
+        const lines = cleaned.split(/\n+/).map(s => s.trim()).filter(Boolean);
+        if (lines.length >= 3) return lines.slice(0, 3).join('\n---\n');
+      }
+      return cleaned;
+    } catch (e) {
+      lastErr = e;
+      console.warn(`Groq model "${model}" failed: ${e.message}`);
+      // try next model
     }
   }
-  return cleaned;
+
+  throw lastErr || new Error('All Groq models failed');
 }
 
 async function getOpenAI(keyword, userMention, { mode, recentContext, guildName, wantVariants, semantic }) {
-  const res = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      model: OPENAI_MODEL,
-      messages: [
-        { role: 'system', content: buildSystemPromptBase(mode, recentContext, guildName, wantVariants) },
-        { role: 'user', content: composeUserPrompt(keyword, wantVariants, semantic) }
-      ],
-      max_tokens: wantVariants ? 180 : 80,
-      temperature: 0.95
-    })
-  });
+  if (!OPENAI_API_KEY) throw new Error('OPENAI_API_KEY missing');
 
-  const json = await res.json();
-  const rawReply = json?.choices?.[0]?.message?.content;
+  const system = buildSystemPromptBase(mode, recentContext, guildName, wantVariants);
+  const user = composeUserPrompt(keyword, wantVariants, semantic);
+
+  const { res, bodyText } = await fetchWithTimeout(
+    'https://api.openai.com/v1/chat/completions',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: OPENAI_MODEL,
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: user }
+        ],
+        max_tokens: wantVariants ? 180 : 80,
+        temperature: 0.95
+      })
+    },
+    25000
+  );
+
+  if (!res.ok) {
+    console.error(`❌ OpenAI HTTP ${res.status}: ${bodyText?.slice(0, 400)}`);
+    throw new Error(`OpenAI HTTP ${res.status}`);
+  }
+
+  const json = safeJsonParse(bodyText);
+  const rawReply = json?.choices?.[0]?.message?.content?.trim();
   if (!rawReply) throw new Error('OpenAI gave no response');
 
   const cleaned = cleanQuotes(rawReply);
-
-  // If it doesn’t include '---' and we asked for variants, make quick splits
   if (wantVariants && !/^\s*---\s*$/m.test(cleaned)) {
     const lines = cleaned.split(/\n+/).map(s => s.trim()).filter(Boolean);
     if (lines.length >= 3) {
@@ -415,10 +490,7 @@ async function getOpenAI(keyword, userMention, { mode, recentContext, guildName,
   return cleaned;
 }
 
-function cleanQuotes(text) {
-  return (text || '').replace(/^"(.*)"$/, '$1').trim();
-}
-
+/* ============================= Local Fallback (Semantic) ============================= */
 /**
  * Local, AI-free semantic fallback: tries to infer simple meaning hints for common slang/foreign words,
  * then crafts multiple variants. Always returns '---' separated block so pickVariant can choose one.
@@ -449,35 +521,29 @@ function localSemanticVariants(keyword, userMention) {
     icy: 'cool under pressure',
     degen: 'chaotic trader energy',
     tidy: 'clean & organized',
-    locohead: 'wild in the head' // playful example
+    locohead: 'wild in the head'
   };
 
-  // Pick a hint if we have one
   const hint = HINTS[k] || null;
 
-  // Templates that read nicely whether or not we have a hint
   const mk = (t) => t.replace(/{user}/gi, userMention).replace(/{k}/g, k).replace(/{hint}/g, hint || k);
 
   const variants = [
     hint ? `{user} is {k} in the head — ({hint}).`
          : `Ohh {user} is {k} in the head.`,
-
     hint ? `{user} just went full {k} — pure {hint}.`
          : `{user} just went full {k}.`,
-
     hint ? `{user} radiates {k} energy (aka {hint}).`
          : `{user} radiates {k} energy.`,
-
     hint ? `Patch notes: +20% {k} for {user} • {hint}.`
          : `Patch notes: +20% {k} for {user}.`,
-
     hint ? `{user} = {k} with extra sparkle ✨ ({hint}).`
          : `{user} = {k} with extra sparkle ✨`,
-
     hint ? `Status: {user} entered {k} mode • {hint}.`
          : `Status: {user} entered {k} mode.`
   ];
 
   return variants.map(mk).join('\n---\n');
 }
+
 
