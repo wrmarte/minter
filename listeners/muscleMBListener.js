@@ -23,30 +23,93 @@ const NICE_PING_EVERY_MS = 4 * 60 * 60 * 1000; // 4 hours
 const NICE_SCAN_EVERY_MS = 60 * 60 * 1000;     // scan hourly
 const NICE_ACTIVE_WINDOW_MS = 45 * 60 * 1000;  // “active” = last 45 minutes
 
-// Expanded with more non-gym, general life/ship vibes
-const NICE_LINES = [
-  "hydrate, hustle, and be kind today 💧💪",
-  "tiny reps compound. keep going, legend ✨",
-  "your pace > perfect. 1% better is a W 📈",
-  "posture check, water sip, breathe deep 🧘‍♂️",
-  "you’re doing great. send a W to someone else too 🙌",
-  "breaks are part of the grind — reset, then rip ⚡️",
-  "stack small dubs; the big ones follow 🧱",
-  "write it down, knock it out, fist bump later ✍️👊",
-  "skip the scroll, ship the thing 📦",
-  "mood follows motion — move first 🕺",
-  // extra non-gym quotes:
-  "clear tab, clear mind — ship the smallest next thing 🧹",
-  "inbox zero? nah—impact first, inbox later ✉️➡️🚀",
-  "add five quiet minutes to think; it pays compound interest ⏱️",
-  "ask one better question and the work gets lighter ❓✨",
-  "today’s goal: one honest message, one shipped change 📤",
-  "a tiny draft beats a perfect idea living in your head 📝",
-  "choose progress over polish; polish comes after 🧽",
-  "drink water, touch grass, send the PR 🌿",
-  "don’t doomscroll; dreamscroll your own roadmap 🗺️",
-  "precision beats intensity — name the next step 🎯",
-];
+/** ===== Categorized NICE_LINES with extra nutty/thoughtful/degen/chaotic/funny ===== */
+const NICE_LINES = {
+  focus: [
+    "precision beats intensity — name the next step 🎯",
+    "clear tab, clear mind — ship the smallest next thing 🧹",
+    "silence the noise, chase the signal 📡",
+    "progress hides in plain sight — reread yesterday’s notes 📓",
+    "if it feels stuck, zoom out; the map is bigger than the street 🗺️",
+  ],
+
+  kindness: [
+    "you’re doing great. send a W to someone else too 🙌",
+    "say thanks today, it compounds louder than code 🙏",
+    "one candle lights another without losing its flame 🕯️",
+    "keep it human: laugh once, share once, breathe once 😌",
+  ],
+
+  shipping: [
+    "skip the scroll, ship the thing 📦",
+    "today’s goal: one honest message, one shipped change 📤",
+    "a tiny draft beats a perfect idea living in your head 📝",
+    "choose progress over polish; polish comes after 🧽",
+    "done is momentum, momentum is magic ✨",
+    "ship bad, learn fast, ship better 🔄",
+  ],
+
+  recharge: [
+    "posture check, water sip, breathe deep 🧘‍♂️",
+    "breaks are part of the grind — reset, then rip ⚡️",
+    "drink water, touch grass, send the PR 🌿",
+    "don’t doomscroll; dreamscroll your own roadmap 🗺️",
+    "add five quiet minutes to think; it pays compound interest ⏱️",
+    "step back: sunsets don’t debug themselves 🌅",
+    "touch grass, touch base, touch reality 🌿",
+  ],
+
+  progress: [
+    "hydrate, hustle, and be kind today 💧💪",
+    "tiny reps compound. keep going, legend ✨",
+    "your pace > perfect. 1% better is a W 📈",
+    "stack small dubs; the big ones follow 🧱",
+    "write it down, knock it out, fist bump later ✍️👊",
+    "mood follows motion — move first 🕺",
+    "future you is watching — give them something to smile about 🔮",
+  ],
+
+  nutty: [
+    "chaos is just order you haven’t met yet 🌀",
+    "laugh at the bug, it fears confidence 😂",
+    "life is a sandbox — kick it, glitch it, build it 🏖️",
+    "fortune favors the shitposters 🧃",
+    "serious plans die, dumb experiments go viral 🤯",
+  ],
+
+  thoughtful: [
+    "ask one better question and the work gets lighter ❓✨",
+    "a pause is not wasted; it’s thinking in disguise 🕰️",
+    "every message is a mirror — write what you want reflected 🪞",
+    "your silence can be louder than their noise 🌌",
+    "the smallest word can tip the biggest balance ⚖️",
+  ],
+
+  degen: [
+    "apes don’t ask, they just swing 🐒",
+    "serenity is for the stakers, chaos is for the traders 🔥",
+    "gm is cheap, conviction is priceless ⛓️",
+    "bag heavy, hands shaky, heart degen 💎🙌",
+    "sleep is the FUD of productivity 😴🚫",
+  ],
+
+  chaotic_wisdom: [
+    "a rug is just gravity teaching you risk 🪂",
+    "the line goes up, then down, then sideways — so does life 📉📈",
+    "fortune cookies are just oracles with better branding 🥠",
+    "every degen thread hides a philosopher in disguise 🧵🧠",
+    "the deeper the dip, the sweeter the cope 🍯",
+  ],
+
+  funny: [
+    "debugging: talking to a rubber duck until it cries 🦆",
+    "wifi down = forced meditation retreat 📴",
+    "life’s just alt-tabbing until bedtime ⌨️😴",
+    "gm is free, coffee isn’t ☕",
+    "success is 90% ctrl+c, 10% ctrl+v 🖇️",
+    "meetings: multiplayer procrastination 🎮",
+  ]
+};
 
 /** Helper: safe channel to speak in */
 function findSpeakableChannel(guild, preferredChannelId = null) {
@@ -245,6 +308,139 @@ async function groqWithDiscovery(systemPrompt, userContent, temperature) {
   return last || { error: new Error('All models failed') };
 }
 
+/** ---------- Smart Picker (seeded, weighted, daypart/weekend, modes) ---------- */
+function makeRng(seedStr = "") {
+  // hash string to 32-bit int (FNV-ish)
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < seedStr.length; i++) {
+    h ^= seedStr.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  let x = (h || 123456789) >>> 0;
+  return () => {
+    x ^= x << 13; x >>>= 0;
+    x ^= x >>> 17; x >>>= 0;
+    x ^= x << 5;  x >>>= 0;
+    return (x >>> 0) / 0x100000000;
+  };
+}
+function weightedPick(entries, rng = Math.random) {
+  const total = entries.reduce((s, e) => s + Math.max(0, e.weight || 0), 0) || 1;
+  let t = rng() * total;
+  for (const e of entries) {
+    const w = Math.max(0, e.weight || 0);
+    if (t < w) return e.key;
+    t -= w;
+  }
+  return entries[entries.length - 1]?.key;
+}
+function getDaypart(hour) {
+  if (hour >= 0 && hour <= 5) return "late_night";
+  if (hour <= 11) return "morning";
+  if (hour <= 16) return "midday";
+  if (hour <= 21) return "evening";
+  return "late_evening";
+}
+const DAYPART_WEIGHTS = {
+  morning: {
+    focus: 3, recharge: 3, progress: 2, kindness: 2, shipping: 1,
+    thoughtful: 2, nutty: 1, degen: 0.5, chaotic_wisdom: 1, funny: 1
+  },
+  midday: {
+    focus: 3, shipping: 3, progress: 2, kindness: 1,
+    thoughtful: 1.5, recharge: 1, funny: 1, nutty: 1, chaotic_wisdom: 1, degen: 1
+  },
+  evening: {
+    kindness: 2, thoughtful: 2, progress: 1.5, shipping: 1,
+    recharge: 2, funny: 2, nutty: 1.2, chaotic_wisdom: 1.2, degen: 1, focus: 1
+  },
+  late_evening: {
+    thoughtful: 2.2, chaotic_wisdom: 2.2, funny: 1.6, nutty: 1.6, degen: 1.4,
+    recharge: 1.2, progress: 1, shipping: 0.8, kindness: 1, focus: 0.8
+  },
+  late_night: {
+    chaotic_wisdom: 3, degen: 2.2, funny: 2, nutty: 2,
+    thoughtful: 1.8, recharge: 1.2, progress: 0.8, shipping: 0.6, focus: 0.6, kindness: 0.8
+  }
+};
+const MODE_MULTIPLIERS = {
+  serious:   { focus: 1.6, shipping: 1.6, progress: 1.4, thoughtful: 1.2 },
+  chaotic:   { chaotic_wisdom: 1.8, nutty: 1.6, funny: 1.4, degen: 1.3 },
+  human:     { kindness: 1.8, thoughtful: 1.4, recharge: 1.2 },
+  degen:     { degen: 2.0, chaotic_wisdom: 1.6, funny: 1.2, nutty: 1.2 },
+  calm:      { recharge: 1.8, thoughtful: 1.4, kindness: 1.2 },
+};
+const WEEKEND_BONUS = { degen: 1.25, funny: 1.2, nutty: 1.15, chaotic_wisdom: 1.15 };
+function applyMultipliers(base, ...multis) {
+  const out = { ...base };
+  for (const m of multis) {
+    if (!m) continue;
+    for (const k of Object.keys(m)) {
+      out[k] = (out[k] || 0) * m[k];
+    }
+  }
+  return out;
+}
+function toEntries(weights, allowSet, blockSet) {
+  const entries = [];
+  for (const [key, weight] of Object.entries(weights)) {
+    if (blockSet?.has(key)) continue;
+    if (allowSet && allowSet.size && !allowSet.has(key)) continue;
+    if ((weight || 0) > 0) entries.push({ key, weight });
+  }
+  return entries.length ? entries : [{ key: "focus", weight: 1 }];
+}
+function pickLineFromCategory(category, rng) {
+  const arr = NICE_LINES[category] || [];
+  if (!arr.length) return { text: "(no lines found)", category };
+  const idx = Math.floor(rng() * arr.length);
+  return { text: arr[idx], category };
+}
+function smartPick(opts = {}) {
+  const {
+    mode,
+    hour,
+    date = new Date(),
+    guildId = "",
+    userId = "",
+    allow,
+    block,
+    overrideWeights
+  } = opts;
+
+  const h = (typeof hour === "number") ? hour : date.getHours();
+  const daypart = getDaypart(h);
+
+  const dow = date.getDay();
+  const isWeekend = (dow === 0 || dow === 6);
+
+  const base = (overrideWeights && overrideWeights[daypart]) || DAYPART_WEIGHTS[daypart] || DAYPART_WEIGHTS.midday;
+
+  const modeMul = mode ? MODE_MULTIPLIERS[mode] : null;
+  const weekendMul = isWeekend ? WEEKEND_BONUS : null;
+
+  const finalWeights = applyMultipliers(base, modeMul, weekendMul);
+  const allowSet = allow ? new Set(allow) : null;
+  const blockSet = block ? new Set(block) : null;
+  const entries = toEntries(finalWeights, allowSet, blockSet);
+
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  const seed = `${guildId}:${userId}:${yyyy}-${mm}-${dd}:${daypart}`;
+  const rng = makeRng(seed);
+
+  const pickedCategory = weightedPick(entries, rng);
+  const { text, category } = pickLineFromCategory(pickedCategory, rng);
+
+  return {
+    text,
+    category,
+    pickedCategory,
+    meta: { daypart, hour: h, isWeekend, mode: mode || null }
+  };
+}
+
 /** ---------- Cross-listener typing suppression (set by MBella) ---------- */
 function isTypingSuppressed(client, channelId) {
   const until = client.__mbTypingSuppress?.get(channelId) || 0;
@@ -288,7 +484,7 @@ module.exports = (client) => {
   /** Periodic nice pings (lightweight) */
   setInterval(async () => {
     const now = Date.now();
-    const byGuild = new Map(); // guildId -> [{userId, channelId, ts}]
+    const byGuild = new Map(); // guildId -> [{channelId, ts}]
     for (const [key, info] of lastActiveByUser.entries()) {
       const [guildId] = key.split(':');
       if (!byGuild.has(guildId)) byGuild.set(guildId, []);
@@ -309,9 +505,12 @@ module.exports = (client) => {
       const channel = findSpeakableChannel(guild, preferredChannel);
       if (!channel) continue;
 
-      const nice = pick(NICE_LINES);
+      // Smart picker for vibe line (seeded per guild/day)
+      const { text, category, meta } = smartPick({ guildId });
+      const prefix = `✨ quick vibe check (${category} • ${meta.daypart}):`;
+
       try {
-        await channel.send(`✨ quick vibe check: ${nice}`);
+        await channel.send(`${prefix} ${text}`);
         lastNicePingByGuild.set(guildId, now);
       } catch {}
     }
@@ -522,5 +721,6 @@ module.exports = (client) => {
     }
   });
 };
+
 
 
