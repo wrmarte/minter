@@ -194,6 +194,27 @@ require('./listeners/mbella')(client);
 require('./listeners/fftrigger')(client);
 require('./listeners/welcomeListener')(client, pool); // pass PG to the welcome listener
 
+// ⬇️ NEW: Prefix EXP listener (for servers that block slash commands)
+// .env knobs:
+//   EXP_PREFIX_ENABLED=true|false  (default true)
+//   EXP_PREFIX=!exp                (default !exp)
+//   EXP_COOLDOWN_MS=6000           (default 6000)
+const EXP_PREFIX_ENABLED = process.env.EXP_PREFIX_ENABLED !== 'false';
+const EXP_PREFIX = process.env.EXP_PREFIX || '!exp';
+const EXP_COOLDOWN_MS = Number(process.env.EXP_COOLDOWN_MS || '6000');
+
+if (EXP_PREFIX_ENABLED) {
+  try {
+    require('./listeners/expPrefix')(client, { pg: pool, prefix: EXP_PREFIX, cooldownMs: EXP_COOLDOWN_MS });
+    console.log(`📣 Prefix listener enabled: "${EXP_PREFIX}" (cooldown ${EXP_COOLDOWN_MS}ms)`);
+  } catch (e) {
+    console.error('❌ Failed to load expPrefix listener:', e?.stack || e?.message || e);
+  }
+} else {
+  console.log('⛔ Prefix EXP listener disabled via EXP_PREFIX_ENABLED=false');
+}
+
+
 // =================== Services / timers ===================
 const { trackAllContracts } = require('./services/mintRouter');
 trackAllContracts(client);
