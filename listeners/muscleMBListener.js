@@ -19,9 +19,11 @@ const FEMALE_TRIGGERS = ['mbella', 'mb ella', 'lady mb', 'queen mb', 'bella'];
 /** ===== Activity tracker for periodic nice messages ===== */
 const lastActiveByUser = new Map(); // key: `${guildId}:${userId}` -> { ts, channelId }
 const lastNicePingByGuild = new Map(); // guildId -> ts
+const lastQuoteByGuild = new Map(); // guildId -> { text, category, ts }
 const NICE_PING_EVERY_MS = 4 * 60 * 60 * 1000; // 4 hours
 const NICE_SCAN_EVERY_MS = 60 * 60 * 1000;     // scan hourly
 const NICE_ACTIVE_WINDOW_MS = 45 * 60 * 1000;  // “active” = last 45 minutes
+const NICE_ANALYZE_LIMIT = Number(process.env.NICE_ANALYZE_LIMIT || 40); // messages to scan for mood
 
 /** ===== Categorized NICE_LINES with extra nutty/thoughtful/degen/chaotic/funny ===== */
 const NICE_LINES = {
@@ -128,7 +130,7 @@ function findSpeakableChannel(guild, preferredChannelId = null) {
   return guild.channels.cache.find((c) => canSend(c)) || null;
 }
 
-/** Lightweight recent context from channel (non-bot, short, last ~6 msgs) */
+/** Lightweight recent context from channel (non-bot, short, last ~6 msgs for LLM) */
 async function getRecentContext(message) {
   try {
     const fetched = await message.channel.messages.fetch({ limit: 8 });
@@ -308,7 +310,7 @@ async function groqWithDiscovery(systemPrompt, userContent, temperature) {
   return last || { error: new Error('All models failed') };
 }
 
-/** ---------- Smart Picker (seeded, weighted, daypart/weekend, modes) ---------- */
+/** ---------- Smart Picker (seeded, weighted, daypart/weekend, DOW, mood) ---------- */
 function makeRng(seedStr = "") {
   // hash string to 32-bit int (FNV-ish)
   let h = 2166136261 >>> 0;
@@ -363,6 +365,18 @@ const DAYPART_WEIGHTS = {
     thoughtful: 1.8, recharge: 1.2, progress: 0.8, shipping: 0.6, focus: 0.6, kindness: 0.8
   }
 };
+
+// New: day-of-week nudges (0=Sun...6=Sat)
+const DOW_WEIGHTS = {
+  1: { focus: 1.2, shipping: 1.2, progress: 1.1 }, // Mon: focus/ship
+  2: { focus: 1.1, shipping: 1.1, progress: 1.1 }, // Tue
+  3: { focus: 1.0, shipping: 1.1, progress: 1.1 }, // Wed
+  4: { shipping: 1.2, progress: 1.1, thoughtful: 1.1 }, // Thu: push + reflect
+  5: { degen: 1.25, funny: 1.2, nutty: 1.1 }, // Fri: chaos
+  6: { degen: 1.3, funny: 1.25, chaotic_wisdom: 1.15 }, // Sat: chaos oracle
+  0: { recharge: 1.2, thoughtful: 1.15, kindness: 1.1 } // Sun: restore
+};
+
 const MODE_MULTIPLIERS = {
   serious:   { focus: 1.6, shipping: 1.6, progress: 1.4, thoughtful: 1.2 },
   chaotic:   { chaotic_wisdom: 1.8, nutty: 1.6, funny: 1.4, degen: 1.3 },
@@ -370,7 +384,9 @@ const MODE_MULTIPLIERS = {
   degen:     { degen: 2.0, chaotic_wisdom: 1.6, funny: 1.2, nutty: 1.2 },
   calm:      { recharge: 1.8, thoughtful: 1.4, kindness: 1.2 },
 };
-const WEEKEND_BONUS = { degen: 1.25, funny: 1.2, nutty: 1.15, chaotic_wisdom: 1.15 };
+
+const WEEKEND_BONUS = { degen: 1.15, funny: 1.1, nutty: 1.08, chaotic_wisdom: 1.08 };
+
 function applyMultipliers(base, ...multis) {
   const out = { ...base };
   for (const m of multis) {
@@ -396,6 +412,70 @@ function pickLineFromCategory(category, rng) {
   const idx = Math.floor(rng() * arr.length);
   return { text: arr[idx], category };
 }
+
+/** Analyze channel mood (recent messages -> bias categories) */
+async function analyzeChannelMood(channel) {
+  const res = {
+    multipliers: {}, // { category: factor }
+    tags: []         // debug indicators
+  };
+  try {
+    const fetched = await channel.messages.fetch({ limit: Math.max(10, Math.min(100, NICE_ANALYZE_LIMIT)) });
+    const msgs = [...fetched.values()].filter(m => !m.author?.bot && (m.content || '').trim());
+    if (!msgs.length) return res;
+
+    // Count signals
+    let hype = 0, laugh = 0, bug = 0, ship = 0, care = 0, stress = 0, reflect = 0, gmgn = 0;
+
+    const rg = {
+      hype: /\b(lfg|send it|to the moon|wen|pump|ape|degen|ngmi|wagmi|airdrop|bull|moon|rocket)\b|🚀|🔥/i,
+      laugh: /😂|🤣|lmao|(^|\s)lol(\s|$)|rofl|💀/i,
+      bug: /\b(bug|error|fix|issue|crash|broken|stacktrace|trace|exception|timeout)\b|❌|⚠️/i,
+      ship: /\b(ship|merge|deploy|pr|pull\s*request|release|commit|build|push|publish)\b|📦/i,
+      care: /\b(thanks|ty|appreciate|gracias|love)\b|❤️|🙏/i,
+      stress: /\b(tired|burn(?:ed)?\s*out|overwhelmed|stressed|angry|mad|annoyed|ugh)\b|😮‍💨|😵‍💫/i,
+      reflect: /\b(why|because|learn|insight|thought|ponder|idea|question)\b|🧠/i,
+      gmgn: /\b(gm|gn|good\s*morning|good\s*night)\b/i,
+    };
+
+    for (const m of msgs) {
+      const t = (m.content || '').toLowerCase();
+      if (rg.hype.test(t)) hype++;
+      if (rg.laugh.test(t)) laugh++;
+      if (rg.bug.test(t)) bug++;
+      if (rg.ship.test(t)) ship++;
+      if (rg.care.test(t)) care++;
+      if (rg.stress.test(t)) stress++;
+      if (rg.reflect.test(t)) reflect++;
+      if (rg.gmgn.test(t)) gmgn++;
+    }
+
+    // Thresholded multipliers (light bias)
+    const bump = (obj, k, v) => { obj[k] = (obj[k] || 1) * v; };
+
+    if (hype >= 2) { bump(res.multipliers, 'degen', 1.3); bump(res.multipliers, 'funny', 1.15); bump(res.multipliers, 'nutty', 1.1); bump(res.multipliers, 'chaotic_wisdom', 1.08); res.tags.push('hype'); }
+    if (laugh >= 2){ bump(res.multipliers, 'funny', 1.4); bump(res.multipliers, 'nutty', 1.15); res.tags.push('laugh'); }
+    if (bug >= 2 || ship >= 2){ bump(res.multipliers, 'shipping', 1.35); bump(res.multipliers, 'focus', 1.25); bump(res.multipliers, 'progress', 1.15); res.tags.push('shipfix'); }
+    if (care >= 2){ bump(res.multipliers, 'kindness', 1.4); bump(res.multipliers, 'thoughtful', 1.15); res.tags.push('care'); }
+    if (stress >= 2){ bump(res.multipliers, 'recharge', 1.4); bump(res.multipliers, 'kindness', 1.15); res.tags.push('stress'); }
+    if (reflect >= 2){ bump(res.multipliers, 'thoughtful', 1.35); bump(res.multipliers, 'chaotic_wisdom', 1.15); res.tags.push('reflect'); }
+    if (gmgn >= 2){ bump(res.multipliers, 'recharge', 1.15); bump(res.multipliers, 'progress', 1.1); bump(res.multipliers, 'kindness', 1.1); res.tags.push('gmgn'); }
+
+    return res;
+  } catch (e) {
+    console.warn('mood analyze failed:', e.message);
+    return res;
+  }
+}
+
+/**
+ * smartPick
+ * Now supports:
+ *  - seed (true randomness per ping if provided)
+ *  - avoidText / avoidCategory (de-dupe)
+ *  - moodMultipliers (bias from channel analysis)
+ *  - DOW multipliers
+ */
 function smartPick(opts = {}) {
   const {
     mode,
@@ -405,12 +485,16 @@ function smartPick(opts = {}) {
     userId = "",
     allow,
     block,
-    overrideWeights
+    overrideWeights,
+    // extras
+    seed,
+    avoidText,
+    avoidCategory,
+    moodMultipliers
   } = opts;
 
   const h = (typeof hour === "number") ? hour : date.getHours();
   const daypart = getDaypart(h);
-
   const dow = date.getDay();
   const isWeekend = (dow === 0 || dow === 6);
 
@@ -418,8 +502,11 @@ function smartPick(opts = {}) {
 
   const modeMul = mode ? MODE_MULTIPLIERS[mode] : null;
   const weekendMul = isWeekend ? WEEKEND_BONUS : null;
+  const dowMul = DOW_WEIGHTS[dow] || null;
 
-  const finalWeights = applyMultipliers(base, modeMul, weekendMul);
+  // compose: base -> mode -> weekend -> DOW -> mood
+  const finalWeights = applyMultipliers(base, modeMul, weekendMul, dowMul, moodMultipliers);
+
   const allowSet = allow ? new Set(allow) : null;
   const blockSet = block ? new Set(block) : null;
   const entries = toEntries(finalWeights, allowSet, blockSet);
@@ -427,17 +514,38 @@ function smartPick(opts = {}) {
   const yyyy = date.getFullYear();
   const mm = String(date.getMonth() + 1).padStart(2, "0");
   const dd = String(date.getDate()).padStart(2, "0");
-  const seed = `${guildId}:${userId}:${yyyy}-${mm}-${dd}:${daypart}`;
-  const rng = makeRng(seed);
 
-  const pickedCategory = weightedPick(entries, rng);
-  const { text, category } = pickLineFromCategory(pickedCategory, rng);
+  // seed: if provided use it (random per ping), else stable daily per guild/daypart
+  const seedStr = (typeof seed === 'string' && seed.length)
+    ? seed
+    : `${guildId}:${userId}:${yyyy}-${mm}-${dd}:${daypart}`;
+
+  const rng = makeRng(seedStr);
+
+  let pickedCategory = weightedPick(entries, rng);
+  let pickRes = pickLineFromCategory(pickedCategory, rng);
+
+  // de-dupe against last
+  if ((avoidCategory && pickedCategory === avoidCategory) || (avoidText && pickRes.text === avoidText)) {
+    for (let i = 0; i < 6; i++) {
+      const altRng = makeRng(`${seedStr}:alt:${i}:${Math.random()}`);
+      const altCat = weightedPick(entries, altRng);
+      const altRes = pickLineFromCategory(altCat, altRng);
+      const badCat = (avoidCategory && altCat === avoidCategory);
+      const badTxt = (avoidText && altRes.text === avoidText);
+      if (!badCat && !badTxt) {
+        pickedCategory = altCat;
+        pickRes = altRes;
+        break;
+      }
+    }
+  }
 
   return {
-    text,
-    category,
+    text: pickRes.text,
+    category: pickedCategory,
     pickedCategory,
-    meta: { daypart, hour: h, isWeekend, mode: mode || null }
+    meta: { daypart, hour: h, isWeekend, mode: mode || null, dow }
   };
 }
 
@@ -505,13 +613,29 @@ module.exports = (client) => {
       const channel = findSpeakableChannel(guild, preferredChannel);
       if (!channel) continue;
 
-      // Smart picker for vibe line (seeded per guild/day)
-      const { text, category, meta } = smartPick({ guildId });
-      const prefix = `✨ quick vibe check (${category} • ${meta.daypart}):`;
+      // Analyze channel mood for dynamic multipliers
+      let mood = { multipliers: {}, tags: [] };
+      try {
+        mood = await analyzeChannelMood(channel);
+      } catch {}
+
+      // Smart picker for vibe line (true random + avoid repeats + mood & DOW bias)
+      const last = lastQuoteByGuild.get(guildId) || null;
+      const { text, category, meta } = smartPick({
+        guildId,
+        seed: `${guildId}:${now}:${Math.random()}`, // unique seed per ping
+        avoidText: last?.text,
+        avoidCategory: last?.category,
+        moodMultipliers: mood.multipliers
+      });
+
+      const moodBadge = mood.tags.length ? ` • mood: ${mood.tags.join(',')}` : '';
+      const prefix = `✨ quick vibe check (${category} • ${meta.daypart}${moodBadge}):`;
 
       try {
         await channel.send(`${prefix} ${text}`);
         lastNicePingByGuild.set(guildId, now);
+        lastQuoteByGuild.set(guildId, { text, category, ts: now });
       } catch {}
     }
   }, NICE_SCAN_EVERY_MS);
@@ -721,6 +845,7 @@ module.exports = (client) => {
     }
   });
 };
+
 
 
 
