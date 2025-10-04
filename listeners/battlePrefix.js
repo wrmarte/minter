@@ -1,5 +1,6 @@
 // listeners/battlePrefix.js
-const { runBattle, ready } = require('../services/battleEngine');
+const { ready } = require('../services/battleEngine');
+const { runRumbleDisplay } = require('../services/battleRumble');
 
 const PREFIX = (process.env.BATTLE_PREFIX || '!battle').trim().toLowerCase();
 
@@ -30,19 +31,29 @@ module.exports = (client) => {
       guild.members.fetch(opponent.id).catch(() => ({ user: opponent }))
     ]);
 
+    // Intro message
+    const introMsg = await message.reply({
+      embeds: [{
+        color: 0x9b59b6,
+        title: '⚔️ Rumble incoming',
+        description: `Setting up **${challengerMember.displayName || message.author.username}** vs **${opponentMember.displayName || opponent.username}**…`
+      }]
+    });
+
     try {
-      const { embed } = await runBattle({
+      await runRumbleDisplay({
+        channel: message.channel,
+        baseMessage: introMsg,
         challenger: challengerMember,
         opponent: opponentMember,
         bestOf,
         style,
         guildName: guild?.name || 'this server'
       });
-
-      await message.reply({ embeds: [embed] });
     } catch (e) {
-      console.error('battle error:', e);
-      await message.reply('⚠️ Battle crashed while loading. Try again.');
+      console.error('battle rumble error:', e);
+      await message.channel.send('⚠️ Rumble crashed while loading. Try again.');
     }
   });
 };
+
