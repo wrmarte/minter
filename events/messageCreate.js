@@ -285,7 +285,8 @@ async function getOpenAI(keyword, { guildName, recentContext, wantVariants }) {
 
   const cleaned = cleanQuotes(raw);
   if (wantVariants && !/^\s*---\s*$/m.test(cleaned)) {
-    const lines = cleaned split(/\n+/).map(s => s.trim()).filter(Boolean);
+    // FIXED: added the missing dot before split + String safety
+    const lines = String(cleaned).split(/\n+/).map(s => s.trim()).filter(Boolean);
     if (lines.length >= 3) return lines.slice(0, 3).join('\n---\n');
   }
   return cleaned;
@@ -467,7 +468,5 @@ module.exports = (client, pg) => {
     }
   });
 };
-
-
 
 
