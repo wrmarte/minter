@@ -1,8 +1,7 @@
-// listeners/battlePrefix.js
-const { ready } = require('../services/battleEngine');
-const { runRumbleDisplay } = require('../services/battleRumble');
+// listeners/rumblePrefix.js
+const { runBracket } = require('../services/tourney');
 
-const PREFIX = (process.env.BATTLE_PREFIX || '!battle').trim().toLowerCase();
+const PREFIX = (process.env.RUMBLE_PREFIX || '!rumble').trim().toLowerCase();
 const OWNER_ID = (process.env.BOT_OWNER_ID || '').trim();
 
 module.exports = (client) => {
@@ -14,46 +13,44 @@ module.exports = (client) => {
     if (!OWNER_ID || message.author.id !== OWNER_ID) {
       return message.reply('🔒 This command is currently owner-only.');
     }
-    if (!ready(`${message.guild.id}:${message.author.id}`)) {
-      return message.reply('⏳ Cooldown — give it a few seconds.');
+
+    // Parse: !rumble @a @b @c … [best_of?] [style?]
+    const mentions = [...message.mentions.users.values()];
+    if (mentions.length < 2) {
+      return message.reply('Usage: `!rumble @a @b @c [best_of] [style]` (need ≥2 mentions).');
     }
 
-    const args = txt.slice(PREFIX.length).trim().split(/\s+/).filter(Boolean);
-    const opponent = message.mentions.users.first() || message.client.user;
+    const args = txt.slice(PREFIX.length).trim().split(/\s+/).filter(t => !t.startsWith('<@')); // strip mention tokens
     let bestOf = 3, style;
     for (const a of args) {
       if (/^\d+$/.test(a)) bestOf = Number(a);
       if (/^(clean|motivator|villain|degen)$/i.test(a)) style = a.toLowerCase();
     }
+    bestOf = [3,5,7].includes(bestOf) ? bestOf : 3;
+    style = style || 'motivator';
 
-    const guild = message.guild;
-    const [challengerMember, opponentMember] = await Promise.all([
-      guild.members.fetch(message.author.id).catch(() => ({ user: message.author })),
-      guild.members.fetch(opponent.id).catch(() => ({ user: opponent }))
-    ]);
+    const members = await Promise.all(
+      mentions.map(u => message.guild.members.fetch(u.id).catch(() => null))
+    );
+    const players = members.filter(Boolean);
+    if (players.length < 2) return message.reply('Not enough valid members fetched.');
 
-    const introMsg = await message.reply({
-      embeds: [{
-        color: 0x9b59b6,
-        title: '⚔️ Rumble incoming',
-        description: `Setting up **${challengerMember.displayName || message.author.username}** vs **${opponentMember.displayName || opponent.username}**…`
-      }]
-    });
+    await message.reply(`🎮 Starting bracket with **${players.length}** players…`);
 
     try {
-      await runRumbleDisplay({
+      await runBracket({
         channel: message.channel,
-        baseMessage: introMsg,
-        challenger: challengerMember,
-        opponent: opponentMember,
+        hostMessage: null,
+        players,
         bestOf,
         style,
-        guildName: guild?.name || 'this server'
+        guildName: message.guild?.name || 'this server'
       });
     } catch (e) {
-      console.error('battle rumble error:', e);
-      await message.channel.send('⚠️ Rumble crashed while loading. Try again.');
+      console.error('rumble bracket error:', e);
+      await message.channel.send('⚠️ Bracket crashed while running.');
     }
   });
 };
+
 
