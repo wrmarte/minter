@@ -42,6 +42,17 @@ function parseCsvEnv(s) { if (!exists(s)) return null; return s.split(',').map(x
 function baseEmbed(style) {
   return { color: colorFor(style), author: { name: 'Rumble Royale' }, timestamp: new Date().toISOString() };
 }
+// no-repeat picker with small memory window
+function pickNoRepeat(arr, recent, cap = 6) {
+  if (!arr.length) return '';
+  let choice = pick(arr), tries = 0;
+  while (recent.includes(choice) && tries < 12) { choice = pick(arr); tries++; }
+  recent.push(choice);
+  if (recent.length > cap) recent.shift();
+  return choice;
+}
+/* Per-match memory (avoids repeats for weapons/verbs/taunts) */
+function makeMemory() { return { weapons: [], verbs: [], taunts: [] }; }
 
 /* ========================== Flavor ========================== */
 // Arenas
@@ -86,6 +97,7 @@ const W_VILL_SAFE  = ['shadow ribbon','smoke dagger (prop)','echo bell','trick t
 const W_VILL_SPICY = ['hex blade (prop)','cursed grimoire (cosplay)'];
 const W_DEGN_SAFE  = ['alpha baton','yield yo-yo','pump trumpet','airdrop crate','ape gauntlet','vibe ledger'];
 const W_DEGN_SPICY = ['leverage gloves','moon mallet (prop)'];
+
 const WEAPONS_SAFE = ['foam bat','rubber chicken','pool noodle','pixel sword','ban hammer','yo-yo','cardboard shield','toy bo staff','glitch gauntlet'];
 const WEAPONS_SPICY= ['steel chair (cosplay prop)','spiked bat (prop)','thunder gloves','meteor hammer (training)'];
 
@@ -93,6 +105,7 @@ const A_CLEAN = ['counters cleanly','finds spacing on','lands textbook sweep on'
 const A_MOTI  = ['powers through','perfect-forms a jab on','locks in and tags','rolls momentum into'];
 const A_VILL  = ['ensnares','phases through and taps','casts a snare on','drains momentum from'];
 const A_DEGN  = ['market buys a combo on','leverages into','apes into','yoinks RNG from'];
+
 const ACTIONS_SAFE = ['bonks','thwacks','boops','yeets','shoulder-bumps','jukes','spin-feints','light sweep'];
 const ACTIONS_SPICY= ['smashes','ground-slams','uppercuts (spar form)','pulled haymaker'];
 
@@ -111,8 +124,10 @@ const HAZARDS = ['Floor tiles shift suddenly!','A rogue shopping cart drifts acr
 const POWERUPS= ['{X} picks up a glowing orb — speed up!','{X} grabs a pixel heart — stamina bump!','{X} equips glitch boots — dash unlocked!','{X} finds a shield bubble — temporary guard!'];
 
 /* ========================== Builders ========================== */
-function buildTaunt(style, A, B) {
-  return `🗣️ ${(pick(TAUNTS[style] || TAUNTS.motivator)).replace('{A}', A).replace('{B}', B)}`;
+function buildTaunt(style, A, B, mem) {
+  const bank = TAUNTS[style] || TAUNTS.motivator;
+  const line = pickNoRepeat(bank, mem.taunts, 6);
+  return `🗣️ ${line.replace('{A}', A).replace('{B}', B)}`;
 }
 function styleWeapons(style){
   const base = SAFE_MODE ? WEAPONS_SAFE.slice() : WEAPONS_SAFE.concat(WEAPONS_SPICY);
@@ -129,9 +144,9 @@ function styleVerbs(style){
   const specific = { clean: A_CLEAN, motivator: A_MOTI, villain: A_VILL, degen: A_DEGN }[style] || [];
   return common.concat(specific);
 }
-function buildAction(A, B, style) {
-  const w = pick(styleWeapons(style));
-  const v = pick(styleVerbs(style));
+function buildAction(A, B, style, mem) {
+  const w = pickNoRepeat(styleWeapons(style), mem.weapons, 7);
+  const v = pickNoRepeat(styleVerbs(style),   mem.verbs,   7);
   return `🥊 **${A} grabs a ${w} and ${v} ${B}!**${SFX_STRING()}`;
 }
 function buildReaction(B) { return `🛡️ ${B} ${pick(REACTIONS)}.${SFX_STRING()}`; }
@@ -153,13 +168,16 @@ function buildAnnouncer(style) {
 
 /* ========================== Embeds ========================== */
 function introEmbed(style, title) {
+  // toned-down: we’ll reuse/edit the caller’s baseMessage so there’s only one intro
   return { ...baseEmbed(style), title, description: `Rumble incoming…` };
 }
 function arenaEmbed(style, env, bestOf) {
+  // BIG reveal with SFX and headline
+  const sfx = SFX_STRING();
   return {
     ...baseEmbed(style),
-    title: `🏟️ Arena Reveal`,
-    description: `**${env.name}**\n_${env.intro}_`,
+    title: `🏟️ ARENA REVEAL`,
+    description: `📣 **Welcome to ${env.name}!**${sfx}\n_${env.intro}_`,
     fields: [{ name: 'Format', value: `Best of **${bestOf}**`, inline: true }],
     footer: { text: `Arena: ${env.name}` }
   };
@@ -186,7 +204,7 @@ function finalAllInOneEmbed({ style, sim, champion, bar, env, cast, stats, timel
     ...baseEmbed(style),
     title: `🏆 Final — ${name} wins ${sim.a}-${sim.b}!`,
     description: bar,
-    thumbnail: { url: champion.displayAvatarURL?.() || champion.avatarURL?.() || null }, // winner avatar back
+    thumbnail: { url: champion.displayAvatarURL?.() || champion.avatarURL?.() || null }, // winner avatar
     fields: [
       { name: 'Match Stats', value:
         [
@@ -212,10 +230,10 @@ function recapEmbed(style, sim, champion, env) {
 }
 
 /* ========================== Round Sequence ========================== */
-function buildRoundSequence({ A, B, style }) {
+function buildRoundSequence({ A, B, style, mem }) {
   const seq = [];
-  if (Math.random() < TAUNT_CHANCE) seq.push({ type: 'taunt', content: buildTaunt(style, A, B) });
-  seq.push({ type: 'action', content: buildAction(A, B, style) });
+  if (Math.random() < TAUNT_CHANCE) seq.push({ type: 'taunt', content: buildTaunt(style, A, B, mem) });
+  seq.push({ type: 'action', content: buildAction(A, B, style, mem) });
 
   let stunned = false;
   if (Math.random() < STUN_CHANCE) { seq.push({ type: 'stun', content: `🫨 ${B} is briefly stunned!${SFX_STRING()}` }); stunned = true; }
@@ -243,10 +261,10 @@ function buildRoundSequence({ A, B, style }) {
   return seq;
 }
 
-/* ========================== Runner (with stats) ========================== */
+/* ========================== Runner (single intro; more random) ========================== */
 async function runRumbleDisplay({
   channel,
-  baseMessage,
+  baseMessage,   // if provided (from slash/prefix), we reuse/edit it to avoid duplicate intro
   challenger,
   opponent,
   bestOf = 3,
@@ -261,40 +279,53 @@ async function runRumbleDisplay({
   const Bname = opponent.displayName   || opponent.username;
   const title = `⚔️ Rumble: ${Aname} vs ${Bname}`;
 
-  // Stats accumulator (display-only; does not influence outcome)
+  // Per-match memory to reduce repeats
+  const mem = makeMemory();
+
+  // Stats accumulator (display-only)
   const stats = { taunts: 0, counters: 0, crits: 0, stuns: 0, combos: 0, events: 0 };
   const roundsTimeline = [];
 
-  // 0) “Rumble incoming…” in channel, then thread + arena reveal for pacing
+  // PRELUDE — exactly ONE "Rumble incoming", then a paced Arena Reveal
   let target = channel;
-  let introMsg;
   try {
-    // Rumble incoming
-    const incoming = await channel.send({ embeds: [introEmbed(style, title)] });
-
-    if (USE_THREAD && incoming?.startThread) {
-      const thread = await incoming.startThread({
-        name: `${THREAD_NAME}: ${Aname} vs ${Bname}`, autoArchiveDuration: 60
-      });
-      target = thread;
+    if (baseMessage) {
+      // Reuse caller’s intro; edit it to our polished intro
+      await baseMessage.edit({ embeds: [introEmbed(style, title)] }).catch(() => {});
+      if (USE_THREAD && baseMessage.startThread) {
+        const thread = await baseMessage.startThread({
+          name: `${THREAD_NAME}: ${Aname} vs ${Bname}`,
+          autoArchiveDuration: 60
+        });
+        target = thread;
+      }
     } else {
-      target = channel;
+      // We post the intro ourselves
+      const incoming = await channel.send({ embeds: [introEmbed(style, title)] });
+      if (USE_THREAD && incoming?.startThread) {
+        const thread = await incoming.startThread({
+          name: `${THREAD_NAME}: ${Aname} vs ${Bname}`,
+          autoArchiveDuration: 60
+        });
+        target = thread;
+      }
     }
 
-    // Arena reveal in the target (thread or channel)
+    // Big Arena Reveal (one beat later)
     await sleep(jitter(INTRO_DELAY));
     await target.send({ embeds: [arenaEmbed(style, env, sim.bestOf)] });
+
   } catch {
-    // fallback: no thread perms — just post both in channel
-    target = channel;
-    await target.send({ embeds: [introEmbed(style, title)] }).catch(() => {});
+    // Fallback: post both in channel
+    if (!baseMessage) await channel.send({ embeds: [introEmbed(style, title)] }).catch(() => {});
     await sleep(jitter(INTRO_DELAY));
-    await target.send({ embeds: [arenaEmbed(style, env, sim.bestOf)] }).catch(() => {});
+    await channel.send({ embeds: [arenaEmbed(style, env, sim.bestOf)] }).catch(() => {});
+    target = channel;
   }
 
   await sleep(jitter(INTRO_DELAY));
 
-  // 1) Round streaming
+  // ROUNDS
   for (let i = 0; i < sim.rounds.length; i++) {
     const r = sim.rounds[i];
     const bar = makeBar(r.a, r.b, sim.bestOf);
@@ -302,8 +333,8 @@ async function runRumbleDisplay({
     await target.send({ embeds: [miniHeaderEmbed(style, `🔔 Round ${i + 1} — Fight!`, env)] });
     await sleep(jitter(Math.max(400, STEP_DELAY / 2)));
 
-    const seq = buildRoundSequence({ A: r.winner, B: r.loser, style });
-    // collect stats as we stream
+    const seq = buildRoundSequence({ A: r.winner, B: r.loser, style, mem });
+
     for (const step of seq) {
       if (step.type === 'taunt')   stats.taunts++;
       if (step.type === 'counter') stats.counters++;
@@ -316,15 +347,13 @@ async function runRumbleDisplay({
       await sleep(jitter(STEP_DELAY));
     }
 
-    // Official round card
     await target.send({ embeds: [roundEmbed(style, i + 1, r, bar, sim.bestOf, env)] });
-
     roundsTimeline.push(`R${i+1}: **${r.winner}** over ${r.loser} (${r.a}-${r.b})`);
 
     if (i < sim.rounds.length - 1) await sleep(jitter(ROUND_DELAY));
   }
 
-  // 2) Finale — all-in-one (winner + avatar + stats + bar)
+  // FINALE — winner avatar + all-in-one stats
   const champion = sim.a > sim.b ? challenger : opponent;
   const runnerUp = sim.a > sim.b ? opponent  : challenger;
   const finalBar = makeBar(sim.a, sim.b, sim.bestOf);
@@ -345,14 +374,10 @@ async function runRumbleDisplay({
     style, sim, champion, bar: finalBar, env, cast, stats, timeline
   })] });
 
-  // Optional recap edit if you want to update a first message (not required)
-  if (introMsg && !USE_THREAD) {
-    await introMsg.edit({ embeds: [recapEmbed(style, sim, champion, env)] }).catch(() => {});
-  }
-
   return { sim, champion };
 }
 
 module.exports = { runRumbleDisplay };
+
 
 
