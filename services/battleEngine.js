@@ -15,7 +15,6 @@ function ready(id) {
 }
 
 function seededRng(seed) {
-  // Simple xorshift32
   let x = 0;
   for (let i = 0; i < seed.length; i++) x = (x ^ seed.charCodeAt(i)) >>> 0;
   if (x === 0) x = 0x9e3779b9;
@@ -66,9 +65,13 @@ function roundNarration(winnerName, loserName, style) {
   return t.replace('{W}', winnerName).replace('{L}', loserName);
 }
 
-function makeBar(a, b) {
-  const arr = Array.from({ length: a + b }, (_, i) => i < a ? '🟩' : '⬛');
-  return arr.join('');
+function makeBar(a, b, total) {
+  const wins = a + b;
+  const len = Math.max(total, wins); // ensure visibility
+  const green = Math.max(0, a);
+  const red   = Math.max(0, b);
+  const empty = Math.max(0, len - green - red);
+  return '🟩'.repeat(green) + '🟥'.repeat(red) + '⬛'.repeat(empty);
 }
 
 async function aiCommentary({ winner, loser, rounds, style, guildName }) {
@@ -109,26 +112,30 @@ async function aiCommentary({ winner, loser, rounds, style, guildName }) {
   }
 }
 
-async function runBattle({ challenger, opponent, bestOf, style = DEFAULT_STYLE, guildName }) {
+/** NEW: pure simulation for round-by-round displays */
+function simulateBattle({ challenger, opponent, bestOf, style = DEFAULT_STYLE }) {
   bestOf = clampBestOf(bestOf);
   const seed = `${challenger.id}:${opponent.id}:${Date.now()}:${bestOf}:${style}`;
   const rng = seededRng(seed);
 
   let a = 0, b = 0;
   const rounds = [];
+  const need = Math.ceil(bestOf / 2);
 
-  while (a < Math.ceil(bestOf/2) && b < Math.ceil(bestOf/2)) {
+  while (a < need && b < need) {
     const roll = rng();
     const winner = roll < 0.5 ? challenger : opponent;
-    const loser  = winner === challenger ? opponent : challenger;
+    const loser  = (winner === challenger) ? opponent : challenger;
+
     if (winner === challenger) a++; else b++;
+
     rounds.push({
       winner: winner.displayName || winner.username || 'A',
       loser:  loser.displayName  || loser.username  || 'B',
-      arrow:  winner === challenger ? '🟩' : '🟥',
-      text:   roundNarration(
+      a, b,                       // running score after this round
+      text: roundNarration(
         winner.displayName || winner.username,
-        loser.displayName || loser.username,
+        loser.displayName  || loser.username,
         style
       )
     });
@@ -136,35 +143,52 @@ async function runBattle({ challenger, opponent, bestOf, style = DEFAULT_STYLE, 
 
   const champion = a > b ? challenger : opponent;
   const runnerUp = a > b ? opponent  : challenger;
-  const bar = makeBar(a, b);
 
+  return {
+    rounds,
+    a, b,
+    bestOf,
+    style,
+    champion,
+    runnerUp,
+  };
+}
+
+/** Existing final embed builder (unchanged external signature) */
+async function runBattle({ challenger, opponent, bestOf, style = DEFAULT_STYLE, guildName }) {
+  const sim = simulateBattle({ challenger, opponent, bestOf, style });
+
+  const bar = makeBar(sim.a, sim.b, sim.bestOf);
   const embed = {
     color: style === 'villain' ? 0x8b0000 : style === 'degen' ? 0xe67e22 : style === 'clean' ? 0x3498db : 0x9b59b6,
     title: `⚔️ Battle: ${challenger.displayName || challenger.username} vs ${opponent.displayName || opponent.username}`,
     description:
-      `**Best of ${bestOf}**\n` +
-      `**${champion.displayName || champion.username} wins ${a}-${b}!**\n` +
-      `\n${bar}\n` +
-      rounds.map((r, i) => `**R${i+1}.** ${r.text}`).join('\n'),
-    thumbnail: { url: champion.displayAvatarURL?.() || champion.avatarURL?.() || null },
+      `**Best of ${sim.bestOf}**\n` +
+      `**${(sim.champion.displayName || sim.champion.username)} wins ${sim.a}-${sim.b}!**\n\n` +
+      `${bar}\n` +
+      sim.rounds.map((r, i) => `**R${i+1}.** ${r.text}`).join('\n'),
+    thumbnail: { url: sim.champion.displayAvatarURL?.() || sim.champion.avatarURL?.() || null },
     footer: { text: `Style: ${style}` }
   };
 
   const cast = await aiCommentary({
-    winner: champion.displayName || champion.username,
-    loser:  runnerUp.displayName || runnerUp.username,
-    rounds,
+    winner: sim.champion.displayName || sim.champion.username,
+    loser:  sim.runnerUp.displayName || sim.runnerUp.username,
+    rounds: sim.rounds,
     style,
     guildName
   });
-
   if (cast) embed.fields = [{ name: '🎙️ Commentary', value: cast }];
 
-  return { embed, winner: champion, score: `${a}-${b}` };
+  return { embed, winner: sim.champion, score: `${sim.a}-${sim.b}`, sim };
 }
 
 module.exports = {
   ready,
-  runBattle,
-  clampBestOf
+  clampBestOf,
+  simulateBattle,   // NEW export
+  runBattle,        // existing
+  aiCommentary,     // export for display helper
+  // helper so others can draw bars mid-fight
+  makeBar
 };
