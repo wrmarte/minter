@@ -1,11 +1,12 @@
 // commands/battle.js
 const { SlashCommandBuilder } = require('discord.js');
-const { runBattle, ready, clampBestOf } = require('../services/battleEngine');
+const { ready } = require('../services/battleEngine');
+const { runRumbleDisplay } = require('../services/battleRumble');
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('battle')
-    .setDescription('Pit two warriors in a best-of showdown')
+    .setDescription('Pit two warriors in a best-of showdown (Rumble Royale style)')
     .addUserOption(o => o.setName('opponent').setDescription('Who are you battling?').setRequired(false))
     .addIntegerOption(o => o.setName('best_of').setDescription('Odd number: 3,5,7').setRequired(false))
     .addStringOption(o =>
@@ -30,23 +31,31 @@ module.exports = {
     const bestOf   = interaction.options.getInteger('best_of') || 3;
     const style    = (interaction.options.getString('style') || '').toLowerCase() || undefined;
 
-    // Fetch full GuildMember for displayName/avatar
+    // Fetch members for displayName/avatar
     const guild = interaction.guild;
     const [challengerMember, opponentMember] = await Promise.all([
       guild.members.fetch(user.id).catch(() => ({ user })),
       guild.members.fetch(opponent.id).catch(() => ({ user: opponent }))
     ]);
 
-    await interaction.deferReply();
+    // Post intro in channel first, then thread from that message if configured
+    const intro = await interaction.reply({
+      embeds: [{
+        color: 0x9b59b6,
+        title: `⚔️ Rumble incoming`,
+        description: `Setting up **${challengerMember.displayName || user.username}** vs **${opponentMember.displayName || opponent.username}**…`
+      }],
+      fetchReply: true
+    });
 
-    const { embed } = await runBattle({
+    await runRumbleDisplay({
+      channel: interaction.channel,
+      baseMessage: intro,
       challenger: challengerMember,
       opponent: opponentMember,
       bestOf,
       style,
       guildName: guild?.name || 'this server'
     });
-
-    return interaction.editReply({ embeds: [embed] });
   }
 };
