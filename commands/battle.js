@@ -24,7 +24,7 @@ async function safeFollowUp(int, opts) {
 
 module.exports = {
   data: new SlashCommandBuilder()
-    .setName('rumble')
+    .setName('battle')
     .setDescription('Start a multi-player Rumble lobby (join/leave/invite, then bracket)')
     .addIntegerOption(o => o.setName('limit').setDescription('Max players (2-16)').setMinValue(2).setMaxValue(16))
     .addIntegerOption(o => o.setName('join_seconds').setDescription('Lobby time in seconds (10-120)').setMinValue(10).setMaxValue(120))
