@@ -38,31 +38,35 @@ function colorFor(style) {
        : style === 'clean'   ? 0x3498db
        : 0x9b59b6;
 }
-
-function parseCsvEnv(s) {
-  if (!exists(s)) return null;
-  return s.split(',').map(x => x.trim()).filter(Boolean);
-}
+function parseCsvEnv(s) { if (!exists(s)) return null; return s.split(',').map(x => x.trim()).filter(Boolean); }
 
 /* ========================== Flavor ========================== */
-// Environments
+// Environments (more scenes!)
 const ENV_BUILTIN = [
   { name: 'Neon Rooftop', intro: 'City lights hum below; the wind carries hype.' },
   { name: 'Underground Dojo', intro: 'Paper walls, sand floor, respectful echoes.' },
   { name: 'Pixel Coliseum', intro: 'Crowd rendered at 60fps — their chant buffers in.' },
-  { name: 'Synthwave Boardwalk', intro: 'Waves slap the pier; a neon crane games watches.' },
+  { name: 'Synthwave Boardwalk', intro: 'Waves slap the pier; a neon crane game watches.' },
   { name: 'Server Room Arena', intro: 'Fans whirr; LEDs blink like judging eyes.' },
+  { name: 'Data Center Catwalk', intro: 'Cables like vines, AC like a storm.' },
+  { name: 'Deserted Arcade', intro: 'CRT glow, coin chimes, boss music faint.' },
+  { name: 'Gravity Gym', intro: 'Chalk in the air; plates clink like bells.' },
+  { name: 'Skybridge Circuit', intro: 'Holograms flicker, drones spectate.' },
+  { name: 'Metro Tunnels', intro: 'Rails sing; echoes cheer.' },
+  { name: 'Glitch Forest', intro: 'Leaves clip; birds lag; mythic latency.' },
+  { name: 'Crystal Cavern', intro: 'Light refracts; steps ring clear.' },
+  { name: 'Futurist Museum', intro: 'Art stares back; history watches.' },
+  { name: 'Hacker Loft', intro: 'Neon code rains across the wall.' },
+  { name: 'Hyperdome', intro: 'Announcer checks mic — reverb perfect.' },
 ];
 const ENV_OVERRIDE = parseCsvEnv(process.env.BATTLE_ENVIRONMENTS);
 const ENVIRONMENTS = ENV_OVERRIDE?.map(n => ({ name: n, intro: 'The air crackles — energy rises.' })) || ENV_BUILTIN;
 
-// SFX bursts
-const SFX = [
-  '💥', '⚡', '🔥', '✨', '💫', '🫨', '🌪️', '🎯', '🧨', '🥁', '📣', '🔊'
-];
+// SFX
+const SFX = ['💥','⚡','🔥','✨','💫','🫨','🌪️','🎯','🧨','🥁','📣','🔊'];
 const SFX_STRING = () => SFX_ON ? ' ' + Array.from({length: 2 + Math.floor(Math.random()*3)}, () => pick(SFX)).join('') : '';
 
-// Style-based taunts
+// Taunts
 const TAUNTS = {
   clean: [
     `Gloves up. Form sharp. {A} and {B} nod.`,
@@ -86,103 +90,84 @@ const TAUNTS = {
   ]
 };
 
-// Weapons / actions vary by style & safe mode
+// Style-specific weapon pools (safe + spicy add-ons)
+const W_CLEAN_SAFE = ['dojo staff','bamboo shinai','practice pads','mirror shield','focus band','training mitts'];
+const W_CLEAN_SPICY= ['weighted baton (prop)','tempered shinai (spar)'];
+
+const W_MOTI_SAFE  = ['PR belt','chalk cloud','coach whistle','rep rope','foam mace','discipline dumbbell'];
+const W_MOTI_SPICY = ['iron plate (prop)','slam ball (soft)'];
+
+const W_VILL_SAFE  = ['shadow ribbon','smoke dagger (prop)','echo bell','trick tarot','void tether (cosplay)'];
+const W_VILL_SPICY = ['hex blade (prop)','cursed grimoire (cosplay)'];
+
+const W_DEGN_SAFE  = ['alpha baton','yield yo-yo','pump trumpet','airdrop crate','ape gauntlet','vibe ledger'];
+const W_DEGN_SPICY = ['leverage gloves','moon mallet (prop)'];
+
+// Generic pools for variety
 const WEAPONS_SAFE = [
   'foam bat','rubber chicken','pool noodle','pixel sword','ban hammer',
-  'yo-yo','cardboard shield','training mitts','toy bo staff'
+  'yo-yo','cardboard shield','toy bo staff','glitch gauntlet'
 ];
-const WEAPONS_SPICY = [
-  'steel chair (cosplay prop)','spiked bat (prop)','thunder gloves','meteor hammer (training)'
-];
-const ACTIONS_SAFE = [
-  'bonks','thwacks','boops','yeets','spin-kicks (stage move)','jukes','shoulder-bumps',
-  'cartwheel feints','sweeps (light)'
-];
-const ACTIONS_SPICY = [
-  'smashes','ground-slams','uppercuts (sparring form)','haymakers (pulled)'
-];
+const WEAPONS_SPICY = ['steel chair (cosplay prop)','spiked bat (prop)','thunder gloves','meteor hammer (training)'];
+
+// Actions (style-aware)
+const A_CLEAN = ['counters cleanly','finds spacing on','lands textbook sweep on','checks with a crisp jab on'];
+const A_MOTI  = ['powers through','perfect-forms a jab on','locks in and tags','rolls momentum into'];
+const A_VILL  = ['ensnares','phases through and taps','casts a snare on','drains momentum from'];
+const A_DEGN  = ['market buys a combo on','leverages into','apes into','yoinks RNG from'];
+
+const ACTIONS_SAFE = ['bonks','thwacks','boops','yeets','shoulder-bumps','jukes','spin-feints','light sweep'];
+const ACTIONS_SPICY= ['smashes','ground-slams','uppercuts (spar form)','pulled haymaker'];
 
 // Reactions / counters / crits
 const REACTIONS = ['dodges','parries','blocks','shrugs it off','stumbles','perfect guards'];
-const COUNTERS = [
-  `{B} snaps a reversal!`,
-  `{B} reads it and flips momentum!`,
-  `Clutch parry from {B}, instant punish!`
-];
-const CRITS = [
-  `{A} finds the pixel-perfect angle — **CRIT!**`,
-  `Frame trap! {A} lands a **critical** read!`,
-  `{A} channels a special — it hits! **Critical!**`
-];
+const COUNTERS = ['{B} snaps a reversal!','{B} reads it and flips momentum!','Clutch parry from {B}, instant punish!'];
+const CRITS = ['{A} finds the pixel-perfect angle — **CRIT!**','Frame trap! {A} lands a **critical** read!','{A} channels a special — it hits! **Critical!**'];
 
 // Announcer personas
 const ANNOUNCER_BANK = {
-  normal: [
-    `Commentary: textbook spacing — beautiful footwork.`,
-    `Commentary: momentum swings, crowd on edge.`,
-    `Commentary: timing windows are razor thin.`
-  ],
-  villain: [
-    `Announcer: it’s delicious when hope cracks.`,
-    `Announcer: watch the light drain — exquisite.`,
-    `Announcer: despair taught them discipline.`
-  ],
-  degen: [
-    `Announcer: leverage UP — liquidation candles in sight.`,
-    `Announcer: full send only — printers humming.`,
-    `Announcer: alpha drop mid-fight, cope rising.`
-  ]
+  normal: ['Commentary: textbook spacing — beautiful footwork.','Commentary: momentum swings, crowd on edge.','Commentary: timing windows are razor thin.'],
+  villain:['Announcer: it’s delicious when hope cracks.','Announcer: watch the light drain — exquisite.','Announcer: despair taught them discipline.'],
+  degen:  ['Announcer: leverage UP — liquidation candles in sight.','Announcer: full send only — printers humming.','Announcer: alpha drop mid-fight, cope rising.']
 };
 
-// Crowd chatter / events
-const CROWD = [
-  'Crowd roars!',
-  'Someone rings a cowbell.',
-  'A vuvuzela bleats in 8-bit.',
-  'Chants ripple through the stands.',
-  'Camera flashes pop!'
-];
-const HAZARDS = [
-  'Floor tiles shift suddenly!',
-  'A rogue shopping cart drifts across the arena!',
-  'Fog machine overperforms, visibility drops!',
-  'Neon sign flickers; shadows dance unpredictably!',
-  'A stray confetti cannon fires!'
-];
-const POWERUPS = [
-  '{X} picks up a glowing orb — speed up!',
-  '{X} grabs a pixel heart — stamina bump!',
-  '{X} equips glitch boots — dash unlocked!',
-  '{X} finds a shield bubble — temporary guard!'
-];
+// Crowd / hazards / powerups
+const CROWD   = ['Crowd roars!','Someone rings a cowbell.','A vuvuzela bleats in 8-bit.','Chants ripple through the stands.','Camera flashes pop!'];
+const HAZARDS = ['Floor tiles shift suddenly!','A rogue shopping cart drifts across the arena!','Fog machine overperforms — visibility drops!','Neon sign flickers; shadows dance unpredictably!','A stray confetti cannon fires!'];
+const POWERUPS= ['{X} picks up a glowing orb — speed up!','{X} grabs a pixel heart — stamina bump!','{X} equips glitch boots — dash unlocked!','{X} finds a shield bubble — temporary guard!'];
 
-/* ========================== Round builders ========================== */
+/* ========================== Builders ========================== */
 function buildTaunt(style, A, B) {
   const bank = TAUNTS[style] || TAUNTS.motivator;
   return `🗣️ ${pick(bank).replace('{A}', A).replace('{B}', B)}`;
 }
-
-function buildAction(A, B) {
-  const WEAP = SAFE_MODE ? WEAPONS_SAFE : WEAPONS_SAFE.concat(WEAPONS_SPICY);
-  const ACT  = SAFE_MODE ? ACTIONS_SAFE  : ACTIONS_SAFE.concat(ACTIONS_SPICY);
-  const w = pick(WEAP); const v = pick(ACT);
+function styleWeapons(style){
+  const base = SAFE_MODE ? WEAPONS_SAFE.slice() : WEAPONS_SAFE.concat(WEAPONS_SPICY);
+  const add = {
+    clean: SAFE_MODE ? W_CLEAN_SAFE : W_CLEAN_SAFE.concat(W_CLEAN_SPICY),
+    motivator: SAFE_MODE ? W_MOTI_SAFE : W_MOTI_SAFE.concat(W_MOTI_SPICY),
+    villain: SAFE_MODE ? W_VILL_SAFE : W_VILL_SAFE.concat(W_VILL_SPICY),
+    degen: SAFE_MODE ? W_DEGN_SAFE  : W_DEGN_SAFE.concat(W_DEGN_SPICY)
+  }[style] || [];
+  return base.concat(add);
+}
+function styleVerbs(style){
+  const common = SAFE_MODE ? ACTIONS_SAFE : ACTIONS_SAFE.concat(ACTIONS_SPICY);
+  const specific = {
+    clean: A_CLEAN, motivator: A_MOTI, villain: A_VILL, degen: A_DEGN
+  }[style] || [];
+  return common.concat(specific);
+}
+function buildAction(A, B, style) {
+  const w = pick(styleWeapons(style));
+  const v = pick(styleVerbs(style));
   return `🥊 **${A} grabs a ${w} and ${v} ${B}!**${SFX_STRING()}`;
 }
-
-function buildReaction(B) {
-  return `🛡️ ${B} ${pick(REACTIONS)}.${SFX_STRING()}`;
-}
-
-function buildCounter(B) {
-  return `⚡ ${pick(COUNTERS).replace('{B}', B)}${SFX_STRING()}`;
-}
-
-function buildCrit(attacker) {
-  return `💥 ${pick(CRITS).replace('{A}', attacker)}${SFX_STRING()}`;
-}
+function buildReaction(B) { return `🛡️ ${B} ${pick(REACTIONS)}.${SFX_STRING()}`; }
+function buildCounter(B) { return `⚡ ${pick(COUNTERS).replace('{B}', B)}${SFX_STRING()}`; }
+function buildCrit(attacker) { return `💥 ${pick(CRITS).replace('{A}', attacker)}${SFX_STRING()}`; }
 
 function randomEvent(A, B) {
-  // pick environment events: hazard or powerup or crowd
   const roll = Math.random();
   if (roll < HAZARD_CHANCE) {
     return `⚠️ ${pick(HAZARDS)}`;
@@ -194,64 +179,43 @@ function randomEvent(A, B) {
   }
   return null;
 }
-
 function buildAnnouncer(style) {
   if (ANNOUNCER === 'none') return null;
   const persona = ANNOUNCER_BANK[ANNOUNCER] || ANNOUNCER_BANK.normal;
   const line = pick(persona);
-  // If user chose a style and persona differs, occasionally bias with style:
-  if (Math.random() < 0.35 && ANNOUNCER_BANK[style]) {
-    return `🎙️ ${pick(ANNOUNCER_BANK[style])}`;
-  }
+  if (Math.random() < 0.35 && ANNOUNCER_BANK[style]) return `🎙️ ${pick(ANNOUNCER_BANK[style])}`;
   return `🎙️ ${line}`;
 }
 
-/** Build per-round micro-sequence.
- * winner=r.winner (A), loser=r.loser (B) — but sequence can counter/crit without changing outcome.
- */
 function buildRoundSequence({ A, B, style }) {
   const seq = [];
-
   if (Math.random() < TAUNT_CHANCE) seq.push({ type: 'taunt', content: buildTaunt(style, A, B) });
 
-  // main action from A to B
-  seq.push({ type: 'action', content: buildAction(A, B) });
+  seq.push({ type: 'action', content: buildAction(A, B, style) });
 
   let stunned = false;
-  // possible stun
-  if (Math.random() < STUN_CHANCE) {
-    seq.push({ type: 'stun', content: `🫨 ${B} is briefly stunned!${SFX_STRING()}` });
-    stunned = true;
-  }
+  if (Math.random() < STUN_CHANCE) { seq.push({ type: 'stun', content: `🫨 ${B} is briefly stunned!${SFX_STRING()}` }); stunned = true; }
 
   if (!stunned) {
-    if (Math.random() < COUNTER_CHANCE) {
-      seq.push({ type: 'counter', content: buildCounter(B) });
-    } else {
-      seq.push({ type: 'reaction', content: buildReaction(B) });
-    }
+    if (Math.random() < COUNTER_CHANCE) seq.push({ type: 'counter', content: buildCounter(B) });
+    else seq.push({ type: 'reaction', content: buildReaction(B) });
   }
 
-  // optional crit (attacker with momentum)
   if (Math.random() < CRIT_CHANCE) {
-    // If counter happened, give crit to B, else A
     const last = seq.find(s => s.type === 'counter');
     seq.push({ type: 'crit', content: buildCrit(last ? B : A) });
   }
 
-  // optional combo string
   if (COMBO_MAX > 1 && Math.random() < 0.38) {
     const hits = 2 + Math.floor(Math.random() * (COMBO_MAX - 1));
     seq.push({ type: 'combo', content: `🔁 Combo x${hits}! ${SFX_STRING()}` });
   }
 
-  // random environmental/crowd event
   if (Math.random() < EVENTS_CHANCE) {
     const ev = randomEvent(A, B);
     if (ev) seq.push({ type: 'event', content: ev });
   }
 
-  // occasional announcer line
   const caster = buildAnnouncer(style);
   if (caster && Math.random() < 0.6) seq.push({ type: 'announcer', content: caster });
 
@@ -270,7 +234,6 @@ async function runRumbleDisplay({
 }) {
   bestOf = clampBestOf(bestOf);
 
-  // choose an environment for this match
   const env = pick(ENVIRONMENTS);
   const sim = simulateBattle({ challenger, opponent, bestOf, style });
 
@@ -290,13 +253,7 @@ async function runRumbleDisplay({
         });
         target = thread;
       } else {
-        introMsg = await channel.send({
-          embeds: [{
-            color: colorFor(style),
-            title,
-            description: `**Best of ${sim.bestOf}**\n**Arena:** ${env.name}\n_${env.intro}_`
-          }]
-        });
+        introMsg = await channel.send({ embeds: [introEmbed(style, title, sim.bestOf, env)] });
         const thread = await introMsg.startThread({
           name: `${THREAD_NAME}: ${Aname} vs ${Bname}`,
           autoArchiveDuration: 60
@@ -304,24 +261,10 @@ async function runRumbleDisplay({
         target = thread;
       }
     } else if (!introMsg) {
-      introMsg = await channel.send({
-        embeds: [{
-          color: colorFor(style),
-          title,
-          description: `**Best of ${sim.bestOf}**\n**Arena:** ${env.name}\n_${env.intro}_`
-        }]
-      });
+      introMsg = await channel.send({ embeds: [introEmbed(style, title, sim.bestOf, env)] });
     }
   } catch {
-    if (!introMsg) {
-      introMsg = await channel.send({
-        embeds: [{
-          color: colorFor(style),
-          title,
-          description: `**Best of ${sim.bestOf}**\n**Arena:** ${env.name}\n_${env.intro}_`
-        }]
-      });
-    }
+    if (!introMsg) introMsg = await channel.send({ embeds: [introEmbed(style, title, sim.bestOf, env)] });
     target = channel;
   }
 
@@ -332,29 +275,19 @@ async function runRumbleDisplay({
     const r = sim.rounds[i];
     const bar = makeBar(r.a, r.b, sim.bestOf);
 
-    await target.send({ content: `🔔 **Round ${i + 1} — Fight!**` });
+    await target.send({ embeds: [miniHeaderEmbed(style, `🔔 Round ${i + 1} — Fight!`, env)] });
     await sleep(jitter(Math.max(400, STEP_DELAY / 2)));
 
-    // Sequence for this round (A=r.winner, B=r.loser purely for story; outcome fixed)
     const seq = buildRoundSequence({ A: r.winner, B: r.loser, style });
-
     for (const step of seq) {
       await target.send({ content: step.content });
       await sleep(jitter(STEP_DELAY));
     }
 
-    // Official result card
-    const embed = {
-      color: colorFor(style),
-      title: `Round ${i + 1} Result`,
-      description: `**${r.winner}** beats **${r.loser}**\n\n${bar}\n\n${r.text}`,
-      footer: { text: `Style: ${style} • Arena: ${env.name}` }
-    };
-    await target.send({ embeds: [embed] });
+    // Official round card
+    await target.send({ embeds: [roundEmbed(style, i + 1, r, bar, sim.bestOf, env)] });
 
-    if (i < sim.rounds.length - 1) {
-      await sleep(jitter(ROUND_DELAY));
-    }
+    if (i < sim.rounds.length - 1) await sleep(jitter(ROUND_DELAY));
   }
 
   // 3) Finale
@@ -373,30 +306,75 @@ async function runRumbleDisplay({
     });
   } catch {}
 
-  const finalEmbed = {
-    color: colorFor(style),
-    title: `🏆 Final: ${(champion.displayName || champion.username)} wins ${sim.a}-${sim.b}!`,
-    description: `${finalBar}`,
-    thumbnail: { url: champion.displayAvatarURL?.() || champion.avatarURL?.() || null },
-    footer: { text: `Best of ${sim.bestOf} • Style: ${style} • Arena: ${env.name}` },
-  };
-  if (cast) finalEmbed.fields = [{ name: '🎙️ Commentary', value: cast }];
+  await target.send({ embeds: [finalEmbed(style, sim, champion, finalBar, env, cast)] });
 
-  await target.send({ embeds: [finalEmbed] });
-
-  // Non-threaded recap edit
   if (introMsg && !USE_THREAD) {
-    await introMsg.edit({
-      embeds: [{
-        color: colorFor(style),
-        title,
-        description: `**Best of ${sim.bestOf}**\nArena: ${env.name}\nWinner: ${(champion.displayName || champion.username)} (${sim.a}-${sim.b}).`
-      }]
-    }).catch(() => {});
+    await introMsg.edit({ embeds: [recapEmbed(style, sim, champion, env)] }).catch(() => {});
   }
 
   return { sim, champion };
 }
 
+/* ========================== Embed builders ========================== */
+function baseEmbed(style) {
+  return {
+    color: colorFor(style),
+    author: { name: 'Rumble Royale' },
+    timestamp: new Date().toISOString(),
+  };
+}
+function introEmbed(style, title, bestOf, env) {
+  return {
+    ...baseEmbed(style),
+    title,
+    description: `**Best of ${bestOf}**`,
+    fields: [
+      { name: 'Arena', value: `**${env.name}**\n_${env.intro}_`, inline: false },
+    ],
+    footer: { text: `Style: ${style} • Arena: ${env.name}` }
+  };
+}
+function miniHeaderEmbed(style, text, env) {
+  return {
+    ...baseEmbed(style),
+    description: text,
+    footer: { text: `Arena: ${env.name}` }
+  };
+}
+function roundEmbed(style, idx, r, bar, bestOf, env) {
+  return {
+    ...baseEmbed(style),
+    title: `Round ${idx} — Result`,
+    description: `${bar}\n\n${r.text}`,
+    fields: [
+      { name: 'Winner', value: `**${r.winner}**`, inline: true },
+      { name: 'Loser',  value: `${r.loser}`, inline: true },
+      { name: 'Score',  value: `**${r.a}–${r.b}** (Best of ${bestOf})`, inline: true },
+    ],
+    footer: { text: `Style: ${style} • Arena: ${env.name}` }
+  };
+}
+function finalEmbed(style, sim, champion, bar, env, cast) {
+  const name = champion.displayName || champion.username;
+  const e = {
+    ...baseEmbed(style),
+    title: `🏆 Final — ${name} wins ${sim.a}-${sim.b}!`,
+    description: bar,
+    footer: { text: `Best of ${sim.bestOf} • Style: ${style} • Arena: ${env.name}` }
+  };
+  if (cast) e.fields = [{ name: '🎙️ Commentary', value: cast }];
+  return e;
+}
+function recapEmbed(style, sim, champion, env) {
+  const name = champion.displayName || champion.username;
+  return {
+    ...baseEmbed(style),
+    title: 'Rumble Complete',
+    description: `Winner: **${name}** (${sim.a}-${sim.b})`,
+    footer: { text: `Best of ${sim.bestOf} • Style: ${style} • Arena: ${env.name}` }
+  };
+}
+
 module.exports = { runRumbleDisplay };
+
 
