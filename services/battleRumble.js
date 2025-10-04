@@ -39,9 +39,12 @@ function colorFor(style) {
        : 0x9b59b6;
 }
 function parseCsvEnv(s) { if (!exists(s)) return null; return s.split(',').map(x => x.trim()).filter(Boolean); }
+function baseEmbed(style) {
+  return { color: colorFor(style), author: { name: 'Rumble Royale' }, timestamp: new Date().toISOString() };
+}
 
 /* ========================== Flavor ========================== */
-// Environments (more scenes!)
+// Arenas
 const ENV_BUILTIN = [
   { name: 'Neon Rooftop', intro: 'City lights hum below; the wind carries hype.' },
   { name: 'Underground Dojo', intro: 'Paper walls, sand floor, respectful echoes.' },
@@ -68,78 +71,48 @@ const SFX_STRING = () => SFX_ON ? ' ' + Array.from({length: 2 + Math.floor(Math.
 
 // Taunts
 const TAUNTS = {
-  clean: [
-    `Gloves up. Form sharp. {A} and {B} nod.`,
-    `{A}: "Best self only." {B}: "Always."`,
-    `Respect. Skill. Timing. Go.`
-  ],
-  motivator: [
-    `{A}: "Clock in." {B}: "Clocked." 💪`,
-    `{B}: "We grind clean — no excuse." ⚡`,
-    `Breathe. Focus. Execute.`
-  ],
-  villain: [
-    `{A}: "I’ll savor this." {B} smiles thinly.`,
-    `Shadows coil as {A} and {B} step forward.`,
-    `{B}: "Hope is a habit I removed."`
-  ],
-  degen: [
-    `{A}: "Max leverage." {B}: "Full send." 🚀`,
-    `Slippage set to chaos — {A} vs {B}.`,
-    `{B}: "Prints only. No stops."`
-  ]
+  clean:      [`Gloves up. Form sharp. {A} and {B} nod.`,`{A}: "Best self only." {B}: "Always."`,`Respect. Skill. Timing. Go.`],
+  motivator:  [`{A}: "Clock in." {B}: "Clocked." 💪`,`{B}: "We grind clean — no excuse." ⚡`,`Breathe. Focus. Execute.`],
+  villain:    [`{A}: "I’ll savor this." {B} smiles thinly.`,`Shadows coil as {A} and {B} step forward.`,`{B}: "Hope is a habit I removed."`],
+  degen:      [`{A}: "Max leverage." {B}: "Full send." 🚀`,`Slippage set to chaos — {A} vs {B}.`,`{B}: "Prints only. No stops."`]
 };
 
-// Style-specific weapon pools (safe + spicy add-ons)
+// Style-specific weapons/actions
 const W_CLEAN_SAFE = ['dojo staff','bamboo shinai','practice pads','mirror shield','focus band','training mitts'];
 const W_CLEAN_SPICY= ['weighted baton (prop)','tempered shinai (spar)'];
-
 const W_MOTI_SAFE  = ['PR belt','chalk cloud','coach whistle','rep rope','foam mace','discipline dumbbell'];
 const W_MOTI_SPICY = ['iron plate (prop)','slam ball (soft)'];
-
 const W_VILL_SAFE  = ['shadow ribbon','smoke dagger (prop)','echo bell','trick tarot','void tether (cosplay)'];
 const W_VILL_SPICY = ['hex blade (prop)','cursed grimoire (cosplay)'];
-
 const W_DEGN_SAFE  = ['alpha baton','yield yo-yo','pump trumpet','airdrop crate','ape gauntlet','vibe ledger'];
 const W_DEGN_SPICY = ['leverage gloves','moon mallet (prop)'];
+const WEAPONS_SAFE = ['foam bat','rubber chicken','pool noodle','pixel sword','ban hammer','yo-yo','cardboard shield','toy bo staff','glitch gauntlet'];
+const WEAPONS_SPICY= ['steel chair (cosplay prop)','spiked bat (prop)','thunder gloves','meteor hammer (training)'];
 
-// Generic pools for variety
-const WEAPONS_SAFE = [
-  'foam bat','rubber chicken','pool noodle','pixel sword','ban hammer',
-  'yo-yo','cardboard shield','toy bo staff','glitch gauntlet'
-];
-const WEAPONS_SPICY = ['steel chair (cosplay prop)','spiked bat (prop)','thunder gloves','meteor hammer (training)'];
-
-// Actions (style-aware)
 const A_CLEAN = ['counters cleanly','finds spacing on','lands textbook sweep on','checks with a crisp jab on'];
 const A_MOTI  = ['powers through','perfect-forms a jab on','locks in and tags','rolls momentum into'];
 const A_VILL  = ['ensnares','phases through and taps','casts a snare on','drains momentum from'];
 const A_DEGN  = ['market buys a combo on','leverages into','apes into','yoinks RNG from'];
-
 const ACTIONS_SAFE = ['bonks','thwacks','boops','yeets','shoulder-bumps','jukes','spin-feints','light sweep'];
 const ACTIONS_SPICY= ['smashes','ground-slams','uppercuts (spar form)','pulled haymaker'];
 
-// Reactions / counters / crits
 const REACTIONS = ['dodges','parries','blocks','shrugs it off','stumbles','perfect guards'];
-const COUNTERS = ['{B} snaps a reversal!','{B} reads it and flips momentum!','Clutch parry from {B}, instant punish!'];
-const CRITS = ['{A} finds the pixel-perfect angle — **CRIT!**','Frame trap! {A} lands a **critical** read!','{A} channels a special — it hits! **Critical!**'];
+const COUNTERS  = ['{B} snaps a reversal!','{B} reads it and flips momentum!','Clutch parry from {B}, instant punish!'];
+const CRITS     = ['{A} finds the pixel-perfect angle — **CRIT!**','Frame trap! {A} lands a **critical** read!','{A} channels a special — it hits! **Critical!**'];
 
-// Announcer personas
 const ANNOUNCER_BANK = {
-  normal: ['Commentary: textbook spacing — beautiful footwork.','Commentary: momentum swings, crowd on edge.','Commentary: timing windows are razor thin.'],
-  villain:['Announcer: it’s delicious when hope cracks.','Announcer: watch the light drain — exquisite.','Announcer: despair taught them discipline.'],
-  degen:  ['Announcer: leverage UP — liquidation candles in sight.','Announcer: full send only — printers humming.','Announcer: alpha drop mid-fight, cope rising.']
+  normal:  ['Commentary: textbook spacing — beautiful footwork.','Commentary: momentum swings, crowd on edge.','Commentary: timing windows are razor thin.'],
+  villain: ['Announcer: it’s delicious when hope cracks.','Announcer: watch the light drain — exquisite.','Announcer: despair taught them discipline.'],
+  degen:   ['Announcer: leverage UP — liquidation candles in sight.','Announcer: full send only — printers humming.','Announcer: alpha drop mid-fight, cope rising.']
 };
 
-// Crowd / hazards / powerups
 const CROWD   = ['Crowd roars!','Someone rings a cowbell.','A vuvuzela bleats in 8-bit.','Chants ripple through the stands.','Camera flashes pop!'];
 const HAZARDS = ['Floor tiles shift suddenly!','A rogue shopping cart drifts across the arena!','Fog machine overperforms — visibility drops!','Neon sign flickers; shadows dance unpredictably!','A stray confetti cannon fires!'];
 const POWERUPS= ['{X} picks up a glowing orb — speed up!','{X} grabs a pixel heart — stamina bump!','{X} equips glitch boots — dash unlocked!','{X} finds a shield bubble — temporary guard!'];
 
 /* ========================== Builders ========================== */
 function buildTaunt(style, A, B) {
-  const bank = TAUNTS[style] || TAUNTS.motivator;
-  return `🗣️ ${pick(bank).replace('{A}', A).replace('{B}', B)}`;
+  return `🗣️ ${(pick(TAUNTS[style] || TAUNTS.motivator)).replace('{A}', A).replace('{B}', B)}`;
 }
 function styleWeapons(style){
   const base = SAFE_MODE ? WEAPONS_SAFE.slice() : WEAPONS_SAFE.concat(WEAPONS_SPICY);
@@ -153,9 +126,7 @@ function styleWeapons(style){
 }
 function styleVerbs(style){
   const common = SAFE_MODE ? ACTIONS_SAFE : ACTIONS_SAFE.concat(ACTIONS_SPICY);
-  const specific = {
-    clean: A_CLEAN, motivator: A_MOTI, villain: A_VILL, degen: A_DEGN
-  }[style] || [];
+  const specific = { clean: A_CLEAN, motivator: A_MOTI, villain: A_VILL, degen: A_DEGN }[style] || [];
   return common.concat(specific);
 }
 function buildAction(A, B, style) {
@@ -164,33 +135,86 @@ function buildAction(A, B, style) {
   return `🥊 **${A} grabs a ${w} and ${v} ${B}!**${SFX_STRING()}`;
 }
 function buildReaction(B) { return `🛡️ ${B} ${pick(REACTIONS)}.${SFX_STRING()}`; }
-function buildCounter(B) { return `⚡ ${pick(COUNTERS).replace('{B}', B)}${SFX_STRING()}`; }
-function buildCrit(attacker) { return `💥 ${pick(CRITS).replace('{A}', attacker)}${SFX_STRING()}`; }
-
+function buildCounter(B) { return `⚡ ${(pick(COUNTERS)).replace('{B}', B)}${SFX_STRING()}`; }
+function buildCrit(attacker) { return `💥 ${(pick(CRITS)).replace('{A}', attacker)}${SFX_STRING()}`; }
 function randomEvent(A, B) {
   const roll = Math.random();
-  if (roll < HAZARD_CHANCE) {
-    return `⚠️ ${pick(HAZARDS)}`;
-  } else if (roll < HAZARD_CHANCE + POWERUP_CHANCE) {
-    const who = Math.random() < 0.5 ? A : B;
-    return `🔸 ${pick(POWERUPS).replace('{X}', who)}${SFX_STRING()}`;
-  } else if (roll < HAZARD_CHANCE + POWERUP_CHANCE + CROWD_CHANCE) {
-    return `📣 ${pick(CROWD)}`;
-  }
+  if (roll < HAZARD_CHANCE) return `⚠️ ${pick(HAZARDS)}`;
+  if (roll < HAZARD_CHANCE + POWERUP_CHANCE) return `🔸 ${(pick(POWERUPS)).replace('{X}', Math.random()<0.5 ? A : B)}${SFX_STRING()}`;
+  if (roll < HAZARD_CHANCE + POWERUP_CHANCE + CROWD_CHANCE) return `📣 ${pick(CROWD)}`;
   return null;
 }
 function buildAnnouncer(style) {
   if (ANNOUNCER === 'none') return null;
   const persona = ANNOUNCER_BANK[ANNOUNCER] || ANNOUNCER_BANK.normal;
-  const line = pick(persona);
   if (Math.random() < 0.35 && ANNOUNCER_BANK[style]) return `🎙️ ${pick(ANNOUNCER_BANK[style])}`;
-  return `🎙️ ${line}`;
+  return `🎙️ ${pick(persona)}`;
 }
 
+/* ========================== Embeds ========================== */
+function introEmbed(style, title) {
+  return { ...baseEmbed(style), title, description: `Rumble incoming…` };
+}
+function arenaEmbed(style, env, bestOf) {
+  return {
+    ...baseEmbed(style),
+    title: `🏟️ Arena Reveal`,
+    description: `**${env.name}**\n_${env.intro}_`,
+    fields: [{ name: 'Format', value: `Best of **${bestOf}**`, inline: true }],
+    footer: { text: `Arena: ${env.name}` }
+  };
+}
+function miniHeaderEmbed(style, text, env) {
+  return { ...baseEmbed(style), description: text, footer: { text: `Arena: ${env.name}` } };
+}
+function roundEmbed(style, idx, r, bar, bestOf, env) {
+  return {
+    ...baseEmbed(style),
+    title: `Round ${idx} — Result`,
+    description: `${bar}\n\n${r.text}`,
+    fields: [
+      { name: 'Winner', value: `**${r.winner}**`, inline: true },
+      { name: 'Loser',  value: `${r.loser}`, inline: true },
+      { name: 'Score',  value: `**${r.a}–${r.b}** (Bo${bestOf})`, inline: true },
+    ],
+    footer: { text: `Style: ${style} • Arena: ${env.name}` }
+  };
+}
+function finalAllInOneEmbed({ style, sim, champion, bar, env, cast, stats, timeline }) {
+  const name = champion.displayName || champion.username;
+  const e = {
+    ...baseEmbed(style),
+    title: `🏆 Final — ${name} wins ${sim.a}-${sim.b}!`,
+    description: bar,
+    thumbnail: { url: champion.displayAvatarURL?.() || champion.avatarURL?.() || null }, // winner avatar back
+    fields: [
+      { name: 'Match Stats', value:
+        [
+          `• Rounds: **${sim.a}-${sim.b}** (Bo${sim.bestOf})`,
+          `• Taunts: **${stats.taunts}**`,
+          `• Counters: **${stats.counters}**`,
+          `• Crits: **${stats.crits}**`,
+          `• Stuns: **${stats.stuns}**`,
+          `• Combos: **${stats.combos}**`,
+          `• Events: **${stats.events}**`
+        ].join('\n')
+      },
+      { name: 'Rounds Timeline', value: timeline.slice(0, 1024) || '—' }
+    ],
+    footer: { text: `Style: ${style} • Arena: ${env.name}` }
+  };
+  if (cast) e.fields.push({ name: '🎙️ Commentary', value: cast });
+  return e;
+}
+function recapEmbed(style, sim, champion, env) {
+  const name = champion.displayName || champion.username;
+  return { ...baseEmbed(style), title: 'Rumble Complete', description: `Winner: **${name}** (${sim.a}-${sim.b})`, footer: { text: `Best of ${sim.bestOf} • Style: ${style} • Arena: ${env.name}` } };
+}
+
+/* ========================== Round Sequence ========================== */
 function buildRoundSequence({ A, B, style }) {
   const seq = [];
   if (Math.random() < TAUNT_CHANCE) seq.push({ type: 'taunt', content: buildTaunt(style, A, B) });
-
   seq.push({ type: 'action', content: buildAction(A, B, style) });
 
   let stunned = false;
@@ -205,24 +229,21 @@ function buildRoundSequence({ A, B, style }) {
     const last = seq.find(s => s.type === 'counter');
     seq.push({ type: 'crit', content: buildCrit(last ? B : A) });
   }
-
   if (COMBO_MAX > 1 && Math.random() < 0.38) {
     const hits = 2 + Math.floor(Math.random() * (COMBO_MAX - 1));
     seq.push({ type: 'combo', content: `🔁 Combo x${hits}! ${SFX_STRING()}` });
   }
-
   if (Math.random() < EVENTS_CHANCE) {
     const ev = randomEvent(A, B);
     if (ev) seq.push({ type: 'event', content: ev });
   }
-
   const caster = buildAnnouncer(style);
   if (caster && Math.random() < 0.6) seq.push({ type: 'announcer', content: caster });
 
   return seq;
 }
 
-/* ========================== Runner ========================== */
+/* ========================== Runner (with stats) ========================== */
 async function runRumbleDisplay({
   channel,
   baseMessage,
@@ -233,7 +254,6 @@ async function runRumbleDisplay({
   guildName = 'this server'
 }) {
   bestOf = clampBestOf(bestOf);
-
   const env = pick(ENVIRONMENTS);
   const sim = simulateBattle({ challenger, opponent, bestOf, style });
 
@@ -241,36 +261,40 @@ async function runRumbleDisplay({
   const Bname = opponent.displayName   || opponent.username;
   const title = `⚔️ Rumble: ${Aname} vs ${Bname}`;
 
-  // 1) Intro & (optional) thread
+  // Stats accumulator (display-only; does not influence outcome)
+  const stats = { taunts: 0, counters: 0, crits: 0, stuns: 0, combos: 0, events: 0 };
+  const roundsTimeline = [];
+
+  // 0) “Rumble incoming…” in channel, then thread + arena reveal for pacing
   let target = channel;
   let introMsg;
   try {
-    if (USE_THREAD) {
-      if (baseMessage?.startThread) {
-        const thread = await baseMessage.startThread({
-          name: `${THREAD_NAME}: ${Aname} vs ${Bname}`,
-          autoArchiveDuration: 60
-        });
-        target = thread;
-      } else {
-        introMsg = await channel.send({ embeds: [introEmbed(style, title, sim.bestOf, env)] });
-        const thread = await introMsg.startThread({
-          name: `${THREAD_NAME}: ${Aname} vs ${Bname}`,
-          autoArchiveDuration: 60
-        });
-        target = thread;
-      }
-    } else if (!introMsg) {
-      introMsg = await channel.send({ embeds: [introEmbed(style, title, sim.bestOf, env)] });
+    // Rumble incoming
+    const incoming = await channel.send({ embeds: [introEmbed(style, title)] });
+
+    if (USE_THREAD && incoming?.startThread) {
+      const thread = await incoming.startThread({
+        name: `${THREAD_NAME}: ${Aname} vs ${Bname}`, autoArchiveDuration: 60
+      });
+      target = thread;
+    } else {
+      target = channel;
     }
+
+    // Arena reveal in the target (thread or channel)
+    await sleep(jitter(INTRO_DELAY));
+    await target.send({ embeds: [arenaEmbed(style, env, sim.bestOf)] });
   } catch {
-    if (!introMsg) introMsg = await channel.send({ embeds: [introEmbed(style, title, sim.bestOf, env)] });
+    // fallback: no thread perms — just post both in channel
     target = channel;
+    await target.send({ embeds: [introEmbed(style, title)] }).catch(() => {});
+    await sleep(jitter(INTRO_DELAY));
+    await target.send({ embeds: [arenaEmbed(style, env, sim.bestOf)] }).catch(() => {});
   }
 
   await sleep(jitter(INTRO_DELAY));
 
-  // 2) Round streaming
+  // 1) Round streaming
   for (let i = 0; i < sim.rounds.length; i++) {
     const r = sim.rounds[i];
     const bar = makeBar(r.a, r.b, sim.bestOf);
@@ -279,7 +303,15 @@ async function runRumbleDisplay({
     await sleep(jitter(Math.max(400, STEP_DELAY / 2)));
 
     const seq = buildRoundSequence({ A: r.winner, B: r.loser, style });
+    // collect stats as we stream
     for (const step of seq) {
+      if (step.type === 'taunt')   stats.taunts++;
+      if (step.type === 'counter') stats.counters++;
+      if (step.type === 'crit')    stats.crits++;
+      if (step.type === 'stun')    stats.stuns++;
+      if (step.type === 'combo')   stats.combos++;
+      if (step.type === 'event')   stats.events++;
+
       await target.send({ content: step.content });
       await sleep(jitter(STEP_DELAY));
     }
@@ -287,10 +319,12 @@ async function runRumbleDisplay({
     // Official round card
     await target.send({ embeds: [roundEmbed(style, i + 1, r, bar, sim.bestOf, env)] });
 
+    roundsTimeline.push(`R${i+1}: **${r.winner}** over ${r.loser} (${r.a}-${r.b})`);
+
     if (i < sim.rounds.length - 1) await sleep(jitter(ROUND_DELAY));
   }
 
-  // 3) Finale
+  // 2) Finale — all-in-one (winner + avatar + stats + bar)
   const champion = sim.a > sim.b ? challenger : opponent;
   const runnerUp = sim.a > sim.b ? opponent  : challenger;
   const finalBar = makeBar(sim.a, sim.b, sim.bestOf);
@@ -306,73 +340,17 @@ async function runRumbleDisplay({
     });
   } catch {}
 
-  await target.send({ embeds: [finalEmbed(style, sim, champion, finalBar, env, cast)] });
+  const timeline = roundsTimeline.join(' • ');
+  await target.send({ embeds: [finalAllInOneEmbed({
+    style, sim, champion, bar: finalBar, env, cast, stats, timeline
+  })] });
 
+  // Optional recap edit if you want to update a first message (not required)
   if (introMsg && !USE_THREAD) {
     await introMsg.edit({ embeds: [recapEmbed(style, sim, champion, env)] }).catch(() => {});
   }
 
   return { sim, champion };
-}
-
-/* ========================== Embed builders ========================== */
-function baseEmbed(style) {
-  return {
-    color: colorFor(style),
-    author: { name: 'Rumble Royale' },
-    timestamp: new Date().toISOString(),
-  };
-}
-function introEmbed(style, title, bestOf, env) {
-  return {
-    ...baseEmbed(style),
-    title,
-    description: `**Best of ${bestOf}**`,
-    fields: [
-      { name: 'Arena', value: `**${env.name}**\n_${env.intro}_`, inline: false },
-    ],
-    footer: { text: `Style: ${style} • Arena: ${env.name}` }
-  };
-}
-function miniHeaderEmbed(style, text, env) {
-  return {
-    ...baseEmbed(style),
-    description: text,
-    footer: { text: `Arena: ${env.name}` }
-  };
-}
-function roundEmbed(style, idx, r, bar, bestOf, env) {
-  return {
-    ...baseEmbed(style),
-    title: `Round ${idx} — Result`,
-    description: `${bar}\n\n${r.text}`,
-    fields: [
-      { name: 'Winner', value: `**${r.winner}**`, inline: true },
-      { name: 'Loser',  value: `${r.loser}`, inline: true },
-      { name: 'Score',  value: `**${r.a}–${r.b}** (Best of ${bestOf})`, inline: true },
-    ],
-    footer: { text: `Style: ${style} • Arena: ${env.name}` }
-  };
-}
-function finalEmbed(style, sim, champion, bar, env, cast) {
-  const name = champion.displayName || champion.username;
-  const e = {
-    ...baseEmbed(style),
-    title: `🏆 Final — ${name} wins ${sim.a}-${sim.b}!`,
-    description: bar,
-    footer: { text: `Best of ${sim.bestOf} • Style: ${style} • Arena: ${env.name}` }
-  };
-  if (cast) e.fields = [{ name: '🎙️ Commentary', value: cast }];
-  return e;
-}
-function recapEmbed(style, sim, champion, env) {
-  const name = champion.displayName || champion.username;
-  return {
-    ...baseEmbed(style),
-    title: 'Rumble Complete',
-    description: `Winner: **${name}** (${sim.a}-${sim.b})`,
-    footer: { text: `Best of ${sim.bestOf} • Style: ${style} • Arena: ${env.name}` }
-  };
 }
 
 module.exports = { runRumbleDisplay };
