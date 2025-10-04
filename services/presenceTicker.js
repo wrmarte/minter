@@ -109,6 +109,19 @@ function parseMapEnv(envVal) {
 const GT_MAP = parseMapEnv(process.env.TICKER_GT_MAP || ''); // geckoterminal
 const DS_MAP = parseMapEnv(process.env.TICKER_DS_MAP || ''); // dex screener
 
+// ----------- debounced warnings (anti-spam) -----------
+const WARN_DEBOUNCE_MS = Math.max(30_000, Number(process.env.TICKER_WARN_DEBOUNCE_MS || 900_000)); // default 15m
+const _warnMemo = new Map(); // key(string) -> ts
+
+function warnDebounced(key, msg) {
+  const t = Date.now();
+  const last = _warnMemo.get(key) || 0;
+  if (t - last >= WARN_DEBOUNCE_MS) {
+    _warnMemo.set(key, t);
+    console.warn(msg);
+  }
+}
+
 // ----------- fetching -----------
 async function fetchCoingecko(assets) {
   const ids = pickSourceIds('coingecko', assets);
@@ -277,12 +290,19 @@ function startPresenceTicker(client) {
   // initial run
   setTimeout(async () => {
     try { await tickOnce(client); }
-    catch (e) { console.warn('⚠️ Price ticker error (initial):', e?.message || e); }
+    catch (e) {
+      // Debounce identical warnings so we don't spam logs (e.g., "Dexscreener: no mapped pairs/prices")
+      const key = `ticker-initial:${String(e?.message || e)}`;
+      warnDebounced(key, `⚠️ Price ticker error (initial): ${e?.message || e}`);
+    }
   }, 1200 + Math.floor(Math.random() * 800));
 
   timer = setInterval(async () => {
     try { await tickOnce(client); }
-    catch (e) { console.warn('⚠️ Price ticker error:', e?.message || e); }
+    catch (e) {
+      const key = `ticker:${String(e?.message || e)}`;
+      warnDebounced(key, `⚠️ Price ticker error: ${e?.message || e}`);
+    }
   }, INTERVAL);
 
   console.log(`📈 Presence ticker started (mode=${MODE}, every ${INTERVAL}ms, Δ=${UPDOWN_MODE}, sources=${SOURCE_LIST.join('>')}, assets=${RAW_ASSETS.join(',')}, pair=${PAIR_COUNT})`);
@@ -293,6 +313,7 @@ function stopPresenceTicker() {
 }
 
 module.exports = { startPresenceTicker, stopPresenceTicker };
+
 
 
 
