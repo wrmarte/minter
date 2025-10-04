@@ -192,6 +192,7 @@ try {
 require('./listeners/muscleMBListener')(client);
 require('./listeners/mbella')(client);
 require('./listeners/fftrigger')(client);
+require('./listeners/battlePrefix')(client);
 require('./listeners/welcomeListener')(client, pool); // pass PG to the welcome listener
 
 // ⬇️ NEW: Prefix EXP listener (for servers that block slash commands)
