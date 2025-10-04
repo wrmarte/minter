@@ -1,63 +1,56 @@
-// commands/battle.js
+// commands/rumble.js
 const { SlashCommandBuilder } = require('discord.js');
-const { ready } = require('../services/battleEngine');
-const { runRumbleDisplay } = require('../services/battleRumble');
+const { openLobby } = require('../services/rumbleLobby');
+const { runBracket } = require('../services/tourney');
 
 const OWNER_ID = (process.env.BOT_OWNER_ID || '').trim();
 
 module.exports = {
   data: new SlashCommandBuilder()
-    .setName('battle')
-    .setDescription('Rumble Royale: round-by-round battle (owner-only)')
-    .addUserOption(o => o.setName('opponent').setDescription('Who are you battling?').setRequired(false))
-    .addIntegerOption(o => o.setName('best_of').setDescription('Odd number: 3,5,7').setRequired(false))
+    .setName('rumble')
+    .setDescription('Start a multi-player Rumble lobby (owner-only)')
+    .addIntegerOption(o => o.setName('limit').setDescription('Max players (2-16)').setMinValue(2).setMaxValue(16))
+    .addIntegerOption(o => o.setName('join_seconds').setDescription('Lobby time in seconds (10-120)').setMinValue(10).setMaxValue(120))
+    .addIntegerOption(o => o.setName('best_of').setDescription('Odd number: 3/5/7').setChoices({name:'3',value:3},{name:'5',value:5},{name:'7',value:7}))
     .addStringOption(o =>
-      o.setName('style')
-       .setDescription('Commentary vibe')
-       .addChoices(
-         { name: 'clean', value: 'clean' },
-         { name: 'motivator', value: 'motivator' },
-         { name: 'villain', value: 'villain' },
-         { name: 'degen', value: 'degen' }
-       )
-       .setRequired(false)
+      o.setName('style').setDescription('Commentary vibe')
+       .addChoices({name:'clean',value:'clean'},{name:'motivator',value:'motivator'},{name:'villain',value:'villain'},{name:'degen',value:'degen'})
     ),
-
   async execute(interaction) {
     if (!OWNER_ID || interaction.user.id !== OWNER_ID) {
-      return interaction.reply({ content: '🔒 This command is currently owner-only.', ephemeral: true });
+      return interaction.reply({ content: '🔒 Owner-only.', ephemeral: true });
     }
-    if (!ready(`${interaction.guildId}:${interaction.user.id}`)) {
-      return interaction.reply({ content: '⏳ Cooldown — give it a few seconds.', ephemeral: true });
-    }
+    const limit = interaction.options.getInteger('limit') ?? 8;
+    const joinSeconds = interaction.options.getInteger('join_seconds') ?? 30;
+    const bestOf = interaction.options.getInteger('best_of') ?? 3;
+    const style = (interaction.options.getString('style') || '').toLowerCase() || 'motivator';
 
-    const opponent = interaction.options.getUser('opponent') || interaction.client.user;
-    const bestOf   = interaction.options.getInteger('best_of') || 3;
-    const style    = (interaction.options.getString('style') || '').toLowerCase() || undefined;
+    await interaction.reply({ content: '🧩 Setting up lobby…', ephemeral: true });
 
-    const guild = interaction.guild;
-    const [challengerMember, opponentMember] = await Promise.all([
-      guild.members.fetch(interaction.user.id).catch(() => ({ user: interaction.user })),
-      guild.members.fetch(opponent.id).catch(() => ({ user: opponent }))
-    ]);
+    const hostMember = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+    if (!hostMember) return interaction.followUp({ content: 'Could not fetch host.', ephemeral: true });
 
-    const intro = await interaction.reply({
-      embeds: [{
-        color: 0x9b59b6,
-        title: `⚔️ Rumble incoming`,
-        description: `Setting up **${challengerMember.displayName || interaction.user.username}** vs **${opponentMember.displayName || opponent.username}**…`
-      }],
-      fetchReply: true
+    const players = await openLobby({
+      channel: interaction.channel,
+      hostMember,
+      title: '🔔 Rumble Lobby',
+      limit,
+      joinSeconds
     });
 
-    await runRumbleDisplay({
+    if (players.length < 2) {
+      return interaction.followUp({ content: 'Lobby ended without enough players.', ephemeral: true });
+    }
+
+    await interaction.followUp({ content: `🎮 Starting bracket with **${players.length}** players…`, ephemeral: false });
+
+    await runBracket({
       channel: interaction.channel,
-      baseMessage: intro,
-      challenger: challengerMember,
-      opponent: opponentMember,
+      hostMessage: null,            // optional; bracket runs matches sequentially in channel (each match may thread per your ENV)
+      players,
       bestOf,
       style,
-      guildName: guild?.name || 'this server'
+      guildName: interaction.guild?.name || 'this server'
     });
   }
 };
