@@ -1,10 +1,15 @@
 // services/rumbleLobby.js
 const {
-  ActionRowBuilder, ButtonBuilder, ButtonStyle,
-  EmbedBuilder, UserSelectMenuBuilder, ComponentType, PermissionsBitField
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  EmbedBuilder,
+  UserSelectMenuBuilder,
+  ComponentType,
+  PermissionsBitField
 } = require('discord.js');
 
-/* ========= utils ========= */
+/* ===================== utils / perms ===================== */
 function canSend(ch) {
   try {
     const me = ch?.guild?.members?.me;
@@ -13,7 +18,9 @@ function canSend(ch) {
     return perms?.has(PermissionsBitField.Flags.ViewChannel)
         && perms?.has(PermissionsBitField.Flags.SendMessages)
         && perms?.has(PermissionsBitField.Flags.EmbedLinks);
-  } catch { return false; }
+  } catch {
+    return false;
+  }
 }
 
 function findSpeakableChannel(guild, preferredId = null) {
@@ -27,9 +34,12 @@ function findSpeakableChannel(guild, preferredId = null) {
     }
     if (guild.systemChannel && ok(guild.systemChannel)) return guild.systemChannel;
     return guild.channels.cache.find(ok) || null;
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }
 
+/* ===================== UI helpers ===================== */
 function lobbyEmbed({ title, host, limit, seconds, players, postedIn }) {
   return new EmbedBuilder()
     .setColor(0x9b59b6)
@@ -43,22 +53,35 @@ function lobbyEmbed({ title, host, limit, seconds, players, postedIn }) {
         '',
         (players.size
           ? Array.from(players.values()).map(p => `• ${p.displayName || p.user?.username}`).join('\n')
-          : '_No players yet_')
+          : '_No players yet_'),
       ].filter(Boolean).join('\n')
     );
 }
 
+/* Acknowledge any interaction in ≤3s to avoid "Interaction Failed" */
+async function ack(i, payload = { content: 'OK', ephemeral: true }) {
+  try {
+    if (i.deferred || i.replied) {
+      return await i.followUp({ ...payload, ephemeral: true });
+    }
+    return await i.reply({ ...payload, ephemeral: true });
+  } catch {
+    try { await i.deferUpdate(); } catch {}
+  }
+}
+
 /**
  * Open a lobby with Join/Leave/Start/Cancel buttons + HOST-ONLY UserSelect to add people.
- * If we lack permission in the current channel, we’ll pick a fallback channel the bot CAN speak in.
+ * If bot can’t send in the requested channel, it will pick another speakable channel and notify the host.
  *
  * @param {Object} opts
  * @param {TextChannel|ThreadChannel} opts.channel
  * @param {GuildMember} opts.hostMember
- * @param {string} [opts.title]
- * @param {number} [opts.limit]
- * @param {number} [opts.joinSeconds]
- * @param {(msg: string)=>Promise<void>} [opts.notify] optional callback to notify host ephemerally
+ * @param {string} [opts.title='🔔 Rumble Lobby']
+ * @param {number} [opts.limit=8]
+ * @param {number} [opts.joinSeconds=30]
+ * @param {(msg: string)=>Promise<void>} [opts.notify] optional callback to ephemerally notify host
+ * @returns {Promise<GuildMember[]>} final list of players (>=2), or [] if canceled/insufficient
  */
 async function openLobby({
   channel,
@@ -68,20 +91,22 @@ async function openLobby({
   joinSeconds = 30,
   notify
 }) {
-  const joinSet = new Map(); // userId -> GuildMember
-  joinSet.set(hostMember.id, hostMember); // host auto-join
+  const joinSet = new Map(); // userId -> GuildMember-ish
+  joinSet.set(hostMember.id, hostMember); // host auto-joined
 
   // choose where to post
   let postCh = canSend(channel) ? channel : findSpeakableChannel(channel.guild, channel.id);
-  const moved = postCh?.id !== channel?.id;
-
+  if (!postCh) {
+    if (notify) await Promise.resolve(notify('I can’t post in any channel here — check my permissions.')).catch(()=>{});
+    throw new Error('No speakable channel for lobby.');
+  }
+  const moved = postCh.id !== channel.id;
+  const postedIn = moved ? `<#${postCh.id}>` : null;
   if (moved && notify) {
-    await Promise.resolve(notify(`I don’t have permission to post here. I opened the lobby in <#${postCh.id}> instead.`)).catch(()=>{});
+    await Promise.resolve(notify(`I don’t have permission to post here. I opened the lobby in ${postedIn} instead.`)).catch(()=>{});
   }
 
-  const postedIn = moved ? `<#${postCh.id}>` : null;
-
-  // components
+  // components: buttons + host-only user select
   const row1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId('rumble_join').setStyle(ButtonStyle.Success).setLabel('Join'),
     new ButtonBuilder().setCustomId('rumble_leave').setStyle(ButtonStyle.Secondary).setLabel('Leave'),
@@ -89,7 +114,6 @@ async function openLobby({
     new ButtonBuilder().setCustomId('rumble_cancel').setStyle(ButtonStyle.Danger).setLabel('Cancel')
   );
 
-  // host-only user selector to add multiple fighters
   const row2 = new ActionRowBuilder().addComponents(
     new UserSelectMenuBuilder()
       .setCustomId('rumble_add')
@@ -98,21 +122,18 @@ async function openLobby({
       .setMaxValues(Math.min(10, limit))
   );
 
-  // post lobby
+  // post lobby message
   let seconds = joinSeconds;
   let msg = await postCh.send({
     embeds: [lobbyEmbed({ title, host: hostMember, limit, seconds, players: joinSet, postedIn })],
     components: [row1, row2],
   });
 
-  // collector
-  const collector = msg.createMessageComponentCollector({
-    time: joinSeconds * 1000,
-    componentType: ComponentType.ActionRow // collects both buttons & selects
-  });
+  // collector: listen to all components on this message
+  const collector = msg.createMessageComponentCollector({ time: joinSeconds * 1000 });
   let ended = false;
 
-  // timer tick (UI refresh)
+  // periodic UI refresh
   const tick = setInterval(async () => {
     if (ended) return;
     seconds = Math.max(0, seconds - 3);
@@ -128,57 +149,85 @@ async function openLobby({
     try {
       const isHost = i.user.id === hostMember.id;
 
+      // JOIN
       if (i.customId === 'rumble_join' && i.isButton()) {
-        if (joinSet.size >= limit) return i.reply({ content: 'Lobby full.', ephemeral: true });
+        if (joinSet.size >= limit) return ack(i, { content: 'Lobby full.' });
         const mem = await i.guild.members.fetch(i.user.id).catch(() => null);
-        if (!mem) return i.reply({ content: 'Could not add you.', ephemeral: true });
+        if (!mem) return ack(i, { content: 'Could not add you.' });
         joinSet.set(i.user.id, mem);
-        await i.reply({ content: 'Joined!', ephemeral: true });
+        await ack(i, { content: 'Joined!' });
+      }
 
-      } else if (i.customId === 'rumble_leave' && i.isButton()) {
+      // LEAVE
+      else if (i.customId === 'rumble_leave' && i.isButton()) {
         joinSet.delete(i.user.id);
-        await i.reply({ content: 'Left.', ephemeral: true });
+        await ack(i, { content: 'Left.' });
+      }
 
-      } else if (i.customId === 'rumble_start' && i.isButton()) {
-        if (!isHost) return i.reply({ content: 'Only host can start.', ephemeral: true });
+      // START (host)
+      else if (i.customId === 'rumble_start' && i.isButton()) {
+        if (!isHost) return ack(i, { content: 'Only host can start.' });
         ended = true; collector.stop('host_start');
-        await i.reply({ content: 'Starting!', ephemeral: true });
+        await ack(i, { content: 'Starting!' });
+      }
 
-      } else if (i.customId === 'rumble_cancel' && i.isButton()) {
-        if (!isHost) return i.reply({ content: 'Only host can cancel.', ephemeral: true });
+      // CANCEL (host)
+      else if (i.customId === 'rumble_cancel' && i.isButton()) {
+        if (!isHost) return ack(i, { content: 'Only host can cancel.' });
         ended = true; collector.stop('host_cancel');
-        await i.reply({ content: 'Canceled.', ephemeral: true });
+        await ack(i, { content: 'Canceled.' });
+      }
 
-      } else if (i.customId === 'rumble_add' && i.isUserSelectMenu()) {
-        if (!isHost) return i.reply({ content: 'Only host can invite.', ephemeral: true });
+      // HOST: ADD VIA USER SELECT
+      else if (i.customId === 'rumble_add' && i.componentType === ComponentType.UserSelect) {
+        if (!isHost) return ack(i, { content: 'Only host can invite.' });
         const ids = i.values || [];
         const added = [];
         for (const id of ids) {
           if (joinSet.size >= limit) break;
           if (joinSet.has(id)) continue;
-          const mem = await i.guild.members.fetch(id).catch(() => null);
-          if (mem) { joinSet.set(id, mem); added.push(mem.displayName || mem.user?.username || id); }
+
+          // try GuildMember, fallback to User object
+          let mem = await i.guild.members.fetch(id).catch(() => null);
+          if (!mem) {
+            const user = await i.client.users.fetch(id).catch(() => null);
+            if (user) {
+              mem = {
+                id: user.id,
+                user,
+                displayName: user.username,
+                displayAvatarURL: (...args) => user.displayAvatarURL(...args),
+              };
+            }
+          }
+          if (mem) {
+            joinSet.set(id, mem);
+            added.push(mem.displayName || mem.user?.username || id);
+          }
         }
-        await i.reply({ content: added.length ? `Invited: ${added.join(', ')}` : 'No new fighters added.', ephemeral: true });
+        await ack(i, { content: added.length ? `Invited: ${added.join(', ')}` : 'No new fighters added.' });
       }
 
-      // live update
+      // Live refresh after any change
       try {
         await msg.edit({
           embeds: [lobbyEmbed({ title, host: hostMember, limit, seconds, players: joinSet, postedIn })],
           components: [row1, row2]
         });
       } catch {}
-    } catch {}
+    } catch {
+      // As a safety net, attempt to ack to avoid failed interaction notice
+      try { await i.deferUpdate(); } catch {}
+    }
   });
 
   return await new Promise((resolve) => {
     collector.on('end', async (_collected, reason) => {
       clearInterval(tick);
-      const arr = Array.from(joinSet.values());
-
-      // lock UI
+      // Freeze controls
       try { await msg.edit({ components: [] }); } catch {}
+
+      const arr = Array.from(joinSet.values());
 
       if (reason === 'host_cancel') {
         try { await msg.edit({ content: '❌ Lobby canceled.', embeds: [] }); } catch {}
@@ -194,4 +243,5 @@ async function openLobby({
 }
 
 module.exports = { openLobby };
+
 
