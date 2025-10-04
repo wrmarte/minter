@@ -12,7 +12,7 @@ function shuffle(arr) {
 
 async function runBracket({
   channel,
-  players,                  // array of GuildMembers (or user-like objects with displayName/user)
+  players,
   bestOf = 3,
   style = 'motivator',
   guildName = 'this server'
@@ -44,7 +44,7 @@ async function runBracket({
 
       const { champion } = await runRumbleDisplay({
         channel,
-        baseMessage: null, // each match posts its own single intro
+        baseMessage: null,
         challenger: A,
         opponent: B,
         bestOf,
@@ -52,8 +52,6 @@ async function runBracket({
         guildName
       });
       nextAlive.push(champion);
-
-      // short breather between matches
       await new Promise(r => setTimeout(r, 1800 + Math.floor(Math.random() * 900)));
     }
 
