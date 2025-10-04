@@ -25,8 +25,6 @@ function canSend(ch) {
 
 function findSpeakableChannel(guild, preferredId = null) {
   try {
-    const me = guild?.members?.me;
-    if (!me) return null;
     const ok = (c) => c?.isTextBased?.() && canSend(c);
     if (preferredId) {
       const ch = guild.channels.cache.get(preferredId);
@@ -95,13 +93,22 @@ async function openLobby({
   joinSet.set(hostMember.id, hostMember); // host auto-joined
 
   // choose where to post
-  let postCh = canSend(channel) ? channel : findSpeakableChannel(channel.guild, channel.id);
-  if (!postCh) {
-    if (notify) await Promise.resolve(notify('I can’t post in any channel here — check my permissions.')).catch(()=>{});
-    throw new Error('No speakable channel for lobby.');
+  let target = channel;
+  const forcedId = (process.env.RUMBLE_LOBBY_CHANNEL_ID || '').trim();
+  if (forcedId) {
+    const forced = channel.guild.channels.cache.get(forcedId);
+    if (canSend(forced)) target = forced;
   }
-  const moved = postCh.id !== channel.id;
-  const postedIn = moved ? `<#${postCh.id}>` : null;
+  if (!canSend(target)) {
+    const fallback = findSpeakableChannel(channel.guild, forcedId || channel.id);
+    if (!fallback) {
+      if (notify) await Promise.resolve(notify('I can’t post in any channel here — check my permissions.')).catch(()=>{});
+      throw new Error('No speakable channel for lobby.');
+    }
+    target = fallback;
+  }
+  const moved = target.id !== channel.id;
+  const postedIn = moved ? `<#${target.id}>` : null;
   if (moved && notify) {
     await Promise.resolve(notify(`I don’t have permission to post here. I opened the lobby in ${postedIn} instead.`)).catch(()=>{});
   }
@@ -124,7 +131,7 @@ async function openLobby({
 
   // post lobby message
   let seconds = joinSeconds;
-  let msg = await postCh.send({
+  let msg = await target.send({
     embeds: [lobbyEmbed({ title, host: hostMember, limit, seconds, players: joinSet, postedIn })],
     components: [row1, row2],
   });
@@ -216,7 +223,6 @@ async function openLobby({
         });
       } catch {}
     } catch {
-      // As a safety net, attempt to ack to avoid failed interaction notice
       try { await i.deferUpdate(); } catch {}
     }
   });
