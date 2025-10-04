@@ -12,6 +12,9 @@ const MB_MAX_DELAY_MS = Number(process.env.MB_MAX_DELAY_MS || '5000');
 // Name MBella uses when posting via webhook/embeds
 const MBELLA_NAME = (process.env.MBELLA_NAME || 'MBella').trim();
 
+// NEW: Quote display style for periodic pings: vibe | clean | tag
+const MB_NICE_STYLE = (process.env.MB_NICE_STYLE || 'vibe').trim().toLowerCase();
+
 const cooldown = new Set();
 const TRIGGERS = ['musclemb', 'muscle mb', 'yo mb', 'mbbot', 'mb bro'];
 const FEMALE_TRIGGERS = ['mbella', 'mb ella', 'lady mb', 'queen mb', 'bella'];
@@ -549,6 +552,50 @@ function smartPick(opts = {}) {
   };
 }
 
+/** ---------- NEW: Quote optimizer & formatter (non-invasive) ---------- */
+function optimizeQuoteText(input) {
+  if (!input) return '';
+  let t = String(input);
+
+  // Normalize whitespace
+  t = t.replace(/\s+/g, ' ').trim();
+
+  // Remove duplicate trailing punctuation (e.g., "!!", "??!" -> "!")
+  t = t.replace(/[!?.,;:]+$/g, (m) => m[0]);
+
+  // Trim leading punctuation/emojis/spaces only if there are many; keep a single emoji prefix
+  t = t.replace(/^(?:[\s\-–—•~·]+)+/, '').trim();
+
+  // Capitalize first letter (but skip if starts with emoji or backtick/quote)
+  if (/^[a-z]/.test(t)) t = t[0].toUpperCase() + t.slice(1);
+
+  // If it ends with a word/emoji and not with terminal punctuation, gently add a period
+  if (!/[.!?]$/.test(t) && /[\p{Letter}\p{Number}]$/u.test(t)) {
+    t += '.';
+  }
+
+  // Keep it short-ish (Discord-friendly single-liner)
+  if (t.length > 240) {
+    t = t.slice(0, 237).trimEnd() + '…';
+  }
+
+  return t;
+}
+
+function formatNiceLine(style, { category, meta, moodTags = [] }, textRaw) {
+  const text = optimizeQuoteText(textRaw);
+  const moodBadge = moodTags.length ? ` • mood: ${moodTags.join(',')}` : '';
+  if (style === 'clean') {
+    return text; // Just the optimized quote
+  }
+  if (style === 'tag') {
+    return `${text} — ${category}`;
+  }
+  // default: vibe (original prefix format)
+  const prefix = `✨ quick vibe check (${category} • ${meta.daypart}${moodBadge}):`;
+  return `${prefix} ${text}`;
+}
+
 /** ---------- Cross-listener typing suppression (set by MBella) ---------- */
 function isTypingSuppressed(client, channelId) {
   const until = client.__mbTypingSuppress?.get(channelId) || 0;
@@ -629,13 +676,15 @@ module.exports = (client) => {
         moodMultipliers: mood.multipliers
       });
 
-      const moodBadge = mood.tags.length ? ` • mood: ${mood.tags.join(',')}` : '';
-      const prefix = `✨ quick vibe check (${category} • ${meta.daypart}${moodBadge}):`;
+      // NEW: format according to MB_NICE_STYLE, with optimized text
+      const outLine = formatNiceLine(MB_NICE_STYLE, { category, meta, moodTags: mood.tags }, text);
 
       try {
-        await channel.send(`${prefix} ${text}`);
+        await channel.send(outLine);
         lastNicePingByGuild.set(guildId, now);
-        lastQuoteByGuild.set(guildId, { text, category, ts: now });
+        // store optimized text for de-dupe fairness
+        const stored = optimizeQuoteText(text);
+        lastQuoteByGuild.set(guildId, { text: stored, category, ts: now });
       } catch {}
     }
   }, NICE_SCAN_EVERY_MS);
