@@ -42,6 +42,14 @@ function parseCsvEnv(s) { if (!exists(s)) return null; return s.split(',').map(x
 function baseEmbed(style) {
   return { color: colorFor(style), author: { name: 'Rumble Royale' }, timestamp: new Date().toISOString() };
 }
+function getAvatarURL(memberOrUser) {
+  try {
+    if (memberOrUser && typeof memberOrUser.displayAvatarURL === 'function') return memberOrUser.displayAvatarURL();
+    const u = memberOrUser?.user;
+    if (u && typeof u.displayAvatarURL === 'function') return u.displayAvatarURL();
+  } catch {}
+  return null;
+}
 // no-repeat picker with small memory window
 function pickNoRepeat(arr, recent, cap = 6) {
   if (!arr.length) return '';
@@ -200,11 +208,12 @@ function roundEmbed(style, idx, r, bar, bestOf, env) {
 }
 function finalAllInOneEmbed({ style, sim, champion, bar, env, cast, stats, timeline }) {
   const name = champion.displayName || champion.username;
+  const avatar = getAvatarURL(champion);
   const e = {
     ...baseEmbed(style),
     title: `🏆 Final — ${name} wins ${sim.a}-${sim.b}!`,
     description: bar,
-    thumbnail: { url: champion.displayAvatarURL?.() || champion.avatarURL?.() || null }, // winner avatar
+    thumbnail: avatar ? { url: avatar } : undefined,
     fields: [
       { name: 'Match Stats', value:
         [
@@ -286,11 +295,11 @@ async function runRumbleDisplay({
   const stats = { taunts: 0, counters: 0, crits: 0, stuns: 0, combos: 0, events: 0 };
   const roundsTimeline = [];
 
-  // PRELUDE — exactly ONE "Rumble incoming", then a paced Arena Reveal
+  // PRELUDE — exactly ONE intro
   let target = channel;
   try {
     if (baseMessage) {
-      // Reuse caller’s intro; edit it to our polished intro
+      // Edit the caller’s message into the “Rumble incoming…” card
       await baseMessage.edit({ embeds: [introEmbed(style, title)] }).catch(() => {});
       if (USE_THREAD && baseMessage.startThread) {
         const thread = await baseMessage.startThread({
@@ -300,7 +309,7 @@ async function runRumbleDisplay({
         target = thread;
       }
     } else {
-      // We post the intro ourselves
+      // We post the intro ourselves (only if no baseMessage)
       const incoming = await channel.send({ embeds: [introEmbed(style, title)] });
       if (USE_THREAD && incoming?.startThread) {
         const thread = await incoming.startThread({
@@ -316,11 +325,11 @@ async function runRumbleDisplay({
     await target.send({ embeds: [arenaEmbed(style, env, sim.bestOf)] });
 
   } catch {
-    // Fallback: post both in channel
-    if (!baseMessage) await channel.send({ embeds: [introEmbed(style, title)] }).catch(() => {});
-    await sleep(jitter(INTRO_DELAY));
-    await channel.send({ embeds: [arenaEmbed(style, env, sim.bestOf)] }).catch(() => {});
+    // Fallback: if edit/startThread failed, DO NOT post a duplicate intro.
+    // Just continue in the channel with the arena as the first visible card.
     target = channel;
+    await sleep(jitter(INTRO_DELAY));
+    await target.send({ embeds: [arenaEmbed(style, env, sim.bestOf)] }).catch(() => {});
   }
 
   await sleep(jitter(INTRO_DELAY));
@@ -378,6 +387,5 @@ async function runRumbleDisplay({
 }
 
 module.exports = { runRumbleDisplay };
-
 
 
