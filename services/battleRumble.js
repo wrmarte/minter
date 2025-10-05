@@ -9,6 +9,10 @@ const INTRO_DELAY  = Math.max(200, Number(process.env.BATTLE_INTRO_DELAY_MS || 1
 const ROUND_DELAY  = Math.max(600, Number(process.env.BATTLE_ROUND_DELAY_MS || 5200));
 const JITTER_MS    = Math.max(0,   Number(process.env.BATTLE_PACE_JITTER_MS || 1200));
 
+// NEW: pacing within each round (progressive embed edits)
+const ROUND_BEATS  = Math.max(2, Number(process.env.BATTLE_ROUND_BEATS || '5'));         // how many reveal beats per round
+const BEAT_DELAY   = Math.max(400, Number(process.env.BATTLE_BEAT_DELAY_MS || '1800'));  // delay between beats
+
 const SAFE_MODE    = !/^false$/i.test(process.env.BATTLE_SAFE_MODE || 'true');
 const ANNOUNCER    = (process.env.BATTLE_ANNOUNCER || 'normal').trim().toLowerCase();
 
@@ -84,7 +88,7 @@ function pickNoRepeat(arr, recent, cap = 6) {
   return choice;
 }
 /* Per-match memory (avoids repeats for weapons/verbs/taunts) */
-function makeMemory() { return { weapons: [], verbs: [], taunts: [] }; }
+function makeMemory() { return { weapons: [], verbs: [], taunts: [], scenes: [] }; }
 
 /* ========================== Flavor ========================== */
 // Arenas
@@ -108,6 +112,29 @@ const ENV_BUILTIN = [
 function parseCsvEnv(s) { if (!exists(s)) return null; return s.split(',').map(x => x.trim()).filter(Boolean); }
 const ENV_OVERRIDE = parseCsvEnv(process.env.BATTLE_ENVIRONMENTS);
 const ENVIRONMENTS = ENV_OVERRIDE?.map(n => ({ name: n, intro: 'The air crackles — energy rises.' })) || ENV_BUILTIN;
+
+// Cinematic bits
+const CAMERA = [
+  'Camera pans low past bootlaces.',
+  'Drone swoops between the fighters.',
+  'Spotlights skate across the floor.',
+  'Jumbotron flickers to life.',
+  'Ref’s hand hovers… and drops.'
+];
+const ATMOS = [
+  'Crowd hushes to a sharp inhale.',
+  'Bassline rattles the rails.',
+  'Cold wind threads the arena.',
+  'Mist rolls in from the corners.',
+  'Neon buzz rises, then stills.'
+];
+const GROUND = [
+  'Dust kicks up around their feet.',
+  'Confetti shimmers in a slow fall.',
+  'Cables hum under the catwalk.',
+  'Sand grinds under heel turns.',
+  'Tiles thrum like a heartbeat.'
+];
 
 // SFX
 const SFX = ['💥','⚡','🔥','✨','💫','🫨','🌪️','🎯','🧨','🥁','📣','🔊'];
@@ -199,6 +226,16 @@ function buildAnnouncer(style) {
   return `🎙️ ${pick(persona)}`;
 }
 
+// Scenic line (no-repeat-ish)
+function scenicLine(env, mem) {
+  const options = [
+    `🎬 ${pickNoRepeat(CAMERA, mem.scenes, 8)}`,
+    `🌫️ ${pickNoRepeat(ATMOS,  mem.scenes, 8)}`,
+    `🏟️ ${env.name}: ${pickNoRepeat(GROUND, mem.scenes, 8)}`
+  ];
+  return pick(options);
+}
+
 /* ========================== Embeds ========================== */
 function introEmbed(style, title) {
   return { ...baseEmbed(style, { withLogo: true, allowThumb: true }), title, description: `Rumble incoming…` };
@@ -208,18 +245,26 @@ function arenaEmbed(style, env, bestOf) {
   return {
     ...baseEmbed(style, { withLogo: true, allowThumb: true }),
     title: `🏟️ ARENA REVEAL`,
-    description: `📣 **Welcome to ${env.name}!**${sfx}\n_${env.intro}_`,
+    description: `📣 **Welcome to ${env.name}**${sfx}\n_${env.intro}_`,
     fields: [{ name: 'Format', value: `Best of **${bestOf}**`, inline: true }],
     footer: { text: `Arena: ${env.name}` }
   };
 }
+function roundProgressEmbed(style, idx, env, linesJoined, barPreview = null) {
+  return {
+    ...baseEmbed(style, { withLogo: true, allowThumb: true }),
+    title: `Round ${idx} — Action Feed`,
+    description: `${linesJoined}${barPreview ? `\n\n${barPreview}` : ''}`,
+    footer: { text: `Arena: ${env.name}` }
+  };
+}
 // color green if winner was trailing before this round (comeback)
-function roundEmbed(style, idx, r, bar, bestOf, env, wasBehind, roundText) {
+function roundFinalEmbed(style, idx, r, bar, bestOf, env, wasBehind, roundText) {
   const color = wasBehind ? 0x2ecc71 /* green */ : colorFor(style);
   return {
     ...baseEmbed(style, { withLogo: true, allowThumb: true }),
     color,
-    title: `Round ${idx} — Fight & Result`,
+    title: `Round ${idx} — Result`,
     description: `${roundText}\n\n${bar}`,
     fields: [
       { name: 'Winner', value: `**${r.winner}**`, inline: true },
@@ -289,7 +334,7 @@ function buildRoundSequence({ A, B, style, mem }) {
   return seq;
 }
 
-/* ========================== Runner (single intro; single embed per round) ========================== */
+/* ========================== Runner (single embed per round with beats) ========================== */
 async function runRumbleDisplay({
   channel,
   baseMessage,   // if provided (from slash/prefix), we reuse/edit it to avoid duplicate intro
@@ -350,14 +395,12 @@ async function runRumbleDisplay({
 
   await sleep(jitter(INTRO_DELAY));
 
-  // ROUNDS (single embed per round)
+  // ROUNDS (single embed per round) — progressively edited across beats
   for (let i = 0; i < sim.rounds.length; i++) {
     const r = sim.rounds[i];
-    const bar = makeBar(r.a, r.b, sim.bestOf);
 
-    // Build a sequence of lines for this round, then aggregate into a single embed
+    // Build full sequence (we’ll reveal it in beats)
     const seq = buildRoundSequence({ A: r.winner, B: r.loser, style, mem });
-
     for (const step of seq) {
       if (step.type === 'taunt')   stats.taunts++;
       if (step.type === 'counter') stats.counters++;
@@ -367,19 +410,46 @@ async function runRumbleDisplay({
       if (step.type === 'event')   stats.events++;
     }
 
-    const roundText = seq.map(s => s.content).join('\n');
+    const lines = [];
+    // Beat 0: cinematic opener
+    lines.push(scenicLine(env, mem));
+
+    // Then reveal a subset of seq in order, capped to ROUND_BEATS-1 more beats
+    const beatsToReveal = Math.max(1, ROUND_BEATS - 1);
+    const reveal = seq.slice(0, beatsToReveal).map(s => s.content);
+
+    // Initial post for the round (preview with no score yet)
+    let msg = await target.send({
+      embeds: [roundProgressEmbed(style, i + 1, env, lines.join('\n'))]
+    });
+
+    // Reveal each beat with an edit and a pause
+    for (let b = 0; b < reveal.length; b++) {
+      await sleep(jitter(BEAT_DELAY));
+      lines.push(reveal[b]);
+
+      // Optional tiny bar preview (not the real score yet)
+      const previewBar = (b === reveal.length - 1) ? '⏳ …resolving round…' : null;
+      await msg.edit({ embeds: [roundProgressEmbed(style, i + 1, env, lines.join('\n'), previewBar)] });
+    }
+
+    // Finalize the round (compute score + bar and replace embed with the result)
+    const bar = makeBar(r.a, r.b, sim.bestOf);
 
     // comeback detection (winner was behind before this round)
-    const winnerIsA = r.winner === Aname;
+    const winnerIsA = r.winner === (challenger.displayName || challenger.username || challenger.user?.username || 'Challenger');
     const prevA = r.a - (winnerIsA ? 1 : 0);
     const prevB = r.b - (winnerIsA ? 0 : 1);
     const wasBehind = winnerIsA ? (prevA < prevB) : (prevB < prevA);
 
-    const embed = roundEmbed(style, i + 1, r, bar, sim.bestOf, env, wasBehind, roundText);
-    await target.send({ embeds: [embed] });
+    const roundText = lines.concat(seq.slice(beatsToReveal).map(s => s.content)).join('\n').slice(0, 1800);
+
+    await sleep(jitter(BEAT_DELAY));
+    await msg.edit({
+      embeds: [roundFinalEmbed(style, i + 1, r, bar, sim.bestOf, env, wasBehind, roundText)]
+    });
 
     roundsTimeline.push(`R${i+1}: **${r.winner}** over ${r.loser} (${r.a}-${r.b})`);
-
     if (i < sim.rounds.length - 1) await sleep(jitter(ROUND_DELAY));
   }
 
@@ -408,6 +478,7 @@ async function runRumbleDisplay({
 }
 
 module.exports = { runRumbleDisplay };
+
 
 
 
