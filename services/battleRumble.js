@@ -393,7 +393,8 @@ function roundFinalEmbed(style, idx, r, aName, bName, bestOf, env, wasBehind, ro
 }
 function finalAllInOneEmbed({ style, sim, champion, env, cast, stats, timeline, aName, bName }) {
   const name = champion.displayName || champion.username || champion.user?.username || 'Winner';
-  const avatar = getAvatarURL(champion);
+  theAvatar = getAvatarURL(champion);
+  const avatar = theAvatar; // prevent lint shadowing in some tooling
   const barBlock = coloredBarBlock(aName, bName, sim.a, sim.b, sim.bestOf);
   const e = {
     ...baseEmbed(style, { withLogo: false, allowThumb: false }), // NO fixed logo on final
@@ -450,6 +451,85 @@ function buildRoundSequence({ A, B, style, mem }) {
   if (caster && Math.random() < 0.6) seq.push({ type: 'announcer', content: caster });
 
   return seq;
+}
+
+/* ========================== Commentary sanitize helpers ========================== */
+function stripThinkBlocks(text) {
+  if (!text) return '';
+  let out = String(text);
+
+  // Remove fenced code blocks
+  out = out.replace(/```[\s\S]*?```/g, ' ');
+  // Remove <think> / <analysis> / etc blocks
+  out = out.replace(/<\s*(think|analysis|reasoning|reflection)[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, ' ');
+  // Remove inline "think:" style prefixes
+  out = out.replace(/^\s*(analysis|think|reasoning|reflection)\s*:\s*/gim, '');
+  // Drop meta headings (Commentary:, Notes:)
+  out = out.replace(/^\s*(commentary|notes?)\s*:?\s*/gim, '');
+  // Remove assistant self-talk lines
+  out = out.replace(/^\s*(okay|alright|first,|let'?s|i need to|i should|i will|here'?s)\b.*$/gim, '');
+
+  // Collapse whitespace
+  out = out.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+  return out;
+}
+
+function safeLinesOnly(text, maxLines = 3, maxLen = 140) {
+  if (!text) return [];
+  const lines = text
+    .split(/\r?\n/)
+    .map(s => s.trim())
+    .filter(Boolean)
+    .filter(s => !/^<\w+>/.test(s) && !/<\/\w+>/.test(s)) // no xml-ish leftovers
+    .map(s => (s.length > maxLen ? s.slice(0, maxLen - 1) + '…' : s))
+    .filter(Boolean);
+
+  if (lines.length <= 1) {
+    const chunk = lines[0] || text;
+    return chunk.split(/(?<=[.!?])\s+/).filter(Boolean).slice(0, maxLines);
+  }
+  return lines.slice(0, maxLines);
+}
+
+function styleFallbackLines(style, winner, loser) {
+  const w = winner || 'Winner';
+  const l = loser || 'Runner-up';
+  switch (style) {
+    case 'villain':
+      return [
+        `${w} feasts on momentum — lights out for ${l}.`,
+        `Footwork cruel, timing colder. ${w} owns the night.`,
+        `Hope? Denied. ${w} signs it in ink.`
+      ];
+    case 'degen':
+      return [
+        `${w} prints a W — liquidation fireworks for ${l}!`,
+        `Max leverage on timing; ${w} hits green candles.`,
+        `${l} got front-run — ${w} sends it.`
+      ];
+    case 'clean':
+      return [
+        `${w} takes it with textbook spacing and control.`,
+        `Composed, precise — ${w} closes the set.`,
+        `Respect shown, skill proven. GG ${l}.`
+      ];
+    default: // motivator
+      return [
+        `${w} locks in and **wins it all**!`,
+        `Discipline, grit, and clean reads — ${w} delivers.`,
+        `GG ${l} — the grind never lies.`
+      ];
+  }
+}
+
+function sanitizeCommentary(raw, { winner, loser, style }) {
+  const stripped = stripThinkBlocks(raw || '');
+  const lines = safeLinesOnly(stripped, 3, 140)
+    .map(s => s.replace(/#[A-Za-z0-9_]+/g, '').trim()) // no hashtags
+    .filter(Boolean);
+
+  if (lines.length) return lines.join('\n');
+  return styleFallbackLines(style, winner, loser).join('\n');
 }
 
 /* ========================== Runner (single embed per round with beats) ========================== */
@@ -572,16 +652,28 @@ async function runRumbleDisplay({
   const champion = sim.a > sim.b ? challenger : opponent;
   const runnerUp = sim.a > sim.b ? opponent  : challenger;
 
+  // Sanitize commentary (remove <think> or meta chatter; make it short & hype)
   let cast = null;
   try {
-    cast = await aiCommentary({
+    const raw = await aiCommentary({
       winner: champion.displayName || champion.username || champion.user?.username,
       loser:  runnerUp.displayName || runnerUp.username || runnerUp.user?.username,
       rounds: sim.rounds,
       style,
       guildName
     });
-  } catch {}
+    cast = sanitizeCommentary(raw, {
+      winner: champion.displayName || champion.username || champion.user?.username,
+      loser:  runnerUp.displayName || runnerUp.username || runnerUp.user?.username,
+      style
+    }).slice(0, 1024);
+  } catch {
+    cast = sanitizeCommentary('', {
+      winner: champion.displayName || champion.username || champion.user?.username,
+      loser:  runnerUp.displayName || runnerUp.user?.username || runnerUp.username,
+      style
+    }).slice(0, 1024);
+  }
 
   const timeline = roundsTimeline.join(' • ');
   await target.send({ embeds: [finalAllInOneEmbed({
