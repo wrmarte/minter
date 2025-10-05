@@ -10,7 +10,7 @@ const {
 
 const { runRumbleDisplay } = require('../services/battleRumble');
 
-const MAX_FIGHTERS = 12;
+const MAX_FIGHTERS = 2;
 
 module.exports = {
   data: new SlashCommandBuilder()
