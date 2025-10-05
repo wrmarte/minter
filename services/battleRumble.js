@@ -175,12 +175,19 @@ function buildAnnouncer(style) {
 }
 
 /* ========================== Embeds ========================== */
+function baseEmbed(style) {
+  return { color: colorFor(style), author: { name: 'Rumble Royale' }, timestamp: new Date().toISOString() };
+}
+function colorFor(style) {
+  return style === 'villain' ? 0x8b0000
+       : style === 'degen'   ? 0xe67e22
+       : style === 'clean'   ? 0x3498db
+       : 0x9b59b6;
+}
 function introEmbed(style, title) {
-  // toned-down: we’ll reuse/edit the caller’s baseMessage so there’s only one intro
   return { ...baseEmbed(style), title, description: `Rumble incoming…` };
 }
 function arenaEmbed(style, env, bestOf) {
-  // BIG reveal with SFX and headline
   const sfx = SFX_STRING();
   return {
     ...baseEmbed(style),
@@ -233,10 +240,6 @@ function finalAllInOneEmbed({ style, sim, champion, bar, env, cast, stats, timel
   if (cast) e.fields.push({ name: '🎙️ Commentary', value: cast });
   return e;
 }
-function recapEmbed(style, sim, champion, env) {
-  const name = champion.displayName || champion.username;
-  return { ...baseEmbed(style), title: 'Rumble Complete', description: `Winner: **${name}** (${sim.a}-${sim.b})`, footer: { text: `Best of ${sim.bestOf} • Style: ${style} • Arena: ${env.name}` } };
-}
 
 /* ========================== Round Sequence ========================== */
 function buildRoundSequence({ A, B, style, mem }) {
@@ -270,7 +273,7 @@ function buildRoundSequence({ A, B, style, mem }) {
   return seq;
 }
 
-/* ========================== Runner (single intro; more random) ========================== */
+/* ========================== Runner (single intro; unbiased seed) ========================== */
 async function runRumbleDisplay({
   channel,
   baseMessage,   // if provided (from slash/prefix), we reuse/edit it to avoid duplicate intro
@@ -282,10 +285,12 @@ async function runRumbleDisplay({
 }) {
   bestOf = clampBestOf(bestOf);
   const env = pick(ENVIRONMENTS);
-  const sim = simulateBattle({ challenger, opponent, bestOf, style });
+  // neutral seed (not tied to who clicked the command)
+  const seed = `${channel.id}:${(challenger.id||challenger.user?.id||'A')}:${(opponent.id||opponent.user?.id||'B')}:${Date.now() >> 11}`;
+  const sim = simulateBattle({ challenger, opponent, bestOf, style, seed });
 
-  const Aname = challenger.displayName || challenger.username;
-  const Bname = opponent.displayName   || opponent.username;
+  const Aname = challenger.displayName || challenger.username || challenger.user?.username || 'Challenger';
+  const Bname = opponent.displayName   || opponent.username   || opponent.user?.username   || 'Opponent';
   const title = `⚔️ Rumble: ${Aname} vs ${Bname}`;
 
   // Per-match memory to reduce repeats
@@ -326,7 +331,6 @@ async function runRumbleDisplay({
 
   } catch {
     // Fallback: if edit/startThread failed, DO NOT post a duplicate intro.
-    // Just continue in the channel with the arena as the first visible card.
     target = channel;
     await sleep(jitter(INTRO_DELAY));
     await target.send({ embeds: [arenaEmbed(style, env, sim.bestOf)] }).catch(() => {});
@@ -342,6 +346,7 @@ async function runRumbleDisplay({
     await target.send({ embeds: [miniHeaderEmbed(style, `🔔 Round ${i + 1} — Fight!`, env)] });
     await sleep(jitter(Math.max(400, STEP_DELAY / 2)));
 
+    // Narrate from winner POV (cosmetic)
     const seq = buildRoundSequence({ A: r.winner, B: r.loser, style, mem });
 
     for (const step of seq) {
@@ -356,7 +361,10 @@ async function runRumbleDisplay({
       await sleep(jitter(STEP_DELAY));
     }
 
-    await target.send({ embeds: [roundEmbed(style, i + 1, r, bar, sim.bestOf, env)] });
+    // Close the round with a compact embed
+    const roundText = seq.map(s => s.content).join('\n');
+    const resultEmbed = roundEmbed(style, i + 1, { ...r, text: roundText }, bar, sim.bestOf, env);
+    await target.send({ embeds: [resultEmbed] });
     roundsTimeline.push(`R${i+1}: **${r.winner}** over ${r.loser} (${r.a}-${r.b})`);
 
     if (i < sim.rounds.length - 1) await sleep(jitter(ROUND_DELAY));
@@ -370,8 +378,8 @@ async function runRumbleDisplay({
   let cast = null;
   try {
     cast = await aiCommentary({
-      winner: champion.displayName || champion.username,
-      loser:  runnerUp.displayName || runnerUp.username,
+      winner: champion.displayName || champion.username || champion.user?.username,
+      loser:  runnerUp.displayName || runnerUp.username || runnerUp.user?.username,
       rounds: sim.rounds,
       style,
       guildName
