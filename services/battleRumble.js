@@ -33,6 +33,11 @@ const POWERUP_CHANCE = clamp01(Number(process.env.BATTLE_POWERUP_CHANCE || 0.22)
 const COMBO_MAX      = Math.max(1, Math.min(5, Number(process.env.BATTLE_COMBO_MAX || 3)));
 const SFX_ON         = !/^false$/i.test(process.env.BATTLE_SFX || 'true');
 
+// NEW: cross-match recency windows (tunable)
+const ARENA_RECENT_WINDOW  = Math.max(2, Number(process.env.BATTLE_ENV_RECENT || 5));
+const WEAPON_RECENT_WINDOW = Math.max(3, Number(process.env.BATTLE_WEAPON_RECENT || 10));
+const VERB_RECENT_WINDOW   = Math.max(3, Number(process.env.BATTLE_VERB_RECENT || 10));
+
 function clamp01(x){ x = Number(x); if (!isFinite(x)) return 0; return Math.min(1, Math.max(0, x)); }
 
 /* ========================== Utils ========================== */
@@ -78,7 +83,7 @@ function getAvatarURL(memberOrUser) {
   return null;
 }
 
-// no-repeat picker with small memory window
+// no-repeat picker with small memory window (per-match)
 function pickNoRepeat(arr, recent, cap = 6) {
   if (!arr.length) return '';
   let choice = pick(arr), tries = 0;
@@ -90,56 +95,42 @@ function pickNoRepeat(arr, recent, cap = 6) {
 /* Per-match memory (avoids repeats) */
 function makeMemory() { return { weapons: [], verbs: [], taunts: [], scenes: [] }; }
 
-/* ========================== Commentary sanitizer ========================== */
-// Strips chain-of-thought (e.g. <think>...</think>), code fences, meta, hashtags.
-// Keeps up to 3 hype lines and caps total to ~1000 chars so it fits the embed field.
-function sanitizeCommentary(raw, { winnerName = 'Winner', loserName = 'Loser' } = {}) {
-  if (!raw) return '';
-  let s = String(raw);
+/* ========================== Cross-Match Recency Stores ========================== */
+// arenas: remember per guild
+const _arenaRecentByGuild = new Map(); // guildId -> [arenaName,...]
+// global recent per style for weapons/verbs
+const _recentGlobal = new Map(); // key -> [item,...]
 
-  // Remove code blocks & inline code
-  s = s.replace(/```[\s\S]*?```/g, ' ');
-  s = s.replace(/`[^`]*`/g, ' ');
-
-  // Remove CoT / XML-ish tags and their contents
-  s = s.replace(/<\s*(think|analysis|scratchpad|system|reasoning)[^>]*>[\s\S]*?<\s*\/\1\s*>/gi, ' ');
-  s = s.replace(/<\s*(think|analysis|scratchpad|system|reasoning)[^>]*>/gi, ' ');
-  s = s.replace(/<\/\s*(think|analysis|scratchpad|system|reasoning)\s*>/gi, ' ');
-
-  // Remove obvious meta lines
-  s = s.replace(/^\s*(analysis|thoughts?|reasoning|plan|notes?|explanation)\s*:/gim, ' ');
-  s = s.replace(/^\s*\[(internal|meta|system|debug)[^\]]*\]\s*$/gim, ' ');
-
-  // Remove hashtags
-  s = s.replace(/#[\p{L}\p{N}_-]+/gu, '');
-
-  // Build up to 3 punchy lines
-  const lines = s.split(/\r?\n+/)
-    .map(l => l.trim())
-    .filter(Boolean)
-    .map(l => l.replace(/^[-*>•\s]+/, '').trim());
-
-  const clean = [];
-  for (const l of lines) {
-    if (!l) continue;
-    clean.push(l.slice(0, 180));
-    if (clean.length >= 3) break;
-  }
-
-  let out = clean.join('\n').trim();
-  if (out.length > 1000) out = out.slice(0, 1000);
-  if (!out) {
-    out = [
-      `${winnerName} closes it out — clean reads and momentum!`,
-      `Respect to ${loserName}, that was a grind.`,
-      `Crowd’s eating it up — GGs!`
-    ].join('\n');
-  }
-  return out;
+function getRecentList(key) {
+  const arr = _recentGlobal.get(key) || [];
+  _recentGlobal.set(key, arr);
+  return arr;
+}
+function updateRecentList(key, item, cap) {
+  const arr = getRecentList(key);
+  if (item && !arr.includes(item)) arr.push(item);
+  while (arr.length > cap) arr.shift();
+}
+function filterByRecent(list, key, cap) {
+  const recent = getRecentList(key);
+  const filtered = list.filter(x => !recent.includes(x));
+  // If filtering removed too many, allow fallback list (keep at least ~40%)
+  return filtered.length >= Math.ceil(list.length * 0.4) ? filtered : list;
+}
+function chooseEnvironment(channel, environments) {
+  const gid = channel?.guildId || 'global';
+  const recent = _arenaRecentByGuild.get(gid) || [];
+  // Prefer arenas not in recent; fallback if needed
+  const candidates = environments.filter(e => !recent.includes(e.name));
+  const pickedEnv = (candidates.length ? pick(candidates) : pick(environments));
+  // Update recent list
+  const next = recent.concat([pickedEnv.name]).slice(-ARENA_RECENT_WINDOW);
+  _arenaRecentByGuild.set(gid, next);
+  return pickedEnv;
 }
 
 /* ========================== Flavor ========================== */
-// Arenas
+// Arenas (expanded)
 const ENV_BUILTIN = [
   { name: 'Neon Rooftop', intro: 'City lights hum below; the wind carries hype.' },
   { name: 'Underground Dojo', intro: 'Paper walls, sand floor, respectful echoes.' },
@@ -156,6 +147,22 @@ const ENV_BUILTIN = [
   { name: 'Futurist Museum', intro: 'Art stares back; history watches.' },
   { name: 'Hacker Loft', intro: 'Neon code rains across the wall.' },
   { name: 'Hyperdome', intro: 'Announcer checks mic — reverb perfect.' },
+  // NEW additions for more variety:
+  { name: 'Aurora Ice Rink', intro: 'Frost breath in neon; blades sing on ice.' },
+  { name: 'Volcano Rim', intro: 'Heat shimmer; sparks float like stars.' },
+  { name: 'Mecha Hangar', intro: 'Hydraulics hiss; warning lights blink.' },
+  { name: 'Cyber Bazaar', intro: 'Vendors cheer; drones barter overhead.' },
+  { name: 'Zen Garden Deck', intro: 'Raked sand; koi ripple to distant drums.' },
+  { name: 'Sky Arena 404', intro: 'Platform boots up; clouds scroll beneath.' },
+  { name: 'Solar Array', intro: 'Panels gleam; sun drums a steady beat.' },
+  { name: 'Noir Backlot', intro: 'Rain on set; a spotlight cuts the fog.' },
+  { name: 'Junkyard Circuit', intro: 'Metal chorus; sparks and grit fly.' },
+  { name: 'Holo Theater', intro: 'Curtains of light; crowd phases in.' },
+  { name: 'Subway Concourse', intro: 'Announcements echo; sneakers squeak.' },
+  { name: 'Starlit Rooftop', intro: 'Constellations watch like judges.' },
+  { name: 'Quantum Track', intro: 'Footsteps desync; time smears and snaps.' },
+  { name: 'Temple Steps', intro: 'Incense curls; drums set the cadence.' },
+  { name: 'Cloud Pier', intro: 'Sea of mist; gulls glitch in and out.' },
 ];
 function parseCsvEnv(s) { if (!exists(s)) return null; return s.split(',').map(x => x.trim()).filter(Boolean); }
 const ENV_OVERRIDE = parseCsvEnv(process.env.BATTLE_ENVIRONMENTS);
@@ -167,21 +174,33 @@ const CAMERA = [
   'Drone swoops between the fighters.',
   'Spotlights skate across the floor.',
   'Jumbotron flickers to life.',
-  'Ref’s hand hovers… and drops.'
+  'Ref’s hand hovers… and drops.',
+  // extra
+  'Slow dolly in; gloves tighten.',
+  'Top-down orbit; crowd becomes a halo.',
+  'Ref nods; the world narrows to two.',
 ];
 const ATMOS = [
   'Crowd hushes to a sharp inhale.',
   'Bassline rattles the rails.',
   'Cold wind threads the arena.',
   'Mist rolls in from the corners.',
-  'Neon buzz rises, then stills.'
+  'Neon buzz rises, then stills.',
+  // extra
+  'Speaker crackle hints at chaos.',
+  'Confetti cannons reload somewhere.',
+  'A banner unfurls; slogans roar.',
 ];
 const GROUND = [
   'Dust kicks up around their feet.',
   'Confetti shimmers in a slow fall.',
   'Cables hum under the catwalk.',
   'Sand grinds under heel turns.',
-  'Tiles thrum like a heartbeat.'
+  'Tiles thrum like a heartbeat.',
+  // extra
+  'Metal grates sing underfoot.',
+  'LED tiles ripple with each step.',
+  'Puddles mirror the hype lights.',
 ];
 
 // SFX
@@ -196,30 +215,53 @@ const TAUNTS = {
   degen:      [`{A}: "Max leverage." {B}: "Full send." 🚀`,`Slippage set to chaos — {A} vs {B}.`,`{B}: "Prints only. No stops."`]
 };
 
-// Style-specific weapons/actions
-const W_CLEAN_SAFE = ['dojo staff','bamboo shinai','practice pads','mirror shield','focus band','training mitts'];
-const W_CLEAN_SPICY= ['weighted baton (prop)','tempered shinai (spar)'];
-const W_MOTI_SAFE  = ['PR belt','chalk cloud','coach whistle','rep rope','foam mace','discipline dumbbell'];
-const W_MOTI_SPICY = ['iron plate (prop)','slam ball (soft)'];
-const W_VILL_SAFE  = ['shadow ribbon','smoke dagger (prop)','echo bell','trick tarot','void tether (cosplay)'];
-const W_VILL_SPICY = ['hex blade (prop)','cursed grimoire (cosplay)'];
-const W_DEGN_SAFE  = ['alpha baton','yield yo-yo','pump trumpet','airdrop crate','ape gauntlet','vibe ledger'];
-const W_DEGN_SPICY = ['leverage gloves','moon mallet (prop)'];
+// Style-specific weapons/actions (expanded)
+const W_CLEAN_SAFE = [
+  'dojo staff','bamboo shinai','practice pads','mirror shield','focus band','training mitts',
+  // extra
+  'wooden tonfa','soft nunchaku','foam sai','balance board','kata fan'
+];
+const W_CLEAN_SPICY= ['weighted baton (prop)','tempered shinai (spar)','practice spear (prop)'];
 
-const WEAPONS_SAFE = ['foam bat','rubber chicken','pool noodle','pixel sword','ban hammer','yo-yo','cardboard shield','toy bo staff','glitch gauntlet'];
-const WEAPONS_SPICY= ['steel chair (cosplay prop)','spiked bat (prop)','thunder gloves','meteor hammer (training)'];
+const W_MOTI_SAFE  = [
+  'PR belt','chalk cloud','coach whistle','rep rope','foam mace','discipline dumbbell',
+  // extra
+  'timer cube','resistance band','speed ladder','focus cone','agility hurdle'
+];
+const W_MOTI_SPICY = ['iron plate (prop)','slam ball (soft)','training kettlebell (prop)'];
 
-const A_CLEAN = ['counters cleanly','finds spacing on','lands textbook sweep on','checks with a crisp jab on'];
-const A_MOTI  = ['powers through','perfect-forms a jab on','locks in and tags','rolls momentum into'];
-const A_VILL  = ['ensnares','phases through and taps','casts a snare on','drains momentum from'];
-const A_DEGN  = ['market buys a combo on','leverages into','apes into','yoinks RNG from'];
+const W_VILL_SAFE  = [
+  'shadow ribbon','smoke dagger (prop)','echo bell','trick tarot','void tether (cosplay)',
+  // extra
+  'illusion orb','stage mask','smoke fan','mirror shard (prop)'
+];
+const W_VILL_SPICY = ['hex blade (prop)','cursed grimoire (cosplay)','phantom chain (prop)'];
 
-const ACTIONS_SAFE = ['bonks','thwacks','boops','yeets','shoulder-bumps','jukes','spin-feints','light sweep'];
-const ACTIONS_SPICY= ['smashes','ground-slams','uppercuts (spar form)','pulled haymaker'];
+const W_DEGN_SAFE  = [
+  'alpha baton','yield yo-yo','pump trumpet','airdrop crate','ape gauntlet','vibe ledger',
+  // extra
+  'meme shield','copium canister','hopium horn','rug detector','dip net'
+];
+const W_DEGN_SPICY = ['leverage gloves','moon mallet (prop)','margin mace (prop)'];
 
-const REACTIONS = ['dodges','parries','blocks','shrugs it off','stumbles','perfect guards'];
-const COUNTERS  = ['{B} snaps a reversal!','{B} reads it and flips momentum!','Clutch parry from {B}, instant punish!'];
-const CRITS     = ['{A} finds the pixel-perfect angle — **CRIT!**','Frame trap! {A} lands a **critical** read!','{A} channels a special — it hits! **Critical!**'];
+const WEAPONS_SAFE = [
+  'foam bat','rubber chicken','pool noodle','pixel sword','ban hammer','yo-yo','cardboard shield','toy bo staff','glitch gauntlet',
+  // extra
+  'bubble blaster','spring glove','confetti popper','karate board (breakaway)','nerf spear'
+];
+const WEAPONS_SPICY= ['steel chair (cosplay prop)','spiked bat (prop)','thunder gloves','meteor hammer (training)','breakaway bottle (prop)'];
+
+const A_CLEAN = ['counters cleanly','finds spacing on','lands textbook sweep on','checks with a crisp jab on','punctuates a perfect step on'];
+const A_MOTI  = ['powers through','perfect-forms a jab on','locks in and tags','rolls momentum into','chains footwork into'];
+const A_VILL  = ['ensnares','phases through and taps','casts a snare on','drains momentum from','twists fate around'];
+const A_DEGN  = ['market buys a combo on','leverages into','apes into','yoinks RNG from','front-runs the angle on'];
+
+const ACTIONS_SAFE = ['bonks','thwacks','boops','yeets','shoulder-bumps','jukes','spin-feints','light sweep','checks low','tags the guard'];
+const ACTIONS_SPICY= ['smashes','ground-slams','uppercuts (spar form)','pulled haymaker','vaults through the gap'];
+
+const REACTIONS = ['dodges','parries','blocks','shrugs it off','stumbles','perfect guards','rolls out','slides back'];
+const COUNTERS  = ['{B} snaps a reversal!','{B} reads it and flips momentum!','Clutch parry from {B}, instant punish!','{B} side-steps, punish window found!'];
+const CRITS     = ['{A} finds the pixel-perfect angle — **CRIT!**','Frame trap! {A} lands a **critical** read!','{A} channels a special — it hits! **Critical!**','Counter-hit spark — **CRIT!** for {A}!'];
 
 const ANNOUNCER_BANK = {
   normal:  ['Commentary: textbook spacing — beautiful footwork.','Commentary: momentum swings, crowd on edge.','Commentary: timing windows are razor thin.'],
@@ -227,9 +269,9 @@ const ANNOUNCER_BANK = {
   degen:   ['Announcer: leverage UP — liquidation candles in sight.','Announcer: full send only — printers humming.','Announcer: alpha drop mid-fight, cope rising.']
 };
 
-const CROWD   = ['Crowd roars!','Someone rings a cowbell.','A vuvuzela bleats in 8-bit.','Chants ripple through the stands.','Camera flashes pop!'];
-const HAZARDS = ['Floor tiles shift suddenly!','A rogue shopping cart drifts across the arena!','Fog machine overperforms — visibility drops!','Neon sign flickers; shadows dance unpredictably!','A stray confetti cannon fires!'];
-const POWERUPS= ['{X} picks up a glowing orb — speed up!','{X} grabs a pixel heart — stamina bump!','{X} equips glitch boots — dash unlocked!','{X} finds a shield bubble — temporary guard!'];
+const CROWD   = ['Crowd roars!','Someone rings a cowbell.','A vuvuzela bleats in 8-bit.','Chants ripple through the stands.','Camera flashes pop!','Wave starts in section B.'];
+const HAZARDS = ['Floor tiles shift suddenly!','A rogue shopping cart drifts across the arena!','Fog machine overperforms — visibility drops!','Neon sign flickers; shadows dance unpredictably!','A stray confetti cannon fires!','Stage cable snags a foot!'];
+const POWERUPS= ['{X} picks up a glowing orb — speed up!','{X} grabs a pixel heart — stamina bump!','{X} equips glitch boots — dash unlocked!','{X} finds a shield bubble — temporary guard!','{X} slots a power chip — timing buff!'];
 
 /* ========================== Builders ========================== */
 function buildTaunt(style, A, B, mem) {
@@ -253,8 +295,18 @@ function styleVerbs(style){
   return common.concat(specific);
 }
 function buildAction(A, B, style, mem) {
-  const w = pickNoRepeat(styleWeapons(style), mem.weapons, 7);
-  const v = pickNoRepeat(styleVerbs(style),   mem.verbs,   7);
+  // Cross-match de-dupe first, then per-match memory de-dupe
+  const wKey = `wep:${style}`;
+  const vKey = `vrb:${style}`;
+  const wList = filterByRecent(styleWeapons(style), wKey, WEAPON_RECENT_WINDOW);
+  const vList = filterByRecent(styleVerbs(style),   vKey, VERB_RECENT_WINDOW);
+
+  const w = pickNoRepeat(wList, mem.weapons, 7);
+  const v = pickNoRepeat(vList, mem.verbs,   7);
+
+  updateRecentList(wKey, w, WEAPON_RECENT_WINDOW);
+  updateRecentList(vKey, v, VERB_RECENT_WINDOW);
+
   return `🥊 **${A} grabs a ${w} and ${v} ${B}!**${SFX_STRING()}`;
 }
 function buildReaction(B) { return `🛡️ ${B} ${pick(REACTIONS)}.${SFX_STRING()}`; }
@@ -294,7 +346,7 @@ function emojiBar(aScore, bScore, width = 16, colorA = '🟦', colorB = '🟥', 
   if (fillA < 0) fillA = 0;
   if (fillA > width) fillA = width;
   const fillB = width - fillA;
-  return `${colorA.repeat(fillA)}${empty.repeat(0)}${colorB.repeat(fillB)}`; // contiguous A|B
+  return `${colorA.repeat(fillA)}${empty.repeat(0)}${colorB.repeat(fillB)}`;
 }
 function coloredBarBlock(aName, bName, a, b, bestOf) {
   const bar = emojiBar(a, b, Math.max(10, Math.min(20, bestOf * 2)));
@@ -323,7 +375,6 @@ function roundProgressEmbed(style, idx, env, linesJoined, previewBarBlock = null
     footer: { text: `Arena: ${env.name}` }
   };
 }
-// color green if winner was trailing before this round (comeback)
 function roundFinalEmbed(style, idx, r, aName, bName, bestOf, env, wasBehind, roundText) {
   const color = wasBehind ? 0x2ecc71 /* green */ : colorFor(style);
   const barBlock = coloredBarBlock(aName, bName, r.a, r.b, bestOf);
@@ -365,7 +416,7 @@ function finalAllInOneEmbed({ style, sim, champion, env, cast, stats, timeline, 
     ],
     footer: { text: `Style: ${style} • Arena: ${env.name}` }
   };
-  if (cast && cast.trim()) e.fields.push({ name: '🎙️ Commentary', value: cast });
+  if (cast) e.fields.push({ name: '🎙️ Commentary', value: cast });
   return e;
 }
 
@@ -412,7 +463,10 @@ async function runRumbleDisplay({
   guildName = 'this server'
 }) {
   bestOf = clampBestOf(bestOf);
-  const env = pick(ENVIRONMENTS);
+
+  // NEW: smarter arena choice (avoid recent)
+  const env = chooseEnvironment(channel, ENVIRONMENTS);
+
   // neutral seed (not tied to who clicked the command)
   const seed = `${channel.id}:${(challenger.id||challenger.user?.id||'A')}:${(opponent.id||opponent.user?.id||'B')}:${Date.now() >> 11}`;
   const sim = simulateBattle({ challenger, opponent, bestOf, style, seed });
@@ -519,21 +573,15 @@ async function runRumbleDisplay({
   const runnerUp = sim.a > sim.b ? opponent  : challenger;
 
   let cast = null;
-  const winnerName = champion.displayName || champion.username || champion.user?.username || 'Winner';
-  const loserName  = runnerUp.displayName || runnerUp.username || runnerUp.user?.username || 'Loser';
-
   try {
-    const raw = await aiCommentary({
-      winner: winnerName,
-      loser:  loserName,
+    cast = await aiCommentary({
+      winner: champion.displayName || champion.username || champion.user?.username,
+      loser:  runnerUp.displayName || runnerUp.username || runnerUp.user?.username,
       rounds: sim.rounds,
       style,
       guildName
     });
-    cast = sanitizeCommentary(raw, { winnerName, loserName });
-  } catch {
-    cast = sanitizeCommentary('', { winnerName, loserName }); // safe fallback pack
-  }
+  } catch {}
 
   const timeline = roundsTimeline.join(' • ');
   await target.send({ embeds: [finalAllInOneEmbed({
