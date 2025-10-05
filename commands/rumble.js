@@ -21,12 +21,12 @@ function isOwner(interaction) {
   return OWNER_ID && interaction.user.id === OWNER_ID;
 }
 
-function lobbyEmbed({ mode, style, pickedIds, guildName, ownerMention }) {
+function lobbyEmbed({ mode, style, pickedIds, guildName, ownerMention, timerLabel }) {
   const title = mode === 'bracket' ? '🏟️ Rumble Lobby — Bracket' : '🏟️ Rumble Lobby — Battle Royale';
   const descTop = [
     `Host: ${ownerMention}`,
     `Mode: **${mode}**${mode === 'bracket' ? ` (Bo1)` : ''} • Style: **${style}**`,
-    `Max fighters: **${MAX_FIGHTERS}**`,
+    `Max fighters: **${MAX_FIGHTERS}** • Timer: **${timerLabel}**`,
     '',
     `Click **Join** to enter • **Leave** to exit`,
     `Host may also **Join** and can add fighters with the selector.`,
@@ -99,6 +99,16 @@ module.exports = {
           { name: 'villain', value: 'villain' },
           { name: 'degen', value: 'degen' },
         )
+    )
+    .addStringOption(opt =>
+      opt.setName('timer')
+        .setDescription('How long the lobby stays open')
+        .addChoices(
+          { name: '1 minute', value: '1m' },
+          { name: '2 minutes', value: '2m' },
+          { name: '3 minutes', value: '3m' },
+          { name: '5 minutes', value: '5m' },
+        )
     ),
 
   async execute(interaction) {
@@ -115,6 +125,12 @@ module.exports = {
     // Always Bo1 per your spec (hide from command UI)
     const bestOf = 1;
 
+    // Timer option
+    const TIMER_MAP = { '1m': 60_000, '2m': 120_000, '3m': 180_000, '5m': 300_000 };
+    const timerSel = interaction.options.getString('timer') || '3m'; // default 3m
+    const lobbyMs = TIMER_MAP[timerSel] ?? 180_000;
+    const timerLabel = Object.keys(TIMER_MAP).includes(timerSel) ? timerSel : '3m';
+
     const mePerms = interaction.channel.permissionsFor(interaction.client.user);
     if (!mePerms?.has(PermissionsBitField.Flags.SendMessages)) {
       return interaction.reply({ content: '❌ I need permission to send messages in this channel.', ephemeral: true });
@@ -129,13 +145,14 @@ module.exports = {
         mode, style,
         pickedIds: [...picked],
         guildName: interaction.guild.name,
-        ownerMention
+        ownerMention,
+        timerLabel
       })],
       components: rows({ locked: false }),
       fetchReply: true
     });
 
-    const collector = lobbyMessage.createMessageComponentCollector({ time: 5 * 60 * 1000 });
+    const collector = lobbyMessage.createMessageComponentCollector({ time: lobbyMs });
 
     const refresh = async () => {
       await safeEdit(lobbyMessage, {
@@ -143,7 +160,8 @@ module.exports = {
           mode, style,
           pickedIds: [...picked],
           guildName: interaction.guild.name,
-          ownerMention
+          ownerMention,
+          timerLabel
         })],
         components: rows({ locked: false })
       });
@@ -203,7 +221,7 @@ module.exports = {
         return;
       }
 
-      // OWNER: MANUAL PICK (UserSelect) — robust: use i.values + deferUpdate
+      // OWNER: MANUAL PICK (UserSelect)
       if (i.customId === 'rumble_select' && i.componentType === ComponentType.UserSelect) {
         const values = Array.isArray(i.values) ? i.values : [];
         let added = 0;
@@ -293,4 +311,3 @@ module.exports = {
     });
   },
 };
-
