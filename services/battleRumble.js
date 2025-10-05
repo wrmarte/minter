@@ -90,6 +90,54 @@ function pickNoRepeat(arr, recent, cap = 6) {
 /* Per-match memory (avoids repeats) */
 function makeMemory() { return { weapons: [], verbs: [], taunts: [], scenes: [] }; }
 
+/* ========================== Commentary sanitizer ========================== */
+// Strips chain-of-thought (e.g. <think>...</think>), code fences, meta, hashtags.
+// Keeps up to 3 hype lines and caps total to ~1000 chars so it fits the embed field.
+function sanitizeCommentary(raw, { winnerName = 'Winner', loserName = 'Loser' } = {}) {
+  if (!raw) return '';
+  let s = String(raw);
+
+  // Remove code blocks & inline code
+  s = s.replace(/```[\s\S]*?```/g, ' ');
+  s = s.replace(/`[^`]*`/g, ' ');
+
+  // Remove CoT / XML-ish tags and their contents
+  s = s.replace(/<\s*(think|analysis|scratchpad|system|reasoning)[^>]*>[\s\S]*?<\s*\/\1\s*>/gi, ' ');
+  s = s.replace(/<\s*(think|analysis|scratchpad|system|reasoning)[^>]*>/gi, ' ');
+  s = s.replace(/<\/\s*(think|analysis|scratchpad|system|reasoning)\s*>/gi, ' ');
+
+  // Remove obvious meta lines
+  s = s.replace(/^\s*(analysis|thoughts?|reasoning|plan|notes?|explanation)\s*:/gim, ' ');
+  s = s.replace(/^\s*\[(internal|meta|system|debug)[^\]]*\]\s*$/gim, ' ');
+
+  // Remove hashtags
+  s = s.replace(/#[\p{L}\p{N}_-]+/gu, '');
+
+  // Build up to 3 punchy lines
+  const lines = s.split(/\r?\n+/)
+    .map(l => l.trim())
+    .filter(Boolean)
+    .map(l => l.replace(/^[-*>•\s]+/, '').trim());
+
+  const clean = [];
+  for (const l of lines) {
+    if (!l) continue;
+    clean.push(l.slice(0, 180));
+    if (clean.length >= 3) break;
+  }
+
+  let out = clean.join('\n').trim();
+  if (out.length > 1000) out = out.slice(0, 1000);
+  if (!out) {
+    out = [
+      `${winnerName} closes it out — clean reads and momentum!`,
+      `Respect to ${loserName}, that was a grind.`,
+      `Crowd’s eating it up — GGs!`
+    ].join('\n');
+  }
+  return out;
+}
+
 /* ========================== Flavor ========================== */
 // Arenas
 const ENV_BUILTIN = [
@@ -317,7 +365,7 @@ function finalAllInOneEmbed({ style, sim, champion, env, cast, stats, timeline, 
     ],
     footer: { text: `Style: ${style} • Arena: ${env.name}` }
   };
-  if (cast) e.fields.push({ name: '🎙️ Commentary', value: cast });
+  if (cast && cast.trim()) e.fields.push({ name: '🎙️ Commentary', value: cast });
   return e;
 }
 
@@ -471,15 +519,21 @@ async function runRumbleDisplay({
   const runnerUp = sim.a > sim.b ? opponent  : challenger;
 
   let cast = null;
+  const winnerName = champion.displayName || champion.username || champion.user?.username || 'Winner';
+  const loserName  = runnerUp.displayName || runnerUp.username || runnerUp.user?.username || 'Loser';
+
   try {
-    cast = await aiCommentary({
-      winner: champion.displayName || champion.username || champion.user?.username,
-      loser:  runnerUp.displayName || runnerUp.username || runnerUp.user?.username,
+    const raw = await aiCommentary({
+      winner: winnerName,
+      loser:  loserName,
       rounds: sim.rounds,
       style,
       guildName
     });
-  } catch {}
+    cast = sanitizeCommentary(raw, { winnerName, loserName });
+  } catch {
+    cast = sanitizeCommentary('', { winnerName, loserName }); // safe fallback pack
+  }
 
   const timeline = roundsTimeline.join(' • ');
   await target.send({ embeds: [finalAllInOneEmbed({
@@ -491,10 +545,6 @@ async function runRumbleDisplay({
 }
 
 module.exports = { runRumbleDisplay };
-
-
-
-
 
 
 
