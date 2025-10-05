@@ -5,13 +5,16 @@ const { simulateBattle, aiCommentary, makeBar, clampBestOf } = require('./battle
 const USE_THREAD   = /^true$/i.test(process.env.BATTLE_USE_THREAD || 'false');
 const THREAD_NAME  = (process.env.BATTLE_THREAD_NAME || 'Rumble Royale').trim();
 
-const INTRO_DELAY  = Math.max(200, Number(process.env.BATTLE_INTRO_DELAY_MS || 1400));
-const ROUND_DELAY  = Math.max(600, Number(process.env.BATTLE_ROUND_DELAY_MS || 5200));
+// NEW: Global pacing multiplier (slow things down a bit by default)
+const PACE_MULT = Math.max(0.5, Number(process.env.BATTLE_PACE_MULTIPLIER || 1.25));
+
+const INTRO_DELAY  = Math.max(200, Math.round((Number(process.env.BATTLE_INTRO_DELAY_MS || 1400)) * PACE_MULT));
+const ROUND_DELAY  = Math.max(600, Math.round((Number(process.env.BATTLE_ROUND_DELAY_MS || 5200)) * PACE_MULT));
 const JITTER_MS    = Math.max(0,   Number(process.env.BATTLE_PACE_JITTER_MS || 1200));
 
 // Pacing within each round (progressive embed edits)
 const ROUND_BEATS  = Math.max(2, Number(process.env.BATTLE_ROUND_BEATS || '5'));         // reveal beats per round
-const BEAT_DELAY   = Math.max(400, Number(process.env.BATTLE_BEAT_DELAY_MS || '1800'));  // delay between beats
+const BEAT_DELAY   = Math.max(400, Math.round((Number(process.env.BATTLE_BEAT_DELAY_MS || '1800')) * PACE_MULT));  // delay between beats
 
 const SAFE_MODE    = !/^false$/i.test(process.env.BATTLE_SAFE_MODE || 'true');
 const ANNOUNCER    = (process.env.BATTLE_ANNOUNCER || 'normal').trim().toLowerCase();
@@ -391,14 +394,15 @@ function roundFinalEmbed(style, idx, r, aName, bName, bestOf, env, wasBehind, ro
     footer: { text: `Style: ${style} • Arena: ${env.name}` }
   };
 }
-function finalAllInOneEmbed({ style, sim, champion, env, cast, stats, timeline, aName, bName }) {
+function finalAllInOneEmbed({ style, sim, champion, env, cast, stats, timeline, aName, bName, winnerId = null, podium = null }) {
   const name = champion.displayName || champion.username || champion.user?.username || 'Winner';
-  theAvatar = getAvatarURL(champion);
-  const avatar = theAvatar; // prevent lint shadowing in some tooling
+  const avatar = getAvatarURL(champion);
   const barBlock = coloredBarBlock(aName, bName, sim.a, sim.b, sim.bestOf);
+  const mention = winnerId ? `<@${winnerId}>` : name;
+
   const e = {
     ...baseEmbed(style, { withLogo: false, allowThumb: false }), // NO fixed logo on final
-    title: `🏆 Final — ${name} wins ${sim.a}-${sim.b}!`,
+    title: `🏆 Final — ${mention} wins ${sim.a}-${sim.b}!`,
     description: barBlock,
     thumbnail: avatar ? { url: avatar } : undefined,
     fields: [
@@ -417,7 +421,19 @@ function finalAllInOneEmbed({ style, sim, champion, env, cast, stats, timeline, 
     ],
     footer: { text: `Style: ${style} • Arena: ${env.name}` }
   };
+
+  // Optional podium (for royale/bracket integrations using this embed) — keeps a spacer before commentary
+  if (Array.isArray(podium) && podium.length) {
+    const lines = podium.slice(0,3).map((u, i) => `${i===0?'🥇':i===1?'🥈':'🥉'} ${u}`).join('\n');
+    e.fields.push({ name: 'Top 3', value: lines || '—' });
+    e.fields.push({ name: '\u200B', value: '\u200B' }); // spacer line before commentary
+  } else {
+    // Even in 1v1, add spacer before commentary for breathing room
+    e.fields.push({ name: '\u200B', value: '\u200B' });
+  }
+
   if (cast) e.fields.push({ name: '🎙️ Commentary', value: cast });
+
   return e;
 }
 
@@ -651,6 +667,7 @@ async function runRumbleDisplay({
   // FINALE — winner avatar + all-in-one stats (NO fixed logo here)
   const champion = sim.a > sim.b ? challenger : opponent;
   const runnerUp = sim.a > sim.b ? opponent  : challenger;
+  const championId = (champion.id || champion.user?.id || null);
 
   // Sanitize commentary (remove <think> or meta chatter; make it short & hype)
   let cast = null;
@@ -678,14 +695,15 @@ async function runRumbleDisplay({
   const timeline = roundsTimeline.join(' • ');
   await target.send({ embeds: [finalAllInOneEmbed({
     style, sim, champion, env, cast, stats, timeline,
-    aName: Aname, bName: Bname
+    aName: Aname, bName: Bname,
+    winnerId: championId,      // <— will tag the winner in the title
+    podium: null               // <— set by royale/bracket services if needed; keeps spacer before commentary
   })] });
 
   return { sim, champion };
 }
 
 module.exports = { runRumbleDisplay };
-
 
 
 
