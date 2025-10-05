@@ -53,7 +53,6 @@ async function fetchWithTimeout(url, opts = {}, timeoutMs = AI_TIMEOUT_MS) {
 }
 
 /* =================== seeded RNG =================== */
-// Deterministic, unbiased RNG (xorshift-ish) seeded from a string
 function makeRng(seedStr = "") {
   let h = 2166136261 >>> 0; // FNV-ish
   for (let i = 0; i < seedStr.length; i++) {
@@ -70,12 +69,6 @@ function makeRng(seedStr = "") {
 }
 
 /* =================== simulator (unbiased) =================== */
-/**
- * simulateBattle
- * - unbiased coin per round around 50/50 with small drift (+/- 3%) from seeded RNG
- * - a = challenger score, b = opponent score
- * - rounds: [{index, winner, loser, a, b}]
- */
 function simulateBattle({ challenger, opponent, bestOf = 3, style, seed }) {
   bestOf = clampBestOf(bestOf);
   const need = Math.floor(bestOf / 2) + 1;
@@ -89,7 +82,6 @@ function simulateBattle({ challenger, opponent, bestOf = 3, style, seed }) {
 
   while (a < need && b < need) {
     idx++;
-    // tiny variance centered on 0.5 for fairness
     const p = 0.5 + (rng() - 0.5) * 0.06; // ±3%
     const aWins = rng() < p;
 
@@ -121,7 +113,6 @@ async function listGroqModels() {
     if (!res.ok) return [];
     const json = safeJsonParse(bodyText);
     const ids = Array.isArray(json?.data) ? json.data.map(x => x.id).filter(Boolean) : [];
-    // prefer chat-ish
     return ids.filter(id => /llama|mixtral|gemma|qwen|mistral|deepseek|phi/i.test(id));
   } catch { return []; }
 }
@@ -132,7 +123,6 @@ async function aiCommentary({ winner, loser, rounds, style = 'motivator', guildN
     `Rounds: ${rounds.map(r => `R${r.index}:${r.winner}`).join(' ')}\n` +
     `Tone: ${style} (fun, safe, hype). Avoid slurs. No hashtags.`;
 
-  // Try Groq
   if (GROQ_API_KEY) {
     const models = [GROQ_MODEL_ENV].filter(Boolean);
     if (!models.length) {
@@ -165,7 +155,7 @@ async function aiCommentary({ winner, loser, rounds, style = 'motivator', guildN
           if (/decommissioned/i.test(msg)) DECOMMISSIONED_MODELS.add(model);
           if (!WARN_ONCE.has(`groq_${model}`)) { console.warn(`Groq ${model} ${res.status}: ${msg}`); WARN_ONCE.add(`groq_${model}`); }
           if (res.status === 400 || res.status === 404) continue;
-          break; // other errors: bail to OpenAI/local
+          break;
         }
         const json = safeJsonParse(bodyText);
         const out  = json?.choices?.[0]?.message?.content?.trim();
@@ -177,7 +167,6 @@ async function aiCommentary({ winner, loser, rounds, style = 'motivator', guildN
     }
   }
 
-  // Try OpenAI
   if (OPENAI_API_KEY) {
     try {
       const { res, bodyText } = await fetchWithTimeout(
@@ -212,7 +201,6 @@ async function aiCommentary({ winner, loser, rounds, style = 'motivator', guildN
     }
   }
 
-  // Local fallback
   const lines = [
     `**${winner}** controlled the pace and closed it out — props to ${loser} for the grit.`,
     `Clean reads, crisp timing, and crowd-pleasing moments. GG!`,
