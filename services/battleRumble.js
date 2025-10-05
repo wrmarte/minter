@@ -9,8 +9,8 @@ const INTRO_DELAY  = Math.max(200, Number(process.env.BATTLE_INTRO_DELAY_MS || 1
 const ROUND_DELAY  = Math.max(600, Number(process.env.BATTLE_ROUND_DELAY_MS || 5200));
 const JITTER_MS    = Math.max(0,   Number(process.env.BATTLE_PACE_JITTER_MS || 1200));
 
-// NEW: pacing within each round (progressive embed edits)
-const ROUND_BEATS  = Math.max(2, Number(process.env.BATTLE_ROUND_BEATS || '5'));         // how many reveal beats per round
+// Pacing within each round (progressive embed edits)
+const ROUND_BEATS  = Math.max(2, Number(process.env.BATTLE_ROUND_BEATS || '5'));         // reveal beats per round
 const BEAT_DELAY   = Math.max(400, Number(process.env.BATTLE_BEAT_DELAY_MS || '1800'));  // delay between beats
 
 const SAFE_MODE    = !/^false$/i.test(process.env.BATTLE_SAFE_MODE || 'true');
@@ -18,7 +18,7 @@ const ANNOUNCER    = (process.env.BATTLE_ANNOUNCER || 'normal').trim().toLowerCa
 
 // Logo options:
 // - BATTLE_THUMB_URL: fixed logo image (used for thumbnails or author icon)
-// - BATTLE_LOGO_MODE: 'author' (small icon, top-left, default) | 'thumbnail' (bigger, top-right)
+// - BATTLE_LOGO_MODE: 'author' (small icon, top-left, default) | 'thumbnail' (top-right)
 const BATTLE_THUMB_URL = (process.env.BATTLE_THUMB_URL || 'https://iili.io/KnsvEAl.png').trim();
 const BATTLE_LOGO_MODE = (process.env.BATTLE_LOGO_MODE || 'author').trim().toLowerCase();
 
@@ -48,16 +48,16 @@ function colorFor(style) {
        : 0x9b59b6;
 }
 
+// Small author icon (left) OR thumbnail (right) based on env
 function baseEmbed(style, { withLogo = true, allowThumb = true } = {}) {
   const e = {
     color: colorFor(style),
     timestamp: new Date().toISOString()
   };
 
-  // Small logo by default via author icon (top-left)
   if (withLogo && BATTLE_THUMB_URL) {
     if (BATTLE_LOGO_MODE === 'thumbnail' && allowThumb) {
-      e.thumbnail = { url: BATTLE_THUMB_URL }; // top-right (cannot size smaller)
+      e.thumbnail = { url: BATTLE_THUMB_URL }; // top-right
       e.author = { name: 'Rumble Royale' };
     } else {
       e.author = { name: 'Rumble Royale', icon_url: BATTLE_THUMB_URL }; // small icon (top-left)
@@ -87,7 +87,7 @@ function pickNoRepeat(arr, recent, cap = 6) {
   if (recent.length > cap) recent.shift();
   return choice;
 }
-/* Per-match memory (avoids repeats for weapons/verbs/taunts) */
+/* Per-match memory (avoids repeats) */
 function makeMemory() { return { weapons: [], verbs: [], taunts: [], scenes: [] }; }
 
 /* ========================== Flavor ========================== */
@@ -236,6 +236,23 @@ function scenicLine(env, mem) {
   return pick(options);
 }
 
+/* ========================== Colored Bar Helpers ========================== */
+function legendLine(aName, bName, colorA = '🟦', colorB = '🟥') {
+  return `Legend: ${colorA} ${aName} • ${colorB} ${bName}`;
+}
+function emojiBar(aScore, bScore, width = 16, colorA = '🟦', colorB = '🟥', empty = '⬜') {
+  const total = Math.max(1, aScore + bScore);
+  let fillA = Math.round((aScore / total) * width);
+  if (fillA < 0) fillA = 0;
+  if (fillA > width) fillA = width;
+  const fillB = width - fillA;
+  return `${colorA.repeat(fillA)}${empty.repeat(0)}${colorB.repeat(fillB)}`; // contiguous A|B
+}
+function coloredBarBlock(aName, bName, a, b, bestOf) {
+  const bar = emojiBar(a, b, Math.max(10, Math.min(20, bestOf * 2)));
+  return `${legendLine(aName, bName)}\n**${a}** ${bar} **${b}**`;
+}
+
 /* ========================== Embeds ========================== */
 function introEmbed(style, title) {
   return { ...baseEmbed(style, { withLogo: true, allowThumb: true }), title, description: `Rumble incoming…` };
@@ -250,22 +267,23 @@ function arenaEmbed(style, env, bestOf) {
     footer: { text: `Arena: ${env.name}` }
   };
 }
-function roundProgressEmbed(style, idx, env, linesJoined, barPreview = null) {
+function roundProgressEmbed(style, idx, env, linesJoined, previewBarBlock = null) {
   return {
     ...baseEmbed(style, { withLogo: true, allowThumb: true }),
     title: `Round ${idx} — Action Feed`,
-    description: `${linesJoined}${barPreview ? `\n\n${barPreview}` : ''}`,
+    description: previewBarBlock ? `${previewBarBlock}\n\n${linesJoined}` : `${linesJoined}`,
     footer: { text: `Arena: ${env.name}` }
   };
 }
 // color green if winner was trailing before this round (comeback)
-function roundFinalEmbed(style, idx, r, bar, bestOf, env, wasBehind, roundText) {
+function roundFinalEmbed(style, idx, r, aName, bName, bestOf, env, wasBehind, roundText) {
   const color = wasBehind ? 0x2ecc71 /* green */ : colorFor(style);
+  const barBlock = coloredBarBlock(aName, bName, r.a, r.b, bestOf);
   return {
     ...baseEmbed(style, { withLogo: true, allowThumb: true }),
     color,
     title: `Round ${idx} — Result`,
-    description: `${roundText}\n\n${bar}`,
+    description: `${barBlock}\n\n${roundText}`,
     fields: [
       { name: 'Winner', value: `**${r.winner}**`, inline: true },
       { name: 'Loser',  value: `${r.loser}`, inline: true },
@@ -274,13 +292,14 @@ function roundFinalEmbed(style, idx, r, bar, bestOf, env, wasBehind, roundText) 
     footer: { text: `Style: ${style} • Arena: ${env.name}` }
   };
 }
-function finalAllInOneEmbed({ style, sim, champion, bar, env, cast, stats, timeline }) {
+function finalAllInOneEmbed({ style, sim, champion, env, cast, stats, timeline, aName, bName }) {
   const name = champion.displayName || champion.username || champion.user?.username || 'Winner';
   const avatar = getAvatarURL(champion);
+  const barBlock = coloredBarBlock(aName, bName, sim.a, sim.b, sim.bestOf);
   const e = {
     ...baseEmbed(style, { withLogo: false, allowThumb: false }), // NO fixed logo on final
     title: `🏆 Final — ${name} wins ${sim.a}-${sim.b}!`,
-    description: bar,
+    description: barBlock,
     thumbnail: avatar ? { url: avatar } : undefined,
     fields: [
       { name: 'Match Stats', value:
@@ -414,30 +433,24 @@ async function runRumbleDisplay({
     // Beat 0: cinematic opener
     lines.push(scenicLine(env, mem));
 
-    // Then reveal a subset of seq in order, capped to ROUND_BEATS-1 more beats
     const beatsToReveal = Math.max(1, ROUND_BEATS - 1);
     const reveal = seq.slice(0, beatsToReveal).map(s => s.content);
 
-    // Initial post for the round (preview with no score yet)
+    // Initial post for the round (preview with colored legend + empty/progress hint)
+    let preview = coloredBarBlock(Aname, Bname, r.a - (r.winner === Aname ? 1 : 0), r.b - (r.winner === Aname ? 0 : 1), sim.bestOf);
     let msg = await target.send({
-      embeds: [roundProgressEmbed(style, i + 1, env, lines.join('\n'))]
+      embeds: [roundProgressEmbed(style, i + 1, env, lines.join('\n'), preview)]
     });
 
     // Reveal each beat with an edit and a pause
     for (let b = 0; b < reveal.length; b++) {
       await sleep(jitter(BEAT_DELAY));
       lines.push(reveal[b]);
-
-      // Optional tiny bar preview (not the real score yet)
-      const previewBar = (b === reveal.length - 1) ? '⏳ …resolving round…' : null;
-      await msg.edit({ embeds: [roundProgressEmbed(style, i + 1, env, lines.join('\n'), previewBar)] });
+      await msg.edit({ embeds: [roundProgressEmbed(style, i + 1, env, lines.join('\n'), '⏳ …resolving round…')] });
     }
 
-    // Finalize the round (compute score + bar and replace embed with the result)
-    const bar = makeBar(r.a, r.b, sim.bestOf);
-
-    // comeback detection (winner was behind before this round)
-    const winnerIsA = r.winner === (challenger.displayName || challenger.username || challenger.user?.username || 'Challenger');
+    // Finalize the round (true score + bar and replace embed with the result)
+    const winnerIsA = r.winner === Aname;
     const prevA = r.a - (winnerIsA ? 1 : 0);
     const prevB = r.b - (winnerIsA ? 0 : 1);
     const wasBehind = winnerIsA ? (prevA < prevB) : (prevB < prevA);
@@ -446,7 +459,7 @@ async function runRumbleDisplay({
 
     await sleep(jitter(BEAT_DELAY));
     await msg.edit({
-      embeds: [roundFinalEmbed(style, i + 1, r, bar, sim.bestOf, env, wasBehind, roundText)]
+      embeds: [roundFinalEmbed(style, i + 1, r, Aname, Bname, sim.bestOf, env, wasBehind, roundText)]
     });
 
     roundsTimeline.push(`R${i+1}: **${r.winner}** over ${r.loser} (${r.a}-${r.b})`);
@@ -456,7 +469,6 @@ async function runRumbleDisplay({
   // FINALE — winner avatar + all-in-one stats (NO fixed logo here)
   const champion = sim.a > sim.b ? challenger : opponent;
   const runnerUp = sim.a > sim.b ? opponent  : challenger;
-  const finalBar = makeBar(sim.a, sim.b, sim.bestOf);
 
   let cast = null;
   try {
@@ -471,13 +483,15 @@ async function runRumbleDisplay({
 
   const timeline = roundsTimeline.join(' • ');
   await target.send({ embeds: [finalAllInOneEmbed({
-    style, sim, champion, bar: finalBar, env, cast, stats, timeline
+    style, sim, champion, env, cast, stats, timeline,
+    aName: Aname, bName: Bname
   })] });
 
   return { sim, champion };
 }
 
 module.exports = { runRumbleDisplay };
+
 
 
 
