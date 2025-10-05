@@ -2,7 +2,7 @@
 const { simulateBattle, aiCommentary, makeBar, clampBestOf } = require('./battleEngine');
 
 /* ========================== Config ========================== */
-const USE_THREAD   = /^true$/i.test(process.env.BATTLE_USE_THREAD || 'true');
+const USE_THREAD   = /^true$/i.test(process.env.BATTLE_USE_THREAD || 'false');
 const THREAD_NAME  = (process.env.BATTLE_THREAD_NAME || 'Rumble Royale').trim();
 
 const INTRO_DELAY  = Math.max(200, Number(process.env.BATTLE_INTRO_DELAY_MS || 1400));
