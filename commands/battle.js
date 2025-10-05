@@ -18,7 +18,7 @@ module.exports = {
     .setDescription('Owner-only: run a cinematic battle. Pick fighters or 1v1.')
     .addBooleanOption(opt =>
       opt.setName('manual_pick')
-        .setDescription('Open a lobby to pick 2+ fighters (you are auto-excluded).')
+        .setDescription('Open a lobby to pick 2 fighters (you are auto-excluded).')
     )
     .addUserOption(opt =>
       opt.setName('opponent')
@@ -63,7 +63,7 @@ module.exports = {
       const picked = new Set(); // user IDs (excluding owner)
 
       const render = () => {
-        if (picked.size === 0) return 'Lobby: *(no fighters yet)*\n> Use the picker below to add fighters (2–12).';
+        if (picked.size === 0) return 'Lobby: *(no fighters yet)*\n> Use the picker below to add fighters (2).';
         const list = [...picked].map(id => `<@${id}>`).join(', ');
         return `Lobby: **${picked.size}** picked → ${list}\n> Add more or press **Start**.`;
       };
