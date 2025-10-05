@@ -1,7 +1,7 @@
 // services/rumbleRoyale.js
 const { simulateBattle, aiCommentary, clampBestOf } = require('./battleEngine');
 
-/* ===== Config (reusing your battleRumble knobs) ===== */
+/* ===== Config (reusing battle knobs) ===== */
 const USE_THREAD   = /^true$/i.test(process.env.BATTLE_USE_THREAD || 'true');
 const THREAD_NAME  = (process.env.BATTLE_THREAD_NAME || 'Rumble Royale').trim();
 
@@ -9,6 +9,7 @@ const INTRO_DELAY  = Math.max(200, Number(process.env.BATTLE_INTRO_DELAY_MS || 1
 const ROUND_DELAY  = Math.max(600, Number(process.env.BATTLE_ROUND_DELAY_MS || 5200));
 const BEAT_DELAY   = Math.max(400, Number(process.env.BATTLE_BEAT_DELAY_MS || '1800'));
 const JITTER_MS    = Math.max(0,   Number(process.env.BATTLE_PACE_JITTER_MS || 1200));
+
 const SAFE_MODE    = !/^false$/i.test(process.env.BATTLE_SAFE_MODE || 'true');
 const ANNOUNCER    = (process.env.BATTLE_ANNOUNCER || 'normal').trim().toLowerCase();
 
@@ -26,7 +27,12 @@ const POWERUP_CHANCE = clamp01(Number(process.env.BATTLE_POWERUP_CHANCE || 0.22)
 const COMBO_MAX      = Math.max(1, Math.min(5, Number(process.env.BATTLE_COMBO_MAX || 3)));
 const SFX_ON         = !/^false$/i.test(process.env.BATTLE_SFX || 'true');
 
-const ROYALE_BESTOF  = clampBestOf(Number(process.env.BATTLE_ROYALE_BESTOF || 1)); // 1 by default (fast skirmish)
+/* Royale revive knobs */
+const REVIVE_CHANCE  = clamp01(Number(process.env.BATTLE_ROYALE_REVIVE_CHANCE || 0.18));
+const MAX_REVIVES    = Math.max(0, Number(process.env.BATTLE_ROYALE_MAX_REVIVES || 1));
+
+/* Always Bo1 for royale skirmishes (no UI option) */
+const ROYALE_BESTOF  = 1;
 
 function clamp01(x){ x = Number(x); if (!isFinite(x)) return 0; return Math.min(1, Math.max(0, x)); }
 const sleep  = (ms) => new Promise(r => setTimeout(r, ms));
@@ -41,16 +47,13 @@ function colorFor(style) {
 }
 
 function baseEmbed(style, { withLogo = true, allowThumb = true } = {}) {
-  const e = {
-    color: colorFor(style),
-    timestamp: new Date().toISOString()
-  };
+  const e = { color: colorFor(style), timestamp: new Date().toISOString() };
   if (withLogo && BATTLE_THUMB_URL) {
     if (BATTLE_LOGO_MODE === 'thumbnail' && allowThumb) {
-      e.thumbnail = { url: BATTLE_THUMB_URL }; // top-right logo
+      e.thumbnail = { url: BATTLE_THUMB_URL };
       e.author = { name: 'Rumble Royale' };
     } else {
-      e.author = { name: 'Rumble Royale', icon_url: BATTLE_THUMB_URL }; // small author icon, top-left
+      e.author = { name: 'Rumble Royale', icon_url: BATTLE_THUMB_URL };
     }
   } else {
     e.author = { name: 'Rumble Royale' };
@@ -160,63 +163,38 @@ function scenicLine() {
   return pick([`🎬 ${a}`, `🌫️ ${b}`, `🏟️ ${c}`]);
 }
 
-/* ===== Embeds (skirmish-only + final) ===== */
 function skirmishEmbed(style, title, linesJoined) {
-  return {
-    ...baseEmbed(style, { withLogo: true, allowThumb: true }),
-    title,
-    description: linesJoined
-  };
+  return { ...baseEmbed(style, { withLogo: true, allowThumb: true }), title, description: linesJoined };
 }
-
-function nameOf(m) {
-  return m?.displayName || m?.user?.username || m?.username || '—';
-}
+function nameOf(m) { return m?.displayName || m?.user?.username || m?.username || '—'; }
 
 function sanitizeAI(s) {
   if (!s) return null;
   let t = String(s);
-  // strip think tags or similar
   t = t.replace(/<think>[\s\S]*?<\/think>/gi, '');
   t = t.replace(/```[\s\S]*?```/g, '');
   return t.trim();
 }
-
 function finalEmbed({ style, champion, runnerUp, third, guildName, cast }) {
   const champName = nameOf(champion);
   const runName   = nameOf(runnerUp);
   const thirdName = third ? nameOf(third) : null;
   const avatar    = getAvatarURL(champion);
-
-  const placementsLines = [
-    `🥇 ${champName}`,
-    `🥈 ${runName}`,
-    thirdName ? `🥉 ${thirdName}` : null
-  ].filter(Boolean).join('\n');
-
   const e = {
-    ...baseEmbed(style, { withLogo: false, allowThumb: false }), // no fixed logo on final
+    ...baseEmbed(style, { withLogo: false, allowThumb: false }),
     title: `🏆 Royale Champion — ${champName}`,
     description: `Runner-up: **${runName}**`,
     thumbnail: avatar ? { url: avatar } : undefined,
-    fields: [
-      { name: 'Top 3', value: placementsLines || '—' }
-    ],
+    fields: [{ name: 'Top 3', value: [`🥇 ${champName}`, `🥈 ${runName}`, thirdName ? `🥉 ${thirdName}` : null].filter(Boolean).join('\n') }],
     footer: { text: `${guildName} • Battle Royale` }
   };
-
   const cleanCast = sanitizeAI(cast);
   if (cleanCast) e.fields.push({ name: '🎙️ Commentary', value: cleanCast.slice(0, 1024) });
-
   return e;
 }
 
-/* ===== Round sequence (like battleRumble, but skirmish compact) ===== */
 function buildSkirmishSequence(A, B, style) {
   const seq = [];
-  if (Math.random() < TAUNTS) seq.push({ type: 'taunt', content: buildTaunt(style, A, B) }); // NOTE: small typo fix: TAUNTS isn't prob here; keep original logic:
-  // Keeping original logic (don’t mess): use TAUNT_CHANCE
-  seq.length = 0;
   if (Math.random() < TAUNT_CHANCE) seq.push({ type: 'taunt', content: buildTaunt(style, A, B) });
   seq.push({ type: 'action', content: buildAction(A, B, style) });
 
@@ -244,26 +222,18 @@ function buildSkirmishSequence(A, B, style) {
   return seq;
 }
 
-/* ===== Main Runner: Battle Royale ===== */
-async function runRoyaleRumble({
-  channel,
-  baseMessage,            // re-used to avoid double intro
-  fighters,               // array of GuildMembers
-  style = (process.env.BATTLE_STYLE_DEFAULT || 'motivator').trim().toLowerCase(),
-  guildName = 'this server'
-}) {
+/* ===== Main Runner: Battle Royale (Bo1, with Revive) ===== */
+async function runRoyaleRumble({ channel, baseMessage, fighters, style = (process.env.BATTLE_STYLE_DEFAULT || 'motivator').trim().toLowerCase(), guildName = 'this server' }) {
   const alive = fighters.slice();
-  const placements = [];         // losers unshifted -> [runner-up, third, ...]
-  // INTRO (once)
+  const placements = []; // elimination order (front is most recent)
+  let revivesUsed = 0;
+
+  // Intro once
   let target = channel;
   try {
     if (baseMessage) {
       await baseMessage.edit({
-        embeds: [{
-          ...baseEmbed(style, { withLogo: true, allowThumb: true }),
-          title: '🎲 Battle Royale — Skirmishes Incoming',
-          description: 'Fighters spread out across the arena…'
-        }]
+        embeds: [{ ...baseEmbed(style, { withLogo: true, allowThumb: true }), title: '🎲 Battle Royale — Skirmishes Incoming', description: 'Fighters spread out across the arena…' }]
       }).catch(() => {});
       if (USE_THREAD && baseMessage.startThread) {
         const thread = await baseMessage.startThread({ name: THREAD_NAME, autoArchiveDuration: 60 });
@@ -271,11 +241,7 @@ async function runRoyaleRumble({
       }
     } else {
       const intro = await channel.send({
-        embeds: [{
-          ...baseEmbed(style, { withLogo: true, allowThumb: true }),
-          title: '🎲 Battle Royale — Skirmishes Incoming',
-          description: 'Fighters spread out across the arena…'
-        }]
+        embeds: [{ ...baseEmbed(style, { withLogo: true, allowThumb: true }), title: '🎲 Battle Royale — Skirmishes Incoming', description: 'Fighters spread out across the arena…' }]
       });
       if (USE_THREAD && intro?.startThread) {
         const thread = await intro.startThread({ name: THREAD_NAME, autoArchiveDuration: 60 });
@@ -283,10 +249,9 @@ async function runRoyaleRumble({
       }
     }
   } catch {}
-
   await sleep(jitter(INTRO_DELAY));
 
-  // LOOP skirmishes until one remains
+  // Skirmishes loop
   let sk = 0;
   while (alive.length > 1) {
     sk++;
@@ -294,13 +259,11 @@ async function runRoyaleRumble({
     let iB = Math.floor(Math.random() * alive.length);
     while (iB === iA) iB = Math.floor(Math.random() * alive.length);
 
-    const A = alive[iA];
-    const B = alive[iB];
-    const Aname = nameOf(A);
-    const Bname = nameOf(B);
+    const A = alive[iA], B = alive[iB];
+    const Aname = nameOf(A), Bname = nameOf(B);
 
     const seed = `${channel.id}:${A.id}:${B.id}:${Date.now() >> 11}`;
-    const sim   = simulateBattle({ challenger: A, opponent: B, bestOf: ROYALE_BESTOF, style, seed });
+    const sim  = simulateBattle({ challenger: A, opponent: B, bestOf: ROYALE_BESTOF, style, seed });
 
     const title = `Skirmish ${sk} — ${Aname} vs ${Bname}`;
     const lines = [scenicLine()];
@@ -319,45 +282,54 @@ async function runRoyaleRumble({
     lines.push(`\n💀 **${nameOf(loser)} is eliminated!**`);
     await msg.edit({ embeds: [skirmishEmbed(style, title, lines.join('\n'))] });
 
-    // remove loser, store for placements
+    // Update alive list + placements
     placements.unshift(loser);
     const idx = alive.findIndex(m => m.id === loser.id);
     if (idx >= 0) alive.splice(idx, 1);
 
+    // 🔁 Revive mechanic
+    if (revivesUsed < MAX_REVIVES && placements.length > 0 && Math.random() < REVIVE_CHANCE && alive.length >= 2) {
+      // pick most recent or random from graveyard
+      const revivePick = Math.random() < 0.6 ? placements[0] : placements[Math.floor(Math.random()*placements.length)];
+      // ensure not already alive
+      if (!alive.some(m => m.id === revivePick.id)) {
+        // remove from graveyard
+        const gi = placements.findIndex(m => m.id === revivePick.id);
+        if (gi >= 0) placements.splice(gi, 1);
+        // add back to alive
+        alive.push(revivePick);
+        revivesUsed++;
+
+        // announce revive inside an embed
+        await sleep(jitter(600));
+        await target.send({
+          embeds: [{
+            ...baseEmbed(style, { withLogo: true, allowThumb: true }),
+            title: '⚕️ Revive!',
+            description: `A portal glitches open… **${nameOf(revivePick)}** staggers back into the fray!${SFX_STRING()}`
+          }]
+        });
+      }
+    }
+
     if (alive.length > 1) await sleep(jitter(ROUND_DELAY));
   }
 
-  // champion, runner-up, third
+  // Final Top 3
   const champion = alive[0];
   const runnerUp = placements[0];
   const third    = placements[1] || null;
 
-  // Optional AI commentary — SAFE: sanitize + embed field
+  // Optional commentary (sanitized)
   let cast = null;
   try {
-    cast = await aiCommentary({
-      winner: nameOf(champion),
-      loser:  nameOf(runnerUp),
-      rounds: [],
-      style,
-      guildName
-    });
+    cast = await aiCommentary({ winner: nameOf(champion), loser: nameOf(runnerUp), rounds: [], style, guildName });
   } catch {}
 
-  // Final embed WITHIN embed (no extra message), Top 3 only
-  await target.send({
-    embeds: [finalEmbed({
-      style,
-      champion,
-      runnerUp,
-      third,
-      guildName,
-      cast
-    })]
-  });
-
+  await target.send({ embeds: [finalEmbed({ style, champion, runnerUp, third, guildName, cast })] });
   return { champion, runnerUp, third };
 }
 
 module.exports = { runRoyaleRumble };
+
 
