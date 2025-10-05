@@ -10,7 +10,6 @@ const {
 
 const { runRumbleDisplay } = require('../services/battleRumble');
 
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const MAX_FIGHTERS = 12;
 
 module.exports = {
@@ -43,7 +42,8 @@ module.exports = {
           { name: 'villain', value: 'villain' },
           { name: 'degen', value: 'degen' },
         )
-    ),
+    )
+    .setDMPermission(false),
 
   async execute(interaction) {
     const OWNER_ID = (process.env.BOT_OWNER_ID || '').trim();
@@ -82,77 +82,85 @@ module.exports = {
         new ButtonBuilder().setCustomId('battle_lobby_cancel').setLabel('Cancel').setStyle(ButtonStyle.Danger).setDisabled(disabled),
       );
 
-      // Send EPHEMERAL lobby. Important: ephemeral replies CANNOT be fetched as a Message.
+      // Send EPHEMERAL lobby and capture the ephemeral message
       await interaction.reply({
         content: render(),
         components: [selectRow(), buttonsRow()],
         ephemeral: true
       });
-
-      // Use awaitMessageComponent on the ORIGINAL interaction in a loop (works with ephemeral).
-      // Each iteration resolves ONE component interaction, which we handle+update, then loop again.
-      const filter = (i) =>
-        i.user.id === interaction.user.id &&
-        (i.customId === 'battle_lobby_select' || i.customId === 'battle_lobby_start' || i.customId === 'battle_lobby_clear' || i.customId === 'battle_lobby_cancel');
+      const lobbyMsg = await interaction.fetchReply(); // ephemeral Message object
 
       const lobbyTimeoutMs = 5 * 60 * 1000;
       const lobbyEndsAt = Date.now() + lobbyTimeoutMs;
 
+      const filter = (i) =>
+        i.user.id === interaction.user.id &&
+        (i.message.id === lobbyMsg.id) && // ensure it’s this lobby message
+        (i.customId === 'battle_lobby_select' ||
+         i.customId === 'battle_lobby_start'  ||
+         i.customId === 'battle_lobby_clear'  ||
+         i.customId === 'battle_lobby_cancel');
+
       async function editLobby(content, disabled = false) {
-        try { await interaction.editReply({ content, components: [selectRow(), buttonsRow(disabled)] }); } catch {}
+        try {
+          await interaction.editReply({ content, components: [selectRow(), buttonsRow(disabled)] });
+        } catch {}
       }
 
       while (Date.now() < lobbyEndsAt) {
         let comp;
         try {
           const remaining = Math.max(1000, lobbyEndsAt - Date.now());
-          comp = await interaction.awaitMessageComponent({ filter, time: remaining });
+          // IMPORTANT: await on the MESSAGE, not the Interaction
+          comp = await lobbyMsg.awaitMessageComponent({ filter, time: remaining });
         } catch {
-          // timeout
           await editLobby('⏱️ Lobby timed out.', true);
           return;
         }
 
         try {
+          // 1) ACK ASAP to avoid "Interaction failed"
+          await comp.deferUpdate();
+
           if (comp.customId === 'battle_lobby_select' && comp.componentType === ComponentType.UserSelect) {
             const id = (comp.values && comp.values[0]) ? comp.values[0] : null;
-            if (!id) { await comp.deferUpdate(); continue; }
+            if (!id) { continue; }
 
             if (id === OWNER_ID) {
-              await comp.update({ content: `${render()}\n\n*You can’t add yourself; you’re excluded by design.*`, components: [selectRow(), buttonsRow()] });
+              await editLobby(`${render()}\n\n*You can’t add yourself; you’re excluded by design.*`);
               continue;
             }
             if (picked.has(id)) {
-              await comp.update({ content: `${render()}\n\n*(Already in lobby.)*`, components: [selectRow(), buttonsRow()] });
+              await editLobby(`${render()}\n\n*(Already in lobby.)*`);
               continue;
             }
             if (picked.size >= MAX_FIGHTERS) {
-              await comp.update({ content: `${render()}\n\n*Max ${MAX_FIGHTERS} fighters reached.*`, components: [selectRow(), buttonsRow()] });
+              await editLobby(`${render()}\n\n*Max ${MAX_FIGHTERS} fighters reached.*`);
               continue;
             }
             picked.add(id);
-            await comp.update({ content: render(), components: [selectRow(), buttonsRow()] });
+            await editLobby(render());
             continue;
           }
 
           if (comp.customId === 'battle_lobby_clear') {
             picked.clear();
-            await comp.update({ content: render(), components: [selectRow(), buttonsRow()] });
+            await editLobby(render());
             continue;
           }
 
           if (comp.customId === 'battle_lobby_cancel') {
-            await comp.update({ content: 'Lobby cancelled.', components: [buttonsRow(true)] });
+            await interaction.editReply({ content: 'Lobby cancelled.', components: [buttonsRow(true)] });
             return;
           }
 
           if (comp.customId === 'battle_lobby_start') {
             if (picked.size < 2) {
-              await comp.update({ content: `${render()}\n\n❌ Need at least **2** fighters.`, components: [selectRow(), buttonsRow()] });
+              await editLobby(`${render()}\n\n❌ Need at least **2** fighters.`);
               continue;
             }
 
-            // Choose any two distinct fighters from the set
+            // Choose any two distinct fighters from the set (engine is 1v1 today)
             const ids = [...picked];
             const aIdx = Math.floor(Math.random() * ids.length);
             let bIdx = Math.floor(Math.random() * ids.length);
@@ -160,18 +168,21 @@ module.exports = {
 
             const idA = ids[aIdx], idB = ids[bIdx];
             const guild = interaction.guild;
+
+            // keep UI responsive (we already deferred)
+            await interaction.editReply({ content: `Starting: <@${idA}> vs <@${idB}>`, components: [buttonsRow(true)] });
+
             const [a, b] = await Promise.all([
               guild.members.fetch(idA).catch(() => null),
               guild.members.fetch(idB).catch(() => null),
             ]);
 
             if (!a || !b) {
-              await comp.update({ content: '❌ Could not resolve the selected fighters as guild members.', components: [selectRow(), buttonsRow()] });
+              await interaction.editReply({ content: '❌ Could not resolve the selected fighters as guild members.', components: [selectRow(), buttonsRow()] });
               continue;
             }
 
-            // Update (ephemeral) lobby, then post public seed
-            await comp.update({ content: `Starting: <@${idA}> vs <@${idB}>`, components: [buttonsRow(true)] });
+            // Public seed message, then start the engine
             const seed = await interaction.followUp({
               content: `⚔️ Battle incoming: **${a.displayName || a.user?.username}** vs **${b.displayName || b.user?.username}**…`,
               fetchReply: true
@@ -190,7 +201,7 @@ module.exports = {
           }
         } catch (err) {
           console.error('battle lobby component error:', err);
-          try { await comp.reply({ content: 'Something went wrong handling that action.', ephemeral: true }); } catch {}
+          try { await interaction.followUp({ content: 'Something went wrong handling that action.', ephemeral: true }); } catch {}
         }
       }
 
@@ -234,4 +245,5 @@ module.exports = {
     });
   },
 };
+
 
