@@ -21,11 +21,11 @@ function isOwner(interaction) {
   return OWNER_ID && interaction.user.id === OWNER_ID;
 }
 
-function lobbyEmbed({ mode, style, bestOf, pickedIds, guildName, ownerMention }) {
+function lobbyEmbed({ mode, style, pickedIds, guildName, ownerMention }) {
   const title = mode === 'bracket' ? '🏟️ Rumble Lobby — Bracket' : '🏟️ Rumble Lobby — Battle Royale';
   const descTop = [
     `Host: ${ownerMention}`,
-    `Mode: **${mode}**${mode === 'bracket' ? ` (Bo${bestOf})` : ''} • Style: **${style}**`,
+    `Mode: **${mode}**${mode === 'bracket' ? ` (Bo1)` : ''} • Style: **${style}**`,
     `Max fighters: **${MAX_FIGHTERS}**`,
     '',
     `Click **Join** to enter • **Leave** to exit`,
@@ -90,15 +90,6 @@ module.exports = {
           { name: 'Battle Royale (last standing)', value: 'royale' }
         )
     )
-    .addIntegerOption(opt =>
-      opt.setName('bestof')
-        .setDescription('Best of (for Bracket). Default 3')
-        .addChoices(
-          { name: 'Best of 1', value: 1 },
-          { name: 'Best of 3', value: 3 },
-          { name: 'Best of 5', value: 5 },
-        )
-    )
     .addStringOption(opt =>
       opt.setName('style')
         .setDescription('clean | motivator | villain | degen (fallback = env default)')
@@ -119,8 +110,10 @@ module.exports = {
     }
 
     const mode   = interaction.options.getString('mode'); // 'bracket' | 'royale'
-    const bestOf = interaction.options.getInteger('bestof') || 3;
     const style  = (interaction.options.getString('style') || process.env.BATTLE_STYLE_DEFAULT || 'motivator').toLowerCase();
+
+    // Always Bo1 per your spec (hide from command UI)
+    const bestOf = 1;
 
     const mePerms = interaction.channel.permissionsFor(interaction.client.user);
     if (!mePerms?.has(PermissionsBitField.Flags.SendMessages)) {
@@ -128,12 +121,12 @@ module.exports = {
     }
 
     // Lobby state
-    const picked = new Set(); // now INCLUDING host if they choose to join
+    const picked = new Set(); // includes host if they press Join
     const ownerMention = `<@${interaction.user.id}>`;
 
     const lobbyMessage = await interaction.reply({
       embeds: [lobbyEmbed({
-        mode, style, bestOf,
+        mode, style,
         pickedIds: [...picked],
         guildName: interaction.guild.name,
         ownerMention
@@ -147,7 +140,7 @@ module.exports = {
     const refresh = async () => {
       await safeEdit(lobbyMessage, {
         embeds: [lobbyEmbed({
-          mode, style, bestOf,
+          mode, style,
           pickedIds: [...picked],
           guildName: interaction.guild.name,
           ownerMention
@@ -172,7 +165,7 @@ module.exports = {
           return i.reply({ content: 'Bots can’t join.', ephemeral: true });
         }
         picked.add(uid);
-        await i.deferUpdate();
+        try { await i.deferUpdate(); } catch {}
         return refresh();
       }
 
@@ -182,7 +175,7 @@ module.exports = {
           return i.reply({ content: 'You’re not in the lobby.', ephemeral: true });
         }
         picked.delete(uid);
-        await i.deferUpdate();
+        try { await i.deferUpdate(); } catch {}
         return refresh();
       }
 
@@ -195,29 +188,27 @@ module.exports = {
       // OWNER: CLEAR
       if (i.customId === 'rumble_clear') {
         picked.clear();
-        await i.deferUpdate();
+        try { await i.deferUpdate(); } catch {}
         return refresh();
       }
 
       // OWNER: CANCEL
       if (i.customId === 'rumble_cancel') {
         collector.stop('cancelled');
+        const clone = EmbedBuilder.from(lobbyMessage.embeds[0]);
         await i.update({
-          embeds: [new EmbedBuilder(lobbyMessage.embeds[0].data)
-            .setFooter({ text: `${interaction.guild.name} • Lobby cancelled` })
-            .setColor(0x8b0000)],
+          embeds: [clone.setFooter({ text: `${interaction.guild.name} • Lobby cancelled` }).setColor(0x8b0000)],
           components: rows({ locked: true })
         });
         return;
       }
 
-      // OWNER: MANUAL PICK (UserSelect) — use i.users (Collection)
+      // OWNER: MANUAL PICK (UserSelect) — robust: use i.values + deferUpdate
       if (i.customId === 'rumble_select' && i.componentType === ComponentType.UserSelect) {
-        const usersColl = i.users ?? null;
-        const ids = usersColl ? [...usersColl.keys()] : [];
+        const values = Array.isArray(i.values) ? i.values : [];
         let added = 0;
 
-        for (const id of ids) {
+        for (const id of values) {
           if (picked.size >= MAX_FIGHTERS) break;
           const usr = interaction.client.users.cache.get(id);
           if (usr?.bot) continue;
@@ -225,18 +216,11 @@ module.exports = {
           added++;
         }
 
-        await i.update({
-          embeds: [lobbyEmbed({
-            mode, style, bestOf,
-            pickedIds: [...picked],
-            guildName: interaction.guild.name,
-            ownerMention
-          })],
-          components: rows({ locked: false })
-        });
+        try { await i.deferUpdate(); } catch {}
+        await refresh();
 
         if (added === 0) {
-          try { await i.followUp({ content: 'No eligible users were added (maybe full, or you picked bots).', ephemeral: true }); } catch {}
+          try { await interaction.followUp({ content: 'No eligible users were added (maybe full, or you picked bots).', ephemeral: true }); } catch {}
         }
         return;
       }
@@ -248,10 +232,9 @@ module.exports = {
         }
 
         collector.stop('started');
+        const clone = EmbedBuilder.from(lobbyMessage.embeds[0]);
         await i.update({
-          embeds: [new EmbedBuilder(lobbyMessage.embeds[0].data)
-            .setFooter({ text: `${interaction.guild.name} • Starting…` })
-            .setColor(0x2ecc71)],
+          embeds: [clone.setFooter({ text: `${interaction.guild.name} • Starting…` }).setColor(0x2ecc71)],
           components: rows({ locked: true })
         });
 
@@ -263,11 +246,11 @@ module.exports = {
           if (m) members.push(m);
         }
         if (members.length < 2) {
-          return i.followUp({ content: '❌ Could not resolve enough fighters as guild members after join.', ephemeral: true });
+          return interaction.followUp({ content: '❌ Could not resolve enough fighters as guild members after join.', ephemeral: true });
         }
 
         const seedMsg = await interaction.followUp({
-          content: `🎮 **${mode === 'bracket' ? 'Tournament Bracket' : 'Battle Royale'}** incoming…`,
+          content: `🎮 **${mode === 'bracket' ? 'Tournament Bracket (Bo1)' : 'Battle Royale'}** incoming…`,
           fetchReply: true
         });
 
@@ -277,7 +260,7 @@ module.exports = {
               channel: interaction.channel,
               baseMessage: seedMsg,
               fighters: members,
-              bestOf,
+              bestOf, // = 1
               style,
               guildName: interaction.guild.name
             });
@@ -302,10 +285,9 @@ module.exports = {
 
     collector.on('end', async (_c, reason) => {
       if (['cancelled', 'started'].includes(reason)) return;
+      const clone = EmbedBuilder.from(lobbyMessage.embeds[0]);
       await safeEdit(lobbyMessage, {
-        embeds: [new EmbedBuilder(lobbyMessage.embeds[0].data)
-          .setFooter({ text: `${interaction.guild.name} • Lobby timed out` })
-          .setColor(0xaaaaaa)],
+        embeds: [clone.setFooter({ text: `${interaction.guild.name} • Lobby timed out` }).setColor(0xaaaaaa)],
         components: rows({ locked: true })
       });
     });
