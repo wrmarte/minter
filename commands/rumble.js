@@ -12,9 +12,6 @@ const {
 
 const MAX_FIGHTERS = 12;
 
-// These should point to your multi-user services you already have wired up.
-// - runBracketRumble: runs a bracket tournament with fighters[]
-// - runRoyaleRumble:  runs a battle-royale (last standing) with fighters[]
 const { runBracketRumble } = require('../services/rumbleBracket');
 const { runRoyaleRumble }  = require('../services/rumbleRoyale');
 
@@ -32,7 +29,7 @@ function lobbyEmbed({ mode, style, bestOf, pickedIds, guildName, ownerMention })
     `Max fighters: **${MAX_FIGHTERS}**`,
     '',
     `Click **Join** to enter • **Leave** to exit`,
-    `Host can pick fighters with the selector below.`,
+    `Host may also **Join** and can add fighters with the selector.`,
   ].join('\n');
 
   const list = pickedIds.length
@@ -64,7 +61,7 @@ function rows({ locked = false }) {
     new ButtonBuilder().setCustomId('rumble_cancel').setLabel('Cancel').setStyle(ButtonStyle.Danger).setDisabled(locked),
   );
 
-  // Owner-only manual picker (kept visible; we gate by handler)
+  // Owner manual picker (anyone sees it; only host can use)
   const row3 = new ActionRowBuilder().addComponents(
     new UserSelectMenuBuilder()
       .setCustomId('rumble_select')
@@ -76,7 +73,6 @@ function rows({ locked = false }) {
   return [row1, row2, row3];
 }
 
-// Safely edit lobby (avoid throwing if message is gone)
 async function safeEdit(msg, payload) {
   try { await msg.edit(payload); } catch {}
 }
@@ -115,8 +111,6 @@ module.exports = {
     ),
 
   async execute(interaction) {
-    const OWNER_ID = (process.env.BOT_OWNER_ID || '').trim();
-
     if (!isOwner(interaction)) {
       return interaction.reply({ content: '⛔ Only the bot owner can use /rumble right now.', ephemeral: true });
     }
@@ -128,14 +122,13 @@ module.exports = {
     const bestOf = interaction.options.getInteger('bestof') || 3;
     const style  = (interaction.options.getString('style') || process.env.BATTLE_STYLE_DEFAULT || 'motivator').toLowerCase();
 
-    // Permissions sanity: need to send & manage messages where slash is used
     const mePerms = interaction.channel.permissionsFor(interaction.client.user);
     if (!mePerms?.has(PermissionsBitField.Flags.SendMessages)) {
       return interaction.reply({ content: '❌ I need permission to send messages in this channel.', ephemeral: true });
     }
 
     // Lobby state
-    const picked = new Set(); // user IDs; excludes host
+    const picked = new Set(); // now INCLUDING host if they choose to join
     const ownerMention = `<@${interaction.user.id}>`;
 
     const lobbyMessage = await interaction.reply({
@@ -149,7 +142,6 @@ module.exports = {
       fetchReply: true
     });
 
-    // Collector on THIS message (public lobby)
     const collector = lobbyMessage.createMessageComponentCollector({ time: 5 * 60 * 1000 });
 
     const refresh = async () => {
@@ -165,14 +157,11 @@ module.exports = {
     };
 
     collector.on('collect', async (i) => {
-      // Always gate unsafe actions quickly with an immediate reply/update
       const uid = i.user.id;
+      const OWNER_ID = (process.env.BOT_OWNER_ID || '').trim();
 
-      // JOIN
+      // JOIN (host allowed)
       if (i.customId === 'rumble_join') {
-        if (uid === OWNER_ID) {
-          return i.reply({ content: 'You’re the host — you don’t join this one 😄', ephemeral: true });
-        }
         if (picked.has(uid)) {
           return i.reply({ content: 'You’re already in the lobby.', ephemeral: true });
         }
@@ -222,17 +211,14 @@ module.exports = {
         return;
       }
 
-      // OWNER: MANUAL PICK (UserSelect)
+      // OWNER: MANUAL PICK (UserSelect) — use i.users (Collection)
       if (i.customId === 'rumble_select' && i.componentType === ComponentType.UserSelect) {
-        // For UserSelect menus, use i.users (Collection) — not values
         const usersColl = i.users ?? null;
         const ids = usersColl ? [...usersColl.keys()] : [];
         let added = 0;
 
         for (const id of ids) {
-          if (id === OWNER_ID) continue;
           if (picked.size >= MAX_FIGHTERS) break;
-          // Avoid bots
           const usr = interaction.client.users.cache.get(id);
           if (usr?.bot) continue;
           picked.add(id);
@@ -250,7 +236,7 @@ module.exports = {
         });
 
         if (added === 0) {
-          try { await i.followUp({ content: 'No eligible users were added (maybe full, or you picked bots/host).', ephemeral: true }); } catch {}
+          try { await i.followUp({ content: 'No eligible users were added (maybe full, or you picked bots).', ephemeral: true }); } catch {}
         }
         return;
       }
@@ -261,7 +247,6 @@ module.exports = {
           return i.reply({ content: 'Need at least **2** fighters to start.', ephemeral: true });
         }
 
-        // Lock UI & stop collector
         collector.stop('started');
         await i.update({
           embeds: [new EmbedBuilder(lobbyMessage.embeds[0].data)
@@ -270,19 +255,17 @@ module.exports = {
           components: rows({ locked: true })
         });
 
-        // Resolve guild members
+        // Resolve members
         const ids = [...picked].slice(0, MAX_FIGHTERS);
         const members = [];
         for (const id of ids) {
           const m = await interaction.guild.members.fetch(id).catch(() => null);
           if (m) members.push(m);
         }
-
         if (members.length < 2) {
           return i.followUp({ content: '❌ Could not resolve enough fighters as guild members after join.', ephemeral: true });
         }
 
-        // Seed “incoming” message for services to reuse (prevents double-intro)
         const seedMsg = await interaction.followUp({
           content: `🎮 **${mode === 'bracket' ? 'Tournament Bracket' : 'Battle Royale'}** incoming…`,
           fetchReply: true
@@ -328,3 +311,4 @@ module.exports = {
     });
   },
 };
+
