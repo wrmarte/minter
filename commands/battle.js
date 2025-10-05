@@ -11,6 +11,7 @@ const {
 const { runRumbleDisplay } = require('../services/battleRumble');
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const MAX_FIGHTERS = 12;
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -57,10 +58,10 @@ module.exports = {
     const bestOf     = interaction.options.getInteger('bestof') || 3;
     const style      = (interaction.options.getString('style') || process.env.BATTLE_STYLE_DEFAULT || 'motivator').toLowerCase();
 
-    // =============== PATH A: LOBBY BUILDER (owner adds 2+ fighters) ===============
+    // ===================== PATH A: EPHEMERAL LOBBY (owner adds 2+) =====================
     if (manualPick) {
-      const picked = new Set(); // store user IDs (excluding owner)
-      const MAX = 12;
+      const picked = new Set(); // user IDs (excluding owner)
+
       const render = () => {
         if (picked.size === 0) return 'Lobby: *(no fighters yet)*\n> Use the picker below to add fighters (2–12).';
         const list = [...picked].map(id => `<@${id}>`).join(', ');
@@ -70,9 +71,9 @@ module.exports = {
       const selectRow = () => new ActionRowBuilder().addComponents(
         new UserSelectMenuBuilder()
           .setCustomId('battle_lobby_select')
-          .setPlaceholder('Pick a fighter to ADD (repeat to add more)')
+          .setPlaceholder('Pick ONE fighter to ADD (click again to add more)')
           .setMinValues(1)
-          .setMaxValues(1) // single-pick; we add on each selection
+          .setMaxValues(1) // single-pick; add repeatedly
       );
 
       const buttonsRow = (disabled = false) => new ActionRowBuilder().addComponents(
@@ -81,53 +82,78 @@ module.exports = {
         new ButtonBuilder().setCustomId('battle_lobby_cancel').setLabel('Cancel').setStyle(ButtonStyle.Danger).setDisabled(disabled),
       );
 
-      const msg = await interaction.reply({
+      // Send EPHEMERAL lobby. Important: ephemeral replies CANNOT be fetched as a Message.
+      await interaction.reply({
         content: render(),
         components: [selectRow(), buttonsRow()],
         ephemeral: true
       });
 
-      const collector = msg.createMessageComponentCollector({
-        time: 5 * 60 * 1000, // 5 min
-        filter: i => i.user.id === interaction.user.id && i.message.id === msg.id
-      });
+      // Use awaitMessageComponent on the ORIGINAL interaction in a loop (works with ephemeral).
+      // Each iteration resolves ONE component interaction, which we handle+update, then loop again.
+      const filter = (i) =>
+        i.user.id === interaction.user.id &&
+        (i.customId === 'battle_lobby_select' || i.customId === 'battle_lobby_start' || i.customId === 'battle_lobby_clear' || i.customId === 'battle_lobby_cancel');
 
-      collector.on('collect', async (i) => {
+      const lobbyTimeoutMs = 5 * 60 * 1000;
+      const lobbyEndsAt = Date.now() + lobbyTimeoutMs;
+
+      async function editLobby(content, disabled = false) {
+        try { await interaction.editReply({ content, components: [selectRow(), buttonsRow(disabled)] }); } catch {}
+      }
+
+      while (Date.now() < lobbyEndsAt) {
+        let comp;
         try {
-          if (i.customId === 'battle_lobby_select' && i.componentType === ComponentType.UserSelect) {
-            const id = (i.values && i.values[0]) ? i.values[0] : null;
-            if (!id) return i.deferUpdate();
+          const remaining = Math.max(1000, lobbyEndsAt - Date.now());
+          comp = await interaction.awaitMessageComponent({ filter, time: remaining });
+        } catch {
+          // timeout
+          await editLobby('⏱️ Lobby timed out.', true);
+          return;
+        }
+
+        try {
+          if (comp.customId === 'battle_lobby_select' && comp.componentType === ComponentType.UserSelect) {
+            const id = (comp.values && comp.values[0]) ? comp.values[0] : null;
+            if (!id) { await comp.deferUpdate(); continue; }
 
             if (id === OWNER_ID) {
-              return i.update({ content: `${render()}\n\n*You can’t add yourself; you’re excluded by design.*`, components: [selectRow(), buttonsRow()] });
+              await comp.update({ content: `${render()}\n\n*You can’t add yourself; you’re excluded by design.*`, components: [selectRow(), buttonsRow()] });
+              continue;
             }
             if (picked.has(id)) {
-              return i.update({ content: `${render()}\n\n*(Already in lobby.)*`, components: [selectRow(), buttonsRow()] });
+              await comp.update({ content: `${render()}\n\n*(Already in lobby.)*`, components: [selectRow(), buttonsRow()] });
+              continue;
             }
-            if (picked.size >= MAX) {
-              return i.update({ content: `${render()}\n\n*Max ${MAX} fighters reached.*`, components: [selectRow(), buttonsRow()] });
+            if (picked.size >= MAX_FIGHTERS) {
+              await comp.update({ content: `${render()}\n\n*Max ${MAX_FIGHTERS} fighters reached.*`, components: [selectRow(), buttonsRow()] });
+              continue;
             }
             picked.add(id);
-            return i.update({ content: render(), components: [selectRow(), buttonsRow()] });
+            await comp.update({ content: render(), components: [selectRow(), buttonsRow()] });
+            continue;
           }
 
-          if (i.customId === 'battle_lobby_clear') {
+          if (comp.customId === 'battle_lobby_clear') {
             picked.clear();
-            return i.update({ content: render(), components: [selectRow(), buttonsRow()] });
+            await comp.update({ content: render(), components: [selectRow(), buttonsRow()] });
+            continue;
           }
 
-          if (i.customId === 'battle_lobby_cancel') {
-            collector.stop('cancel');
-            return i.update({ content: 'Lobby cancelled.', components: [buttonsRow(true)] });
+          if (comp.customId === 'battle_lobby_cancel') {
+            await comp.update({ content: 'Lobby cancelled.', components: [buttonsRow(true)] });
+            return;
           }
 
-          if (i.customId === 'battle_lobby_start') {
+          if (comp.customId === 'battle_lobby_start') {
             if (picked.size < 2) {
-              return i.update({ content: `${render()}\n\n❌ Need at least **2** fighters.`, components: [selectRow(), buttonsRow()] });
+              await comp.update({ content: `${render()}\n\n❌ Need at least **2** fighters.`, components: [selectRow(), buttonsRow()] });
+              continue;
             }
-            // Resolve members and start a **single 1v1** for now (engine is 1v1)
+
+            // Choose any two distinct fighters from the set
             const ids = [...picked];
-            // Choose any two distinct fighters
             const aIdx = Math.floor(Math.random() * ids.length);
             let bIdx = Math.floor(Math.random() * ids.length);
             while (bIdx === aIdx) bIdx = Math.floor(Math.random() * ids.length);
@@ -140,18 +166,16 @@ module.exports = {
             ]);
 
             if (!a || !b) {
-              return i.update({ content: '❌ Could not resolve the selected fighters as guild members.', components: [selectRow(), buttonsRow()] });
+              await comp.update({ content: '❌ Could not resolve the selected fighters as guild members.', components: [selectRow(), buttonsRow()] });
+              continue;
             }
 
-            // Post a public seed message, then start the battle
+            // Update (ephemeral) lobby, then post public seed
+            await comp.update({ content: `Starting: <@${idA}> vs <@${idB}>`, components: [buttonsRow(true)] });
             const seed = await interaction.followUp({
               content: `⚔️ Battle incoming: **${a.displayName || a.user?.username}** vs **${b.displayName || b.user?.username}**…`,
               fetchReply: true
             });
-
-            // Disable lobby UI and finish
-            await i.update({ content: `Starting: <@${idA}> vs <@${idB}>`, components: [buttonsRow(true)] });
-            collector.stop('start');
 
             await runRumbleDisplay({
               channel: interaction.channel,
@@ -162,22 +186,20 @@ module.exports = {
               style,
               guildName: interaction.guild.name
             });
+            return; // done
           }
         } catch (err) {
-          console.error('battle lobby error:', err);
-          try { await i.reply({ content: 'Something went wrong handling that action.', ephemeral: true }); } catch {}
+          console.error('battle lobby component error:', err);
+          try { await comp.reply({ content: 'Something went wrong handling that action.', ephemeral: true }); } catch {}
         }
-      });
+      }
 
-      collector.on('end', async (_collected, reason) => {
-        if (reason === 'start' || reason === 'cancel') return;
-        try { await msg.edit({ content: '⏱️ Lobby timed out.', components: [buttonsRow(true)] }); } catch {}
-      });
-
+      // Safety timeout end
+      await interaction.editReply({ content: '⏱️ Lobby timed out.', components: [buttonsRow(true)] });
       return;
     }
 
-    // =============== PATH B: CLASSIC 1v1 (you vs opponent) ===============
+    // ===================== PATH B: CLASSIC 1v1 (you vs opponent) =====================
     const opponent = interaction.options.getUser('opponent');
     if (!opponent) {
       return interaction.reply({
