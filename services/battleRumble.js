@@ -5,7 +5,7 @@ const { simulateBattle, aiCommentary, makeBar, clampBestOf } = require('./battle
 const USE_THREAD   = /^true$/i.test(process.env.BATTLE_USE_THREAD || 'false');
 const THREAD_NAME  = (process.env.BATTLE_THREAD_NAME || 'Rumble Royale').trim();
 
-// NEW: Global pacing multiplier (slow things down a bit by default)
+// Global pacing multiplier (slow things down a bit by default)
 const PACE_MULT = Math.max(0.5, Number(process.env.BATTLE_PACE_MULTIPLIER || 1.25));
 
 const INTRO_DELAY  = Math.max(200, Math.round((Number(process.env.BATTLE_INTRO_DELAY_MS || 1400)) * PACE_MULT));
@@ -13,8 +13,8 @@ const ROUND_DELAY  = Math.max(600, Math.round((Number(process.env.BATTLE_ROUND_D
 const JITTER_MS    = Math.max(0,   Number(process.env.BATTLE_PACE_JITTER_MS || 1200));
 
 // Pacing within each round (progressive embed edits)
-const ROUND_BEATS  = Math.max(2, Number(process.env.BATTLE_ROUND_BEATS || '5'));         // reveal beats per round
-const BEAT_DELAY   = Math.max(400, Math.round((Number(process.env.BATTLE_BEAT_DELAY_MS || '1800')) * PACE_MULT));  // delay between beats
+const ROUND_BEATS  = Math.max(2, Number(process.env.BATTLE_ROUND_BEATS || '5'));
+const BEAT_DELAY   = Math.max(400, Math.round((Number(process.env.BATTLE_BEAT_DELAY_MS || '1800')) * PACE_MULT));
 
 const SAFE_MODE    = !/^false$/i.test(process.env.BATTLE_SAFE_MODE || 'true');
 const ANNOUNCER    = (process.env.BATTLE_ANNOUNCER || 'normal').trim().toLowerCase();
@@ -36,7 +36,7 @@ const POWERUP_CHANCE = clamp01(Number(process.env.BATTLE_POWERUP_CHANCE || 0.22)
 const COMBO_MAX      = Math.max(1, Math.min(5, Number(process.env.BATTLE_COMBO_MAX || 3)));
 const SFX_ON         = !/^false$/i.test(process.env.BATTLE_SFX || 'true');
 
-// NEW: cross-match recency windows (tunable)
+// cross-match recency windows (tunable)
 const ARENA_RECENT_WINDOW  = Math.max(2, Number(process.env.BATTLE_ENV_RECENT || 5));
 const WEAPON_RECENT_WINDOW = Math.max(3, Number(process.env.BATTLE_WEAPON_RECENT || 10));
 const VERB_RECENT_WINDOW   = Math.max(3, Number(process.env.BATTLE_VERB_RECENT || 10));
@@ -99,10 +99,8 @@ function pickNoRepeat(arr, recent, cap = 6) {
 function makeMemory() { return { weapons: [], verbs: [], taunts: [], scenes: [] }; }
 
 /* ========================== Cross-Match Recency Stores ========================== */
-// arenas: remember per guild
 const _arenaRecentByGuild = new Map(); // guildId -> [arenaName,...]
-// global recent per style for weapons/verbs
-const _recentGlobal = new Map(); // key -> [item,...]
+const _recentGlobal = new Map();       // key -> [item,...]
 
 function getRecentList(key) {
   const arr = _recentGlobal.get(key) || [];
@@ -117,23 +115,19 @@ function updateRecentList(key, item, cap) {
 function filterByRecent(list, key, cap) {
   const recent = getRecentList(key);
   const filtered = list.filter(x => !recent.includes(x));
-  // If filtering removed too many, allow fallback list (keep at least ~40%)
   return filtered.length >= Math.ceil(list.length * 0.4) ? filtered : list;
 }
 function chooseEnvironment(channel, environments) {
   const gid = channel?.guildId || 'global';
   const recent = _arenaRecentByGuild.get(gid) || [];
-  // Prefer arenas not in recent; fallback if needed
   const candidates = environments.filter(e => !recent.includes(e.name));
   const pickedEnv = (candidates.length ? pick(candidates) : pick(environments));
-  // Update recent list
   const next = recent.concat([pickedEnv.name]).slice(-ARENA_RECENT_WINDOW);
   _arenaRecentByGuild.set(gid, next);
   return pickedEnv;
 }
 
 /* ========================== Flavor ========================== */
-// Arenas (expanded)
 const ENV_BUILTIN = [
   { name: 'Neon Rooftop', intro: 'City lights hum below; the wind carries hype.' },
   { name: 'Underground Dojo', intro: 'Paper walls, sand floor, respectful echoes.' },
@@ -150,7 +144,7 @@ const ENV_BUILTIN = [
   { name: 'Futurist Museum', intro: 'Art stares back; history watches.' },
   { name: 'Hacker Loft', intro: 'Neon code rains across the wall.' },
   { name: 'Hyperdome', intro: 'Announcer checks mic — reverb perfect.' },
-  // NEW additions for more variety:
+  // new variety
   { name: 'Aurora Ice Rink', intro: 'Frost breath in neon; blades sing on ice.' },
   { name: 'Volcano Rim', intro: 'Heat shimmer; sparks float like stars.' },
   { name: 'Mecha Hangar', intro: 'Hydraulics hiss; warning lights blink.' },
@@ -171,14 +165,12 @@ function parseCsvEnv(s) { if (!exists(s)) return null; return s.split(',').map(x
 const ENV_OVERRIDE = parseCsvEnv(process.env.BATTLE_ENVIRONMENTS);
 const ENVIRONMENTS = ENV_OVERRIDE?.map(n => ({ name: n, intro: 'The air crackles — energy rises.' })) || ENV_BUILTIN;
 
-// Cinematic bits
 const CAMERA = [
   'Camera pans low past bootlaces.',
   'Drone swoops between the fighters.',
   'Spotlights skate across the floor.',
   'Jumbotron flickers to life.',
   'Ref’s hand hovers… and drops.',
-  // extra
   'Slow dolly in; gloves tighten.',
   'Top-down orbit; crowd becomes a halo.',
   'Ref nods; the world narrows to two.',
@@ -189,7 +181,6 @@ const ATMOS = [
   'Cold wind threads the arena.',
   'Mist rolls in from the corners.',
   'Neon buzz rises, then stills.',
-  // extra
   'Speaker crackle hints at chaos.',
   'Confetti cannons reload somewhere.',
   'A banner unfurls; slogans roar.',
@@ -200,7 +191,6 @@ const GROUND = [
   'Cables hum under the catwalk.',
   'Sand grinds under heel turns.',
   'Tiles thrum like a heartbeat.',
-  // extra
   'Metal grates sing underfoot.',
   'LED tiles ripple with each step.',
   'Puddles mirror the hype lights.',
@@ -221,35 +211,30 @@ const TAUNTS = {
 // Style-specific weapons/actions (expanded)
 const W_CLEAN_SAFE = [
   'dojo staff','bamboo shinai','practice pads','mirror shield','focus band','training mitts',
-  // extra
   'wooden tonfa','soft nunchaku','foam sai','balance board','kata fan'
 ];
 const W_CLEAN_SPICY= ['weighted baton (prop)','tempered shinai (spar)','practice spear (prop)'];
 
 const W_MOTI_SAFE  = [
   'PR belt','chalk cloud','coach whistle','rep rope','foam mace','discipline dumbbell',
-  // extra
   'timer cube','resistance band','speed ladder','focus cone','agility hurdle'
 ];
 const W_MOTI_SPICY = ['iron plate (prop)','slam ball (soft)','training kettlebell (prop)'];
 
 const W_VILL_SAFE  = [
   'shadow ribbon','smoke dagger (prop)','echo bell','trick tarot','void tether (cosplay)',
-  // extra
   'illusion orb','stage mask','smoke fan','mirror shard (prop)'
 ];
 const W_VILL_SPICY = ['hex blade (prop)','cursed grimoire (cosplay)','phantom chain (prop)'];
 
 const W_DEGN_SAFE  = [
   'alpha baton','yield yo-yo','pump trumpet','airdrop crate','ape gauntlet','vibe ledger',
-  // extra
   'meme shield','copium canister','hopium horn','rug detector','dip net'
 ];
 const W_DEGN_SPICY = ['leverage gloves','moon mallet (prop)','margin mace (prop)'];
 
 const WEAPONS_SAFE = [
   'foam bat','rubber chicken','pool noodle','pixel sword','ban hammer','yo-yo','cardboard shield','toy bo staff','glitch gauntlet',
-  // extra
   'bubble blaster','spring glove','confetti popper','karate board (breakaway)','nerf spear'
 ];
 const WEAPONS_SPICY= ['steel chair (cosplay prop)','spiked bat (prop)','thunder gloves','meteor hammer (training)','breakaway bottle (prop)'];
@@ -298,7 +283,6 @@ function styleVerbs(style){
   return common.concat(specific);
 }
 function buildAction(A, B, style, mem) {
-  // Cross-match de-dupe first, then per-match memory de-dupe
   const wKey = `wep:${style}`;
   const vKey = `vrb:${style}`;
   const wList = filterByRecent(styleWeapons(style), wKey, WEAPON_RECENT_WINDOW);
@@ -394,15 +378,14 @@ function roundFinalEmbed(style, idx, r, aName, bName, bestOf, env, wasBehind, ro
     footer: { text: `Style: ${style} • Arena: ${env.name}` }
   };
 }
-function finalAllInOneEmbed({ style, sim, champion, env, cast, stats, timeline, aName, bName, winnerId = null, podium = null }) {
+function finalAllInOneEmbed({ style, sim, champion, env, cast, stats, timeline, aName, bName, podium = null }) {
   const name = champion.displayName || champion.username || champion.user?.username || 'Winner';
   const avatar = getAvatarURL(champion);
   const barBlock = coloredBarBlock(aName, bName, sim.a, sim.b, sim.bestOf);
-  const mention = winnerId ? `<@${winnerId}>` : name;
 
   const e = {
     ...baseEmbed(style, { withLogo: false, allowThumb: false }), // NO fixed logo on final
-    title: `🏆 Final — ${mention} wins ${sim.a}-${sim.b}!`,
+    title: `🏆 Final — ${name} wins ${sim.a}-${sim.b}!`,
     description: barBlock,
     thumbnail: avatar ? { url: avatar } : undefined,
     fields: [
@@ -422,15 +405,12 @@ function finalAllInOneEmbed({ style, sim, champion, env, cast, stats, timeline, 
     footer: { text: `Style: ${style} • Arena: ${env.name}` }
   };
 
-  // Optional podium (for royale/bracket integrations using this embed) — keeps a spacer before commentary
+  // Optional podium (for royale/bracket). Spacer before commentary either way.
   if (Array.isArray(podium) && podium.length) {
     const lines = podium.slice(0,3).map((u, i) => `${i===0?'🥇':i===1?'🥈':'🥉'} ${u}`).join('\n');
     e.fields.push({ name: 'Top 3', value: lines || '—' });
-    e.fields.push({ name: '\u200B', value: '\u200B' }); // spacer line before commentary
-  } else {
-    // Even in 1v1, add spacer before commentary for breathing room
-    e.fields.push({ name: '\u200B', value: '\u200B' });
   }
+  e.fields.push({ name: '\u200B', value: '\u200B' });
 
   if (cast) e.fields.push({ name: '🎙️ Commentary', value: cast });
 
@@ -476,12 +456,23 @@ function stripThinkBlocks(text) {
 
   // Remove fenced code blocks
   out = out.replace(/```[\s\S]*?```/g, ' ');
-  // Remove <think> / <analysis> / etc blocks
-  out = out.replace(/<\s*(think|analysis|reasoning|reflection)[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, ' ');
+
+  // If any <think|analysis|reasoning|reflection> appears (even unclosed),
+  // cut everything from the first tag onward.
+  const openIdx = out.search(/<\s*(think|analysis|reasoning|reflection)\b/i);
+  if (openIdx !== -1) {
+    out = out.slice(0, openIdx);
+  }
+
+  // Also remove any stray XML-ish tags of those types
+  out = out.replace(/<\s*\/?\s*(think|analysis|reasoning|reflection)[^>]*>/gi, ' ');
+
   // Remove inline "think:" style prefixes
   out = out.replace(/^\s*(analysis|think|reasoning|reflection)\s*:\s*/gim, '');
-  // Drop meta headings (Commentary:, Notes:)
-  out = out.replace(/^\s*(commentary|notes?)\s*:?\s*/gim, '');
+
+  // Drop meta headings (Commentary, Notes) with optional colon
+  out = out.replace(/^\s*(commentary|notes?)\s*:?\s*$/gim, '');
+
   // Remove assistant self-talk lines
   out = out.replace(/^\s*(okay|alright|first,|let'?s|i need to|i should|i will|here'?s)\b.*$/gim, '');
 
@@ -496,7 +487,7 @@ function safeLinesOnly(text, maxLines = 3, maxLen = 140) {
     .split(/\r?\n/)
     .map(s => s.trim())
     .filter(Boolean)
-    .filter(s => !/^<\w+>/.test(s) && !/<\/\w+>/.test(s)) // no xml-ish leftovers
+    .filter(s => !/^<\w+>/.test(s) && !/<\/\w+>/.test(s))
     .map(s => (s.length > maxLen ? s.slice(0, maxLen - 1) + '…' : s))
     .filter(Boolean);
 
@@ -541,7 +532,7 @@ function styleFallbackLines(style, winner, loser) {
 function sanitizeCommentary(raw, { winner, loser, style }) {
   const stripped = stripThinkBlocks(raw || '');
   const lines = safeLinesOnly(stripped, 3, 140)
-    .map(s => s.replace(/#[A-Za-z0-9_]+/g, '').trim()) // no hashtags
+    .map(s => s.replace(/#[A-Za-z0-9_]+/g, '').trim())
     .filter(Boolean);
 
   if (lines.length) return lines.join('\n');
@@ -560,7 +551,6 @@ async function runRumbleDisplay({
 }) {
   bestOf = clampBestOf(bestOf);
 
-  // NEW: smarter arena choice (avoid recent)
   const env = chooseEnvironment(channel, ENVIRONMENTS);
 
   // neutral seed (not tied to who clicked the command)
@@ -571,10 +561,7 @@ async function runRumbleDisplay({
   const Bname = opponent.displayName   || opponent.username   || opponent.user?.username   || 'Opponent';
   const title = `⚔️ Rumble: ${Aname} vs ${Bname}`;
 
-  // Per-match memory to reduce repeats
   const mem = makeMemory();
-
-  // Stats accumulator (display-only)
   const stats = { taunts: 0, counters: 0, crits: 0, stuns: 0, combos: 0, events: 0 };
   const roundsTimeline = [];
 
@@ -616,7 +603,6 @@ async function runRumbleDisplay({
   for (let i = 0; i < sim.rounds.length; i++) {
     const r = sim.rounds[i];
 
-    // Build full sequence (we’ll reveal it in beats)
     const seq = buildRoundSequence({ A: r.winner, B: r.loser, style, mem });
     for (const step of seq) {
       if (step.type === 'taunt')   stats.taunts++;
@@ -628,26 +614,22 @@ async function runRumbleDisplay({
     }
 
     const lines = [];
-    // Beat 0: cinematic opener
     lines.push(scenicLine(env, mem));
 
     const beatsToReveal = Math.max(1, ROUND_BEATS - 1);
     const reveal = seq.slice(0, beatsToReveal).map(s => s.content);
 
-    // Initial post for the round (preview with colored legend + empty/progress hint)
     let preview = coloredBarBlock(Aname, Bname, r.a - (r.winner === Aname ? 1 : 0), r.b - (r.winner === Aname ? 0 : 1), sim.bestOf);
     let msg = await target.send({
       embeds: [roundProgressEmbed(style, i + 1, env, lines.join('\n'), preview)]
     });
 
-    // Reveal each beat with an edit and a pause
     for (let b = 0; b < reveal.length; b++) {
       await sleep(jitter(BEAT_DELAY));
       lines.push(reveal[b]);
       await msg.edit({ embeds: [roundProgressEmbed(style, i + 1, env, lines.join('\n'), '⏳ …resolving round…')] });
     }
 
-    // Finalize the round (true score + bar and replace embed with the result)
     const winnerIsA = r.winner === Aname;
     const prevA = r.a - (winnerIsA ? 1 : 0);
     const prevB = r.b - (winnerIsA ? 0 : 1);
@@ -669,7 +651,7 @@ async function runRumbleDisplay({
   const runnerUp = sim.a > sim.b ? opponent  : challenger;
   const championId = (champion.id || champion.user?.id || null);
 
-  // Sanitize commentary (remove <think> or meta chatter; make it short & hype)
+  // Sanitize commentary
   let cast = null;
   try {
     const raw = await aiCommentary({
@@ -693,22 +675,25 @@ async function runRumbleDisplay({
   }
 
   const timeline = roundsTimeline.join(' • ');
-  await target.send({ embeds: [finalAllInOneEmbed({
-    style, sim, champion, env, cast, stats, timeline,
-    aName: Aname, bName: Bname,
-    winnerId: championId,      // <— will tag the winner in the title
-    podium: null               // <— set by royale/bracket services if needed; keeps spacer before commentary
-  })] });
+
+  // Send the final embed first (no mention inside embed title)
+  await target.send({
+    embeds: [finalAllInOneEmbed({
+      style, sim, champion, env, cast, stats, timeline,
+      aName: Aname, bName: Bname,
+      podium: null
+    })]
+  });
+
+  // Then post a separate congrats message that pings the winner reliably
+  if (championId) {
+    await target.send({
+      content: `🎉 Congratulations <@${championId}>!`,
+      allowed_mentions: { users: [championId] }
+    });
+  }
 
   return { sim, champion };
 }
 
 module.exports = { runRumbleDisplay };
-
-
-
-
-
-
-
-
