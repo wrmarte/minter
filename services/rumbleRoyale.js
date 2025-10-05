@@ -67,7 +67,6 @@ function getAvatarURL(memberOrUser) {
   return null;
 }
 
-/* ===== Flavor & builders (mirrors battleRumble) ===== */
 const CAMERA = ['Camera pans low past bootlaces.','Drone swoops between the fighters.','Spotlights skate across the floor.','Jumbotron flickers to life.','Ref’s hand hovers… and drops.'];
 const ATMOS  = ['Crowd hushes to a sharp inhale.','Bassline rattles the rails.','Cold wind threads the arena.','Mist rolls in from the corners.','Neon buzz rises, then stills.'];
 const GROUND = ['Dust kicks up around their feet.','Confetti shimmers in a slow fall.','Cables hum under the catwalk.','Sand grinds under heel turns.','Tiles thrum like a heartbeat.'];
@@ -169,30 +168,55 @@ function skirmishEmbed(style, title, linesJoined) {
     description: linesJoined
   };
 }
-function finalEmbed({ style, champion, runnerUp, placements, guildName }) {
-  const name = champion.displayName || champion.username || champion.user?.username || 'Winner';
-  const avatar = getAvatarURL(champion);
-  const fieldPlacements = placements
-    .map((m, i) => `${i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : '•'} ${m.displayName || m.user?.username || m.username}`)
-    .join('\n')
-    .slice(0, 1024);
+
+function nameOf(m) {
+  return m?.displayName || m?.user?.username || m?.username || '—';
+}
+
+function sanitizeAI(s) {
+  if (!s) return null;
+  let t = String(s);
+  // strip think tags or similar
+  t = t.replace(/<think>[\s\S]*?<\/think>/gi, '');
+  t = t.replace(/```[\s\S]*?```/g, '');
+  return t.trim();
+}
+
+function finalEmbed({ style, champion, runnerUp, third, guildName, cast }) {
+  const champName = nameOf(champion);
+  const runName   = nameOf(runnerUp);
+  const thirdName = third ? nameOf(third) : null;
+  const avatar    = getAvatarURL(champion);
+
+  const placementsLines = [
+    `🥇 ${champName}`,
+    `🥈 ${runName}`,
+    thirdName ? `🥉 ${thirdName}` : null
+  ].filter(Boolean).join('\n');
 
   const e = {
     ...baseEmbed(style, { withLogo: false, allowThumb: false }), // no fixed logo on final
-    title: `🏆 Royale Champion — ${name}`,
-    description: `Runner-up: **${runnerUp.displayName || runnerUp.user?.username || runnerUp.username}**`,
+    title: `🏆 Royale Champion — ${champName}`,
+    description: `Runner-up: **${runName}**`,
     thumbnail: avatar ? { url: avatar } : undefined,
     fields: [
-      { name: 'Placements', value: fieldPlacements || '—' }
+      { name: 'Top 3', value: placementsLines || '—' }
     ],
     footer: { text: `${guildName} • Battle Royale` }
   };
+
+  const cleanCast = sanitizeAI(cast);
+  if (cleanCast) e.fields.push({ name: '🎙️ Commentary', value: cleanCast.slice(0, 1024) });
+
   return e;
 }
 
 /* ===== Round sequence (like battleRumble, but skirmish compact) ===== */
 function buildSkirmishSequence(A, B, style) {
   const seq = [];
+  if (Math.random() < TAUNTS) seq.push({ type: 'taunt', content: buildTaunt(style, A, B) }); // NOTE: small typo fix: TAUNTS isn't prob here; keep original logic:
+  // Keeping original logic (don’t mess): use TAUNT_CHANCE
+  seq.length = 0;
   if (Math.random() < TAUNT_CHANCE) seq.push({ type: 'taunt', content: buildTaunt(style, A, B) });
   seq.push({ type: 'action', content: buildAction(A, B, style) });
 
@@ -229,75 +253,73 @@ async function runRoyaleRumble({
   guildName = 'this server'
 }) {
   const alive = fighters.slice();
-  const placements = [];         // filled in reverse (when eliminated), we’ll reverse at the end
-  const stats = { skirmishes: 0 };
-
+  const placements = [];         // losers unshifted -> [runner-up, third, ...]
   // INTRO (once)
   let target = channel;
   try {
     if (baseMessage) {
-      await baseMessage.edit({ embeds: [{ ...baseEmbed(style, { withLogo: true, allowThumb: true }), title: '🎲 Battle Royale — Skirmishes Incoming', description: 'Fighters spread out across the arena…' }] }).catch(() => {});
+      await baseMessage.edit({
+        embeds: [{
+          ...baseEmbed(style, { withLogo: true, allowThumb: true }),
+          title: '🎲 Battle Royale — Skirmishes Incoming',
+          description: 'Fighters spread out across the arena…'
+        }]
+      }).catch(() => {});
       if (USE_THREAD && baseMessage.startThread) {
-        const thread = await baseMessage.startThread({
-          name: THREAD_NAME,
-          autoArchiveDuration: 60
-        });
+        const thread = await baseMessage.startThread({ name: THREAD_NAME, autoArchiveDuration: 60 });
         target = thread;
       }
     } else {
-      const intro = await channel.send({ embeds: [{ ...baseEmbed(style, { withLogo: true, allowThumb: true }), title: '🎲 Battle Royale — Skirmishes Incoming', description: 'Fighters spread out across the arena…' }] });
+      const intro = await channel.send({
+        embeds: [{
+          ...baseEmbed(style, { withLogo: true, allowThumb: true }),
+          title: '🎲 Battle Royale — Skirmishes Incoming',
+          description: 'Fighters spread out across the arena…'
+        }]
+      });
       if (USE_THREAD && intro?.startThread) {
-        const thread = await intro.startThread({
-          name: THREAD_NAME,
-          autoArchiveDuration: 60
-        });
+        const thread = await intro.startThread({ name: THREAD_NAME, autoArchiveDuration: 60 });
         target = thread;
       }
     }
-  } catch { /* ignore */ }
+  } catch {}
 
   await sleep(jitter(INTRO_DELAY));
 
   // LOOP skirmishes until one remains
+  let sk = 0;
   while (alive.length > 1) {
-    stats.skirmishes++;
-    // pick two distinct
+    sk++;
     const iA = Math.floor(Math.random() * alive.length);
     let iB = Math.floor(Math.random() * alive.length);
     while (iB === iA) iB = Math.floor(Math.random() * alive.length);
 
     const A = alive[iA];
     const B = alive[iB];
-    const Aname = A.displayName || A.user?.username || 'Fighter A';
-    const Bname = B.displayName || B.user?.username || 'Fighter B';
+    const Aname = nameOf(A);
+    const Bname = nameOf(B);
 
-    // simulate a quick match (best-of per env, default 1)
     const seed = `${channel.id}:${A.id}:${B.id}:${Date.now() >> 11}`;
     const sim   = simulateBattle({ challenger: A, opponent: B, bestOf: ROYALE_BESTOF, style, seed });
 
-    // Build only ONE embed per skirmish: gradual reveal, then append elimination line (no separate winner embed)
-    const title = `Skirmish ${stats.skirmishes} — ${Aname} vs ${Bname}`;
+    const title = `Skirmish ${sk} — ${Aname} vs ${Bname}`;
     const lines = [scenicLine()];
-    const seq   = buildSkirmishSequence(sim.rounds[0].winner, sim.rounds[0].loser, style); // sequence uses winner/loser labeling just for verbs flavor
+    const seq   = buildSkirmishSequence(sim.rounds[0].winner, sim.rounds[0].loser, style);
 
     let msg = await target.send({ embeds: [skirmishEmbed(style, title, lines.join('\n'))] });
     await sleep(jitter(BEAT_DELAY));
 
-    // reveal steps
     for (const s of seq) {
       lines.push(s.content);
       await msg.edit({ embeds: [skirmishEmbed(style, title, lines.join('\n'))] });
-      await sleep(jitter( Math.max(300, BEAT_DELAY - 300) ));
+      await sleep(jitter(Math.max(300, BEAT_DELAY - 300)));
     }
 
-    // Determine loser from simulation and append elimination inline (still same embed)
     const loser  = (sim.a > sim.b) ? B : A;
-    const winner = (loser === A) ? B : A;
-
-    lines.push(`\n💀 **${loser.displayName || loser.user?.username} is eliminated!**`);
+    lines.push(`\n💀 **${nameOf(loser)} is eliminated!**`);
     await msg.edit({ embeds: [skirmishEmbed(style, title, lines.join('\n'))] });
 
-    // move loser to placements (front) and remove from alive
+    // remove loser, store for placements
     placements.unshift(loser);
     const idx = alive.findIndex(m => m.id === loser.id);
     if (idx >= 0) alive.splice(idx, 1);
@@ -305,38 +327,36 @@ async function runRoyaleRumble({
     if (alive.length > 1) await sleep(jitter(ROUND_DELAY));
   }
 
-  // Finale: champion is last alive, runner-up is first in placements
+  // champion, runner-up, third
   const champion = alive[0];
   const runnerUp = placements[0];
-  const finalOrder = [champion, runnerUp, ...placements.slice(1)];
+  const third    = placements[1] || null;
 
-  // Optional AI commentary — safe wrapped
+  // Optional AI commentary — SAFE: sanitize + embed field
   let cast = null;
   try {
     cast = await aiCommentary({
-      winner: champion.displayName || champion.user?.username,
-      loser:  runnerUp.displayName || runnerUp.user?.username,
-      rounds: [], // royale is many skirmishes; we keep this empty to avoid long generations
+      winner: nameOf(champion),
+      loser:  nameOf(runnerUp),
+      rounds: [],
       style,
       guildName
     });
   } catch {}
 
-  // Final embed: single winner card
-  await target.send({ embeds: [finalEmbed({
-    style,
-    champion,
-    runnerUp,
-    placements: finalOrder,
-    guildName
-  })] });
+  // Final embed WITHIN embed (no extra message), Top 3 only
+  await target.send({
+    embeds: [finalEmbed({
+      style,
+      champion,
+      runnerUp,
+      third,
+      guildName,
+      cast
+    })]
+  });
 
-  // Optional: short commentator line
-  if (cast) {
-    await target.send({ content: `🎙️ ${cast}` }).catch(() => {});
-  }
-
-  return { champion, runnerUp, placements: finalOrder, stats };
+  return { champion, runnerUp, third };
 }
 
 module.exports = { runRoyaleRumble };
