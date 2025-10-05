@@ -20,7 +20,7 @@ const ANNOUNCER    = (process.env.BATTLE_ANNOUNCER || 'normal').trim().toLowerCa
 // - BATTLE_THUMB_URL: fixed logo image (used for thumbnails or author icon)
 // - BATTLE_LOGO_MODE: 'author' (small icon, top-left, default) | 'thumbnail' (top-right)
 const BATTLE_THUMB_URL = (process.env.BATTLE_THUMB_URL || 'https://iili.io/KXCT1CN.png').trim();
-const BATTLE_LOGO_MODE = (process.env.BATTLE_LOGO_MODE || 'thumnail').trim().toLowerCase();
+const BATTLE_LOGO_MODE = (process.env.BATTLE_LOGO_MODE || 'thumbnail').trim().toLowerCase();
 
 const TAUNT_CHANCE   = clamp01(Number(process.env.BATTLE_TAUNT_CHANCE   || 0.65));
 const COUNTER_CHANCE = clamp01(Number(process.env.BATTLE_COUNTER_CHANCE || 0.30));
