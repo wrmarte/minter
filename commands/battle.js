@@ -16,7 +16,7 @@ const MAX_FIGHTERS = 2;
 // ---------- helpers ----------
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-function progressBar(elapsed, total, width = 20) {
+function progressBar(elapsed, total, width = 22) {
   const ratio = Math.max(0, Math.min(1, elapsed / total));
   const filled = Math.round(ratio * width);
   const empty = width - filled;
@@ -35,7 +35,7 @@ function countdownEmbed({ title, subtitle, seconds, elapsed, color = 0x9b59b6 })
   const remain = Math.max(0, seconds - elapsed);
   return new EmbedBuilder()
     .setColor(color)
-    .setAuthor({ name: 'Rumble Royale' })
+    .setAuthor({ name: '1v1 Battle' }) // <- distinct from /rumble
     .setTitle(title)
     .setDescription([
       subtitle,
@@ -47,10 +47,10 @@ function countdownEmbed({ title, subtitle, seconds, elapsed, color = 0x9b59b6 })
 
 async function runTwoStageCountdown({
   message,          // Message to edit
-  title,            // e.g. "⚔️ Battle Incoming: A vs B"
+  title,            // e.g. "⚔️ 1v1 Battle: A vs B"
   style,            // for color
-  stage1Seconds,    // 30 or 60
-  stage2Seconds,    // 30 or 60
+  stage1Seconds,    // default 30
+  stage2Seconds,    // default 30
 }) {
   const color = colorFor(style);
 
@@ -79,12 +79,6 @@ async function runTwoStageCountdown({
     await message.edit({ embeds: [embed] }).catch(() => {});
     if (t < stage2Seconds) await sleep(1000);
   }
-}
-
-function parseTimerChoice(choice) {
-  // '30s' or '60s'
-  if (choice === '60s') return 60;
-  return 30; // default
 }
 
 module.exports = {
@@ -118,22 +112,6 @@ module.exports = {
           { name: 'degen', value: 'degen' },
         )
     )
-    .addStringOption(opt =>
-      opt.setName('incoming_timer')
-        .setDescription('Countdown before intro (progress bar)')
-        .addChoices(
-          { name: '30 seconds', value: '30s' },
-          { name: '1 minute',   value: '60s' },
-        )
-    )
-    .addStringOption(opt =>
-      opt.setName('arena_timer')
-        .setDescription('Delay (progress bar) before arena reveal')
-        .addChoices(
-          { name: '30 seconds', value: '30s' },
-          { name: '1 minute',   value: '60s' },
-        )
-    )
     .setDMPermission(false),
 
   async execute(interaction) {
@@ -149,10 +127,9 @@ module.exports = {
     const bestOf     = interaction.options.getInteger('bestof') || 3;
     const style      = (interaction.options.getString('style') || process.env.BATTLE_STYLE_DEFAULT || 'motivator').toLowerCase();
 
-    const incomingTimerSel = interaction.options.getString('incoming_timer') || '30s';
-    const arenaTimerSel    = interaction.options.getString('arena_timer')    || '30s';
-    const incomingSeconds  = parseTimerChoice(incomingTimerSel);
-    const arenaSeconds     = parseTimerChoice(arenaTimerSel);
+    // Auto defaults for both countdowns (30s each)
+    const incomingSeconds = 30;
+    const arenaSeconds    = 30;
 
     // ===================== PATH A: EPHEMERAL LOBBY (owner adds 2) =====================
     if (manualPick) {
@@ -178,19 +155,20 @@ module.exports = {
         new ButtonBuilder().setCustomId('battle_lobby_cancel').setLabel('Cancel').setStyle(ButtonStyle.Danger).setDisabled(disabled),
       );
 
+      // Send EPHEMERAL lobby and capture the ephemeral message
       await interaction.reply({
         content: render(),
         components: [selectRow(), buttonsRow()],
         ephemeral: true
       });
-      const lobbyMsg = await interaction.fetchReply();
+      const lobbyMsg = await interaction.fetchReply(); // ephemeral Message object
 
       const lobbyTimeoutMs = 5 * 60 * 1000;
       const lobbyEndsAt = Date.now() + lobbyTimeoutMs;
 
       const filter = (i) =>
         i.user.id === interaction.user.id &&
-        (i.message.id === lobbyMsg.id) &&
+        (i.message.id === lobbyMsg.id) && // ensure it’s this lobby message
         (i.customId === 'battle_lobby_select' ||
          i.customId === 'battle_lobby_start'  ||
          i.customId === 'battle_lobby_clear'  ||
@@ -206,6 +184,7 @@ module.exports = {
         let comp;
         try {
           const remaining = Math.max(1000, lobbyEndsAt - Date.now());
+          // IMPORTANT: await on the MESSAGE, not the Interaction
           comp = await lobbyMsg.awaitMessageComponent({ filter, time: remaining });
         } catch {
           await editLobby('⏱️ Lobby timed out.', true);
@@ -213,6 +192,7 @@ module.exports = {
         }
 
         try {
+          // ACK ASAP to avoid "Interaction failed"
           await comp.deferUpdate();
 
           if (comp.customId === 'battle_lobby_select' && comp.componentType === ComponentType.UserSelect) {
@@ -253,7 +233,7 @@ module.exports = {
               continue;
             }
 
-            // Pick exactly two distinct fighters
+            // Choose exactly two distinct fighters
             const ids = [...picked];
             const aIdx = Math.floor(Math.random() * ids.length);
             let bIdx = Math.floor(Math.random() * ids.length);
@@ -275,11 +255,11 @@ module.exports = {
             }
 
             // Seed message (public), then two-stage countdown on it
-            const title = `⚔️ Battle Incoming: ${a.displayName || a.user?.username} vs ${b.displayName || b.user?.username}`;
+            const title = `⚔️ 1v1 Battle: ${a.displayName || a.user?.username} vs ${b.displayName || b.user?.username}`;
             const seed = await interaction.followUp({
               embeds: [new EmbedBuilder()
                 .setColor(colorFor(style))
-                .setAuthor({ name: 'Rumble Royale' })
+                .setAuthor({ name: '1v1 Battle' })
                 .setTitle(title)
                 .setDescription('Preparing…')],
               fetchReply: true
@@ -311,6 +291,7 @@ module.exports = {
         }
       }
 
+      // Safety timeout end
       await interaction.editReply({ content: '⏱️ Lobby timed out.', components: [buttonsRow(true)] });
       return;
     }
@@ -335,11 +316,11 @@ module.exports = {
     }
 
     // Seed message + two-stage countdown
-    const title = `⚔️ Battle Incoming: ${me.displayName || me.user?.username} vs ${them.displayName || them.user?.username}`;
+    const title = `⚔️ 1v1 Battle: ${me.displayName || me.user?.username} vs ${them.displayName || them.user?.username}`;
     const seed = await interaction.reply({
       embeds: [new EmbedBuilder()
         .setColor(colorFor(style))
-        .setAuthor({ name: 'Rumble Royale' })
+        .setAuthor({ name: '1v1 Battle' })
         .setTitle(title)
         .setDescription('Preparing…')],
       fetchReply: true
@@ -365,4 +346,5 @@ module.exports = {
     });
   },
 };
+
 
