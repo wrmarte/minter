@@ -45,16 +45,72 @@ function incomingEmbed({ title, seconds, elapsed, color = 0x9b59b6 }) {
     ].join('\n'));
 }
 
-function arenaRevealEmbed({ title, lines, color = 0x9b59b6 }) {
+function arenaRevealEmbed({ arena, color = 0x9b59b6, prepsLines = [], countdown = null }) {
+  const lines = [
+    `📣 **Welcome to ${arena.name}**`,
+    `_${arena.intro}_`,
+    '',
+    ...(prepsLines.length ? prepsLines : [])
+  ];
+
+  if (countdown != null) {
+    lines.push('', `**Be ready in ${countdown}…**`);
+    if (countdown === 'Let’s go!') {
+      lines[lines.length - 1] = '**Let’s go!**';
+    }
+  }
+
   return new EmbedBuilder()
     .setColor(color)
     .setAuthor({ name: '1v1 Battle' })
-    .setTitle(`🏟️ Arena Reveal`)
+    .setTitle('🏟️ Arena Reveal')
     .setDescription(lines.join('\n'));
 }
 
-// Toggle this to show static 30s hold instead of line-by-line reveal
-const ARENA_REVEAL_LINE_BY_LINE = true;
+// Local arena list (kept in sync with services flavor; good enough for pre-reveal)
+const ENVIRONMENTS = [
+  { name: 'Neon Rooftop', intro: 'City lights hum below; the wind carries hype.' },
+  { name: 'Underground Dojo', intro: 'Paper walls, sand floor, respectful echoes.' },
+  { name: 'Pixel Coliseum', intro: 'Crowd rendered at 60fps — their chant buffers in.' },
+  { name: 'Synthwave Boardwalk', intro: 'Waves slap the pier; a neon crane game watches.' },
+  { name: 'Server Room Arena', intro: 'Fans whirr; LEDs blink like judging eyes.' },
+  { name: 'Data Center Catwalk', intro: 'Cables like vines, AC like a storm.' },
+  { name: 'Deserted Arcade', intro: 'CRT glow, coin chimes, boss music faint.' },
+  { name: 'Gravity Gym', intro: 'Chalk in the air; plates clink like bells.' },
+  { name: 'Skybridge Circuit', intro: 'Holograms flicker, drones spectate.' },
+  { name: 'Metro Tunnels', intro: 'Rails sing; echoes cheer.' },
+  { name: 'Glitch Forest', intro: 'Leaves clip; birds lag; mythic latency.' },
+  { name: 'Crystal Cavern', intro: 'Light refracts; steps ring clear.' },
+  { name: 'Futurist Museum', intro: 'Art stares back; history watches.' },
+  { name: 'Hacker Loft', intro: 'Neon code rains across the wall.' },
+  { name: 'Hyperdome', intro: 'Announcer checks mic — reverb perfect.' },
+  { name: 'Aurora Ice Rink', intro: 'Frost breath in neon; blades sing on ice.' },
+  { name: 'Volcano Rim', intro: 'Heat shimmer; sparks float like stars.' },
+  { name: 'Mecha Hangar', intro: 'Hydraulics hiss; warning lights blink.' },
+  { name: 'Cyber Bazaar', intro: 'Vendors cheer; drones barter overhead.' },
+  { name: 'Zen Garden Deck', intro: 'Raked sand; koi ripple to distant drums.' },
+  { name: 'Sky Arena 404', intro: 'Platform boots up; clouds scroll beneath.' },
+  { name: 'Solar Array', intro: 'Panels gleam; sun drums a steady beat.' },
+  { name: 'Noir Backlot', intro: 'Rain on set; a spotlight cuts the fog.' },
+  { name: 'Junkyard Circuit', intro: 'Metal chorus; sparks and grit fly.' },
+  { name: 'Holo Theater', intro: 'Curtains of light; crowd phases in.' },
+  { name: 'Subway Concourse', intro: 'Announcements echo; sneakers squeak.' },
+  { name: 'Starlit Rooftop', intro: 'Constellations watch like judges.' },
+  { name: 'Quantum Track', intro: 'Footsteps desync; time smears and snaps.' },
+  { name: 'Temple Steps', intro: 'Incense curls; drums set the cadence.' },
+  { name: 'Cloud Pier', intro: 'Sea of mist; gulls glitch in and out.' },
+];
+
+const PREP_LINES = [
+  'Corners set. Tape checked.',
+  'Mics live; cam ops confirm focus.',
+  'Ref briefs the rules — clean fight.',
+  'Gloves laced; wrist tape snug.',
+  'Warmups fade; the canvas hums.',
+  'Crowd builds a low thunder.',
+  'Spotlights converge to center.',
+  'Tunnel shadow stirs — here we go.',
+];
 
 async function runIncomingCountdown({ message, title, style, seconds = 30 }) {
   const color = colorFor(style);
@@ -65,39 +121,28 @@ async function runIncomingCountdown({ message, title, style, seconds = 30 }) {
   }
 }
 
-async function runArenaRevealTease({ message, style, seconds = 30 }) {
+async function runArenaRevealSequence({ message, style, arena, prepSeconds = 20 }) {
   const color = colorFor(style);
-  const pieces = [
-    'Gates opening…',
-    'Tickets scan in; crowd pours through.',
-    'Cameras roll; lights warm to gold.',
-    'House track builds — bassline steady.',
-    'Corners iced. Gloves checked.',
-    'Tunnel hush… and a single spotlight.'
-  ];
 
-  if (!ARENA_REVEAL_LINE_BY_LINE) {
-    // Static 30s hold
-    const embed = arenaRevealEmbed({ title: 'Arena Reveal', lines: ['Preparing stage…'], color });
-    await message.edit({ embeds: [embed] }).catch(() => {});
-    await sleep(seconds * 1000);
-    return;
-  }
+  // 1) Show reveal immediately (name + intro)
+  await message.edit({ embeds: [arenaRevealEmbed({ arena, color, prepsLines: [] })] }).catch(() => {});
 
-  // Line-by-line reveal spread across 30 seconds
-  const stepTime = Math.max(2, Math.floor(seconds / pieces.length)); // ~5s each for 6 lines
+  // 2) 20s preps line-by-line
+  const steps = Math.max(1, Math.min(PREP_LINES.length, Math.floor(prepSeconds / 2))); // ~2s per line
+  const sel = PREP_LINES.slice(0, steps);
   const acc = [];
-  for (let i = 0; i < pieces.length; i++) {
-    acc.push(`• ${pieces[i]}`);
-    const embed = arenaRevealEmbed({ title: 'Arena Reveal', lines: acc, color });
-    await message.edit({ embeds: [embed] }).catch(() => {});
-    if (i < pieces.length - 1) await sleep(stepTime * 1000);
+  for (let i = 0; i < sel.length; i++) {
+    acc.push(`• ${sel[i]}`);
+    await sleep(2000);
+    await message.edit({ embeds: [arenaRevealEmbed({ arena, color, prepsLines: acc })] }).catch(() => {});
   }
 
-  // If we have leftover time due to rounding, wait it out
-  const used = stepTime * (pieces.length - 1);
-  const remaining = Math.max(0, (seconds - used) * 1000);
-  if (remaining) await sleep(remaining);
+  // 3) Final countdown 5..1..Go
+  const countdownVals = ['5', '4', '3', '2', '1', 'Let’s go!'];
+  for (const c of countdownVals) {
+    await sleep(1000);
+    await message.edit({ embeds: [arenaRevealEmbed({ arena, color, prepsLines: acc, countdown: c })] }).catch(() => {});
+  }
 }
 
 module.exports = {
@@ -146,13 +191,12 @@ module.exports = {
     const bestOf     = interaction.options.getInteger('bestof') || 3;
     const style      = (interaction.options.getString('style') || process.env.BATTLE_STYLE_DEFAULT || 'motivator').toLowerCase();
 
-    // Fixed pacing you asked for:
-    const incomingSeconds = 30;   // progress bar
-    const arenaRevealSecs = 30;   // line-by-line arena tease
+    const incomingSeconds = 30;
+    const prepSeconds     = 20;
 
     // ===================== PATH A: EPHEMERAL LOBBY (owner adds 2) =====================
     if (manualPick) {
-      const picked = new Set(); // user IDs (excluding owner)
+      const picked = new Set();
 
       const render = () => {
         if (picked.size === 0) return 'Lobby: *(no fighters yet)*\n> Use the picker below to add fighters (2).';
@@ -239,7 +283,6 @@ module.exports = {
               continue;
             }
 
-            // Pick two distinct for 1v1
             const ids = [...picked];
             const aIdx = Math.floor(Math.random() * ids.length);
             let bIdx = Math.floor(Math.random() * ids.length);
@@ -260,7 +303,6 @@ module.exports = {
               continue;
             }
 
-            // Pre-show: 30s incoming progress, then 30s arena reveal lines, then run engine
             const title = `⚔️ 1v1 Battle: ${a.displayName || a.user?.username} vs ${b.displayName || b.user?.username}`;
             const seed = await interaction.followUp({
               embeds: [new EmbedBuilder()
@@ -271,13 +313,16 @@ module.exports = {
               fetchReply: true
             });
 
-            // 30s incoming progress bar
+            // 30s incoming
             await runIncomingCountdown({ message: seed, title, style, seconds: incomingSeconds });
 
-            // Arena reveal tease (30s, line-by-line)
-            await runArenaRevealTease({ message: seed, style, seconds: arenaRevealSecs });
+            // Pick arena here for the pre-reveal; we’ll pass it to the engine so it matches
+            const arena = ENVIRONMENTS[Math.floor(Math.random() * ENVIRONMENTS.length)];
 
-            // Start the cinematic battle
+            // Show Arena + 20s prep + final countdown
+            await runArenaRevealSequence({ message: seed, style, arena, prepSeconds: prepSeconds });
+
+            // Start the cinematic battle (skip engine intro/arena; reuse our arena)
             await runRumbleDisplay({
               channel: interaction.channel,
               baseMessage: seed,
@@ -285,7 +330,10 @@ module.exports = {
               opponent: b,
               bestOf,
               style,
-              guildName: interaction.guild.name
+              guildName: interaction.guild.name,
+              // NEW wiring:
+              skipIntro: true,
+              envOverride: arena
             });
             return;
           }
@@ -328,13 +376,16 @@ module.exports = {
       fetchReply: true
     });
 
-    // 30s incoming progress bar
+    // 30s incoming
     await runIncomingCountdown({ message: seed, title, style, seconds: incomingSeconds });
 
-    // Arena reveal tease (30s, line-by-line)
-    await runArenaRevealTease({ message: seed, style, seconds: arenaRevealSecs });
+    // Pick arena here for the pre-reveal; we’ll pass it to the engine so it matches
+    const arena = ENVIRONMENTS[Math.floor(Math.random() * ENVIRONMENTS.length)];
 
-    // Start the cinematic battle
+    // Show Arena + 20s prep + final countdown
+    await runArenaRevealSequence({ message: seed, style, arena, prepSeconds: prepSeconds });
+
+    // Start the cinematic battle (skip engine intro/arena; reuse our arena)
     await runRumbleDisplay({
       channel: interaction.channel,
       baseMessage: seed,
@@ -342,10 +393,10 @@ module.exports = {
       opponent: them,
       bestOf,
       style,
-      guildName: guild.name
+      guildName: guild.name,
+      // NEW wiring:
+      skipIntro: true,
+      envOverride: arena
     });
   },
 };
-
-
-
