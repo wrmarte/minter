@@ -45,13 +45,16 @@ function incomingEmbed({ title, seconds, elapsed, color = 0x9b59b6 }) {
     ].join('\n'));
 }
 
-function arenaHoldEmbed({ title, color = 0x9b59b6, seconds = 30 }) {
+function arenaRevealEmbed({ title, lines, color = 0x9b59b6 }) {
   return new EmbedBuilder()
     .setColor(color)
     .setAuthor({ name: '1v1 Battle' })
-    .setTitle(title)
-    .setDescription(`🏟️ Arena reveal arming…\n\`Starting in ${seconds}s…\``);
+    .setTitle(`🏟️ Arena Reveal`)
+    .setDescription(lines.join('\n'));
 }
+
+// Toggle this to show static 30s hold instead of line-by-line reveal
+const ARENA_REVEAL_LINE_BY_LINE = true;
 
 async function runIncomingCountdown({ message, title, style, seconds = 30 }) {
   const color = colorFor(style);
@@ -60,6 +63,41 @@ async function runIncomingCountdown({ message, title, style, seconds = 30 }) {
     await message.edit({ embeds: [embed] }).catch(() => {});
     if (t < seconds) await sleep(1000);
   }
+}
+
+async function runArenaRevealTease({ message, style, seconds = 30 }) {
+  const color = colorFor(style);
+  const pieces = [
+    'Gates opening…',
+    'Tickets scan in; crowd pours through.',
+    'Cameras roll; lights warm to gold.',
+    'House track builds — bassline steady.',
+    'Corners iced. Gloves checked.',
+    'Tunnel hush… and a single spotlight.'
+  ];
+
+  if (!ARENA_REVEAL_LINE_BY_LINE) {
+    // Static 30s hold
+    const embed = arenaRevealEmbed({ title: 'Arena Reveal', lines: ['Preparing stage…'], color });
+    await message.edit({ embeds: [embed] }).catch(() => {});
+    await sleep(seconds * 1000);
+    return;
+  }
+
+  // Line-by-line reveal spread across 30 seconds
+  const stepTime = Math.max(2, Math.floor(seconds / pieces.length)); // ~5s each for 6 lines
+  const acc = [];
+  for (let i = 0; i < pieces.length; i++) {
+    acc.push(`• ${pieces[i]}`);
+    const embed = arenaRevealEmbed({ title: 'Arena Reveal', lines: acc, color });
+    await message.edit({ embeds: [embed] }).catch(() => {});
+    if (i < pieces.length - 1) await sleep(stepTime * 1000);
+  }
+
+  // If we have leftover time due to rounding, wait it out
+  const used = stepTime * (pieces.length - 1);
+  const remaining = Math.max(0, (seconds - used) * 1000);
+  if (remaining) await sleep(remaining);
 }
 
 module.exports = {
@@ -108,9 +146,9 @@ module.exports = {
     const bestOf     = interaction.options.getInteger('bestof') || 3;
     const style      = (interaction.options.getString('style') || process.env.BATTLE_STYLE_DEFAULT || 'motivator').toLowerCase();
 
-    // Fixed pacing: 30s incoming progress, 30s arena hold
-    const incomingSeconds = 30;
-    const arenaHoldSeconds = 30;
+    // Fixed pacing you asked for:
+    const incomingSeconds = 30;   // progress bar
+    const arenaRevealSecs = 30;   // line-by-line arena tease
 
     // ===================== PATH A: EPHEMERAL LOBBY (owner adds 2) =====================
     if (manualPick) {
@@ -201,6 +239,7 @@ module.exports = {
               continue;
             }
 
+            // Pick two distinct for 1v1
             const ids = [...picked];
             const aIdx = Math.floor(Math.random() * ids.length);
             let bIdx = Math.floor(Math.random() * ids.length);
@@ -221,7 +260,7 @@ module.exports = {
               continue;
             }
 
-            // Seed message -> 30s incoming progress -> arena hold 30s -> engine
+            // Pre-show: 30s incoming progress, then 30s arena reveal lines, then run engine
             const title = `⚔️ 1v1 Battle: ${a.displayName || a.user?.username} vs ${b.displayName || b.user?.username}`;
             const seed = await interaction.followUp({
               embeds: [new EmbedBuilder()
@@ -232,10 +271,13 @@ module.exports = {
               fetchReply: true
             });
 
+            // 30s incoming progress bar
             await runIncomingCountdown({ message: seed, title, style, seconds: incomingSeconds });
-            await seed.edit({ embeds: [arenaHoldEmbed({ title, color: colorFor(style), seconds: arenaHoldSeconds })] }).catch(() => {});
-            await sleep(arenaHoldSeconds * 1000);
 
+            // Arena reveal tease (30s, line-by-line)
+            await runArenaRevealTease({ message: seed, style, seconds: arenaRevealSecs });
+
+            // Start the cinematic battle
             await runRumbleDisplay({
               channel: interaction.channel,
               baseMessage: seed,
@@ -286,10 +328,13 @@ module.exports = {
       fetchReply: true
     });
 
+    // 30s incoming progress bar
     await runIncomingCountdown({ message: seed, title, style, seconds: incomingSeconds });
-    await seed.edit({ embeds: [arenaHoldEmbed({ title, color: colorFor(style), seconds: arenaHoldSeconds })] }).catch(() => {});
-    await sleep(arenaHoldSeconds * 1000);
 
+    // Arena reveal tease (30s, line-by-line)
+    await runArenaRevealTease({ message: seed, style, seconds: arenaRevealSecs });
+
+    // Start the cinematic battle
     await runRumbleDisplay({
       channel: interaction.channel,
       baseMessage: seed,
