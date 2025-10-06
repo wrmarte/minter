@@ -6,11 +6,86 @@ const {
   ButtonBuilder,
   ButtonStyle,
   ComponentType,
+  EmbedBuilder,
 } = require('discord.js');
 
 const { runRumbleDisplay } = require('../services/battleRumble');
 
 const MAX_FIGHTERS = 2;
+
+// ---------- helpers ----------
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+function progressBar(elapsed, total, width = 20) {
+  const ratio = Math.max(0, Math.min(1, elapsed / total));
+  const filled = Math.round(ratio * width);
+  const empty = width - filled;
+  return '█'.repeat(filled) + '░'.repeat(empty);
+}
+
+function colorFor(style) {
+  return style === 'villain' ? 0x8b0000
+       : style === 'degen'   ? 0xe67e22
+       : style === 'clean'   ? 0x3498db
+       : 0x9b59b6; // motivator/default
+}
+
+function countdownEmbed({ title, subtitle, seconds, elapsed, color = 0x9b59b6 }) {
+  const bar = progressBar(elapsed, seconds, 22);
+  const remain = Math.max(0, seconds - elapsed);
+  return new EmbedBuilder()
+    .setColor(color)
+    .setAuthor({ name: 'Rumble Royale' })
+    .setTitle(title)
+    .setDescription([
+      subtitle,
+      '```',
+      `[${bar}]  ${remain}s`,
+      '```'
+    ].join('\n'));
+}
+
+async function runTwoStageCountdown({
+  message,          // Message to edit
+  title,            // e.g. "⚔️ Battle Incoming: A vs B"
+  style,            // for color
+  stage1Seconds,    // 30 or 60
+  stage2Seconds,    // 30 or 60
+}) {
+  const color = colorFor(style);
+
+  // Stage 1: "Battle incoming"
+  for (let t = 0; t <= stage1Seconds; t++) {
+    const embed = countdownEmbed({
+      title,
+      subtitle: 'Spectators gathering…',
+      seconds: stage1Seconds,
+      elapsed: t,
+      color
+    });
+    await message.edit({ embeds: [embed] }).catch(() => {});
+    if (t < stage1Seconds) await sleep(1000);
+  }
+
+  // Stage 2: "Arena reveal"
+  for (let t = 0; t <= stage2Seconds; t++) {
+    const embed = countdownEmbed({
+      title,
+      subtitle: 'Arena reveal arming…',
+      seconds: stage2Seconds,
+      elapsed: t,
+      color
+    });
+    await message.edit({ embeds: [embed] }).catch(() => {});
+    if (t < stage2Seconds) await sleep(1000);
+  }
+}
+
+function parseTimerChoice(choice) {
+  // '30s' or '60s'
+  if (choice === '60s') return 60;
+  return 30; // default
+}
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -43,6 +118,22 @@ module.exports = {
           { name: 'degen', value: 'degen' },
         )
     )
+    .addStringOption(opt =>
+      opt.setName('incoming_timer')
+        .setDescription('Countdown before intro (progress bar)')
+        .addChoices(
+          { name: '30 seconds', value: '30s' },
+          { name: '1 minute',   value: '60s' },
+        )
+    )
+    .addStringOption(opt =>
+      opt.setName('arena_timer')
+        .setDescription('Delay (progress bar) before arena reveal')
+        .addChoices(
+          { name: '30 seconds', value: '30s' },
+          { name: '1 minute',   value: '60s' },
+        )
+    )
     .setDMPermission(false),
 
   async execute(interaction) {
@@ -58,7 +149,12 @@ module.exports = {
     const bestOf     = interaction.options.getInteger('bestof') || 3;
     const style      = (interaction.options.getString('style') || process.env.BATTLE_STYLE_DEFAULT || 'motivator').toLowerCase();
 
-    // ===================== PATH A: EPHEMERAL LOBBY (owner adds 2+) =====================
+    const incomingTimerSel = interaction.options.getString('incoming_timer') || '30s';
+    const arenaTimerSel    = interaction.options.getString('arena_timer')    || '30s';
+    const incomingSeconds  = parseTimerChoice(incomingTimerSel);
+    const arenaSeconds     = parseTimerChoice(arenaTimerSel);
+
+    // ===================== PATH A: EPHEMERAL LOBBY (owner adds 2) =====================
     if (manualPick) {
       const picked = new Set(); // user IDs (excluding owner)
 
@@ -82,20 +178,19 @@ module.exports = {
         new ButtonBuilder().setCustomId('battle_lobby_cancel').setLabel('Cancel').setStyle(ButtonStyle.Danger).setDisabled(disabled),
       );
 
-      // Send EPHEMERAL lobby and capture the ephemeral message
       await interaction.reply({
         content: render(),
         components: [selectRow(), buttonsRow()],
         ephemeral: true
       });
-      const lobbyMsg = await interaction.fetchReply(); // ephemeral Message object
+      const lobbyMsg = await interaction.fetchReply();
 
       const lobbyTimeoutMs = 5 * 60 * 1000;
       const lobbyEndsAt = Date.now() + lobbyTimeoutMs;
 
       const filter = (i) =>
         i.user.id === interaction.user.id &&
-        (i.message.id === lobbyMsg.id) && // ensure it’s this lobby message
+        (i.message.id === lobbyMsg.id) &&
         (i.customId === 'battle_lobby_select' ||
          i.customId === 'battle_lobby_start'  ||
          i.customId === 'battle_lobby_clear'  ||
@@ -111,7 +206,6 @@ module.exports = {
         let comp;
         try {
           const remaining = Math.max(1000, lobbyEndsAt - Date.now());
-          // IMPORTANT: await on the MESSAGE, not the Interaction
           comp = await lobbyMsg.awaitMessageComponent({ filter, time: remaining });
         } catch {
           await editLobby('⏱️ Lobby timed out.', true);
@@ -119,7 +213,6 @@ module.exports = {
         }
 
         try {
-          // 1) ACK ASAP to avoid "Interaction failed"
           await comp.deferUpdate();
 
           if (comp.customId === 'battle_lobby_select' && comp.componentType === ComponentType.UserSelect) {
@@ -160,7 +253,7 @@ module.exports = {
               continue;
             }
 
-            // Choose any two distinct fighters from the set (engine is 1v1 today)
+            // Pick exactly two distinct fighters
             const ids = [...picked];
             const aIdx = Math.floor(Math.random() * ids.length);
             let bIdx = Math.floor(Math.random() * ids.length);
@@ -169,7 +262,6 @@ module.exports = {
             const idA = ids[aIdx], idB = ids[bIdx];
             const guild = interaction.guild;
 
-            // keep UI responsive (we already deferred)
             await interaction.editReply({ content: `Starting: <@${idA}> vs <@${idB}>`, components: [buttonsRow(true)] });
 
             const [a, b] = await Promise.all([
@@ -182,12 +274,26 @@ module.exports = {
               continue;
             }
 
-            // Public seed message, then start the engine
+            // Seed message (public), then two-stage countdown on it
+            const title = `⚔️ Battle Incoming: ${a.displayName || a.user?.username} vs ${b.displayName || b.user?.username}`;
             const seed = await interaction.followUp({
-              content: `⚔️ Battle incoming: **${a.displayName || a.user?.username}** vs **${b.displayName || b.user?.username}**…`,
+              embeds: [new EmbedBuilder()
+                .setColor(colorFor(style))
+                .setAuthor({ name: 'Rumble Royale' })
+                .setTitle(title)
+                .setDescription('Preparing…')],
               fetchReply: true
             });
 
+            await runTwoStageCountdown({
+              message: seed,
+              title,
+              style,
+              stage1Seconds: incomingSeconds,
+              stage2Seconds: arenaSeconds
+            });
+
+            // Hand off to engine
             await runRumbleDisplay({
               channel: interaction.channel,
               baseMessage: seed,
@@ -205,7 +311,6 @@ module.exports = {
         }
       }
 
-      // Safety timeout end
       await interaction.editReply({ content: '⏱️ Lobby timed out.', components: [buttonsRow(true)] });
       return;
     }
@@ -229,11 +334,26 @@ module.exports = {
       return interaction.reply({ content: '❌ Could not resolve both fighters as guild members.', ephemeral: true });
     }
 
+    // Seed message + two-stage countdown
+    const title = `⚔️ Battle Incoming: ${me.displayName || me.user?.username} vs ${them.displayName || them.user?.username}`;
     const seed = await interaction.reply({
-      content: `⚔️ Battle incoming: **${me.displayName || me.user?.username}** vs **${them.displayName || them.user?.username}**…`,
+      embeds: [new EmbedBuilder()
+        .setColor(colorFor(style))
+        .setAuthor({ name: 'Rumble Royale' })
+        .setTitle(title)
+        .setDescription('Preparing…')],
       fetchReply: true
     });
 
+    await runTwoStageCountdown({
+      message: seed,
+      title,
+      style,
+      stage1Seconds: incomingSeconds,
+      stage2Seconds: arenaSeconds
+    });
+
+    // Start the cinematic engine (it will overwrite the seed to intro, then reveal arena)
     await runRumbleDisplay({
       channel: interaction.channel,
       baseMessage: seed,
@@ -245,5 +365,4 @@ module.exports = {
     });
   },
 };
-
 
