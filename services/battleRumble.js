@@ -547,11 +547,14 @@ async function runRumbleDisplay({
   opponent,
   bestOf = 3,
   style = (process.env.BATTLE_STYLE_DEFAULT || 'motivator').trim().toLowerCase(),
-  guildName = 'this server'
+  guildName = 'this server',
+  // NEW: allow /battle pre-show to take over
+  skipIntro = false,
+  envOverride = null
 }) {
   bestOf = clampBestOf(bestOf);
 
-  const env = chooseEnvironment(channel, ENVIRONMENTS);
+  const env = envOverride || chooseEnvironment(channel, ENVIRONMENTS);
 
   // neutral seed (not tied to who clicked the command)
   const seed = `${channel.id}:${(challenger.id||challenger.user?.id||'A')}:${(opponent.id||opponent.user?.id||'B')}:${Date.now() >> 11}`;
@@ -565,12 +568,13 @@ async function runRumbleDisplay({
   const stats = { taunts: 0, counters: 0, crits: 0, stuns: 0, combos: 0, events: 0 };
   const roundsTimeline = [];
 
-  // PRELUDE — exactly ONE intro
+  // PRELUDE
   let target = channel;
   try {
-    if (baseMessage) {
-      await baseMessage.edit({ embeds: [introEmbed(style, title)] }).catch(() => {});
-      if (USE_THREAD && baseMessage.startThread) {
+    if (skipIntro) {
+      // We already showed pre-roll elsewhere (incoming + arena + prep).
+      // Optionally spin up a thread under the existing baseMessage.
+      if (baseMessage && USE_THREAD && baseMessage.startThread) {
         const thread = await baseMessage.startThread({
           name: `${THREAD_NAME}: ${Aname} vs ${Bname}`,
           autoArchiveDuration: 60
@@ -578,26 +582,34 @@ async function runRumbleDisplay({
         target = thread;
       }
     } else {
-      const incoming = await channel.send({ embeds: [introEmbed(style, title)] });
-      if (USE_THREAD && incoming?.startThread) {
-        const thread = await incoming.startThread({
-          name: `${THREAD_NAME}: ${Aname} vs ${Bname}`,
-          autoArchiveDuration: 60
-        });
-        target = thread;
+      // Original behavior: intro + arena inside this runner
+      if (baseMessage) {
+        await baseMessage.edit({ embeds: [introEmbed(style, title)] }).catch(() => {});
+        if (USE_THREAD && baseMessage.startThread) {
+          const thread = await baseMessage.startThread({
+            name: `${THREAD_NAME}: ${Aname} vs ${Bname}`,
+            autoArchiveDuration: 60
+          });
+          target = thread;
+        }
+      } else {
+        const incoming = await channel.send({ embeds: [introEmbed(style, title)] });
+        if (USE_THREAD && incoming?.startThread) {
+          const thread = await incoming.startThread({
+            name: `${THREAD_NAME}: ${Aname} vs ${Bname}`,
+            autoArchiveDuration: 60
+          });
+          target = thread;
+        }
       }
+
+      await sleep(jitter(INTRO_DELAY));
+      await target.send({ embeds: [arenaEmbed(style, env, sim.bestOf)] });
+      await sleep(jitter(INTRO_DELAY));
     }
-
-    await sleep(jitter(INTRO_DELAY));
-    await target.send({ embeds: [arenaEmbed(style, env, sim.bestOf)] });
-
   } catch {
     target = channel;
-    await sleep(jitter(INTRO_DELAY));
-    await target.send({ embeds: [arenaEmbed(style, env, sim.bestOf)] }).catch(() => {});
   }
-
-  await sleep(jitter(INTRO_DELAY));
 
   // ROUNDS (single embed per round) — progressively edited across beats
   for (let i = 0; i < sim.rounds.length; i++) {
@@ -689,7 +701,7 @@ async function runRumbleDisplay({
   if (championId) {
     await target.send({
       content: `🎉 Congratulations <@${championId}>!`,
-      allowed_mentions: { users: [championId] }
+      allowedMentions: { users: [championId] }
     });
   }
 
@@ -697,3 +709,4 @@ async function runRumbleDisplay({
 }
 
 module.exports = { runRumbleDisplay };
+
