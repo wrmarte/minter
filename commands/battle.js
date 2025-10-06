@@ -30,54 +30,35 @@ function colorFor(style) {
        : 0x9b59b6; // motivator/default
 }
 
-function countdownEmbed({ title, subtitle, seconds, elapsed, color = 0x9b59b6 }) {
+function incomingEmbed({ title, seconds, elapsed, color = 0x9b59b6 }) {
   const bar = progressBar(elapsed, seconds, 22);
   const remain = Math.max(0, seconds - elapsed);
   return new EmbedBuilder()
     .setColor(color)
-    .setAuthor({ name: '1v1 Battle' }) // <- distinct from /rumble
+    .setAuthor({ name: '1v1 Battle' })
     .setTitle(title)
     .setDescription([
-      subtitle,
+      'Spectators gathering…',
       '```',
       `[${bar}]  ${remain}s`,
       '```'
     ].join('\n'));
 }
 
-async function runTwoStageCountdown({
-  message,          // Message to edit
-  title,            // e.g. "⚔️ 1v1 Battle: A vs B"
-  style,            // for color
-  stage1Seconds,    // default 30
-  stage2Seconds,    // default 30
-}) {
+function arenaHoldEmbed({ title, color = 0x9b59b6, seconds = 30 }) {
+  return new EmbedBuilder()
+    .setColor(color)
+    .setAuthor({ name: '1v1 Battle' })
+    .setTitle(title)
+    .setDescription(`🏟️ Arena reveal arming…\n\`Starting in ${seconds}s…\``);
+}
+
+async function runIncomingCountdown({ message, title, style, seconds = 30 }) {
   const color = colorFor(style);
-
-  // Stage 1: "Battle incoming"
-  for (let t = 0; t <= stage1Seconds; t++) {
-    const embed = countdownEmbed({
-      title,
-      subtitle: 'Spectators gathering…',
-      seconds: stage1Seconds,
-      elapsed: t,
-      color
-    });
+  for (let t = 0; t <= seconds; t++) {
+    const embed = incomingEmbed({ title, seconds, elapsed: t, color });
     await message.edit({ embeds: [embed] }).catch(() => {});
-    if (t < stage1Seconds) await sleep(1000);
-  }
-
-  // Stage 2: "Arena reveal"
-  for (let t = 0; t <= stage2Seconds; t++) {
-    const embed = countdownEmbed({
-      title,
-      subtitle: 'Arena reveal arming…',
-      seconds: stage2Seconds,
-      elapsed: t,
-      color
-    });
-    await message.edit({ embeds: [embed] }).catch(() => {});
-    if (t < stage2Seconds) await sleep(1000);
+    if (t < seconds) await sleep(1000);
   }
 }
 
@@ -127,9 +108,9 @@ module.exports = {
     const bestOf     = interaction.options.getInteger('bestof') || 3;
     const style      = (interaction.options.getString('style') || process.env.BATTLE_STYLE_DEFAULT || 'motivator').toLowerCase();
 
-    // Auto defaults for both countdowns (30s each)
+    // Fixed pacing: 30s incoming progress, 30s arena hold
     const incomingSeconds = 30;
-    const arenaSeconds    = 30;
+    const arenaHoldSeconds = 30;
 
     // ===================== PATH A: EPHEMERAL LOBBY (owner adds 2) =====================
     if (manualPick) {
@@ -146,7 +127,7 @@ module.exports = {
           .setCustomId('battle_lobby_select')
           .setPlaceholder('Pick ONE fighter to ADD (click again to add more)')
           .setMinValues(1)
-          .setMaxValues(1) // single-pick; add repeatedly
+          .setMaxValues(1)
       );
 
       const buttonsRow = (disabled = false) => new ActionRowBuilder().addComponents(
@@ -155,20 +136,19 @@ module.exports = {
         new ButtonBuilder().setCustomId('battle_lobby_cancel').setLabel('Cancel').setStyle(ButtonStyle.Danger).setDisabled(disabled),
       );
 
-      // Send EPHEMERAL lobby and capture the ephemeral message
       await interaction.reply({
         content: render(),
         components: [selectRow(), buttonsRow()],
         ephemeral: true
       });
-      const lobbyMsg = await interaction.fetchReply(); // ephemeral Message object
+      const lobbyMsg = await interaction.fetchReply();
 
       const lobbyTimeoutMs = 5 * 60 * 1000;
       const lobbyEndsAt = Date.now() + lobbyTimeoutMs;
 
       const filter = (i) =>
         i.user.id === interaction.user.id &&
-        (i.message.id === lobbyMsg.id) && // ensure it’s this lobby message
+        (i.message.id === lobbyMsg.id) &&
         (i.customId === 'battle_lobby_select' ||
          i.customId === 'battle_lobby_start'  ||
          i.customId === 'battle_lobby_clear'  ||
@@ -184,7 +164,6 @@ module.exports = {
         let comp;
         try {
           const remaining = Math.max(1000, lobbyEndsAt - Date.now());
-          // IMPORTANT: await on the MESSAGE, not the Interaction
           comp = await lobbyMsg.awaitMessageComponent({ filter, time: remaining });
         } catch {
           await editLobby('⏱️ Lobby timed out.', true);
@@ -192,25 +171,14 @@ module.exports = {
         }
 
         try {
-          // ACK ASAP to avoid "Interaction failed"
           await comp.deferUpdate();
 
           if (comp.customId === 'battle_lobby_select' && comp.componentType === ComponentType.UserSelect) {
             const id = (comp.values && comp.values[0]) ? comp.values[0] : null;
             if (!id) { continue; }
-
-            if (id === OWNER_ID) {
-              await editLobby(`${render()}\n\n*You can’t add yourself; you’re excluded by design.*`);
-              continue;
-            }
-            if (picked.has(id)) {
-              await editLobby(`${render()}\n\n*(Already in lobby.)*`);
-              continue;
-            }
-            if (picked.size >= MAX_FIGHTERS) {
-              await editLobby(`${render()}\n\n*Max ${MAX_FIGHTERS} fighters reached.*`);
-              continue;
-            }
+            if (id === OWNER_ID) { await editLobby(`${render()}\n\n*You can’t add yourself; you’re excluded by design.*`); continue; }
+            if (picked.has(id)) { await editLobby(`${render()}\n\n*(Already in lobby.)*`); continue; }
+            if (picked.size >= MAX_FIGHTERS) { await editLobby(`${render()}\n\n*Max ${MAX_FIGHTERS} fighters reached.*`); continue; }
             picked.add(id);
             await editLobby(render());
             continue;
@@ -233,7 +201,6 @@ module.exports = {
               continue;
             }
 
-            // Choose exactly two distinct fighters
             const ids = [...picked];
             const aIdx = Math.floor(Math.random() * ids.length);
             let bIdx = Math.floor(Math.random() * ids.length);
@@ -254,7 +221,7 @@ module.exports = {
               continue;
             }
 
-            // Seed message (public), then two-stage countdown on it
+            // Seed message -> 30s incoming progress -> arena hold 30s -> engine
             const title = `⚔️ 1v1 Battle: ${a.displayName || a.user?.username} vs ${b.displayName || b.user?.username}`;
             const seed = await interaction.followUp({
               embeds: [new EmbedBuilder()
@@ -265,15 +232,10 @@ module.exports = {
               fetchReply: true
             });
 
-            await runTwoStageCountdown({
-              message: seed,
-              title,
-              style,
-              stage1Seconds: incomingSeconds,
-              stage2Seconds: arenaSeconds
-            });
+            await runIncomingCountdown({ message: seed, title, style, seconds: incomingSeconds });
+            await seed.edit({ embeds: [arenaHoldEmbed({ title, color: colorFor(style), seconds: arenaHoldSeconds })] }).catch(() => {});
+            await sleep(arenaHoldSeconds * 1000);
 
-            // Hand off to engine
             await runRumbleDisplay({
               channel: interaction.channel,
               baseMessage: seed,
@@ -283,7 +245,7 @@ module.exports = {
               style,
               guildName: interaction.guild.name
             });
-            return; // done
+            return;
           }
         } catch (err) {
           console.error('battle lobby component error:', err);
@@ -291,7 +253,6 @@ module.exports = {
         }
       }
 
-      // Safety timeout end
       await interaction.editReply({ content: '⏱️ Lobby timed out.', components: [buttonsRow(true)] });
       return;
     }
@@ -315,7 +276,6 @@ module.exports = {
       return interaction.reply({ content: '❌ Could not resolve both fighters as guild members.', ephemeral: true });
     }
 
-    // Seed message + two-stage countdown
     const title = `⚔️ 1v1 Battle: ${me.displayName || me.user?.username} vs ${them.displayName || them.user?.username}`;
     const seed = await interaction.reply({
       embeds: [new EmbedBuilder()
@@ -326,15 +286,10 @@ module.exports = {
       fetchReply: true
     });
 
-    await runTwoStageCountdown({
-      message: seed,
-      title,
-      style,
-      stage1Seconds: incomingSeconds,
-      stage2Seconds: arenaSeconds
-    });
+    await runIncomingCountdown({ message: seed, title, style, seconds: incomingSeconds });
+    await seed.edit({ embeds: [arenaHoldEmbed({ title, color: colorFor(style), seconds: arenaHoldSeconds })] }).catch(() => {});
+    await sleep(arenaHoldSeconds * 1000);
 
-    // Start the cinematic engine (it will overwrite the seed to intro, then reveal arena)
     await runRumbleDisplay({
       channel: interaction.channel,
       baseMessage: seed,
@@ -346,5 +301,6 @@ module.exports = {
     });
   },
 };
+
 
 
