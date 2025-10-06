@@ -20,8 +20,6 @@ const SAFE_MODE    = !/^false$/i.test(process.env.BATTLE_SAFE_MODE || 'true');
 const ANNOUNCER    = (process.env.BATTLE_ANNOUNCER || 'normal').trim().toLowerCase();
 
 // Logo options:
-// - BATTLE_THUMB_URL: fixed logo image (used for thumbnails or author icon)
-// - BATTLE_LOGO_MODE: 'author' (small icon, top-left, default) | 'thumbnail' (top-right)
 const BATTLE_THUMB_URL = (process.env.BATTLE_THUMB_URL || 'https://iili.io/KXCT1CN.png').trim();
 const BATTLE_LOGO_MODE = (process.env.BATTLE_LOGO_MODE || 'thumbnail').trim().toLowerCase();
 
@@ -48,6 +46,10 @@ const sleep  = (ms) => new Promise(r => setTimeout(r, ms));
 const jitter = (base) => base + Math.floor((Math.random() * 2 - 1) * JITTER_MS);
 const pick   = (arr) => arr[Math.floor(Math.random() * arr.length)];
 const exists = (s) => typeof s === 'string' && s.trim().length > 0;
+
+// NEW: dark “strip” per line inside the embed using inline code style
+const dark = (s) => `\`${s}\``;
+const formatFeed = (lines) => lines.map(dark).join('\n');
 
 function colorFor(style) {
   return style === 'villain' ? 0x8b0000
@@ -261,6 +263,19 @@ const CROWD   = ['Crowd roars!','Someone rings a cowbell.','A vuvuzela bleats in
 const HAZARDS = ['Floor tiles shift suddenly!','A rogue shopping cart drifts across the arena!','Fog machine overperforms — visibility drops!','Neon sign flickers; shadows dance unpredictably!','A stray confetti cannon fires!','Stage cable snags a foot!'];
 const POWERUPS= ['{X} picks up a glowing orb — speed up!','{X} grabs a pixel heart — stamina bump!','{X} equips glitch boots — dash unlocked!','{X} finds a shield bubble — temporary guard!','{X} slots a power chip — timing buff!'];
 
+// NEW: micro-movement / defense / evasion pools for longer rounds
+const MOVES = [
+  'angles off the center','cuts the lane','resets to neutral','shadows the footwork','drifts toward the ropes',
+  'switches stance','slides back a half step','pressures to the edge','reclaims mid','circles into open space'
+];
+const DEFENDS = [
+  'checks the guard','slips the jab','frame-blocks clean','covers the body','peeks behind the shoulder',
+  'parries on reaction','rides the impact','turtles briefly','shoulder rolls','guards high, elbows tight'
+];
+const EVADE = [
+  'sidesteps cleanly','micro-dashes out','backsteps at the bell','shimmy-feints the hook','duck-and-weaves under heat'
+];
+
 /* ========================== Builders ========================== */
 function buildTaunt(style, A, B, mem) {
   const bank = TAUNTS[style] || TAUNTS.motivator;
@@ -311,6 +326,16 @@ function buildAnnouncer(style) {
   const persona = ANNOUNCER_BANK[ANNOUNCER] || ANNOUNCER_BANK.normal;
   if (Math.random() < 0.35 && ANNOUNCER_BANK[style]) return `🎙️ ${pick(ANNOUNCER_BANK[style])}`;
   return `🎙️ ${pick(persona)}`;
+}
+function buildMove(A, B) { return `🌀 ${A} ${pick(MOVES)}; ${B} stays alert.`; }
+function buildDefense(B) { return `🛡️ ${B} ${pick(DEFENDS)}.`; }
+function buildEvade(B)   { return `🪽 ${B} ${pick(EVADE)}.`; }
+function buildSwap(X, style, mem) {
+  const wKey = `wep:${style}`;
+  const wList = filterByRecent(styleWeapons(style), wKey, WEAPON_RECENT_WINDOW);
+  const w = pickNoRepeat(wList, mem.weapons, 7);
+  updateRecentList(wKey, w, WEAPON_RECENT_WINDOW);
+  return `🔧 ${X} swaps to a ${w}.`;
 }
 
 // Scenic line (no-repeat-ish)
@@ -417,32 +442,64 @@ function finalAllInOneEmbed({ style, sim, champion, env, cast, stats, timeline, 
   return e;
 }
 
-/* ========================== Round Sequence ========================== */
+/* ========================== Round Sequence (ENRICHED) ========================== */
 function buildRoundSequence({ A, B, style, mem }) {
   const seq = [];
+
+  // Optional opener taunt
   if (Math.random() < TAUNT_CHANCE) seq.push({ type: 'taunt', content: buildTaunt(style, A, B, mem) });
+
+  // Opener action
   seq.push({ type: 'action', content: buildAction(A, B, style, mem) });
 
-  let stunned = false;
-  if (Math.random() < STUN_CHANCE) { seq.push({ type: 'stun', content: `🫨 ${B} is briefly stunned!${SFX_STRING()}` }); stunned = true; }
+  // Mid-round scramble: add 2–4 micro beats (move/defend/evade/swap)
+  const microBeats = 2 + Math.floor(Math.random() * 3); // 2..4
+  for (let i = 0; i < microBeats; i++) {
+    const roll = Math.random();
+    if (roll < 0.30) seq.push({ type: 'move',    content: buildMove(A, B) });
+    else if (roll < 0.55) seq.push({ type: 'def', content: buildDefense(B) });
+    else if (roll < 0.75) seq.push({ type: 'evd', content: buildEvade(B) });
+    else                   seq.push({ type: 'swap', content: buildSwap(Math.random()<0.5 ? A : B, style, mem) });
+  }
 
+  // Stun check
+  let stunned = false;
+  if (Math.random() < STUN_CHANCE) {
+    seq.push({ type: 'stun', content: `🫨 ${B} is briefly stunned!${SFX_STRING()}` });
+    stunned = true;
+  }
+
+  // Reaction / Counter
+  let didCounter = false;
   if (!stunned) {
-    if (Math.random() < COUNTER_CHANCE) seq.push({ type: 'counter', content: buildCounter(B) });
+    if (Math.random() < COUNTER_CHANCE) { seq.push({ type: 'counter', content: buildCounter(B) }); didCounter = true; }
     else seq.push({ type: 'reaction', content: buildReaction(B) });
   }
 
-  if (Math.random() < CRIT_CHANCE) {
-    const last = seq.find(s => s.type === 'counter');
-    seq.push({ type: 'crit', content: buildCrit(last ? B : A) });
+  // If counter happened, let B follow up with a quick action
+  if (didCounter && Math.random() < 0.7) {
+    seq.push({ type: 'actionB', content: buildAction(B, A, style, mem) });
   }
-  if (COMBO_MAX > 1 && Math.random() < 0.38) {
+
+  // Crit chance (attacker depends on last momentum)
+  if (Math.random() < CRIT_CHANCE) {
+    const lastCounter = seq.find(s => s.type === 'counter' || s.type === 'actionB');
+    seq.push({ type: 'crit', content: buildCrit(lastCounter ? B : A) });
+  }
+
+  // Optional combo burst
+  if (COMBO_MAX > 1 && Math.random() < 0.45) {
     const hits = 2 + Math.floor(Math.random() * (COMBO_MAX - 1));
     seq.push({ type: 'combo', content: `🔁 Combo x${hits}! ${SFX_STRING()}` });
   }
+
+  // Random environment/crowd events
   if (Math.random() < EVENTS_CHANCE) {
     const ev = randomEvent(A, B);
     if (ev) seq.push({ type: 'event', content: ev });
   }
+
+  // Occasional announcer line
   const caster = buildAnnouncer(style);
   if (caster && Math.random() < 0.6) seq.push({ type: 'announcer', content: caster });
 
@@ -454,29 +511,13 @@ function stripThinkBlocks(text) {
   if (!text) return '';
   let out = String(text);
 
-  // Remove fenced code blocks
   out = out.replace(/```[\s\S]*?```/g, ' ');
-
-  // If any <think|analysis|reasoning|reflection> appears (even unclosed),
-  // cut everything from the first tag onward.
   const openIdx = out.search(/<\s*(think|analysis|reasoning|reflection)\b/i);
-  if (openIdx !== -1) {
-    out = out.slice(0, openIdx);
-  }
-
-  // Also remove any stray XML-ish tags of those types
+  if (openIdx !== -1) out = out.slice(0, openIdx);
   out = out.replace(/<\s*\/?\s*(think|analysis|reasoning|reflection)[^>]*>/gi, ' ');
-
-  // Remove inline "think:" style prefixes
   out = out.replace(/^\s*(analysis|think|reasoning|reflection)\s*:\s*/gim, '');
-
-  // Drop meta headings (Commentary, Notes) with optional colon
   out = out.replace(/^\s*(commentary|notes?)\s*:?\s*$/gim, '');
-
-  // Remove assistant self-talk lines
   out = out.replace(/^\s*(okay|alright|first,|let'?s|i need to|i should|i will|here'?s)\b.*$/gim, '');
-
-  // Collapse whitespace
   out = out.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
   return out;
 }
@@ -489,8 +530,7 @@ function safeLinesOnly(text, maxLines = 3, maxLen = 140) {
     .filter(Boolean)
     .filter(s => !/^<\w+>/.test(s) && !/<\/\w+>/.test(s))
     .map(s => (s.length > maxLen ? s.slice(0, maxLen - 1) + '…' : s))
-    .filter(Boolean);
-
+  ;
   if (lines.length <= 1) {
     const chunk = lines[0] || text;
     return chunk.split(/(?<=[.!?])\s+/).filter(Boolean).slice(0, maxLines);
@@ -548,7 +588,7 @@ async function runRumbleDisplay({
   bestOf = 3,
   style = (process.env.BATTLE_STYLE_DEFAULT || 'motivator').trim().toLowerCase(),
   guildName = 'this server',
-  // NEW: allow /battle pre-show to take over
+  // allow callers to run their own pre-show
   skipIntro = false,
   envOverride = null
 }) {
@@ -556,7 +596,7 @@ async function runRumbleDisplay({
 
   const env = envOverride || chooseEnvironment(channel, ENVIRONMENTS);
 
-  // neutral seed (not tied to who clicked the command)
+  // neutral seed
   const seed = `${channel.id}:${(challenger.id||challenger.user?.id||'A')}:${(opponent.id||opponent.user?.id||'B')}:${Date.now() >> 11}`;
   const sim = simulateBattle({ challenger, opponent, bestOf, style, seed });
 
@@ -572,8 +612,6 @@ async function runRumbleDisplay({
   let target = channel;
   try {
     if (skipIntro) {
-      // We already showed pre-roll elsewhere (incoming + arena + prep).
-      // Optionally spin up a thread under the existing baseMessage.
       if (baseMessage && USE_THREAD && baseMessage.startThread) {
         const thread = await baseMessage.startThread({
           name: `${THREAD_NAME}: ${Aname} vs ${Bname}`,
@@ -582,7 +620,6 @@ async function runRumbleDisplay({
         target = thread;
       }
     } else {
-      // Original behavior: intro + arena inside this runner
       if (baseMessage) {
         await baseMessage.edit({ embeds: [introEmbed(style, title)] }).catch(() => {});
         if (USE_THREAD && baseMessage.startThread) {
@@ -615,6 +652,7 @@ async function runRumbleDisplay({
   for (let i = 0; i < sim.rounds.length; i++) {
     const r = sim.rounds[i];
 
+    // Build sequence with extra micro moments
     const seq = buildRoundSequence({ A: r.winner, B: r.loser, style, mem });
     for (const step of seq) {
       if (step.type === 'taunt')   stats.taunts++;
@@ -628,26 +666,32 @@ async function runRumbleDisplay({
     const lines = [];
     lines.push(scenicLine(env, mem));
 
-    const beatsToReveal = Math.max(1, ROUND_BEATS - 1);
+    // Reveal more beats now that rounds are longer:
+    const beatsToReveal = Math.min(seq.length, Math.max(3, ROUND_BEATS + 2));
     const reveal = seq.slice(0, beatsToReveal).map(s => s.content);
 
+    // Initial post for the round
     let preview = coloredBarBlock(Aname, Bname, r.a - (r.winner === Aname ? 1 : 0), r.b - (r.winner === Aname ? 0 : 1), sim.bestOf);
     let msg = await target.send({
-      embeds: [roundProgressEmbed(style, i + 1, env, lines.join('\n'), preview)]
+      embeds: [roundProgressEmbed(style, i + 1, env, formatFeed(lines), preview)]
     });
 
+    // Reveal each beat with an edit and a pause
     for (let b = 0; b < reveal.length; b++) {
       await sleep(jitter(BEAT_DELAY));
       lines.push(reveal[b]);
-      await msg.edit({ embeds: [roundProgressEmbed(style, i + 1, env, lines.join('\n'), '⏳ …resolving round…')] });
+      await msg.edit({ embeds: [roundProgressEmbed(style, i + 1, env, formatFeed(lines), '⏳ …resolving round…')] });
     }
 
+    // Finalize the round
     const winnerIsA = r.winner === Aname;
     const prevA = r.a - (winnerIsA ? 1 : 0);
     const prevB = r.b - (winnerIsA ? 0 : 1);
     const wasBehind = winnerIsA ? (prevA < prevB) : (prevB < prevA);
 
-    const roundText = lines.concat(seq.slice(beatsToReveal).map(s => s.content)).join('\n').slice(0, 1800);
+    const roundText = formatFeed(
+      lines.concat(seq.slice(beatsToReveal).map(s => s.content))
+    ).slice(0, 1800);
 
     await sleep(jitter(BEAT_DELAY));
     await msg.edit({
@@ -658,7 +702,7 @@ async function runRumbleDisplay({
     if (i < sim.rounds.length - 1) await sleep(jitter(ROUND_DELAY));
   }
 
-  // FINALE — winner avatar + all-in-one stats (NO fixed logo here)
+  // FINALE — winner avatar + all-in-one stats
   const champion = sim.a > sim.b ? challenger : opponent;
   const runnerUp = sim.a > sim.b ? opponent  : challenger;
   const championId = (champion.id || champion.user?.id || null);
@@ -688,7 +732,6 @@ async function runRumbleDisplay({
 
   const timeline = roundsTimeline.join(' • ');
 
-  // Send the final embed first (no mention inside embed title)
   await target.send({
     embeds: [finalAllInOneEmbed({
       style, sim, champion, env, cast, stats, timeline,
@@ -697,7 +740,6 @@ async function runRumbleDisplay({
     })]
   });
 
-  // Then post a separate congrats message that pings the winner reliably
   if (championId) {
     await target.send({
       content: `🎉 Congratulations <@${championId}>!`,
@@ -709,4 +751,5 @@ async function runRumbleDisplay({
 }
 
 module.exports = { runRumbleDisplay };
+
 
