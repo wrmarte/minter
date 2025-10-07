@@ -41,6 +41,9 @@ const ARENA_RECENT_WINDOW  = Math.max(2, Number(process.env.BATTLE_ENV_RECENT ||
 const WEAPON_RECENT_WINDOW = Math.max(3, Number(process.env.BATTLE_WEAPON_RECENT || 10));
 const VERB_RECENT_WINDOW   = Math.max(3, Number(process.env.BATTLE_VERB_RECENT || 10));
 
+// follow-up counter rate after a reaction (not a hard counter)
+const FOLLOWUP_RATE = clamp01(Number(process.env.BATTLE_FOLLOWUP_RATE || 0.55));
+
 function clamp01(x){ x = Number(x); if (!isFinite(x)) return 0; return Math.min(1, Math.max(0, x)); }
 
 /* ========================== Utils ========================== */
@@ -117,7 +120,7 @@ function updateRecentList(key, item, cap) {
   if (item && !arr.includes(item)) arr.push(item);
   while (arr.length > cap) arr.shift();
 }
-function filterByRecent(list, key, cap) {
+function filterByRecent(list, key) {
   const recent = getRecentList(key);
   const filtered = list.filter(x => !recent.includes(x));
   return filtered.length >= Math.ceil(list.length * 0.4) ? filtered : list;
@@ -290,8 +293,8 @@ function styleVerbs(style){
 function buildAction(A, B, style, mem) {
   const wKey = `wep:${style}`;
   const vKey = `vrb:${style}`;
-  const wList = filterByRecent(styleWeapons(style), wKey, WEAPON_RECENT_WINDOW);
-  const vList = filterByRecent(styleVerbs(style),   vKey, VERB_RECENT_WINDOW);
+  const wList = filterByRecent(styleWeapons(style), wKey);
+  const vList = filterByRecent(styleVerbs(style),   vKey);
 
   const w = pickNoRepeat(wList, mem.weapons, 7);
   const v = pickNoRepeat(vList, mem.verbs,   7);
@@ -305,12 +308,11 @@ function buildReaction(B) { return L('🛡️', `${bold(B)} ${pick(REACTIONS)}.$
 function buildCounter(B) { return L('⚡', `${bold(B)} reads it and flips momentum!${SFX_STRING()}`); }
 function buildCrit(attacker) { return L('💥', `${bold(attacker)} lands a **critical** hit!${SFX_STRING()}`); }
 
-// New: explicit follow-up counter after a successful evade/block/etc.
 function buildFollowupCounter(attacker, defender, style, mem) {
   const wKey = `wep:${style}`;
   const vKey = `vrb:${style}`;
-  const wList = filterByRecent(styleWeapons(style), wKey, WEAPON_RECENT_WINDOW);
-  const vList = filterByRecent(styleVerbs(style),   vKey, VERB_RECENT_WINDOW);
+  const wList = filterByRecent(styleWeapons(style), wKey);
+  const vList = filterByRecent(styleVerbs(style),   vKey);
 
   const w = pickNoRepeat(wList, mem.weapons, 7);
   const v = pickNoRepeat(vList, mem.verbs,   7);
@@ -442,40 +444,73 @@ function finalAllInOneEmbed({ style, sim, champion, env, cast, stats, timeline, 
 /* ========================== Round Sequence ========================== */
 function buildRoundSequence({ A, B, style, mem }) {
   const seq = [];
-  if (Math.random() < TAUNT_CHANCE) seq.push({ type: 'taunt', content: buildTaunt(style, A, B, mem) });
-  seq.push({ type: 'action', content: buildAction(A, B, style, mem) });
+  let momentum = 'A'; // winner starts with momentum by default
 
-  let stunned = false;
-  if (Math.random() < STUN_CHANCE) { seq.push({ type: 'stun', content: L('🫨', `${bold(B)} is briefly stunned!${SFX_STRING()}`) }); stunned = true; }
+  // opener (sometimes a taunt)
+  if (Math.random() < TAUNT_CHANCE) {
+    seq.push({ type: 'taunt', by: 'A', content: buildTaunt(style, A, B, mem) });
+  }
 
-  if (!stunned) {
+  // primary action by winner A
+  seq.push({ type: 'action', by: 'A', content: buildAction(A, B, style, mem) });
+  momentum = 'A';
+
+  // possible stun on B
+  const stunnedB = Math.random() < STUN_CHANCE;
+  if (stunnedB) {
+    seq.push({ type: 'stun', by: 'A', content: L('🫨', `${bold(B)} is briefly stunned!${SFX_STRING()}`) });
+    momentum = 'A';
+  }
+
+  // defense window for B if not stunned
+  let bDidCounter = false;
+  if (!stunnedB) {
     if (Math.random() < COUNTER_CHANCE) {
-      // Hard counter: defender immediately flips it
-      seq.push({ type: 'counter', content: buildCounter(B) });
+      // Hard counter (B flips momentum)
+      seq.push({ type: 'counter', by: 'B', content: buildCounter(B) });
+      momentum = 'B';
+      bDidCounter = true;
     } else {
-      // Evade/block/etc., then immediate follow-up counter-attack for entertainment
-      seq.push({ type: 'reaction', content: buildReaction(B) });
-      seq.push({ type: 'followup', content: buildFollowupCounter(B, A, style, mem) });
+      // simple reaction (evade/block/etc.)
+      seq.push({ type: 'reaction', by: 'B', content: buildReaction(B) });
+      // chance to follow-up after a reaction (NOT guaranteed anymore)
+      if (Math.random() < FOLLOWUP_RATE) {
+        seq.push({ type: 'followup', by: 'B', content: buildFollowupCounter(B, A, style, mem) });
+        momentum = 'B';
+        bDidCounter = true;
+      }
     }
   }
 
-  // Choose CRIT attacker based on who last had momentum (counter/followup => B; otherwise A)
+  // Critical window — bias towards current momentum but favor the actual winner overall
   if (Math.random() < CRIT_CHANCE) {
-    const lastWasB = seq.some(s => s.type === 'counter' || s.type === 'followup');
-    seq.push({ type: 'crit', content: buildCrit(lastWasB ? B : A) });
+    const critAttacker = (momentum === 'B' && Math.random() < 0.35) ? B : A; // 65% A, 35% whoever has momentum if B
+    seq.push({ type: 'crit', by: critAttacker === A ? 'A' : 'B', content: buildCrit(critAttacker) });
+    momentum = (critAttacker === A) ? 'A' : 'B';
   }
 
+  // Optional combo burst (from whoever currently has momentum)
   if (COMBO_MAX > 1 && Math.random() < 0.38) {
     const hits = 2 + Math.floor(Math.random() * (COMBO_MAX - 1));
-    seq.push({ type: 'combo', content: L('🔁', `Combo x${hits}! ${SFX_STRING()}`) });
+    seq.push({ type: 'combo', by: momentum, content: L('🔁', `Combo x${hits}! ${SFX_STRING()}`) });
   }
 
+  // Random event
   if (Math.random() < EVENTS_CHANCE) {
     const ev = randomEvent(A, B);
-    if (ev) seq.push({ type: 'event', content: ev });
+    if (ev) seq.push({ type: 'event', by: 'env', content: ev });
   }
+
+  // If B had momentum late, ensure winner A closes the round so narrative matches the actual outcome
+  if (momentum === 'B') {
+    // winner A retakes with a decisive finisher
+    seq.push({ type: 'finisher', by: 'A', content: L('🏁', `${bold(A)} seizes the final exchange — clean finish!${SFX_STRING()}`) });
+    momentum = 'A';
+  }
+
+  // Announcer (sometimes)
   const caster = buildAnnouncer(style);
-  if (caster && Math.random() < 0.6) seq.push({ type: 'announcer', content: caster });
+  if (caster && Math.random() < 0.6) seq.push({ type: 'announcer', by: 'cast', content: caster });
 
   return seq;
 }
@@ -732,7 +767,5 @@ async function runRumbleDisplay({
 }
 
 module.exports = { runRumbleDisplay };
-
-
 
 
