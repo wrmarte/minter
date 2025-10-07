@@ -269,6 +269,55 @@ const CROWD   = ['Crowd roars!','Someone rings a cowbell.','A vuvuzela bleats in
 const HAZARDS = ['Floor tiles shift suddenly!','A rogue shopping cart drifts across the arena!','Fog machine overperforms — visibility drops!','Neon sign flickers; shadows dance unpredictably!','A stray confetti cannon fires!','Stage cable snags a foot!'];
 const POWERUPS= ['{X} picks up a glowing orb — speed up!','{X} grabs a pixel heart — stamina bump!','{X} equips glitch boots — dash unlocked!','{X} finds a shield bubble — temporary guard!','{X} slots a power chip — timing buff!'];
 
+/* ===== New: Analyst-style explanation banks (pure flavor) ===== */
+const EXPLAIN = {
+  setup: [
+    '{A} squares to center — ring control matters.',
+    'Light feints from {A}; {B} tests the guard.',
+    '{B} circles off the logo; eyes locked, breaths calm.',
+    '{A} edges into pocket range; {B} watches the lead foot.'
+  ],
+  defense: [
+    'That guard funnels the hit to the safe side — smart from {B}.',
+    'Perfect timing: {B} meets the strike on the half-beat.',
+    '{B} reads the shoulder — defense was loaded before the swing.',
+    'Angle step by {B}; impact glances and momentum stalls.'
+  ],
+  counter: [
+    'Defense to offense in one beat — {B} turns the table.',
+    '{B} punishes the over-commit — textbook reversal.',
+    'Great read: {B} attacks the recovery frames.',
+    'Spacing trap sprung — {B} owns the exchange.'
+  ],
+  crit: [
+    'Tiny window, huge value — accuracy decides rounds.',
+    'Everything lined up: footwork, timing, intent.',
+    'Read into punish — the crowd felt that one.',
+    'Frame-perfect — you could measure it in pixels.'
+  ],
+  combo: [
+    'Rhythm lands — each hit sets the next.',
+    'Staggered pressure: breathing room vanishes.',
+    'Once tempo breaks, it snowballs — you’re seeing it.',
+    'Hit-confirm into flow — clean conversion.'
+  ],
+  close: [
+    '{A} resets the stance and shuts the door on the round.',
+    'Momentum reclaimed — {A} makes the last exchange count.',
+    'Discipline at the end — {A} doesn’t give a reroll.',
+    'All business: {A} lands the closer.'
+  ],
+  crowd: [
+    'Crowd leans forward — even the refs are grinning.',
+    'Phones up; clips are farming.',
+    'You can feel the bass through the rail.',
+    'That one echoes through the Hyperdome.'
+  ]
+};
+
+const ANALYST_EMOJI = '🧠';
+const GEAR_EMOJI    = '🧰';
+
 /* ========================== Builders ========================== */
 function buildTaunt(style, A, B, mem) {
   const bank = TAUNTS[style] || TAUNTS.motivator;
@@ -321,6 +370,12 @@ function buildFollowupCounter(attacker, defender, style, mem) {
   updateRecentList(vKey, v, VERB_RECENT_WINDOW);
 
   return L('🔄', `${bold(attacker)} counterstrikes with a ${w} and ${v} ${bold(defender)}!${SFX_STRING()}`);
+}
+
+// flavor-only swap (no logic change)
+function buildWeaponSwap(user, style, mem) {
+  const w = pickNoRepeat(styleWeapons(style), mem.weapons, 7);
+  return L(GEAR_EMOJI, `${bold(user)} swaps gear — now wielding a ${w}.`);
 }
 
 function randomEvent(A, B) {
@@ -442,9 +497,27 @@ function finalAllInOneEmbed({ style, sim, champion, env, cast, stats, timeline, 
 }
 
 /* ========================== Round Sequence ========================== */
+function explain(kind, A, B) {
+  const bank = EXPLAIN[kind] || [];
+  if (!bank.length) return null;
+  const line = pick(bank).replaceAll('{A}', bold(A)).replaceAll('{B}', bold(B));
+  return L(ANALYST_EMOJI, line);
+}
+
 function buildRoundSequence({ A, B, style, mem }) {
   const seq = [];
   let momentum = 'A'; // winner starts with momentum by default
+
+  // (A) Optional setup line to hook the audience
+  if (Math.random() < 0.75) {
+    const s = explain('setup', A, B);
+    if (s) seq.push({ type: 'explain', by: 'cast', content: s });
+  }
+
+  // Optional weapon swap (pure flavor)
+  if (Math.random() < 0.25) {
+    seq.push({ type: 'swap', by: 'A', content: buildWeaponSwap(A, style, mem) });
+  }
 
   // opener (sometimes a taunt)
   if (Math.random() < TAUNT_CHANCE) {
@@ -468,14 +541,26 @@ function buildRoundSequence({ A, B, style, mem }) {
     if (Math.random() < COUNTER_CHANCE) {
       // Hard counter (B flips momentum)
       seq.push({ type: 'counter', by: 'B', content: buildCounter(B) });
+      if (Math.random() < 0.9) {
+        const e = explain('counter', A, B);
+        if (e) seq.push({ type: 'explain', by: 'cast', content: e });
+      }
       momentum = 'B';
       bDidCounter = true;
     } else {
       // simple reaction (evade/block/etc.)
       seq.push({ type: 'reaction', by: 'B', content: buildReaction(B) });
-      // chance to follow-up after a reaction (NOT guaranteed anymore)
+      if (Math.random() < 0.8) {
+        const e = explain('defense', A, B);
+        if (e) seq.push({ type: 'explain', by: 'cast', content: e });
+      }
+      // chance to follow-up after a reaction (NOT guaranteed)
       if (Math.random() < FOLLOWUP_RATE) {
         seq.push({ type: 'followup', by: 'B', content: buildFollowupCounter(B, A, style, mem) });
+        if (Math.random() < 0.75) {
+          const e2 = explain('counter', A, B);
+          if (e2) seq.push({ type: 'explain', by: 'cast', content: e2 });
+        }
         momentum = 'B';
         bDidCounter = true;
       }
@@ -484,8 +569,12 @@ function buildRoundSequence({ A, B, style, mem }) {
 
   // Critical window — bias towards current momentum but favor the actual winner overall
   if (Math.random() < CRIT_CHANCE) {
-    const critAttacker = (momentum === 'B' && Math.random() < 0.35) ? B : A; // 65% A, 35% whoever has momentum if B
+    const critAttacker = (momentum === 'B' && Math.random() < 0.35) ? B : A; // 65% A, 35% momentum if B
     seq.push({ type: 'crit', by: critAttacker === A ? 'A' : 'B', content: buildCrit(critAttacker) });
+    if (Math.random() < 0.8) {
+      const e = explain('crit', A, B);
+      if (e) seq.push({ type: 'explain', by: 'cast', content: e });
+    }
     momentum = (critAttacker === A) ? 'A' : 'B';
   }
 
@@ -493,18 +582,30 @@ function buildRoundSequence({ A, B, style, mem }) {
   if (COMBO_MAX > 1 && Math.random() < 0.38) {
     const hits = 2 + Math.floor(Math.random() * (COMBO_MAX - 1));
     seq.push({ type: 'combo', by: momentum, content: L('🔁', `Combo x${hits}! ${SFX_STRING()}`) });
+    if (Math.random() < 0.8) {
+      const e = explain('combo', A, B);
+      if (e) seq.push({ type: 'explain', by: 'cast', content: e });
+    }
   }
 
   // Random event
   if (Math.random() < EVENTS_CHANCE) {
     const ev = randomEvent(A, B);
-    if (ev) seq.push({ type: 'event', by: 'env', content: ev });
+    if (ev) {
+      seq.push({ type: 'event', by: 'env', content: ev });
+      if (Math.random() < 0.5) {
+        const e = explain('crowd', A, B);
+        if (e) seq.push({ type: 'explain', by: 'cast', content: e });
+      }
+    }
   }
 
   // If B had momentum late, ensure winner A closes the round so narrative matches the actual outcome
   if (momentum === 'B') {
     // winner A retakes with a decisive finisher
     seq.push({ type: 'finisher', by: 'A', content: L('🏁', `${bold(A)} seizes the final exchange — clean finish!${SFX_STRING()}`) });
+    const e = explain('close', A, B);
+    if (e) seq.push({ type: 'explain', by: 'cast', content: e });
     momentum = 'A';
   }
 
