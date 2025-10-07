@@ -36,13 +36,15 @@ const POWERUP_CHANCE = clamp01(Number(process.env.BATTLE_POWERUP_CHANCE || 0.22)
 const COMBO_MAX      = Math.max(1, Math.min(5, Number(process.env.BATTLE_COMBO_MAX || 3)));
 const SFX_ON         = !/^false$/i.test(process.env.BATTLE_SFX || 'true');
 
+// Momentum / follow-up tuning
+const STRONG_REACTION_RATE   = clamp01(Number(process.env.BATTLE_STRONG_REACTION_RATE || 0.45));
+const FOLLOWUP_RATE          = clamp01(Number(process.env.BATTLE_FOLLOWUP_RATE || 0.45)); // chance defender counters after a defense
+const GUARDBREAK_CRIT_RATE   = clamp01(Number(process.env.BATTLE_GUARDBREAK_CRIT_RATE || 0.5));
+
 // cross-match recency windows (tunable)
 const ARENA_RECENT_WINDOW  = Math.max(2, Number(process.env.BATTLE_ENV_RECENT || 5));
 const WEAPON_RECENT_WINDOW = Math.max(3, Number(process.env.BATTLE_WEAPON_RECENT || 10));
 const VERB_RECENT_WINDOW   = Math.max(3, Number(process.env.BATTLE_VERB_RECENT || 10));
-
-// follow-up counter rate after a reaction (not a hard counter)
-const FOLLOWUP_RATE = clamp01(Number(process.env.BATTLE_FOLLOWUP_RATE || 0.55));
 
 function clamp01(x){ x = Number(x); if (!isFinite(x)) return 0; return Math.min(1, Math.max(0, x)); }
 
@@ -51,11 +53,13 @@ const sleep  = (ms) => new Promise(r => setTimeout(r, ms));
 const jitter = (base) => base + Math.floor((Math.random() * 2 - 1) * JITTER_MS);
 const pick   = (arr) => arr[Math.floor(Math.random() * arr.length)];
 const exists = (s) => typeof s === 'string' && s.trim().length > 0;
-const bold   = (s) => `**${s}**`;
+const bold  = (s) => `**${s}**`;
 
-// visual prefix after emoji for each action line
-const LINE_PREFIX = '│';
-const L = (emoji, text) => `${emoji} ${LINE_PREFIX} ${text}`;
+// Prefix each narrative line with a vertical bar and keep emoji at the start for quick scanning
+const withPrefix = (s) => `│ ${s}`;
+
+// Wrap a set of lines in a code block for cleaner, darker background on desktop
+const codeBlock = (text) => '```' + '\n' + text + '\n' + '```';
 
 function colorFor(style) {
   return style === 'villain' ? 0x8b0000
@@ -73,7 +77,7 @@ function baseEmbed(style, { withLogo = true, allowThumb = true } = {}) {
 
   if (withLogo && BATTLE_THUMB_URL) {
     if (BATTLE_LOGO_MODE === 'thumbnail' && allowThumb) {
-      e.thumbnail = { url: BATTLE_THUMB_URL }; // top-right (squeezes width)
+      e.thumbnail = { url: BATTLE_THUMB_URL }; // top-right
       e.author = { name: 'Rumble Royale' };
     } else {
       e.author = { name: 'Rumble Royale', icon_url: BATTLE_THUMB_URL }; // small icon (top-left)
@@ -120,7 +124,7 @@ function updateRecentList(key, item, cap) {
   if (item && !arr.includes(item)) arr.push(item);
   while (arr.length > cap) arr.shift();
 }
-function filterByRecent(list, key) {
+function filterByRecent(list, key, cap) {
   const recent = getRecentList(key);
   const filtered = list.filter(x => !recent.includes(x));
   return filtered.length >= Math.ceil(list.length * 0.4) ? filtered : list;
@@ -208,11 +212,11 @@ const GROUND = [
 const SFX = ['💥','⚡','🔥','✨','💫','🫨','🌪️','🎯','🧨','🥁','📣','🔊'];
 const SFX_STRING = () => SFX_ON ? ' ' + Array.from({length: 2 + Math.floor(Math.random()*3)}, () => pick(SFX)).join('') : '';
 
-// Taunts (plain placeholders; we bold during replacement)
+// Taunts
 const TAUNTS = {
-  clean:      [`{A}: "Best self only." {B}: "Always."`,`Respect. Skill. Timing. Go.`,`Gloves up. Form sharp. {A} and {B} nod.`],
+  clean:      [`Gloves up. Form sharp. {A} and {B} nod.`,`{A}: "Best self only." {B}: "Always."`,`Respect. Skill. Timing. Go.`],
   motivator:  [`{A}: "Clock in." {B}: "Clocked." 💪`,`{B}: "We grind clean — no excuse." ⚡`,`Breathe. Focus. Execute.`],
-  villain:    [`{A} smiles thinly: "I’ll savor this."`,`Shadows coil as {A} and {B} step forward.`,`{B}: "Hope is a habit I removed."`],
+  villain:    [`{A}: "I’ll savor this." {B} smiles thinly.`,`Shadows coil as {A} and {B} step forward.`,`{B}: "Hope is a habit I removed."`],
   degen:      [`{A}: "Max leverage." {B}: "Full send." 🚀`,`Slippage set to chaos — {A} vs {B}.`,`{B}: "Prints only. No stops."`]
 };
 
@@ -255,7 +259,9 @@ const A_DEGN  = ['market buys a combo on','leverages into','apes into','yoinks R
 const ACTIONS_SAFE = ['bonks','thwacks','boops','yeets','shoulder-bumps','jukes','spin-feints','light sweep','checks low','tags the guard'];
 const ACTIONS_SPICY= ['smashes','ground-slams','uppercuts (spar form)','pulled haymaker','vaults through the gap'];
 
-const REACTIONS = ['dodges','parries','blocks','shrugs it off','stumbles','perfect guards','rolls out','slides back'];
+const REACTIONS_STRONG = ['perfect guards','parries'];
+const REACTIONS_LIGHT  = ['dodges','blocks','shrugs it off','stumbles','rolls out','slides back'];
+
 const COUNTERS  = ['{B} snaps a reversal!','{B} reads it and flips momentum!','Clutch parry from {B}, instant punish!','{B} side-steps, punish window found!'];
 const CRITS     = ['{A} finds the pixel-perfect angle — **CRIT!**','Frame trap! {A} lands a **critical** read!','{A} channels a special — it hits! **Critical!**','Counter-hit spark — **CRIT!** for {A}!'];
 
@@ -273,7 +279,7 @@ const POWERUPS= ['{X} picks up a glowing orb — speed up!','{X} grabs a pixel h
 function buildTaunt(style, A, B, mem) {
   const bank = TAUNTS[style] || TAUNTS.motivator;
   const line = pickNoRepeat(bank, mem.taunts, 6);
-  return L('🗣️', line.replace('{A}', bold(A)).replace('{B}', bold(B)));
+  return `🗣️ ${line.replace('{A}', bold(A)).replace('{B}', bold(B))}`;
 }
 function styleWeapons(style){
   const base = SAFE_MODE ? WEAPONS_SAFE.slice() : WEAPONS_SAFE.concat(WEAPONS_SPICY);
@@ -293,8 +299,8 @@ function styleVerbs(style){
 function buildAction(A, B, style, mem) {
   const wKey = `wep:${style}`;
   const vKey = `vrb:${style}`;
-  const wList = filterByRecent(styleWeapons(style), wKey);
-  const vList = filterByRecent(styleVerbs(style),   vKey);
+  const wList = filterByRecent(styleWeapons(style), wKey, WEAPON_RECENT_WINDOW);
+  const vList = filterByRecent(styleVerbs(style),   vKey, VERB_RECENT_WINDOW);
 
   const w = pickNoRepeat(wList, mem.weapons, 7);
   const v = pickNoRepeat(vList, mem.verbs,   7);
@@ -302,64 +308,50 @@ function buildAction(A, B, style, mem) {
   updateRecentList(wKey, w, WEAPON_RECENT_WINDOW);
   updateRecentList(vKey, v, VERB_RECENT_WINDOW);
 
-  return L('🥊', `${bold(A)} grabs a ${w} and ${v} ${bold(B)}!${SFX_STRING()}`);
+  return `🥊 ${bold(A)} grabs a ${w} and ${v} ${bold(B)}!${SFX_STRING()}`;
 }
-function buildReaction(B) { return L('🛡️', `${bold(B)} ${pick(REACTIONS)}.${SFX_STRING()}`); }
-function buildCounter(B) { return L('⚡', `${bold(B)} reads it and flips momentum!${SFX_STRING()}`); }
-function buildCrit(attacker) { return L('💥', `${bold(attacker)} lands a **critical** hit!${SFX_STRING()}`); }
-
-function buildFollowupCounter(attacker, defender, style, mem) {
-  const wKey = `wep:${style}`;
-  const vKey = `vrb:${style}`;
-  const wList = filterByRecent(styleWeapons(style), wKey);
-  const vList = filterByRecent(styleVerbs(style),   vKey);
-
-  const w = pickNoRepeat(wList, mem.weapons, 7);
-  const v = pickNoRepeat(vList, mem.verbs,   7);
-
-  updateRecentList(wKey, w, WEAPON_RECENT_WINDOW);
-  updateRecentList(vKey, v, VERB_RECENT_WINDOW);
-
-  return L('🔄', `${bold(attacker)} counterstrikes with a ${w} and ${v} ${bold(defender)}!${SFX_STRING()}`);
+function buildReactionLine(name) {
+  const strong = Math.random() < STRONG_REACTION_RATE;
+  const kind = strong ? pick(REACTIONS_STRONG) : pick(REACTIONS_LIGHT);
+  return { strong, line: `🛡️ ${bold(name)} ${kind}.${SFX_STRING()}` };
 }
-
+function buildCounter(B) { return `⚡ ${(pick(COUNTERS)).replace('{B}', bold(B))}${SFX_STRING()}`; }
+function buildCrit(attacker) { return `💥 ${(pick(CRITS)).replace('{A}', bold(attacker))}${SFX_STRING()}`; }
 function randomEvent(A, B) {
   const roll = Math.random();
-  if (roll < HAZARD_CHANCE) return L('⚠️', pick(HAZARDS));
-  if (roll < HAZARD_CHANCE + POWERUP_CHANCE) {
-    return L('🔸', (pick(POWERUPS)).replace('{X}', Math.random()<0.5 ? bold(A) : bold(B)) + SFX_STRING());
-  }
-  if (roll < HAZARD_CHANCE + POWERUP_CHANCE + CROWD_CHANCE) return L('📣', pick(CROWD));
+  if (roll < HAZARD_CHANCE) return `⚠️ ${pick(HAZARDS)}`;
+  if (roll < HAZARD_CHANCE + POWERUP_CHANCE) return `🔸 ${(pick(POWERUPS)).replace('{X}', Math.random()<0.5 ? bold(A) : bold(B))}${SFX_STRING()}`;
+  if (roll < HAZARD_CHANCE + POWERUP_CHANCE + CROWD_CHANCE) return `📣 ${pick(CROWD)}`;
   return null;
 }
 function buildAnnouncer(style) {
   if (ANNOUNCER === 'none') return null;
   const persona = ANNOUNCER_BANK[ANNOUNCER] || ANNOUNCER_BANK.normal;
-  if (Math.random() < 0.35 && ANNOUNCER_BANK[style]) return L('🎙️', pick(ANNOUNCER_BANK[style]));
-  return L('🎙️', pick(persona));
+  if (Math.random() < 0.35 && ANNOUNCER_BANK[style]) return `🎙️ ${pick(ANNOUNCER_BANK[style])}`;
+  return `🎙️ ${pick(persona)}`;
 }
 
 // Scenic line (no-repeat-ish)
 function scenicLine(env, mem) {
   const options = [
-    L('🎬', pickNoRepeat(CAMERA, mem.scenes, 8)),
-    L('🌫️', pickNoRepeat(ATMOS,  mem.scenes, 8)),
-    L('🏟️', `${env.name}: ${pickNoRepeat(GROUND, mem.scenes, 8)}`)
+    `🎬 ${pickNoRepeat(CAMERA, mem.scenes, 8)}`,
+    `🌫️ ${pickNoRepeat(ATMOS,  mem.scenes, 8)}`,
+    `🏟️ ${env.name}: ${pickNoRepeat(GROUND, mem.scenes, 8)}`
   ];
   return pick(options);
 }
 
-/* ========================== Colored Bar Helpers (kept for final only) ========================== */
+/* ========================== Colored Bar Helpers ========================== */
 function legendLine(aName, bName, colorA = '🟦', colorB = '🟥') {
   return `Legend: ${colorA} ${aName} • ${colorB} ${bName}`;
 }
-function emojiBar(aScore, bScore, width = 16, colorA = '🟦', colorB = '🟥') {
+function emojiBar(aScore, bScore, width = 16, colorA = '🟦', colorB = '🟥', empty = '⬜') {
   const total = Math.max(1, aScore + bScore);
   let fillA = Math.round((aScore / total) * width);
   if (fillA < 0) fillA = 0;
   if (fillA > width) fillA = width;
   const fillB = width - fillA;
-  return `${colorA.repeat(fillA)}${colorB.repeat(fillB)}`;
+  return `${colorA.repeat(fillA)}${empty.repeat(0)}${colorB.repeat(fillB)}`;
 }
 function coloredBarBlock(aName, bName, a, b, bestOf) {
   const bar = emojiBar(a, b, Math.max(10, Math.min(20, bestOf * 2)));
@@ -368,46 +360,50 @@ function coloredBarBlock(aName, bName, a, b, bestOf) {
 
 /* ========================== Embeds ========================== */
 function introEmbed(style, title) {
+  // Allow logo/thumbnail here
   return { ...baseEmbed(style, { withLogo: true, allowThumb: true }), title, description: `Rumble incoming…` };
 }
 function arenaEmbed(style, env, bestOf) {
   const sfx = SFX_STRING();
+  // Allow logo/thumbnail here
   return {
-    ...baseEmbed(style, { withLogo: true, allowThumb: true }), // logo/thumbnail OK here
+    ...baseEmbed(style, { withLogo: true, allowThumb: true }),
     title: `🏟️ ARENA REVEAL`,
     description: `📣 **Welcome to ${env.name}**${sfx}\n_${env.intro}_`,
     fields: [{ name: 'Format', value: `Best of **${bestOf}**`, inline: true }],
     footer: { text: `Arena: ${env.name}` }
   };
 }
-
-// NOTE: round embeds use NO thumbnail to keep full-width on mobile
 function roundProgressEmbed(style, idx, env, linesJoined) {
+  // No thumbnail to maximize width
   return {
-    ...baseEmbed(style, { withLogo: true, allowThumb: false }), // author icon only; full width
-    title: `Round ${idx}`,
-    description: linesJoined,
+    ...baseEmbed(style, { withLogo: false, allowThumb: false }),
+    title: `Round ${idx} — Action Feed`,
+    description: codeBlock(linesJoined),
     footer: { text: `Arena: ${env.name}` }
   };
 }
-function roundFinalEmbed(style, idx, r, env, wasBehind, linesJoined) {
+// color green if winner was trailing before this round (comeback)
+function roundFinalEmbed(style, idx, r, aName, bName, bestOf, env, wasBehind, roundText) {
   const color = wasBehind ? 0x2ecc71 /* green */ : colorFor(style);
+  // No thumbnail to maximize width
   return {
-    ...baseEmbed(style, { withLogo: true, allowThumb: false }), // author icon only; full width
+    ...baseEmbed(style, { withLogo: false, allowThumb: false }),
     color,
     title: `Round ${idx} — Result`,
-    description: linesJoined,
+    description: codeBlock(roundText),
     fields: [
-      { name: 'Winner', value: `**${r.winner}** (${r.a}–${r.b})` }, // winner + score
+      { name: 'Winner', value: `${bold(r.winner)} (${r.a}–${r.b})`, inline: true },
+      // Keep Score as well for quick scanning (optional; can remove if you want only in Winner)
+      { name: 'Score',  value: `**${r.a}–${r.b}** (Bo${bestOf})`, inline: true },
     ],
     footer: { text: `Style: ${style} • Arena: ${env.name}` }
   };
 }
-
 function finalAllInOneEmbed({ style, sim, champion, env, cast, stats, timeline, aName, bName, podium = null }) {
   const name = champion.displayName || champion.username || champion.user?.username || 'Winner';
   const avatar = getAvatarURL(champion);
-  const barBlock = coloredBarBlock(bold(aName), bold(bName), sim.a, sim.b, sim.bestOf);
+  const barBlock = coloredBarBlock(aName, bName, sim.a, sim.b, sim.bestOf);
 
   const e = {
     ...baseEmbed(style, { withLogo: false, allowThumb: false }), // NO fixed logo on final
@@ -431,68 +427,66 @@ function finalAllInOneEmbed({ style, sim, champion, env, cast, stats, timeline, 
     footer: { text: `Style: ${style} • Arena: ${env.name}` }
   };
 
+  // Optional podium (for royale/bracket). Spacer before commentary either way.
   if (Array.isArray(podium) && podium.length) {
     const lines = podium.slice(0,3).map((u, i) => `${i===0?'🥇':i===1?'🥈':'🥉'} ${u}`).join('\n');
     e.fields.push({ name: 'Top 3', value: lines || '—' });
   }
-  e.fields.push({ name: '\u200B', value: '\u200B' }); // spacer
+  e.fields.push({ name: '\u200B', value: '\u200B' });
+
   if (cast) e.fields.push({ name: '🎙️ Commentary', value: cast });
 
   return e;
 }
 
-/* ========================== Round Sequence ========================== */
+/* ========================== Round Sequence (momentum-aware) ========================== */
 function buildRoundSequence({ A, B, style, mem }) {
-  const seq = [];
-  let momentum = 'A'; // winner starts with momentum by default
+  // A is the *precomputed winner* of this round; B is the loser.
+  let seq = [];
+  let momentum = 'A'; // attacker starts favored
 
-  // opener (sometimes a taunt)
-  if (Math.random() < TAUNT_CHANCE) {
-    seq.push({ type: 'taunt', by: 'A', content: buildTaunt(style, A, B, mem) });
-  }
+  // Optional taunt
+  if (Math.random() < TAUNT_CHANCE) seq.push({ type: 'taunt', by: 'A', content: buildTaunt(style, A, B, mem) });
 
-  // primary action by winner A
+  // Initial action from A
   seq.push({ type: 'action', by: 'A', content: buildAction(A, B, style, mem) });
-  momentum = 'A';
 
-  // possible stun on B
-  const stunnedB = Math.random() < STUN_CHANCE;
-  if (stunnedB) {
-    seq.push({ type: 'stun', by: 'A', content: L('🫨', `${bold(B)} is briefly stunned!${SFX_STRING()}`) });
+  // Possible stun on B (brief)
+  let stunned = false;
+  if (Math.random() < STUN_CHANCE) {
+    seq.push({ type: 'stun', by: 'A', content: `🫨 ${bold(B)} is briefly stunned!${SFX_STRING()}` });
+    stunned = true;
     momentum = 'A';
   }
 
-  // defense window for B if not stunned
-  let bDidCounter = false;
-  if (!stunnedB) {
-    if (Math.random() < COUNTER_CHANCE) {
-      // Hard counter (B flips momentum)
-      seq.push({ type: 'counter', by: 'B', content: buildCounter(B) });
+  // Defense window for B
+  if (!stunned) {
+    const rx = buildReactionLine(B);
+    seq.push({ type: 'reaction', by: 'B', content: rx.line });
+    if (rx.strong) {
       momentum = 'B';
-      bDidCounter = true;
-    } else {
-      // simple reaction (evade/block/etc.)
-      seq.push({ type: 'reaction', by: 'B', content: buildReaction(B) });
-      // chance to follow-up after a reaction (NOT guaranteed anymore)
       if (Math.random() < FOLLOWUP_RATE) {
-        seq.push({ type: 'followup', by: 'B', content: buildFollowupCounter(B, A, style, mem) });
+        seq.push({ type: 'counter', by: 'B', content: buildCounter(B) });
+      }
+    } else {
+      // Light defense: small chance to follow up and flip
+      if (Math.random() < FOLLOWUP_RATE) {
+        seq.push({ type: 'counter', by: 'B', content: buildCounter(B) });
         momentum = 'B';
-        bDidCounter = true;
       }
     }
   }
 
-  // Critical window — bias towards current momentum but favor the actual winner overall
+  // Crit happens for the current aggressor sometimes
   if (Math.random() < CRIT_CHANCE) {
-    const critAttacker = (momentum === 'B' && Math.random() < 0.35) ? B : A; // 65% A, 35% whoever has momentum if B
-    seq.push({ type: 'crit', by: critAttacker === A ? 'A' : 'B', content: buildCrit(critAttacker) });
-    momentum = (critAttacker === A) ? 'A' : 'B';
+    const who = momentum === 'B' ? B : A;
+    seq.push({ type: 'crit', by: who === B ? 'B' : 'A', content: buildCrit(who) });
   }
 
-  // Optional combo burst (from whoever currently has momentum)
+  // Small combo burst
   if (COMBO_MAX > 1 && Math.random() < 0.38) {
     const hits = 2 + Math.floor(Math.random() * (COMBO_MAX - 1));
-    seq.push({ type: 'combo', by: momentum, content: L('🔁', `Combo x${hits}! ${SFX_STRING()}`) });
+    seq.push({ type: 'combo', by: momentum, content: `🔁 Combo x${hits}! ${SFX_STRING()}` });
   }
 
   // Random event
@@ -501,16 +495,20 @@ function buildRoundSequence({ A, B, style, mem }) {
     if (ev) seq.push({ type: 'event', by: 'env', content: ev });
   }
 
-  // If B had momentum late, ensure winner A closes the round so narrative matches the actual outcome
+  // Announcer (occasionally)
+  const caster = buildAnnouncer(style);
+  if (caster && Math.random() < 0.6) seq.push({ type: 'announcer', by: 'caster', content: caster });
+
+  // Ensure narrative earns the pre-decided winner (A)
   if (momentum === 'B') {
-    // winner A retakes with a decisive finisher
-    seq.push({ type: 'finisher', by: 'A', content: L('🏁', `${bold(A)} seizes the final exchange — clean finish!${SFX_STRING()}`) });
+    // A must take it back: show a guard-break + possible crit + finisher
+    seq.push({ type: 'break', by: 'A', content: `🧩 ${bold(A)} baits the guard — **guard break!**` });
+    if (Math.random() < GUARDBREAK_CRIT_RATE) {
+      seq.push({ type: 'crit', by: 'A', content: buildCrit(A) });
+    }
+    seq.push({ type: 'finisher', by: 'A', content: `🏁 ${bold(A)} converts the break and seals the round!${SFX_STRING()}` });
     momentum = 'A';
   }
-
-  // Announcer (sometimes)
-  const caster = buildAnnouncer(style);
-  if (caster && Math.random() < 0.6) seq.push({ type: 'announcer', by: 'cast', content: caster });
 
   return seq;
 }
@@ -669,6 +667,7 @@ async function runRumbleDisplay({
   for (let i = 0; i < sim.rounds.length; i++) {
     const r = sim.rounds[i];
 
+    // Build full sequence (momentum-aware) with A = winner, B = loser
     const seq = buildRoundSequence({ A: r.winner, B: r.loser, style, mem });
     for (const step of seq) {
       if (step.type === 'taunt')   stats.taunts++;
@@ -679,13 +678,14 @@ async function runRumbleDisplay({
       if (step.type === 'event')   stats.events++;
     }
 
-    // Start lines with a cinematic opener
+    // Lines with a clear prefix; keep emoji right after the bar
     const lines = [];
-    lines.push(scenicLine(env, mem));
+    lines.push(withPrefix(`🏟️ ${env.name}: ${pick(GROUND)}`));
 
     const beatsToReveal = Math.max(1, ROUND_BEATS - 1);
-    const reveal = seq.slice(0, beatsToReveal).map(s => s.content);
+    const reveal = seq.slice(0, beatsToReveal).map(s => withPrefix(s.content));
 
+    // Initial post for the round (no progress bar preview)
     let msg = await target.send({
       embeds: [roundProgressEmbed(style, i + 1, env, lines.join('\n'))]
     });
@@ -697,26 +697,27 @@ async function runRumbleDisplay({
       await msg.edit({ embeds: [roundProgressEmbed(style, i + 1, env, lines.join('\n'))] });
     }
 
-    // Finalize the round (replace embed with the result)
+    // Finalize the round — append remaining lines, then show result embed
+    const roundText = lines
+      .concat(seq.slice(beatsToReveal).map(s => withPrefix(s.content)))
+      .join('\n')
+      .slice(0, 1800);
+
     const winnerIsA = r.winner === Aname;
     const prevA = r.a - (winnerIsA ? 1 : 0);
     const prevB = r.b - (winnerIsA ? 0 : 1);
     const wasBehind = winnerIsA ? (prevA < prevB) : (prevB < prevA);
 
-    // Also append any remaining sequence items to the lines
-    const roundText = lines.concat(seq.slice(beatsToReveal).map(s => s.content)).join('\n').slice(0, 1800);
-
     await sleep(jitter(BEAT_DELAY));
     await msg.edit({
-      embeds: [roundFinalEmbed(style, i + 1, r, env, wasBehind, roundText)]
+      embeds: [roundFinalEmbed(style, i + 1, r, Aname, Bname, sim.bestOf, env, wasBehind, roundText)]
     });
 
-    // Timeline note — concise for mobile: winner + score
-    roundsTimeline.push(`R${i+1}: **${r.winner}** (${r.a}-${r.b})`);
+    roundsTimeline.push(`R${i+1}: **${r.winner}** over ${r.loser} (${r.a}-${r.b})`);
     if (i < sim.rounds.length - 1) await sleep(jitter(ROUND_DELAY));
   }
 
-  // FINALE — winner avatar + all-in-one stats
+  // FINALE — winner avatar + all-in-one stats (NO fixed logo here)
   const champion = sim.a > sim.b ? challenger : opponent;
   const runnerUp = sim.a > sim.b ? opponent  : challenger;
   const championId = (champion.id || champion.user?.id || null);
@@ -759,7 +760,7 @@ async function runRumbleDisplay({
   if (championId) {
     await target.send({
       content: `🎉 Congratulations <@${championId}>!`,
-      allowedMentions: { users: [championId] }
+      allowed_mentions: { users: [championId] }
     });
   }
 
