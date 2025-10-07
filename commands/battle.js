@@ -121,13 +121,13 @@ async function runIncomingCountdown({ message, title, style, seconds = 30 }) {
   }
 }
 
-async function runArenaRevealSequence({ message, style, arena, prepSeconds = 20 }) {
+async function runArenaRevealSequence({ message, style, arena, prepSeconds = 10 }) {
   const color = colorFor(style);
 
   // 1) Show reveal immediately (name + intro)
   await message.edit({ embeds: [arenaRevealEmbed({ arena, color, prepsLines: [] })] }).catch(() => {});
 
-  // 2) 20s preps line-by-line
+  // 2) 10s preps line-by-line
   const steps = Math.max(1, Math.min(PREP_LINES.length, Math.floor(prepSeconds / 2))); // ~2s per line
   const sel = PREP_LINES.slice(0, steps);
   const acc = [];
