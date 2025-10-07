@@ -201,12 +201,12 @@ const GROUND = [
 const SFX = ['💥','⚡','🔥','✨','💫','🫨','🌪️','🎯','🧨','🥁','📣','🔊'];
 const SFX_STRING = () => SFX_ON ? ' ' + Array.from({length: 2 + Math.floor(Math.random()*3)}, () => pick(SFX)).join('') : '';
 
-// Taunts
+// Taunts (plain placeholders; we bold during replacement)
 const TAUNTS = {
-  clean:      [`${bold('{A}')}: "Best self only." ${bold('{B}')}: "Always."`,`Respect. Skill. Timing. Go.`,`Gloves up. Form sharp. ${bold('{A}')} and ${bold('{B}')} nod.`],
-  motivator:  [`${bold('{A}')}: "Clock in." ${bold('{B}')}: "Clocked." 💪`,`${bold('{B}')}: "We grind clean — no excuse." ⚡`,`Breathe. Focus. Execute.`],
-  villain:    [`${bold('{A}')} smiles thinly: "I’ll savor this."`,`Shadows coil as ${bold('{A}')} and ${bold('{B}')} step forward.`,`${bold('{B}')}: "Hope is a habit I removed."`],
-  degen:      [`${bold('{A}')}: "Max leverage." ${bold('{B}')}: "Full send." 🚀`,`Slippage set to chaos — ${bold('{A}')} vs ${bold('{B}')}.`,`${bold('{B}')}: "Prints only. No stops."`]
+  clean:      [`{A}: "Best self only." {B}: "Always."`,`Respect. Skill. Timing. Go.`,`Gloves up. Form sharp. {A} and {B} nod.`],
+  motivator:  [`{A}: "Clock in." {B}: "Clocked." 💪`,`{B}: "We grind clean — no excuse." ⚡`,`Breathe. Focus. Execute.`],
+  villain:    [`{A} smiles thinly: "I’ll savor this."`,`Shadows coil as {A} and {B} step forward.`,`{B}: "Hope is a habit I removed."`],
+  degen:      [`{A}: "Max leverage." {B}: "Full send." 🚀`,`Slippage set to chaos — {A} vs {B}.`,`{B}: "Prints only. No stops."`]
 };
 
 // Style-specific weapons/actions (expanded)
@@ -224,8 +224,8 @@ const W_MOTI_SPICY = ['iron plate (prop)','slam ball (soft)','training kettlebel
 
 const W_VILL_SAFE  = [
   'shadow ribbon','smoke dagger (prop)','echo bell','trick tarot','void tether (cosplay)',
-  'illusion orb','stage mask','smoke fan','mirror shard (prop)
-'];
+  'illusion orb','stage mask','smoke fan','mirror shard (prop)'
+];
 const W_VILL_SPICY = ['hex blade (prop)','cursed grimoire (cosplay)','phantom chain (prop)'];
 
 const W_DEGN_SAFE  = [
@@ -692,7 +692,7 @@ async function runRumbleDisplay({
   if (championId) {
     await target.send({
       content: `🎉 Congratulations <@${championId}>!`,
-      allowed_mentions: { users: [championId] }
+      allowedMentions: { users: [championId] }
     });
   }
 
@@ -700,5 +700,6 @@ async function runRumbleDisplay({
 }
 
 module.exports = { runRumbleDisplay };
+
 
 
