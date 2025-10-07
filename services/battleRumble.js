@@ -4,6 +4,8 @@ const { simulateBattle, aiCommentary, makeBar, clampBestOf } = require('./battle
 /* ========================== Config ========================== */
 const USE_THREAD   = /^true$/i.test(process.env.BATTLE_USE_THREAD || 'false');
 const THREAD_NAME  = (process.env.BATTLE_THREAD_NAME || 'Rumble Royale').trim();
+// Brand name for this module (used by /battle). /rumble uses its own services.
+const BRAND_NAME   = (process.env.BATTLE_BRAND || '1v1 Battle').trim();
 
 // Global pacing multiplier (slow things down a bit by default)
 const PACE_MULT = Math.max(0.5, Number(process.env.BATTLE_PACE_MULTIPLIER || 1.25));
@@ -74,12 +76,12 @@ function baseEmbed(style, { withLogo = true, allowThumb = true } = {}) {
   if (withLogo && BATTLE_THUMB_URL) {
     if (BATTLE_LOGO_MODE === 'thumbnail' && allowThumb) {
       e.thumbnail = { url: BATTLE_THUMB_URL }; // top-right (squeezes width)
-      e.author = { name: 'Rumble Royale' };
+      e.author = { name: BRAND_NAME };
     } else {
-      e.author = { name: 'Rumble Royale', icon_url: BATTLE_THUMB_URL }; // small icon (top-left)
+      e.author = { name: BRAND_NAME, icon_url: BATTLE_THUMB_URL }; // small icon (top-left)
     }
   } else {
-    e.author = { name: 'Rumble Royale' };
+    e.author = { name: BRAND_NAME };
   }
 
   return e;
@@ -216,48 +218,106 @@ const TAUNTS = {
   degen:      [`{A}: "Max leverage." {B}: "Full send." 🚀`,`Slippage set to chaos — {A} vs {B}.`,`{B}: "Prints only. No stops."`]
 };
 
-// Style-specific weapons/actions (expanded)
+// Style-specific weapons/actions (expanded, all safe/prop)
 const W_CLEAN_SAFE = [
   'dojo staff','bamboo shinai','practice pads','mirror shield','focus band','training mitts',
-  'wooden tonfa','soft nunchaku','foam sai','balance board','kata fan'
+  'wooden tonfa','soft nunchaku','foam sai','balance board','kata fan',
+  // protections & tricks
+  'sparring helmet','kendo armor (do)','forearm guards','focus mitts','ankle weights',
+  'throwing ring (foam)','breakaway board','practice chain (foam)','rolling mat'
 ];
-const W_CLEAN_SPICY= ['weighted baton (prop)','tempered shinai (spar)','practice spear (prop)'];
+const W_CLEAN_SPICY= [
+  'weighted baton (prop)','tempered shinai (spar)','practice spear (prop)',
+  'training naginata (prop)','steel fan (cosplay prop)'
+];
 
 const W_MOTI_SAFE  = [
   'PR belt','chalk cloud','coach whistle','rep rope','foam mace','discipline dumbbell',
-  'timer cube','resistance band','speed ladder','focus cone','agility hurdle'
+  'timer cube','resistance band','speed ladder','focus cone','agility hurdle',
+  // protections & tricks
+  'kneesleeves','lifting belt (prop)','wrist wraps','tactical shaker (prop)','foam shield plate',
+  'plyo box (soft)','battle rope (foam)','sled harness (prop)'
 ];
-const W_MOTI_SPICY = ['iron plate (prop)','slam ball (soft)','training kettlebell (prop)'];
+const W_MOTI_SPICY = [
+  'iron plate (prop)','slam ball (soft)','training kettlebell (prop)',
+  'steel club (prop)','mace bell (prop)'
+];
 
 const W_VILL_SAFE  = [
   'shadow ribbon','smoke dagger (prop)','echo bell','trick tarot','void tether (cosplay)',
-  'illusion orb','stage mask','smoke fan','mirror shard (prop)'
+  'illusion orb','stage mask','smoke fan','mirror shard (prop)',
+  // protections & tricks
+  'curse ward (cosplay)','hex sigil (prop)','mirror cloak (cosplay)','bone charm (prop)',
+  'flash pellet (prop)','decoy card (cosplay)'
 ];
-const W_VILL_SPICY = ['hex blade (prop)','cursed grimoire (cosplay)','phantom chain (prop)'];
+const W_VILL_SPICY = [
+  'hex blade (prop)','cursed grimoire (cosplay)','phantom chain (prop)',
+  'soul lantern (prop)','gloom scythe (prop)'
+];
 
 const W_DEGN_SAFE  = [
   'alpha baton','yield yo-yo','pump trumpet','airdrop crate','ape gauntlet','vibe ledger',
-  'meme shield','copium canister','hopium horn','rug detector','dip net'
+  'meme shield','copium canister','hopium horn','rug detector','dip net',
+  // protections & tricks
+  'ledger shield (prop)','degen visor','airdrop parachute (prop)','emote spammer',
+  'flash drive shuriken (foam)','TOS-safe taser (prop)'
 ];
-const W_DEGN_SPICY = ['leverage gloves','moon mallet (prop)','margin mace (prop)'];
+const W_DEGN_SPICY = [
+  'leverage gloves','moon mallet (prop)','margin mace (prop)',
+  'printer cannon (prop)','liquidation hammer (prop)'
+];
 
 const WEAPONS_SAFE = [
   'foam bat','rubber chicken','pool noodle','pixel sword','ban hammer','yo-yo','cardboard shield','toy bo staff','glitch gauntlet',
-  'bubble blaster','spring glove','confetti popper','karate board (breakaway)','nerf spear'
+  'bubble blaster','spring glove','confetti popper','karate board (breakaway)','nerf spear',
+  // extra protections & tricks
+  'riot shield (prop)','tactical umbrella (prop)','buckler (foam)','smoke capsule (prop)',
+  'decoy drone (prop)','grappling hook (prop)','strobe beacon (prop)'
 ];
-const WEAPONS_SPICY= ['steel chair (cosplay prop)','spiked bat (prop)','thunder gloves','meteor hammer (training)','breakaway bottle (prop)'];
+const WEAPONS_SPICY= [
+  'steel chair (cosplay prop)','spiked bat (prop)','thunder gloves','meteor hammer (training)','breakaway bottle (prop)',
+  'war drum (prop)','shock baton (prop)','chain whip (training prop)'
+];
 
-const A_CLEAN = ['counters cleanly','finds spacing on','lands textbook sweep on','checks with a crisp jab on','punctuates a perfect step on'];
-const A_MOTI  = ['powers through','perfect-forms a jab on','locks in and tags','rolls momentum into','chains footwork into'];
-const A_VILL  = ['ensnares','phases through and taps','casts a snare on','drains momentum from','twists fate around'];
-const A_DEGN  = ['market buys a combo on','leverages into','apes into','yoinks RNG from','front-runs the angle on'];
+// Verbs / actions
+const A_CLEAN = [
+  'counters cleanly','finds spacing on','lands textbook sweep on','checks with a crisp jab on','punctuates a perfect step on',
+  'feints into a grip on','off-balances','disarms lightly','redirects timing on'
+];
+const A_MOTI  = [
+  'powers through','perfect-forms a jab on','locks in and tags','rolls momentum into','chains footwork into',
+  'grinds pressure on','holds frame and presses','pivots to angle on'
+];
+const A_VILL  = [
+  'ensnares','phases through and taps','casts a snare on','drains momentum from','twists fate around',
+  'steals initiative from','clouds vision of','threads a curse around'
+];
+const A_DEGN  = [
+  'market buys a combo on','leverages into','apes into','yoinks RNG from','front-runs the angle on',
+  'snipes the entry of','degens a reversal on','prints momentum over'
+];
 
-const ACTIONS_SAFE = ['bonks','thwacks','boops','yeets','shoulder-bumps','jukes','spin-feints','light sweep','checks low','tags the guard'];
-const ACTIONS_SPICY= ['smashes','ground-slams','uppercuts (spar form)','pulled haymaker','vaults through the gap'];
+const ACTIONS_SAFE = [
+  'bonks','thwacks','boops','yeets','shoulder-bumps','jukes','spin-feints','light sweep','checks low','tags the guard',
+  'grapples','foot-trips','throws (safe)','hand-fights','frame-traps lightly'
+];
+const ACTIONS_SPICY= [
+  'smashes','ground-slams','uppercuts (spar form)','pulled haymaker','vaults through the gap',
+  'suplex feint (safe)','axe-handle (prop)'
+];
 
-const REACTIONS = ['dodges','parries','blocks','shrugs it off','stumbles','perfect guards','rolls out','slides back'];
-const COUNTERS  = ['{B} snaps a reversal!','{B} reads it and flips momentum!','Clutch parry from {B}, instant punish!','{B} side-steps, punish window found!'];
-const CRITS     = ['{A} finds the pixel-perfect angle — **CRIT!**','Frame trap! {A} lands a **critical** read!','{A} channels a special — it hits! **Critical!**','Counter-hit spark — **CRIT!** for {A}!'];
+const REACTIONS = [
+  'dodges','parries','blocks','shrugs it off','stumbles','perfect guards','rolls out','slides back',
+  'shoulder checks safely','slips the shot','techs the throw'
+];
+const COUNTERS  = [
+  '{B} snaps a reversal!','{B} reads it and flips momentum!','Clutch parry from {B}, instant punish!','{B} side-steps, punish window found!',
+  '{B} steals turn on a whiff!','{B} interrupts the startup — punish!'
+];
+const CRITS     = [
+  '{A} finds the pixel-perfect angle — **CRIT!**','Frame trap! {A} lands a **critical** read!','{A} channels a special — it hits! **Critical!**',
+  'Counter-hit spark — **CRIT!** for {A}!'
+];
 
 const ANNOUNCER_BANK = {
   normal:  ['Commentary: textbook spacing — beautiful footwork.','Commentary: momentum swings, crowd on edge.','Commentary: timing windows are razor thin.'],
@@ -268,54 +328,6 @@ const ANNOUNCER_BANK = {
 const CROWD   = ['Crowd roars!','Someone rings a cowbell.','A vuvuzela bleats in 8-bit.','Chants ripple through the stands.','Camera flashes pop!','Wave starts in section B.'];
 const HAZARDS = ['Floor tiles shift suddenly!','A rogue shopping cart drifts across the arena!','Fog machine overperforms — visibility drops!','Neon sign flickers; shadows dance unpredictably!','A stray confetti cannon fires!','Stage cable snags a foot!'];
 const POWERUPS= ['{X} picks up a glowing orb — speed up!','{X} grabs a pixel heart — stamina bump!','{X} equips glitch boots — dash unlocked!','{X} finds a shield bubble — temporary guard!','{X} slots a power chip — timing buff!'];
-
-/* ============ Analyst-style explanation banks (pure flavor) ============ */
-const EXPLAIN = {
-  setup: [
-    '{A} squares to center — ring control matters.',
-    'Light feints from {A}; {B} tests the guard.',
-    '{B} circles off the logo; eyes locked, breaths calm.',
-    '{A} edges into pocket range; {B} watches the lead foot.'
-  ],
-  defense: [
-    'That guard funnels the hit to the safe side — smart from {B}.',
-    'Perfect timing: {B} meets the strike on the half-beat.',
-    '{B} reads the shoulder — defense was loaded before the swing.',
-    'Angle step by {B}; impact glances and momentum stalls.'
-  ],
-  counter: [
-    'Defense to offense in one beat — {B} turns the table.',
-    '{B} punishes the over-commit — textbook reversal.',
-    'Great read: {B} attacks the recovery frames.',
-    'Spacing trap sprung — {B} owns the exchange.'
-  ],
-  crit: [
-    'Tiny window, huge value — accuracy decides rounds.',
-    'Everything lined up: footwork, timing, intent.',
-    'Read into punish — the crowd felt that one.',
-    'Frame-perfect — you could measure it in pixels.'
-  ],
-  combo: [
-    'Rhythm lands — each hit sets the next.',
-    'Staggered pressure: breathing room vanishes.',
-    'Once tempo breaks, it snowballs — you’re seeing it.',
-    'Hit-confirm into flow — clean conversion.'
-  ],
-  close: [
-    '{A} resets the stance and shuts the door on the round.',
-    'Momentum reclaimed — {A} makes the last exchange count.',
-    'Discipline at the end — {A} doesn’t give a reroll.',
-    'All business: {A} lands the closer.'
-  ],
-  crowd: [
-    'Crowd leans forward — even the refs are grinning.',
-    'Phones up; clips are farming.',
-    'You can feel the bass through the rail.',
-    'That one echoes through the Hyperdome.'
-  ]
-};
-const ANALYST_EMOJI = '🧠';
-const GEAR_EMOJI    = '🧰';
 
 /* ========================== Builders ========================== */
 function buildTaunt(style, A, B, mem) {
@@ -369,12 +381,6 @@ function buildFollowupCounter(attacker, defender, style, mem) {
   updateRecentList(vKey, v, VERB_RECENT_WINDOW);
 
   return L('🔄', `${bold(attacker)} counterstrikes with a ${w} and ${v} ${bold(defender)}!${SFX_STRING()}`);
-}
-
-// flavor-only swap (no logic change)
-function buildWeaponSwap(user, style, mem) {
-  const w = pickNoRepeat(styleWeapons(style), mem.weapons, 7);
-  return L(GEAR_EMOJI, `${bold(user)} swaps gear — now wielding a ${w}.`);
 }
 
 function randomEvent(A, B) {
@@ -480,7 +486,6 @@ function finalAllInOneEmbed({ style, sim, champion, env, cast, stats, timeline, 
           `• Events: **${stats.events}**`
         ].join('\n')
       },
-      // One round per line:
       { name: 'Rounds Timeline', value: timeline.slice(0, 1024) || '—' }
     ],
     footer: { text: `Style: ${style} • Arena: ${env.name}` }
@@ -490,37 +495,16 @@ function finalAllInOneEmbed({ style, sim, champion, env, cast, stats, timeline, 
     const lines = podium.slice(0,3).map((u, i) => `${i===0?'🥇':i===1?'🥈':'🥉'} ${u}`).join('\n');
     e.fields.push({ name: 'Top 3', value: lines || '—' });
   }
-
-  // Spacer line to leave a blank gap between timeline (or podium) and commentary
-  e.fields.push({ name: '\u200B', value: '\u200B' });
-
+  e.fields.push({ name: '\u200B', value: '\u200B' }); // spacer
   if (cast) e.fields.push({ name: '🎙️ Commentary', value: cast });
 
   return e;
 }
 
 /* ========================== Round Sequence ========================== */
-function explain(kind, A, B) {
-  const bank = EXPLAIN[kind] || [];
-  if (!bank.length) return null;
-  const line = bank[Math.floor(Math.random()*bank.length)].replaceAll('{A}', bold(A)).replaceAll('{B}', bold(B));
-  return L(ANALYST_EMOJI, line);
-}
-
 function buildRoundSequence({ A, B, style, mem }) {
   const seq = [];
   let momentum = 'A'; // winner starts with momentum by default
-
-  // (A) Optional setup line to hook the audience
-  if (Math.random() < 0.75) {
-    const s = explain('setup', A, B);
-    if (s) seq.push({ type: 'explain', by: 'cast', content: s });
-  }
-
-  // Optional weapon swap (pure flavor)
-  if (Math.random() < 0.25) {
-    seq.push({ type: 'swap', by: 'A', content: buildWeaponSwap(A, style, mem) });
-  }
 
   // opener (sometimes a taunt)
   if (Math.random() < TAUNT_CHANCE) {
@@ -543,25 +527,13 @@ function buildRoundSequence({ A, B, style, mem }) {
     if (Math.random() < COUNTER_CHANCE) {
       // Hard counter (B flips momentum)
       seq.push({ type: 'counter', by: 'B', content: buildCounter(B) });
-      if (Math.random() < 0.9) {
-        const e = explain('counter', A, B);
-        if (e) seq.push({ type: 'explain', by: 'cast', content: e });
-      }
       momentum = 'B';
     } else {
       // simple reaction (evade/block/etc.)
       seq.push({ type: 'reaction', by: 'B', content: buildReaction(B) });
-      if (Math.random() < 0.8) {
-        const e = explain('defense', A, B);
-        if (e) seq.push({ type: 'explain', by: 'cast', content: e });
-      }
-      // chance to follow-up after a reaction (NOT guaranteed)
+      // chance to follow-up after a reaction (NOT guaranteed anymore)
       if (Math.random() < FOLLOWUP_RATE) {
         seq.push({ type: 'followup', by: 'B', content: buildFollowupCounter(B, A, style, mem) });
-        if (Math.random() < 0.75) {
-          const e2 = explain('counter', A, B);
-          if (e2) seq.push({ type: 'explain', by: 'cast', content: e2 });
-        }
         momentum = 'B';
       }
     }
@@ -569,12 +541,8 @@ function buildRoundSequence({ A, B, style, mem }) {
 
   // Critical window — bias towards current momentum but favor the actual winner overall
   if (Math.random() < CRIT_CHANCE) {
-    const critAttacker = (momentum === 'B' && Math.random() < 0.35) ? B : A; // 65% A, 35% momentum if B
+    const critAttacker = (momentum === 'B' && Math.random() < 0.35) ? B : A; // 65% A, 35% whoever has momentum if B
     seq.push({ type: 'crit', by: critAttacker === A ? 'A' : 'B', content: buildCrit(critAttacker) });
-    if (Math.random() < 0.8) {
-      const e = explain('crit', A, B);
-      if (e) seq.push({ type: 'explain', by: 'cast', content: e });
-    }
     momentum = (critAttacker === A) ? 'A' : 'B';
   }
 
@@ -582,30 +550,18 @@ function buildRoundSequence({ A, B, style, mem }) {
   if (COMBO_MAX > 1 && Math.random() < 0.38) {
     const hits = 2 + Math.floor(Math.random() * (COMBO_MAX - 1));
     seq.push({ type: 'combo', by: momentum, content: L('🔁', `Combo x${hits}! ${SFX_STRING()}`) });
-    if (Math.random() < 0.8) {
-      const e = explain('combo', A, B);
-      if (e) seq.push({ type: 'explain', by: 'cast', content: e });
-    }
   }
 
   // Random event
   if (Math.random() < EVENTS_CHANCE) {
     const ev = randomEvent(A, B);
-    if (ev) {
-      seq.push({ type: 'event', by: 'env', content: ev });
-      if (Math.random() < 0.5) {
-        const e = explain('crowd', A, B);
-        if (e) seq.push({ type: 'explain', by: 'cast', content: e });
-      }
-    }
+    if (ev) seq.push({ type: 'event', by: 'env', content: ev });
   }
 
   // If B had momentum late, ensure winner A closes the round so narrative matches the actual outcome
   if (momentum === 'B') {
     // winner A retakes with a decisive finisher
     seq.push({ type: 'finisher', by: 'A', content: L('🏁', `${bold(A)} seizes the final exchange — clean finish!${SFX_STRING()}`) });
-    const e = explain('close', A, B);
-    if (e) seq.push({ type: 'explain', by: 'cast', content: e });
     momentum = 'A';
   }
 
@@ -621,22 +577,26 @@ function stripThinkBlocks(text) {
   if (!text) return '';
   let out = String(text);
 
-  // Remove fenced code blocks entirely
+  // Remove fenced code blocks
   out = out.replace(/```[\s\S]*?```/g, ' ');
 
-  // Remove any paired <think|analysis|reasoning|reflection>...</...> blocks
-  out = out.replace(/<\s*(think|analysis|reasoning|reflection)[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, ' ');
+  // If any <think|analysis|reasoning|reflection> appears (even unclosed),
+  // cut everything from the first tag onward.
+  const openIdx = out.search(/<\s*(think|analysis|reasoning|reflection)\b/i);
+  if (openIdx !== -1) {
+    out = out.slice(0, openIdx);
+  }
 
-  // Remove any standalone open/close tags of those types (but DO NOT cut the rest)
+  // Also remove any stray XML-ish tags of those types
   out = out.replace(/<\s*\/?\s*(think|analysis|reasoning|reflection)[^>]*>/gi, ' ');
 
-  // Remove lines that start with "analysis:|think:|reasoning:|reflection:"
-  out = out.replace(/^\s*(analysis|think|reasoning|reflection)\s*:\s*.*$/gim, '');
+  // Remove inline "think:" style prefixes
+  out = out.replace(/^\s*(analysis|think|reasoning|reflection)\s*:\s*/gim, '');
 
-  // Drop meta-only headings "commentary:" / "notes:" lines but keep actual text elsewhere
+  // Drop meta headings (Commentary, Notes) with optional colon
   out = out.replace(/^\s*(commentary|notes?)\s*:?\s*$/gim, '');
 
-  // Remove obvious assistant self-talk lines
+  // Remove assistant self-talk lines
   out = out.replace(/^\s*(okay|alright|first,|let'?s|i need to|i should|i will|here'?s)\b.*$/gim, '');
 
   // Collapse whitespace
@@ -722,7 +682,7 @@ async function runRumbleDisplay({
 
   const Aname = challenger.displayName || challenger.username || challenger.user?.username || 'Challenger';
   const Bname = opponent.displayName   || opponent.username   || opponent.user?.username   || 'Opponent';
-  const title = `⚔️ Rumble: ${Aname} vs ${Bname}`;
+  const title = `⚔️ ${BRAND_NAME}: ${Aname} vs ${Bname}`;
 
   const mem = makeMemory();
   const stats = { taunts: 0, counters: 0, crits: 0, stuns: 0, combos: 0, events: 0 };
@@ -808,7 +768,7 @@ async function runRumbleDisplay({
       embeds: [roundFinalEmbed(style, i + 1, r, env, wasBehind, roundText)]
     });
 
-    // Timeline note — concise & one-per-line for final stats
+    // Timeline note — one line per round (better for mobile)
     roundsTimeline.push(`R${i+1}: **${r.winner}** (${r.a}-${r.b})`);
     if (i < sim.rounds.length - 1) await sleep(jitter(ROUND_DELAY));
   }
@@ -818,7 +778,7 @@ async function runRumbleDisplay({
   const runnerUp = sim.a > sim.b ? opponent  : challenger;
   const championId = (champion.id || champion.user?.id || null);
 
-  // Sanitize commentary, preserving useful lines instead of falling back too often
+  // Sanitize commentary
   let cast = null;
   try {
     const raw = await aiCommentary({
@@ -841,7 +801,7 @@ async function runRumbleDisplay({
     }).slice(0, 1024);
   }
 
-  // One round per line for the timeline field
+  // One-per-line timeline
   const timeline = roundsTimeline.join('\n');
 
   // Send the final embed first (no mention inside embed title)
