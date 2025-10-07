@@ -481,6 +481,7 @@ function finalAllInOneEmbed({ style, sim, champion, env, cast, stats, timeline, 
           `• Events: **${stats.events}**`
         ].join('\n')
       },
+      // Ensure one round per line:
       { name: 'Rounds Timeline', value: timeline.slice(0, 1024) || '—' }
     ],
     footer: { text: `Style: ${style} • Arena: ${env.name}` }
@@ -490,13 +491,64 @@ function finalAllInOneEmbed({ style, sim, champion, env, cast, stats, timeline, 
     const lines = podium.slice(0,3).map((u, i) => `${i===0?'🥇':i===1?'🥈':'🥉'} ${u}`).join('\n');
     e.fields.push({ name: 'Top 3', value: lines || '—' });
   }
-  e.fields.push({ name: '\u200B', value: '\u200B' }); // spacer
+
+  // Spacer line to leave a blank gap between timeline (or podium) and commentary
+  e.fields.push({ name: '\u200B', value: '\u200B' });
+
   if (cast) e.fields.push({ name: '🎙️ Commentary', value: cast });
 
   return e;
 }
 
 /* ========================== Round Sequence ========================== */
+const EXPLAIN = {
+  setup: [
+    '{A} squares to center — ring control matters.',
+    'Light feints from {A}; {B} tests the guard.',
+    '{B} circles off the logo; eyes locked, breaths calm.',
+    '{A} edges into pocket range; {B} watches the lead foot.'
+  ],
+  defense: [
+    'That guard funnels the hit to the safe side — smart from {B}.',
+    'Perfect timing: {B} meets the strike on the half-beat.',
+    '{B} reads the shoulder — defense was loaded before the swing.',
+    'Angle step by {B}; impact glances and momentum stalls.'
+  ],
+  counter: [
+    'Defense to offense in one beat — {B} turns the table.',
+    '{B} punishes the over-commit — textbook reversal.',
+    'Great read: {B} attacks the recovery frames.',
+    'Spacing trap sprung — {B} owns the exchange.'
+  ],
+  crit: [
+    'Tiny window, huge value — accuracy decides rounds.',
+    'Everything lined up: footwork, timing, intent.',
+    'Read into punish — the crowd felt that one.',
+    'Frame-perfect — you could measure it in pixels.'
+  ],
+  combo: [
+    'Rhythm lands — each hit sets the next.',
+    'Staggered pressure: breathing room vanishes.',
+    'Once tempo breaks, it snowballs — you’re seeing it.',
+    'Hit-confirm into flow — clean conversion.'
+  ],
+  close: [
+    '{A} resets the stance and shuts the door on the round.',
+    'Momentum reclaimed — {A} makes the last exchange count.',
+    'Discipline at the end — {A} doesn’t give a reroll.',
+    'All business: {A} lands the closer.'
+  ],
+  crowd: [
+    'Crowd leans forward — even the refs are grinning.',
+    'Phones up; clips are farming.',
+    'You can feel the bass through the rail.',
+    'That one echoes through the Hyperdome.'
+  ]
+};
+
+const ANALYST_EMOJI = '🧠';
+const GEAR_EMOJI    = '🧰';
+
 function explain(kind, A, B) {
   const bank = EXPLAIN[kind] || [];
   if (!bank.length) return null;
@@ -536,7 +588,6 @@ function buildRoundSequence({ A, B, style, mem }) {
   }
 
   // defense window for B if not stunned
-  let bDidCounter = false;
   if (!stunnedB) {
     if (Math.random() < COUNTER_CHANCE) {
       // Hard counter (B flips momentum)
@@ -546,7 +597,6 @@ function buildRoundSequence({ A, B, style, mem }) {
         if (e) seq.push({ type: 'explain', by: 'cast', content: e });
       }
       momentum = 'B';
-      bDidCounter = true;
     } else {
       // simple reaction (evade/block/etc.)
       seq.push({ type: 'reaction', by: 'B', content: buildReaction(B) });
@@ -562,7 +612,6 @@ function buildRoundSequence({ A, B, style, mem }) {
           if (e2) seq.push({ type: 'explain', by: 'cast', content: e2 });
         }
         momentum = 'B';
-        bDidCounter = true;
       }
     }
   }
@@ -621,26 +670,22 @@ function stripThinkBlocks(text) {
   if (!text) return '';
   let out = String(text);
 
-  // Remove fenced code blocks
+  // Remove fenced code blocks entirely
   out = out.replace(/```[\s\S]*?```/g, ' ');
 
-  // If any <think|analysis|reasoning|reflection> appears (even unclosed),
-  // cut everything from the first tag onward.
-  const openIdx = out.search(/<\s*(think|analysis|reasoning|reflection)\b/i);
-  if (openIdx !== -1) {
-    out = out.slice(0, openIdx);
-  }
+  // Remove any paired <think|analysis|reasoning|reflection>...</...> blocks
+  out = out.replace(/<\s*(think|analysis|reasoning|reflection)[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, ' ');
 
-  // Also remove any stray XML-ish tags of those types
+  // Remove any standalone open/close tags of those types (but DO NOT cut the rest)
   out = out.replace(/<\s*\/?\s*(think|analysis|reasoning|reflection)[^>]*>/gi, ' ');
 
-  // Remove inline "think:" style prefixes
-  out = out.replace(/^\s*(analysis|think|reasoning|reflection)\s*:\s*/gim, '');
+  // Remove lines that start with "analysis:|think:|reasoning:|reflection:"
+  out = out.replace(/^\s*(analysis|think|reasoning|reflection)\s*:\s*.*$/gim, '');
 
-  // Drop meta headings (Commentary, Notes) with optional colon
+  // Drop meta-only headings "commentary:" / "notes:" lines but keep actual text elsewhere
   out = out.replace(/^\s*(commentary|notes?)\s*:?\s*$/gim, '');
 
-  // Remove assistant self-talk lines
+  // Remove obvious assistant self-talk lines
   out = out.replace(/^\s*(okay|alright|first,|let'?s|i need to|i should|i will|here'?s)\b.*$/gim, '');
 
   // Collapse whitespace
@@ -812,7 +857,7 @@ async function runRumbleDisplay({
       embeds: [roundFinalEmbed(style, i + 1, r, env, wasBehind, roundText)]
     });
 
-    // Timeline note — concise for mobile: winner + score
+    // Timeline note — concise & one-per-line for final stats
     roundsTimeline.push(`R${i+1}: **${r.winner}** (${r.a}-${r.b})`);
     if (i < sim.rounds.length - 1) await sleep(jitter(ROUND_DELAY));
   }
@@ -822,7 +867,7 @@ async function runRumbleDisplay({
   const runnerUp = sim.a > sim.b ? opponent  : challenger;
   const championId = (champion.id || champion.user?.id || null);
 
-  // Sanitize commentary
+  // Sanitize commentary, preserving useful lines instead of falling back too often
   let cast = null;
   try {
     const raw = await aiCommentary({
@@ -845,7 +890,8 @@ async function runRumbleDisplay({
     }).slice(0, 1024);
   }
 
-  const timeline = roundsTimeline.join(' • ');
+  // One round per line for the timeline field
+  const timeline = roundsTimeline.join('\n');
 
   // Send the final embed first (no mention inside embed title)
   await target.send({
@@ -868,6 +914,4 @@ async function runRumbleDisplay({
 }
 
 module.exports = { runRumbleDisplay };
-
-
 
