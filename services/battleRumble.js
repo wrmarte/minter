@@ -1,4 +1,3 @@
-
 // services/battleRumble.js
 const { simulateBattle, aiCommentary, makeBar, clampBestOf } = require('./battleEngine');
 
@@ -86,6 +85,9 @@ function getAvatarURL(memberOrUser) {
   } catch {}
   return null;
 }
+
+// bold helper (renamed to avoid collisions with param names)
+function bold(name) { return `**${name}**`; }
 
 // no-repeat picker with small memory window (per-match)
 function pickNoRepeat(arr, recent, cap = 6) {
@@ -276,7 +278,6 @@ const EVADE = [
 ];
 
 /* ========================== Line rendering helpers ========================== */
-// emoji per step type
 const ICONS = {
   taunt: '🗣️',
   action: '🥊',
@@ -292,20 +293,16 @@ const ICONS = {
   event: '📣',
   announcer: '🎙️'
 };
-
-// Normalize names to **bold**
-function B(name) { return `**${name}**`; }
-// Render one line (full width on mobile/desktop)
 function renderLine(type, text) {
   const icon = ICONS[type] || '•';
   return `${icon} │ ${text}`;
 }
 
 /* ========================== Builders (names bold) ========================== */
-function buildTaunt(style, A, Bname, mem) {
+function buildTaunt(style, Aname, Bname, mem) {
   const bank = TAUNTS[style] || TAUNTS.motivator;
   const line = pickNoRepeat(bank, mem.taunts, 6);
-  return line.replace('{A}', B(A)).replace('{B}', B(Bname));
+  return line.replace('{A}', bold(Aname)).replace('{B}', bold(Bname));
 }
 function styleWeapons(style){
   const base = SAFE_MODE ? WEAPONS_SAFE.slice() : WEAPONS_SAFE.concat(WEAPONS_SPICY);
@@ -322,7 +319,7 @@ function styleVerbs(style){
   const specific = { clean: A_CLEAN, motivator: A_MOTI, villain: A_VILL, degen: A_DEGN }[style] || [];
   return common.concat(specific);
 }
-function buildAction(A, Bname, style, mem) {
+function buildAction(Aname, Bname, style, mem) {
   const wKey = `wep:${style}`;
   const vKey = `vrb:${style}`;
   const wList = filterByRecent(styleWeapons(style), wKey);
@@ -334,15 +331,15 @@ function buildAction(A, Bname, style, mem) {
   updateRecentList(wKey, w, WEAPON_RECENT_WINDOW);
   updateRecentList(vKey, v, VERB_RECENT_WINDOW);
 
-  return `${B(A)} grabs a ${w} and ${v} ${B(Bname)}!${SFX_STRING()}`;
+  return `${bold(Aname)} grabs a ${w} and ${v} ${bold(Bname)}!${SFX_STRING()}`;
 }
-function buildReaction(Bname) { return `${B(Bname)} ${pick(REACTIONS)}.${SFX_STRING()}`; }
-function buildCounter(Bname)  { return (pick(COUNTERS)).replace('{B}', B(Bname)) + SFX_STRING(); }
-function buildCrit(attacker)  { return (pick(CRITS)).replace('{A}', B(attacker)) + SFX_STRING(); }
-function randomEvent(A, Bname) {
+function buildReaction(Bname) { return `${bold(Bname)} ${pick(REACTIONS)}.${SFX_STRING()}`; }
+function buildCounter(Bname)  { return (pick(COUNTERS)).replace('{B}', bold(Bname)) + SFX_STRING(); }
+function buildCrit(attacker)  { return (pick(CRITS)).replace('{A}', bold(attacker)) + SFX_STRING(); }
+function randomEvent(Aname, Bname) {
   const roll = Math.random();
   if (roll < HAZARD_CHANCE) return `${pick(HAZARDS)}`;
-  if (roll < HAZARD_CHANCE + POWERUP_CHANCE) return (pick(POWERUPS)).replace('{X}', Math.random()<0.5 ? B(A) : B(Bname)) + SFX_STRING();
+  if (roll < HAZARD_CHANCE + POWERUP_CHANCE) return (pick(POWERUPS)).replace('{X}', Math.random()<0.5 ? bold(Aname) : bold(Bname)) + SFX_STRING();
   if (roll < HAZARD_CHANCE + POWERUP_CHANCE + CROWD_CHANCE) return `${pick(CROWD)}`;
   return null;
 }
@@ -352,15 +349,15 @@ function buildAnnouncer(style) {
   if (Math.random() < 0.35 && ANNOUNCER_BANK[style]) return `${pick(ANNOUNCER_BANK[style])}`;
   return `${pick(persona)}`;
 }
-function buildMove(A, Bname)  { return `${B(A)} ${pick(MOVES)}; ${B(Bname)} stays alert.`; }
-function buildDefense(Bname)  { return `${B(Bname)} ${pick(DEFENDS)}.`; }
-function buildEvade(Bname)    { return `${B(Bname)} ${pick(EVADE)}.`; }
-function buildSwap(X, style, mem) {
+function buildMove(Aname, Bname)  { return `${bold(Aname)} ${pick(MOVES)}; ${bold(Bname)} stays alert.`; }
+function buildDefense(Bname)  { return `${bold(Bname)} ${pick(DEFENDS)}.`; }
+function buildEvade(Bname)    { return `${bold(Bname)} ${pick(EVADE)}.`; }
+function buildSwap(Xname, style, mem) {
   const wKey = `wep:${style}`;
   const wList = filterByRecent(styleWeapons(style), wKey);
   const w = pickNoRepeat(wList, mem.weapons, 7);
   updateRecentList(wKey, w, WEAPON_RECENT_WINDOW);
-  return `${B(X)} swaps to a ${w}.`;
+  return `${bold(Xname)} swaps to a ${w}.`;
 }
 
 // Scenic line (no-repeat-ish)
@@ -445,41 +442,41 @@ function finalAllInOneEmbed({ style, sim, champion, env, cast, stats, timeline, 
 }
 
 /* ========================== Round Sequence (ENRICHED) ========================== */
-function buildRoundSequence({ A, B, style, mem }) {
+function buildRoundSequence({ Aname, Bname, style, mem }) {
   const seq = [];
 
-  if (Math.random() < TAUNT_CHANCE) seq.push({ type: 'taunt', content: buildTaunt(style, A, B, mem) });
+  if (Math.random() < TAUNT_CHANCE) seq.push({ type: 'taunt', content: buildTaunt(style, Aname, Bname, mem) });
 
-  seq.push({ type: 'action', content: buildAction(A, B, style, mem) });
+  seq.push({ type: 'action', content: buildAction(Aname, Bname, style, mem) });
 
   const microBeats = 2 + Math.floor(Math.random() * 3); // 2..4
   for (let i = 0; i < microBeats; i++) {
     const roll = Math.random();
-    if (roll < 0.30) seq.push({ type: 'move',    content: buildMove(A, B) });
-    else if (roll < 0.55) seq.push({ type: 'def', content: buildDefense(B) });
-    else if (roll < 0.75) seq.push({ type: 'evd', content: buildEvade(B) });
-    else                   seq.push({ type: 'swap', content: buildSwap(Math.random()<0.5 ? A : B, style, mem) });
+    if (roll < 0.30) seq.push({ type: 'move',    content: buildMove(Aname, Bname) });
+    else if (roll < 0.55) seq.push({ type: 'def', content: buildDefense(Bname) });
+    else if (roll < 0.75) seq.push({ type: 'evd', content: buildEvade(Bname) });
+    else                   seq.push({ type: 'swap', content: buildSwap(Math.random()<0.5 ? Aname : Bname, style, mem) });
   }
 
   let stunned = false;
   if (Math.random() < STUN_CHANCE) {
-    seq.push({ type: 'stun', content: `🫨 ${B} is briefly stunned!${SFX_STRING()}`.replace(B, (m)=>B(m)) }); // keep bold via B() below
+    seq.push({ type: 'stun', content: `${bold(Bname)} is briefly stunned!${SFX_STRING()}` });
     stunned = true;
   }
 
   let didCounter = false;
   if (!stunned) {
-    if (Math.random() < COUNTER_CHANCE) { seq.push({ type: 'counter', content: buildCounter(B) }); didCounter = true; }
-    else seq.push({ type: 'reaction', content: buildReaction(B) });
+    if (Math.random() < COUNTER_CHANCE) { seq.push({ type: 'counter', content: buildCounter(Bname) }); didCounter = true; }
+    else seq.push({ type: 'reaction', content: buildReaction(Bname) });
   }
 
   if (didCounter && Math.random() < 0.7) {
-    seq.push({ type: 'action', content: buildAction(B, A, style, mem) });
+    seq.push({ type: 'action', content: buildAction(Bname, Aname, style, mem) });
   }
 
   if (Math.random() < CRIT_CHANCE) {
     const lastCounter = seq.find(s => s.type === 'counter' || s.type === 'action');
-    seq.push({ type: 'crit', content: buildCrit(lastCounter ? B : A) });
+    seq.push({ type: 'crit', content: buildCrit(lastCounter ? Bname : Aname) });
   }
 
   if (COMBO_MAX > 1 && Math.random() < 0.45) {
@@ -488,23 +485,21 @@ function buildRoundSequence({ A, B, style, mem }) {
   }
 
   if (Math.random() < EVENTS_CHANCE) {
-    const ev = randomEvent(A, B);
+    const ev = randomEvent(Aname, Bname);
     if (ev) {
-      // pick event-specific icon based on content
-      const type = ev.startsWith('⚠️') ? 'event' : ev.startsWith('🔸') ? 'event' : ev.startsWith('📣') ? 'event' : 'event';
-      seq.push({ type, content: ev.replace(/\*\*(.+?)\*\*/g, '$1') }); // ensure we don't double-bold later
+      seq.push({ type: 'event', content: ev.replace(/\*\*(.+?)\*\*/g, '$1') });
     }
   }
 
   const caster = buildAnnouncer(style);
   if (caster && Math.random() < 0.6) seq.push({ type: 'announcer', content: caster });
 
-  // Ensure bold for any remaining raw A/B tokens from stun line
+  // Ensure any plain-name leftovers are bolded
   return seq.map(s => ({
     ...s,
     content: String(s.content)
-      .replace(new RegExp(`\\b${escapeRegExp(A)}\\b`, 'g'), B(A))
-      .replace(new RegExp(`\\b${escapeRegExp(B)}\\b`, 'g'), B(B))
+      .replace(new RegExp(`\\b${escapeRegExp(Aname)}\\b`, 'g'), bold(Aname))
+      .replace(new RegExp(`\\b${escapeRegExp(Bname)}\\b`, 'g'), bold(Bname))
   }));
 }
 
@@ -659,7 +654,7 @@ async function runRumbleDisplay({
     const r = sim.rounds[i];
 
     // Build full sequence (extra micro moments)
-    const seq = buildRoundSequence({ A: r.winner, B: r.loser, style, mem });
+    const seq = buildRoundSequence({ Aname: r.winner, Bname: r.loser, style, mem });
 
     // Score stats
     for (const step of seq) {
@@ -708,7 +703,7 @@ async function runRumbleDisplay({
     await sleep(jitter(BEAT_DELAY));
     try {
       await msg.edit({
-        embeds: [roundFinalEmbed(style, i + 1, r, env, wasBehind, lines.slice(0, 120))] // safe cap
+        embeds: [roundFinalEmbed(style, i + 1, r, env, wasBehind, lines.slice(0, 120))]
       });
     } catch {}
 
@@ -767,5 +762,6 @@ async function runRumbleDisplay({
 }
 
 module.exports = { runRumbleDisplay };
+
 
 
