@@ -47,9 +47,20 @@ const jitter = (base) => base + Math.floor((Math.random() * 2 - 1) * JITTER_MS);
 const pick   = (arr) => arr[Math.floor(Math.random() * arr.length)];
 const exists = (s) => typeof s === 'string' && s.trim().length > 0;
 
-// NEW: dark “strip” per line inside the embed using inline code style
-const dark = (s) => `\`${s}\``;
-const formatFeed = (lines) => lines.map(dark).join('\n');
+// “clean list” block — code block with leading pipes for each line
+const block = (lines) => {
+  const arr = Array.isArray(lines) ? lines : String(lines || '').split('\n');
+  const body = arr.map(s => ` | ${s}`).join('\n');
+  return '```' + body + '```';
+};
+
+// Optional meta appended under the block, like Players Left & Era
+const metaLines = ({ playersLeft = null, era = null } = {}) => {
+  const lines = [];
+  if (playersLeft !== null && playersLeft !== undefined) lines.push(`Players Left: ${playersLeft}`);
+  if (era) lines.push(`Era: ${era}`);
+  return lines.length ? '\n' + lines.join('\n') : '';
+};
 
 function colorFor(style) {
   return style === 'villain' ? 0x8b0000
@@ -114,7 +125,7 @@ function updateRecentList(key, item, cap) {
   if (item && !arr.includes(item)) arr.push(item);
   while (arr.length > cap) arr.shift();
 }
-function filterByRecent(list, key, cap) {
+function filterByRecent(list, key) {
   const recent = getRecentList(key);
   const filtered = list.filter(x => !recent.includes(x));
   return filtered.length >= Math.ceil(list.length * 0.4) ? filtered : list;
@@ -300,8 +311,8 @@ function styleVerbs(style){
 function buildAction(A, B, style, mem) {
   const wKey = `wep:${style}`;
   const vKey = `vrb:${style}`;
-  const wList = filterByRecent(styleWeapons(style), wKey, WEAPON_RECENT_WINDOW);
-  const vList = filterByRecent(styleVerbs(style),   vKey, VERB_RECENT_WINDOW);
+  const wList = filterByRecent(styleWeapons(style), wKey);
+  const vList = filterByRecent(styleVerbs(style),   vKey);
 
   const w = pickNoRepeat(wList, mem.weapons, 7);
   const v = pickNoRepeat(vList, mem.verbs,   7);
@@ -332,7 +343,7 @@ function buildDefense(B) { return `🛡️ ${B} ${pick(DEFENDS)}.`; }
 function buildEvade(B)   { return `🪽 ${B} ${pick(EVADE)}.`; }
 function buildSwap(X, style, mem) {
   const wKey = `wep:${style}`;
-  const wList = filterByRecent(styleWeapons(style), wKey, WEAPON_RECENT_WINDOW);
+  const wList = filterByRecent(styleWeapons(style), wKey);
   const w = pickNoRepeat(wList, mem.weapons, 7);
   updateRecentList(wKey, w, WEAPON_RECENT_WINDOW);
   return `🔧 ${X} swaps to a ${w}.`;
@@ -365,7 +376,7 @@ function coloredBarBlock(aName, bName, a, b, bestOf) {
   return `${legendLine(aName, bName)}\n**${a}** ${bar} **${b}**`;
 }
 
-/* ========================== Embeds ========================== */
+/* ========================== Embeds (CLEAN STYLE) ========================== */
 function introEmbed(style, title) {
   return { ...baseEmbed(style, { withLogo: true, allowThumb: true }), title, description: `Rumble incoming…` };
 }
@@ -379,22 +390,27 @@ function arenaEmbed(style, env, bestOf) {
     footer: { text: `Arena: ${env.name}` }
   };
 }
-function roundProgressEmbed(style, idx, env, linesJoined, previewBarBlock = null) {
+function roundProgressEmbed(style, idx, env, lines, previewBarBlock = null, meta = null) {
+  const top = previewBarBlock ? `${previewBarBlock}\n\n` : '';
+  const body = block(lines);
+  const tail = meta ? metaLines(meta) : '';
   return {
     ...baseEmbed(style, { withLogo: true, allowThumb: true }),
-    title: `Round ${idx} — Action Feed`,
-    description: previewBarBlock ? `${previewBarBlock}\n\n${linesJoined}` : `${linesJoined}`,
+    title: `Round ${idx}`,
+    description: `${top}${body}${tail}`,
     footer: { text: `Arena: ${env.name}` }
   };
 }
-function roundFinalEmbed(style, idx, r, aName, bName, bestOf, env, wasBehind, roundText) {
+function roundFinalEmbed(style, idx, r, aName, bName, bestOf, env, wasBehind, lines, meta = null) {
   const color = wasBehind ? 0x2ecc71 /* green */ : colorFor(style);
   const barBlock = coloredBarBlock(aName, bName, r.a, r.b, bestOf);
+  const body = block(lines);
+  const tail = meta ? metaLines(meta) : '';
   return {
     ...baseEmbed(style, { withLogo: true, allowThumb: true }),
     color,
     title: `Round ${idx} — Result`,
-    description: `${barBlock}\n\n${roundText}`,
+    description: `${barBlock}\n\n${body}${tail}`,
     fields: [
       { name: 'Winner', value: `**${r.winner}**`, inline: true },
       { name: 'Loser',  value: `${r.loser}`, inline: true },
@@ -430,7 +446,6 @@ function finalAllInOneEmbed({ style, sim, champion, env, cast, stats, timeline, 
     footer: { text: `Style: ${style} • Arena: ${env.name}` }
   };
 
-  // Optional podium (for royale/bracket). Spacer before commentary either way.
   if (Array.isArray(podium) && podium.length) {
     const lines = podium.slice(0,3).map((u, i) => `${i===0?'🥇':i===1?'🥈':'🥉'} ${u}`).join('\n');
     e.fields.push({ name: 'Top 3', value: lines || '—' });
@@ -446,13 +461,10 @@ function finalAllInOneEmbed({ style, sim, champion, env, cast, stats, timeline, 
 function buildRoundSequence({ A, B, style, mem }) {
   const seq = [];
 
-  // Optional opener taunt
   if (Math.random() < TAUNT_CHANCE) seq.push({ type: 'taunt', content: buildTaunt(style, A, B, mem) });
 
-  // Opener action
   seq.push({ type: 'action', content: buildAction(A, B, style, mem) });
 
-  // Mid-round scramble: add 2–4 micro beats (move/defend/evade/swap)
   const microBeats = 2 + Math.floor(Math.random() * 3); // 2..4
   for (let i = 0; i < microBeats; i++) {
     const roll = Math.random();
@@ -462,44 +474,37 @@ function buildRoundSequence({ A, B, style, mem }) {
     else                   seq.push({ type: 'swap', content: buildSwap(Math.random()<0.5 ? A : B, style, mem) });
   }
 
-  // Stun check
   let stunned = false;
   if (Math.random() < STUN_CHANCE) {
     seq.push({ type: 'stun', content: `🫨 ${B} is briefly stunned!${SFX_STRING()}` });
     stunned = true;
   }
 
-  // Reaction / Counter
   let didCounter = false;
   if (!stunned) {
     if (Math.random() < COUNTER_CHANCE) { seq.push({ type: 'counter', content: buildCounter(B) }); didCounter = true; }
     else seq.push({ type: 'reaction', content: buildReaction(B) });
   }
 
-  // If counter happened, let B follow up with a quick action
   if (didCounter && Math.random() < 0.7) {
     seq.push({ type: 'actionB', content: buildAction(B, A, style, mem) });
   }
 
-  // Crit chance (attacker depends on last momentum)
   if (Math.random() < CRIT_CHANCE) {
     const lastCounter = seq.find(s => s.type === 'counter' || s.type === 'actionB');
     seq.push({ type: 'crit', content: buildCrit(lastCounter ? B : A) });
   }
 
-  // Optional combo burst
   if (COMBO_MAX > 1 && Math.random() < 0.45) {
     const hits = 2 + Math.floor(Math.random() * (COMBO_MAX - 1));
     seq.push({ type: 'combo', content: `🔁 Combo x${hits}! ${SFX_STRING()}` });
   }
 
-  // Random environment/crowd events
   if (Math.random() < EVENTS_CHANCE) {
     const ev = randomEvent(A, B);
     if (ev) seq.push({ type: 'event', content: ev });
   }
 
-  // Occasional announcer line
   const caster = buildAnnouncer(style);
   if (caster && Math.random() < 0.6) seq.push({ type: 'announcer', content: caster });
 
@@ -590,7 +595,9 @@ async function runRumbleDisplay({
   guildName = 'this server',
   // allow callers to run their own pre-show
   skipIntro = false,
-  envOverride = null
+  envOverride = null,
+  // optional round meta for display aesthetics (royale can pass these)
+  roundMetaProvider = null // fn: (roundIdx) => ({ playersLeft, era })
 }) {
   bestOf = clampBestOf(bestOf);
 
@@ -666,21 +673,27 @@ async function runRumbleDisplay({
     const lines = [];
     lines.push(scenicLine(env, mem));
 
-    // Reveal more beats now that rounds are longer:
     const beatsToReveal = Math.min(seq.length, Math.max(3, ROUND_BEATS + 2));
     const reveal = seq.slice(0, beatsToReveal).map(s => s.content);
 
+    const meta = typeof roundMetaProvider === 'function' ? (roundMetaProvider(i + 1) || null) : null;
+
     // Initial post for the round
-    let preview = coloredBarBlock(Aname, Bname, r.a - (r.winner === Aname ? 1 : 0), r.b - (r.winner === Aname ? 0 : 1), sim.bestOf);
+    const preview = coloredBarBlock(Aname, Bname, r.a - (r.winner === Aname ? 1 : 0), r.b - (r.winner === Aname ? 0 : 1), sim.bestOf);
     let msg = await target.send({
-      embeds: [roundProgressEmbed(style, i + 1, env, formatFeed(lines), preview)]
+      embeds: [roundProgressEmbed(style, i + 1, env, lines, preview, meta)]
     });
 
-    // Reveal each beat with an edit and a pause
+    // Add audience reactions to the message
+    for (const emoji of ['🔥','🤣','💯']) { try { await msg.react(emoji); } catch {} }
+
+    // Reveal each beat
     for (let b = 0; b < reveal.length; b++) {
       await sleep(jitter(BEAT_DELAY));
       lines.push(reveal[b]);
-      await msg.edit({ embeds: [roundProgressEmbed(style, i + 1, env, formatFeed(lines), '⏳ …resolving round…')] });
+      try {
+        await msg.edit({ embeds: [roundProgressEmbed(style, i + 1, env, lines, '⏳ …resolving round…', meta)] });
+      } catch {}
     }
 
     // Finalize the round
@@ -689,14 +702,14 @@ async function runRumbleDisplay({
     const prevB = r.b - (winnerIsA ? 0 : 1);
     const wasBehind = winnerIsA ? (prevA < prevB) : (prevB < prevA);
 
-    const roundText = formatFeed(
-      lines.concat(seq.slice(beatsToReveal).map(s => s.content))
-    ).slice(0, 1800);
+    const finalLines = lines.concat(seq.slice(beatsToReveal).map(s => s.content)).slice(0, 100); // safe cap
 
     await sleep(jitter(BEAT_DELAY));
-    await msg.edit({
-      embeds: [roundFinalEmbed(style, i + 1, r, Aname, Bname, sim.bestOf, env, wasBehind, roundText)]
-    });
+    try {
+      await msg.edit({
+        embeds: [roundFinalEmbed(style, i + 1, r, Aname, Bname, sim.bestOf, env, wasBehind, finalLines, meta)]
+      });
+    } catch {}
 
     roundsTimeline.push(`R${i+1}: **${r.winner}** over ${r.loser} (${r.a}-${r.b})`);
     if (i < sim.rounds.length - 1) await sleep(jitter(ROUND_DELAY));
