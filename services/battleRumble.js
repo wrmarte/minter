@@ -269,7 +269,7 @@ const CROWD   = ['Crowd roars!','Someone rings a cowbell.','A vuvuzela bleats in
 const HAZARDS = ['Floor tiles shift suddenly!','A rogue shopping cart drifts across the arena!','Fog machine overperforms — visibility drops!','Neon sign flickers; shadows dance unpredictably!','A stray confetti cannon fires!','Stage cable snags a foot!'];
 const POWERUPS= ['{X} picks up a glowing orb — speed up!','{X} grabs a pixel heart — stamina bump!','{X} equips glitch boots — dash unlocked!','{X} finds a shield bubble — temporary guard!','{X} slots a power chip — timing buff!'];
 
-/* ===== New: Analyst-style explanation banks (pure flavor) ===== */
+/* ============ Analyst-style explanation banks (pure flavor) ============ */
 const EXPLAIN = {
   setup: [
     '{A} squares to center — ring control matters.',
@@ -314,7 +314,6 @@ const EXPLAIN = {
     'That one echoes through the Hyperdome.'
   ]
 };
-
 const ANALYST_EMOJI = '🧠';
 const GEAR_EMOJI    = '🧰';
 
@@ -481,7 +480,7 @@ function finalAllInOneEmbed({ style, sim, champion, env, cast, stats, timeline, 
           `• Events: **${stats.events}**`
         ].join('\n')
       },
-      // Ensure one round per line:
+      // One round per line:
       { name: 'Rounds Timeline', value: timeline.slice(0, 1024) || '—' }
     ],
     footer: { text: `Style: ${style} • Arena: ${env.name}` }
@@ -501,58 +500,10 @@ function finalAllInOneEmbed({ style, sim, champion, env, cast, stats, timeline, 
 }
 
 /* ========================== Round Sequence ========================== */
-const EXPLAIN = {
-  setup: [
-    '{A} squares to center — ring control matters.',
-    'Light feints from {A}; {B} tests the guard.',
-    '{B} circles off the logo; eyes locked, breaths calm.',
-    '{A} edges into pocket range; {B} watches the lead foot.'
-  ],
-  defense: [
-    'That guard funnels the hit to the safe side — smart from {B}.',
-    'Perfect timing: {B} meets the strike on the half-beat.',
-    '{B} reads the shoulder — defense was loaded before the swing.',
-    'Angle step by {B}; impact glances and momentum stalls.'
-  ],
-  counter: [
-    'Defense to offense in one beat — {B} turns the table.',
-    '{B} punishes the over-commit — textbook reversal.',
-    'Great read: {B} attacks the recovery frames.',
-    'Spacing trap sprung — {B} owns the exchange.'
-  ],
-  crit: [
-    'Tiny window, huge value — accuracy decides rounds.',
-    'Everything lined up: footwork, timing, intent.',
-    'Read into punish — the crowd felt that one.',
-    'Frame-perfect — you could measure it in pixels.'
-  ],
-  combo: [
-    'Rhythm lands — each hit sets the next.',
-    'Staggered pressure: breathing room vanishes.',
-    'Once tempo breaks, it snowballs — you’re seeing it.',
-    'Hit-confirm into flow — clean conversion.'
-  ],
-  close: [
-    '{A} resets the stance and shuts the door on the round.',
-    'Momentum reclaimed — {A} makes the last exchange count.',
-    'Discipline at the end — {A} doesn’t give a reroll.',
-    'All business: {A} lands the closer.'
-  ],
-  crowd: [
-    'Crowd leans forward — even the refs are grinning.',
-    'Phones up; clips are farming.',
-    'You can feel the bass through the rail.',
-    'That one echoes through the Hyperdome.'
-  ]
-};
-
-const ANALYST_EMOJI = '🧠';
-const GEAR_EMOJI    = '🧰';
-
 function explain(kind, A, B) {
   const bank = EXPLAIN[kind] || [];
   if (!bank.length) return null;
-  const line = pick(bank).replaceAll('{A}', bold(A)).replaceAll('{B}', bold(B));
+  const line = bank[Math.floor(Math.random()*bank.length)].replaceAll('{A}', bold(A)).replaceAll('{B}', bold(B));
   return L(ANALYST_EMOJI, line);
 }
 
@@ -914,4 +865,5 @@ async function runRumbleDisplay({
 }
 
 module.exports = { runRumbleDisplay };
+
 
