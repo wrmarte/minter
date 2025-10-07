@@ -127,7 +127,7 @@ async function runArenaRevealSequence({ message, style, arena, prepSeconds = 10 
   // 1) Show reveal immediately (name + intro)
   await message.edit({ embeds: [arenaRevealEmbed({ arena, color, prepsLines: [] })] }).catch(() => {});
 
-  // 2) 10s preps line-by-line
+  // 2) 10s preps line-by-line (~2s per line)
   const steps = Math.max(1, Math.min(PREP_LINES.length, Math.floor(prepSeconds / 2))); // ~2s per line
   const sel = PREP_LINES.slice(0, steps);
   const acc = [];
@@ -192,7 +192,7 @@ module.exports = {
     const style      = (interaction.options.getString('style') || process.env.BATTLE_STYLE_DEFAULT || 'motivator').toLowerCase();
 
     const incomingSeconds = 30;
-    const prepSeconds     = 20;
+    const prepSeconds     = 10; // <-- changed from 20 to 10
 
     // ===================== PATH A: EPHEMERAL LOBBY (owner adds 2) =====================
     if (manualPick) {
@@ -319,7 +319,7 @@ module.exports = {
             // Pick arena here for the pre-reveal; we’ll pass it to the engine so it matches
             const arena = ENVIRONMENTS[Math.floor(Math.random() * ENVIRONMENTS.length)];
 
-            // Show Arena + 20s prep + final countdown
+            // Show Arena + 10s prep + final countdown
             await runArenaRevealSequence({ message: seed, style, arena, prepSeconds: prepSeconds });
 
             // Start the cinematic battle (skip engine intro/arena; reuse our arena)
@@ -382,7 +382,7 @@ module.exports = {
     // Pick arena here for the pre-reveal; we’ll pass it to the engine so it matches
     const arena = ENVIRONMENTS[Math.floor(Math.random() * ENVIRONMENTS.length)];
 
-    // Show Arena + 20s prep + final countdown
+    // Show Arena + 10s prep + final countdown
     await runArenaRevealSequence({ message: seed, style, arena, prepSeconds: prepSeconds });
 
     // Start the cinematic battle (skip engine intro/arena; reuse our arena)
@@ -400,3 +400,4 @@ module.exports = {
     });
   },
 };
+
