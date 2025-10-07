@@ -304,6 +304,23 @@ function buildAction(A, B, style, mem) {
 function buildReaction(B) { return L('🛡️', `${bold(B)} ${pick(REACTIONS)}.${SFX_STRING()}`); }
 function buildCounter(B) { return L('⚡', `${bold(B)} reads it and flips momentum!${SFX_STRING()}`); }
 function buildCrit(attacker) { return L('💥', `${bold(attacker)} lands a **critical** hit!${SFX_STRING()}`); }
+
+// New: explicit follow-up counter after a successful evade/block/etc.
+function buildFollowupCounter(attacker, defender, style, mem) {
+  const wKey = `wep:${style}`;
+  const vKey = `vrb:${style}`;
+  const wList = filterByRecent(styleWeapons(style), wKey, WEAPON_RECENT_WINDOW);
+  const vList = filterByRecent(styleVerbs(style),   vKey, VERB_RECENT_WINDOW);
+
+  const w = pickNoRepeat(wList, mem.weapons, 7);
+  const v = pickNoRepeat(vList, mem.verbs,   7);
+
+  updateRecentList(wKey, w, WEAPON_RECENT_WINDOW);
+  updateRecentList(vKey, v, VERB_RECENT_WINDOW);
+
+  return L('🔄', `${bold(attacker)} counterstrikes with a ${w} and ${v} ${bold(defender)}!${SFX_STRING()}`);
+}
+
 function randomEvent(A, B) {
   const roll = Math.random();
   if (roll < HAZARD_CHANCE) return L('⚠️', pick(HAZARDS));
@@ -379,9 +396,7 @@ function roundFinalEmbed(style, idx, r, env, wasBehind, linesJoined) {
     title: `Round ${idx} — Result`,
     description: linesJoined,
     fields: [
-      { name: 'Winner', value: `**${r.winner}**` },
-      // (No loser field per your request)
-      { name: 'Round Score', value: `**${r.a}–${r.b}**` },
+      { name: 'Winner', value: `**${r.winner}** (${r.a}–${r.b})` }, // winner + score
     ],
     footer: { text: `Style: ${style} • Arena: ${env.name}` }
   };
@@ -434,18 +449,27 @@ function buildRoundSequence({ A, B, style, mem }) {
   if (Math.random() < STUN_CHANCE) { seq.push({ type: 'stun', content: L('🫨', `${bold(B)} is briefly stunned!${SFX_STRING()}`) }); stunned = true; }
 
   if (!stunned) {
-    if (Math.random() < COUNTER_CHANCE) seq.push({ type: 'counter', content: buildCounter(B) });
-    else seq.push({ type: 'reaction', content: buildReaction(B) });
+    if (Math.random() < COUNTER_CHANCE) {
+      // Hard counter: defender immediately flips it
+      seq.push({ type: 'counter', content: buildCounter(B) });
+    } else {
+      // Evade/block/etc., then immediate follow-up counter-attack for entertainment
+      seq.push({ type: 'reaction', content: buildReaction(B) });
+      seq.push({ type: 'followup', content: buildFollowupCounter(B, A, style, mem) });
+    }
   }
 
+  // Choose CRIT attacker based on who last had momentum (counter/followup => B; otherwise A)
   if (Math.random() < CRIT_CHANCE) {
-    const last = seq.find(s => s.type === 'counter');
-    seq.push({ type: 'crit', content: buildCrit(last ? B : A) });
+    const lastWasB = seq.some(s => s.type === 'counter' || s.type === 'followup');
+    seq.push({ type: 'crit', content: buildCrit(lastWasB ? B : A) });
   }
+
   if (COMBO_MAX > 1 && Math.random() < 0.38) {
     const hits = 2 + Math.floor(Math.random() * (COMBO_MAX - 1));
     seq.push({ type: 'combo', content: L('🔁', `Combo x${hits}! ${SFX_STRING()}`) });
   }
+
   if (Math.random() < EVENTS_CHANCE) {
     const ev = randomEvent(A, B);
     if (ev) seq.push({ type: 'event', content: ev });
@@ -652,7 +676,7 @@ async function runRumbleDisplay({
       embeds: [roundFinalEmbed(style, i + 1, r, env, wasBehind, roundText)]
     });
 
-    // Timeline note — keep concise for mobile: winner only (+ score)
+    // Timeline note — concise for mobile: winner + score
     roundsTimeline.push(`R${i+1}: **${r.winner}** (${r.a}-${r.b})`);
     if (i < sim.rounds.length - 1) await sleep(jitter(ROUND_DELAY));
   }
@@ -708,6 +732,7 @@ async function runRumbleDisplay({
 }
 
 module.exports = { runRumbleDisplay };
+
 
 
 
