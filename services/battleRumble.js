@@ -50,6 +50,10 @@ const pick   = (arr) => arr[Math.floor(Math.random() * arr.length)];
 const exists = (s) => typeof s === 'string' && s.trim().length > 0;
 const bold   = (s) => `**${s}**`;
 
+// visual prefix after emoji for each action line
+const LINE_PREFIX = '│';
+const L = (emoji, text) => `${emoji} ${LINE_PREFIX} ${text}`;
+
 function colorFor(style) {
   return style === 'villain' ? 0x8b0000
        : style === 'degen'   ? 0xe67e22
@@ -266,7 +270,7 @@ const POWERUPS= ['{X} picks up a glowing orb — speed up!','{X} grabs a pixel h
 function buildTaunt(style, A, B, mem) {
   const bank = TAUNTS[style] || TAUNTS.motivator;
   const line = pickNoRepeat(bank, mem.taunts, 6);
-  return `🗣️ ${line.replace('{A}', bold(A)).replace('{B}', bold(B))}`;
+  return L('🗣️', line.replace('{A}', bold(A)).replace('{B}', bold(B)));
 }
 function styleWeapons(style){
   const base = SAFE_MODE ? WEAPONS_SAFE.slice() : WEAPONS_SAFE.concat(WEAPONS_SPICY);
@@ -295,31 +299,33 @@ function buildAction(A, B, style, mem) {
   updateRecentList(wKey, w, WEAPON_RECENT_WINDOW);
   updateRecentList(vKey, v, VERB_RECENT_WINDOW);
 
-  return `🥊 ${bold(A)} grabs a ${w} and ${v} ${bold(B)}!${SFX_STRING()}`;
+  return L('🥊', `${bold(A)} grabs a ${w} and ${v} ${bold(B)}!${SFX_STRING()}`);
 }
-function buildReaction(B) { return `🛡️ ${bold(B)} ${pick(REACTIONS)}.${SFX_STRING()}`; }
-function buildCounter(B) { return `⚡ ${bold(B)} reads it and flips momentum!${SFX_STRING()}`; }
-function buildCrit(attacker) { return `💥 ${bold(attacker)} lands a **critical** hit!${SFX_STRING()}`; }
+function buildReaction(B) { return L('🛡️', `${bold(B)} ${pick(REACTIONS)}.${SFX_STRING()}`); }
+function buildCounter(B) { return L('⚡', `${bold(B)} reads it and flips momentum!${SFX_STRING()}`); }
+function buildCrit(attacker) { return L('💥', `${bold(attacker)} lands a **critical** hit!${SFX_STRING()}`); }
 function randomEvent(A, B) {
   const roll = Math.random();
-  if (roll < HAZARD_CHANCE) return `⚠️ ${pick(HAZARDS)}`;
-  if (roll < HAZARD_CHANCE + POWERUP_CHANCE) return `🔸 ${(pick(POWERUPS)).replace('{X}', Math.random()<0.5 ? bold(A) : bold(B))}${SFX_STRING()}`;
-  if (roll < HAZARD_CHANCE + POWERUP_CHANCE + CROWD_CHANCE) return `📣 ${pick(CROWD)}`;
+  if (roll < HAZARD_CHANCE) return L('⚠️', pick(HAZARDS));
+  if (roll < HAZARD_CHANCE + POWERUP_CHANCE) {
+    return L('🔸', (pick(POWERUPS)).replace('{X}', Math.random()<0.5 ? bold(A) : bold(B)) + SFX_STRING());
+  }
+  if (roll < HAZARD_CHANCE + POWERUP_CHANCE + CROWD_CHANCE) return L('📣', pick(CROWD));
   return null;
 }
 function buildAnnouncer(style) {
   if (ANNOUNCER === 'none') return null;
   const persona = ANNOUNCER_BANK[ANNOUNCER] || ANNOUNCER_BANK.normal;
-  if (Math.random() < 0.35 && ANNOUNCER_BANK[style]) return `🎙️ ${pick(ANNOUNCER_BANK[style])}`;
-  return `🎙️ ${pick(persona)}`;
+  if (Math.random() < 0.35 && ANNOUNCER_BANK[style]) return L('🎙️', pick(ANNOUNCER_BANK[style]));
+  return L('🎙️', pick(persona));
 }
 
 // Scenic line (no-repeat-ish)
 function scenicLine(env, mem) {
   const options = [
-    `🎬 ${pickNoRepeat(CAMERA, mem.scenes, 8)}`,
-    `🌫️ ${pickNoRepeat(ATMOS,  mem.scenes, 8)}`,
-    `🏟️ ${env.name}: ${pickNoRepeat(GROUND, mem.scenes, 8)}`
+    L('🎬', pickNoRepeat(CAMERA, mem.scenes, 8)),
+    L('🌫️', pickNoRepeat(ATMOS,  mem.scenes, 8)),
+    L('🏟️', `${env.name}: ${pickNoRepeat(GROUND, mem.scenes, 8)}`)
   ];
   return pick(options);
 }
@@ -373,9 +379,9 @@ function roundFinalEmbed(style, idx, r, env, wasBehind, linesJoined) {
     title: `Round ${idx} — Result`,
     description: linesJoined,
     fields: [
-      { name: 'Winner', value: `**${r.winner}**`, inline: true },
-      { name: 'Loser',  value: `${bold(r.loser)}`, inline: true },
-      { name: 'Score',  value: `**${r.a}–${r.b}**`, inline: true },
+      { name: 'Winner', value: `**${r.winner}**` },
+      // (No loser field per your request)
+      { name: 'Round Score', value: `**${r.a}–${r.b}**` },
     ],
     footer: { text: `Style: ${style} • Arena: ${env.name}` }
   };
@@ -425,7 +431,7 @@ function buildRoundSequence({ A, B, style, mem }) {
   seq.push({ type: 'action', content: buildAction(A, B, style, mem) });
 
   let stunned = false;
-  if (Math.random() < STUN_CHANCE) { seq.push({ type: 'stun', content: `🫨 ${bold(B)} is briefly stunned!${SFX_STRING()}` }); stunned = true; }
+  if (Math.random() < STUN_CHANCE) { seq.push({ type: 'stun', content: L('🫨', `${bold(B)} is briefly stunned!${SFX_STRING()}`) }); stunned = true; }
 
   if (!stunned) {
     if (Math.random() < COUNTER_CHANCE) seq.push({ type: 'counter', content: buildCounter(B) });
@@ -438,7 +444,7 @@ function buildRoundSequence({ A, B, style, mem }) {
   }
   if (COMBO_MAX > 1 && Math.random() < 0.38) {
     const hits = 2 + Math.floor(Math.random() * (COMBO_MAX - 1));
-    seq.push({ type: 'combo', content: `🔁 Combo x${hits}! ${SFX_STRING()}` });
+    seq.push({ type: 'combo', content: L('🔁', `Combo x${hits}! ${SFX_STRING()}`) });
   }
   if (Math.random() < EVENTS_CHANCE) {
     const ev = randomEvent(A, B);
@@ -638,6 +644,7 @@ async function runRumbleDisplay({
     const prevB = r.b - (winnerIsA ? 0 : 1);
     const wasBehind = winnerIsA ? (prevA < prevB) : (prevB < prevA);
 
+    // Also append any remaining sequence items to the lines
     const roundText = lines.concat(seq.slice(beatsToReveal).map(s => s.content)).join('\n').slice(0, 1800);
 
     await sleep(jitter(BEAT_DELAY));
@@ -645,7 +652,8 @@ async function runRumbleDisplay({
       embeds: [roundFinalEmbed(style, i + 1, r, env, wasBehind, roundText)]
     });
 
-    roundsTimeline.push(`R${i+1}: **${r.winner}** over **${r.loser}** (${r.a}-${r.b})`);
+    // Timeline note — keep concise for mobile: winner only (+ score)
+    roundsTimeline.push(`R${i+1}: **${r.winner}** (${r.a}-${r.b})`);
     if (i < sim.rounds.length - 1) await sleep(jitter(ROUND_DELAY));
   }
 
