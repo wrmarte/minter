@@ -298,7 +298,6 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
       }
     }
   }
-
   // 🔹 If we have a token address but no known name/symbol, fetch from chain
   let displayTokenSymbol = mint_token_symbol || 'TOKEN';
   let displayTokenName = mint_token || null;
@@ -452,6 +451,90 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     }
   }
 
+  // ---- BEGIN NEW: Swap-aware detection (UniswapV2 / UniswapV3 / router-aggregator flows) ----
+  // This block runs only if we still don't have tokenAmount/ethValue.
+  // It detects Swap events or router activity and infers the buyer's outgoing ERC20 amount.
+  if (!tokenAmount || !ethValue) {
+    try {
+      // Common router addresses used in your other files — lowercase for comparison
+      const ROUTERS = [
+        '0x327Df1E6de05895d2ab08513aaDD9313Fe505d86',
+        '0x420dd381b31aef6683e2c581f93b119eee7e3f4d',
+        '0xfbeef911dc5821886e1dda23b3e4f3eaffdd7930',
+        '0x812e79c9c37eD676fdbdd1212D6a4e47EFfC6a42',
+        '0xa5e0829CaCEd8fFDD4De3c43696c57F7D7A678ff',
+        '0x95ebfcb1c6b345fda69cf56c51e30421e5a35aec'
+      ].map(a => a.toLowerCase());
+
+      // Swap event topic hashes for common pair/router implementations
+      const SWAP_TOPIC_V2 = ethers.id('Swap(address,uint256,uint256,uint256,uint256,address)'); // UniswapV2-style (amount0In, amount1In, amount0Out, amount1Out, to)
+      const SWAP_TOPIC_V3 = ethers.id('Swap(address,address,int256,int256,uint160,uint128,int24)'); // UniswapV3-style
+
+      let sawSwapOrRouter = false;
+
+      for (const lg of receipt.logs) {
+        const lgAddr = (lg.address || '').toLowerCase();
+        // If a router emitted logs, it's a hint this tx used a router/aggregator
+        if (ROUTERS.includes(lgAddr)) {
+          sawSwapOrRouter = true;
+          break;
+        }
+        // Check for known Swap topics
+        if (lg.topics && lg.topics.length > 0) {
+          const t0 = lg.topics[0];
+          if (t0 === SWAP_TOPIC_V2 || t0 === SWAP_TOPIC_V3) {
+            sawSwapOrRouter = true;
+            break;
+          }
+        }
+      }
+
+      if (sawSwapOrRouter) {
+        // Try to infer the buyer address (we have it as `to`) and find the largest ERC20 transfer that originates from buyer.
+        const buyer = (() => { try { return ethers.getAddress(to); } catch { return (to || ''); } })().toLowerCase();
+        let best = { amount: 0, token: null, rawLog: null };
+
+        for (const lg of receipt.logs) {
+          // Skip logs emitted by the NFT contract itself
+          if ((lg.address || '').toLowerCase() === (contract.target || contract.address || '').toLowerCase()) continue;
+          if (lg.topics[0] !== TRANSFER_ERC20_TOPIC || lg.topics.length !== 3) continue;
+          try {
+            const fromAddr = '0x' + lg.topics[1].slice(26);
+            if ((fromAddr || '').toLowerCase() !== buyer) continue;
+            // candidate token is lg.address
+            const candidateToken = (lg.address || '').toLowerCase();
+            const amt = await formatErc20(provider, candidateToken, lg.data);
+            if (isFinite(amt) && amt > best.amount) {
+              best = { amount: amt, token: candidateToken, rawLog: lg };
+            }
+          } catch {}
+        }
+
+        if (best.amount > 0 && best.token) {
+          tokenAmount = best.amount;
+          const tokenContract = best.token;
+          inferredTokenAddr = tokenContract;
+          // Convert to ETH
+          try {
+            const maybeEth = await getRealDexPriceForToken(tokenAmount, tokenContract);
+            if (maybeEth && !isNaN(maybeEth)) {
+              ethValue = maybeEth;
+            } else {
+              const fallback = await getEthPriceFromToken(tokenContract);
+              if (fallback && !isNaN(fallback)) ethValue = tokenAmount * fallback;
+            }
+            methodUsed = `🔁 swap → ${mint_token_symbol || tokenContract || 'TOKEN'}`;
+          } catch (e) {
+            // ignore and leave tokenAmount/ethValue as best effort
+          }
+        }
+      }
+    } catch (err) {
+      // non-fatal — we only try to enhance detection
+      // console.warn('Swap-detect failed', err);
+    }
+  }
+  // ---- END NEW: Swap-aware detection ----
   if (!tokenAmount || !ethValue) return;
 
   const embed = {
