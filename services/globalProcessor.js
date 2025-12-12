@@ -129,15 +129,28 @@ async function handleTokenLog(client, tokenRows, log) {
   const tokenPrice = await getTokenPriceUSD(tokenAddress);
   const marketCap = await getMarketCapUSD(tokenAddress);
 
-  // 🔧 Display amount: use actual received tokens, no extra ×1000
-  const tokenAmountFormatted = tokenAmountRaw.toLocaleString(undefined, {
+  // 🔧 Display amount
+  let displayAmount = tokenAmountRaw * 1000; // fallback original behavior
+  try {
+    if (usdSpent > 0 && tokenPrice > 0 && tokenAmountRaw > 0) {
+      const implied = usdSpent / tokenPrice;          // tokens implied by USD/price
+      const ratio = implied / tokenAmountRaw;
+      if (ratio > 800 && ratio < 1200) {
+        displayAmount = implied;
+      }
+    }
+  } catch {}
+  const tokenAmountFormatted = displayAmount.toLocaleString(undefined, {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2
   });
 
+  // 🟢 Fix emoji repetition according to tokenAmountRaw
+  const emojiScale = 1000; // 1 emoji per 1000 tokens, adjust as needed
+  const emojiCount = Math.max(1, Math.floor(tokenAmountRaw / emojiScale));
   const emojiLine = isBuy
-    ? '🟥🟦🚀'.repeat(Math.max(1, Math.floor(tokenAmountRaw / 100)))
-    : '🔻💀🔻'.repeat(Math.max(1, Math.floor(tokenAmountRaw / 100)));
+    ? '🟥🟦🚀'.repeat(emojiCount)
+    : '🔻💀🔻'.repeat(emojiCount);
 
   const getColorByUsd = (usd) => isBuy
     ? (usd < 10 ? 0xff0000 : usd < 20 ? 0x3498db : 0x00cc66)
