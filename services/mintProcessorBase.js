@@ -13,7 +13,7 @@ const TOKEN_NAME_TO_ADDRESS = {
 
 const ZERO_ADDRESS = ethers.ZeroAddress;
 const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
-const TRANSFER_ERC20_TOPIC = ethers.id('Transfer(address,address,uint256)'); // ERC20 shares the same signature; amount in `data`
+const TRANSFER_ERC20_TOPIC = ethers.id('Transfer(address,address,uint256)'); // ERC20 shares same signature
 
 const IPFS_GATEWAYS = [
   'https://cloudflare-ipfs.com/ipfs/',
@@ -37,15 +37,9 @@ async function fetchJsonWithFallback(urlOrList, timeoutMs = 5000) {
       const res = await fetch(url, { signal: ctrl.signal });
       clearTimeout(t);
       if (!res.ok) continue;
-      const ctype = (res.headers.get('content-type') || '').toLowerCase();
-      if (!ctype.includes('application/json') && !ctype.includes('text/plain') && !ctype.includes('application/octet-stream')) {
-        // still try to parse; some IPFS gateways mislabel
-      }
       const json = await res.json().catch(() => null);
       if (json) return json;
-    } catch {
-      // try next
-    }
+    } catch {}
   }
   return null;
 }
@@ -76,7 +70,7 @@ async function getErc20Decimals(provider, tokenAddr) {
     decimalsCache.set(key, d);
     return d;
   } catch {
-    decimalsCache.set(key, 18); // fallback
+    decimalsCache.set(key, 18);
     return 18;
   }
 }
@@ -86,7 +80,6 @@ async function formatErc20(provider, tokenAddr, rawDataHex) {
   try {
     return parseFloat(ethers.formatUnits(rawDataHex, decimals));
   } catch {
-    // as last resort assume 18
     return parseFloat(ethers.formatUnits(rawDataHex, 18));
   }
 }
@@ -142,7 +135,7 @@ function setupBaseBlockListener(client, contractRows) {
 
     const fromBlock = Math.max(blockNumber - 5, 0);
     const toBlock = blockNumber;
-    const mintTxMap = new Map(); // txHash -> Map(guildId, { row, contract, tokenIds, to })
+    const mintTxMap = new Map();
 
     for (const row of contractRows) {
       let logs = [];
@@ -218,7 +211,6 @@ function setupBaseBlockListener(client, contractRows) {
       }
     }
 
-    // Emit mint notifications grouped by tx + guild
     for (const [txHash, txGuildMap] of mintTxMap.entries()) {
       for (const [guildId, { row, contract, tokenIds, to }] of txGuildMap.entries()) {
         const tokenIdArray = Array.from(tokenIds);
@@ -237,26 +229,21 @@ function setupBaseBlockListener(client, contractRows) {
 
 async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, channel_ids, isSingle = false, minterAddress = '') {
   let { name, mint_token, mint_token_symbol, address: nftAddress } = contractRow;
-  const provider = await safeRpcCall('base', p => p); // ✅ base
+  const provider = await safeRpcCall('base', p => p);
   if (!provider || !txHash) return;
 
-  const receipt = await provider.getTransactionReceipt(txHash).catch(() => null);
-  if (!receipt) return;
-
-  // Resolve configured token address if provided
+  // Resolve token address
   let tokenAddr = (mint_token || '').toLowerCase();
   if (!tokenAddr && mint_token_symbol) {
     const mapped = TOKEN_NAME_TO_ADDRESS[(mint_token_symbol || '').toUpperCase()];
     if (mapped) tokenAddr = mapped.toLowerCase();
   }
 
-  // Determine buyer/minter address safely
+  // Determine buyer/minter
   let buyer = '';
   try { buyer = minterAddress ? ethers.getAddress(minterAddress) : ''; } catch { buyer = ''; }
 
-  // Try to compute tokenAmount:
-  // 1) If tokenAddr known, look for ERC20 Transfer from buyer for that token
-  // 2) Else, infer the largest ERC20 transfer from buyer (excluding the NFT contract)
+  // Compute tokenAmount
   let tokenAmount = null;
   let inferredTokenAddr = tokenAddr;
 
@@ -264,7 +251,7 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     const addrEq = (a, b) => (a || '').toLowerCase() === (b || '').toLowerCase();
 
     if (tokenAddr) {
-      for (const log of receipt.logs) {
+      for (const log of (await provider.getTransactionReceipt(txHash)).logs) {
         if (log.topics[0] === TRANSFER_ERC20_TOPIC && log.topics.length === 3 && (log.address || '').toLowerCase() === tokenAddr) {
           const from = '0x' + log.topics[1].slice(26);
           if (addrEq(from, buyer)) {
@@ -277,11 +264,9 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
       }
     }
 
-    // Fallback inference if not found or no tokenAddr configured
     if (!tokenAmount) {
       let best = { amount: 0, token: null };
-      for (const log of receipt.logs) {
-        // skip NFT contract logs
+      for (const log of (await provider.getTransactionReceipt(txHash)).logs) {
         if ((log.address || '').toLowerCase() === (contract.target || contract.address || '').toLowerCase()) continue;
         if (log.topics[0] !== TRANSFER_ERC20_TOPIC || log.topics.length !== 3) continue;
         const from = '0x' + log.topics[1].slice(26);
@@ -299,7 +284,7 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     }
   }
 
-  // 🔹 If we have a token address but no known name/symbol, fetch from chain
+  // Resolve display token
   let displayTokenSymbol = mint_token_symbol || 'TOKEN';
   let displayTokenName = mint_token || null;
 
@@ -309,7 +294,6 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     if (chainSym) displayTokenSymbol = chainSym;
     if (chainName) displayTokenName = chainName;
 
-    // Optional: persist to DB so we don't fetch again next time
     try {
       const pg = client.pg;
       if (pg && (chainSym || chainName)) {
@@ -320,16 +304,13 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
            WHERE address = $3 AND chain = 'base'`,
           [chainName || '', chainSym || '', nftAddress]
         );
-        // also update local row so future messages in this run use it
         contractRow.mint_token = contractRow.mint_token || chainName || null;
         contractRow.mint_token_symbol = contractRow.mint_token_symbol || chainSym || null;
       }
-    } catch (e) {
-      // silent: DB update is best-effort
-    }
+    } catch {}
   }
 
-  // Compute ETH value from token via DEX/price fallbacks
+  // ETH value
   let ethValue = null;
   if (tokenAmount && tokenToDescribe) {
     try {
@@ -345,16 +326,14 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     }
   }
 
-  // Resolve image (tokenURI of first token)
+  // Resolve image
   let imageUrl = 'https://via.placeholder.com/400x400.png?text=NFT';
   try {
     let uri = await contract.tokenURI(tokenIds[0]);
     const urls = uri.startsWith('ipfs://') ? toIpfsHttp(uri) : [uri];
     const meta = await fetchJsonWithFallback(urls, 5000);
     const img = meta?.image;
-    if (img) {
-      imageUrl = img.startsWith('ipfs://') ? (toIpfsHttp(img)[0] || imageUrl) : img;
-    }
+    if (img) imageUrl = img.startsWith('ipfs://') ? (toIpfsHttp(img)[0] || imageUrl) : img;
   } catch {}
 
   const embed = {
@@ -385,19 +364,17 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
 async function handleSale(client, contractRow, contract, tokenId, from, to, txHash, channel_ids) {
   const { name, mint_token_symbol } = contractRow;
 
-  // Resolve image
+  // Image
   let imageUrl = 'https://via.placeholder.com/400x400.png?text=SOLD';
   try {
     let uri = await contract.tokenURI(tokenId);
     const urls = uri.startsWith('ipfs://') ? toIpfsHttp(uri) : [uri];
     const meta = await fetchJsonWithFallback(urls, 5000);
     const img = meta?.image;
-    if (img) {
-      imageUrl = img.startsWith('ipfs://') ? (toIpfsHttp(img)[0] || imageUrl) : img;
-    }
+    if (img) imageUrl = img.startsWith('ipfs://') ? (toIpfsHttp(img)[0] || imageUrl) : img;
   } catch {}
 
-  const provider = await safeRpcCall('base', p => p); // ✅ base
+  const provider = await safeRpcCall('base', p => p);
   if (!provider) return;
 
   let receipt, tx;
@@ -409,7 +386,6 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
 
   let tokenAmount = null, ethValue = null, methodUsed = null;
 
-  // Case 1: Paid in native ETH (Base ETH)
   try {
     if (tx.value && tx.value > 0n) {
       tokenAmount = parseFloat(ethers.formatEther(tx.value));
@@ -418,10 +394,8 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     }
   } catch {}
 
-  // Case 2: Paid in ERC20 (fallback)
   if (!ethValue) {
     const seller = (() => { try { return ethers.getAddress(from); } catch { return (from || ''); } })();
-    // Find ERC20 transfer TO the seller address
     for (const log of receipt.logs) {
       if (log.topics[0] === TRANSFER_ERC20_TOPIC && log.topics.length === 3 && (log.address || '').toLowerCase() !== (contract.target || contract.address || '').toLowerCase()) {
         try {
@@ -432,16 +406,10 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
             if (!isFinite(amt) || amt <= 0) continue;
 
             tokenAmount = amt;
-            // Convert to ETH value
             let priceEth = null;
-            try {
-              priceEth = await getRealDexPriceForToken(amt, tokenContract);
-            } catch {}
+            try { priceEth = await getRealDexPriceForToken(amt, tokenContract); } catch {}
             if (!priceEth) {
-              try {
-                const px = await getEthPriceFromToken(tokenContract);
-                if (px) priceEth = amt * px;
-              } catch {}
+              try { const px = await getEthPriceFromToken(tokenContract); if (px) priceEth = amt * px; } catch {}
             }
             ethValue = priceEth || null;
             methodUsed = `🟨 ${mint_token_symbol || 'TOKEN'}`;
@@ -461,19 +429,18 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
       { name: '👤 Seller', value: shortWalletLink(from), inline: true },
       { name: '🧑‍💻 Buyer', value: shortWalletLink(to), inline: true },
       { name: `💰 Paid`, value: `${tokenAmount.toFixed(4)}`, inline: true },
-      { name: `⇄ ETH Value`, value: `${ethValue.toFixed(4)} ETH`, inline: true },
-      { name: `💳 Method`, value: methodUsed || 'Unknown', inline: true }
+      { name: `⇄ ETH Value`, value: `${ethValue.toFixed(4)} ETH (${methodUsed || 'N/A'})`, inline: true }
     ],
     thumbnail: { url: imageUrl },
-    color: 0x66cc66,
-    footer: { text: 'Powered by PimpsDev' },
+    color: 0xFFAA00,
+    footer: { text: 'Base Network • PimpsDev' },
     timestamp: new Date().toISOString()
   };
 
-  const sentChannels = new Set();
-  for (const id of normalizeChannels(channel_ids)) {
-    if (sentChannels.has(id)) continue;
-    sentChannels.add(id);
+  const sent = new Set();
+  for (const id of uniq(normalizeChannels(channel_ids))) {
+    if (sent.has(id)) continue;
+    sent.add(id);
     const ch = await client.channels.fetch(id).catch(() => null);
     if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
   }
