@@ -1,3 +1,4 @@
+// mintprocessorbase.js
 const { Interface, Contract, ethers } = require('ethers');
 const fetch = require('node-fetch');
 const { getRealDexPriceForToken, getEthPriceFromToken } = require('./price');
@@ -13,7 +14,7 @@ const TOKEN_NAME_TO_ADDRESS = {
 
 const ZERO_ADDRESS = ethers.ZeroAddress;
 const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
-const TRANSFER_ERC20_TOPIC = ethers.id('Transfer(address,address,uint256)'); // ERC20 shares the same signature; amount in `data`
+const TRANSFER_ERC20_TOPIC = ethers.id('Transfer(address,address,uint256)'); // ERC20 shares the same signature
 
 const IPFS_GATEWAYS = [
   'https://cloudflare-ipfs.com/ipfs/',
@@ -39,13 +40,11 @@ async function fetchJsonWithFallback(urlOrList, timeoutMs = 5000) {
       if (!res.ok) continue;
       const ctype = (res.headers.get('content-type') || '').toLowerCase();
       if (!ctype.includes('application/json') && !ctype.includes('text/plain') && !ctype.includes('application/octet-stream')) {
-        // still try to parse; some IPFS gateways mislabel
+        // still try to parse
       }
       const json = await res.json().catch(() => null);
       if (json) return json;
-    } catch {
-      // try next
-    }
+    } catch {}
   }
   return null;
 }
@@ -86,12 +85,10 @@ async function formatErc20(provider, tokenAddr, rawDataHex) {
   try {
     return parseFloat(ethers.formatUnits(rawDataHex, decimals));
   } catch {
-    // as last resort assume 18
     return parseFloat(ethers.formatUnits(rawDataHex, 18));
   }
 }
 
-/* Resolve ERC-20 name/symbol */
 async function getErc20NameSymbol(provider, tokenAddr) {
   try {
     const erc20 = new Contract(tokenAddr, [
@@ -142,7 +139,7 @@ function setupBaseBlockListener(client, contractRows) {
 
     const fromBlock = Math.max(blockNumber - 5, 0);
     const toBlock = blockNumber;
-    const mintTxMap = new Map(); // txHash -> Map(guildId, { row, contract, tokenIds, to })
+    const mintTxMap = new Map();
 
     for (const row of contractRows) {
       let logs = [];
@@ -237,26 +234,18 @@ function setupBaseBlockListener(client, contractRows) {
 
 async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, channel_ids, isSingle = false, minterAddress = '') {
   let { name, mint_token, mint_token_symbol, address: nftAddress } = contractRow;
-  const provider = await safeRpcCall('base', p => p); // ✅ base
+  const provider = await safeRpcCall('base', p => p);
   if (!provider || !txHash) return;
 
-  const receipt = await provider.getTransactionReceipt(txHash).catch(() => null);
-  if (!receipt) return;
-
-  // Resolve configured token address if provided
   let tokenAddr = (mint_token || '').toLowerCase();
   if (!tokenAddr && mint_token_symbol) {
     const mapped = TOKEN_NAME_TO_ADDRESS[(mint_token_symbol || '').toUpperCase()];
     if (mapped) tokenAddr = mapped.toLowerCase();
   }
 
-  // Determine buyer/minter address safely
   let buyer = '';
   try { buyer = minterAddress ? ethers.getAddress(minterAddress) : ''; } catch { buyer = ''; }
 
-  // Try to compute tokenAmount:
-  // 1) If tokenAddr known, look for ERC20 Transfer from buyer for that token
-  // 2) Else, infer the largest ERC20 transfer from buyer (excluding the NFT contract)
   let tokenAmount = null;
   let inferredTokenAddr = tokenAddr;
 
@@ -264,7 +253,7 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     const addrEq = (a, b) => (a || '').toLowerCase() === (b || '').toLowerCase();
 
     if (tokenAddr) {
-      for (const log of receipt.logs) {
+      for (const log of (await provider.getTransactionReceipt(txHash)).logs) {
         if (log.topics[0] === TRANSFER_ERC20_TOPIC && log.topics.length === 3 && (log.address || '').toLowerCase() === tokenAddr) {
           const from = '0x' + log.topics[1].slice(26);
           if (addrEq(from, buyer)) {
@@ -277,11 +266,9 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
       }
     }
 
-    // Fallback inference if not found or no tokenAddr configured
     if (!tokenAmount) {
       let best = { amount: 0, token: null };
-      for (const log of receipt.logs) {
-        // skip NFT contract logs
+      for (const log of (await provider.getTransactionReceipt(txHash)).logs) {
         if ((log.address || '').toLowerCase() === (contract.target || contract.address || '').toLowerCase()) continue;
         if (log.topics[0] !== TRANSFER_ERC20_TOPIC || log.topics.length !== 3) continue;
         const from = '0x' + log.topics[1].slice(26);
@@ -299,7 +286,6 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     }
   }
 
-  // 🔹 If we have a token address but no known name/symbol, fetch from chain
   let displayTokenSymbol = mint_token_symbol || 'TOKEN';
   let displayTokenName = mint_token || null;
 
@@ -309,7 +295,6 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     if (chainSym) displayTokenSymbol = chainSym;
     if (chainName) displayTokenName = chainName;
 
-    // Optional: persist to DB so we don't fetch again next time
     try {
       const pg = client.pg;
       if (pg && (chainSym || chainName)) {
@@ -320,16 +305,12 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
            WHERE address = $3 AND chain = 'base'`,
           [chainName || '', chainSym || '', nftAddress]
         );
-        // also update local row so future messages in this run use it
         contractRow.mint_token = contractRow.mint_token || chainName || null;
         contractRow.mint_token_symbol = contractRow.mint_token_symbol || chainSym || null;
       }
-    } catch (e) {
-      // silent: DB update is best-effort
-    }
+    } catch {}
   }
 
-  // Compute ETH value from token via DEX/price fallbacks
   let ethValue = null;
   if (tokenAmount && tokenToDescribe) {
     try {
@@ -345,7 +326,6 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     }
   }
 
-  // Resolve image (tokenURI of first token)
   let imageUrl = 'https://via.placeholder.com/400x400.png?text=NFT';
   try {
     let uri = await contract.tokenURI(tokenIds[0]);
@@ -385,7 +365,6 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
 async function handleSale(client, contractRow, contract, tokenId, from, to, txHash, channel_ids) {
   const { name, mint_token_symbol } = contractRow;
 
-  // Resolve image
   let imageUrl = 'https://via.placeholder.com/400x400.png?text=SOLD';
   try {
     let uri = await contract.tokenURI(tokenId);
@@ -397,7 +376,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     }
   } catch {}
 
-  const provider = await safeRpcCall('base', p => p); // ✅ base
+  const provider = await safeRpcCall('base', p => p);
   if (!provider) return;
 
   let receipt, tx;
@@ -409,7 +388,6 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
 
   let tokenAmount = null, ethValue = null, methodUsed = null;
 
-  // Case 1: Paid in native ETH (Base ETH)
   try {
     if (tx.value && tx.value > 0n) {
       tokenAmount = parseFloat(ethers.formatEther(tx.value));
@@ -418,10 +396,8 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     }
   } catch {}
 
-  // Case 2: Paid in ERC20 (fallback)
   if (!ethValue) {
     const seller = (() => { try { return ethers.getAddress(from); } catch { return (from || ''); } })();
-    // Find ERC20 transfer TO the seller address
     for (const log of receipt.logs) {
       if (log.topics[0] === TRANSFER_ERC20_TOPIC && log.topics.length === 3 && (log.address || '').toLowerCase() !== (contract.target || contract.address || '').toLowerCase()) {
         try {
@@ -432,11 +408,8 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
             if (!isFinite(amt) || amt <= 0) continue;
 
             tokenAmount = amt;
-            // Convert to ETH value
             let priceEth = null;
-            try {
-              priceEth = await getRealDexPriceForToken(amt, tokenContract);
-            } catch {}
+            try { priceEth = await getRealDexPriceForToken(amt, tokenContract); } catch {}
             if (!priceEth) {
               try {
                 const px = await getEthPriceFromToken(tokenContract);
@@ -452,163 +425,31 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     }
   }
 
-  // ---- BEGIN NEW: Swap-aware detection (UniswapV2 / UniswapV3 / router-aggregator flows) ----
-  // This block runs only if we still don't have tokenAmount/ethValue.
-  // It detects Swap events or router activity and infers the buyer's outgoing ERC20 amount.
+  // ======= NEW PATCH: Fallback aggregated sale for Base =======
   if (!tokenAmount || !ethValue) {
-    try {
-      // Common router addresses used in your other files — lowercase for comparison
-      const ROUTERS = [
-        '0x327Df1E6de05895d2ab08513aaDD9313Fe505d86',
-        '0x420dd381b31aef6683e2c581f93b119eee7e3f4d',
-        '0xfbeef911dc5821886e1dda23b3e4f3eaffdd7930',
-        '0x812e79c9c37eD676fdbdd1212D6a4e47EFfC6a42',
-        '0xa5e0829CaCEd8fFDD4De3c43696c57F7D7A678ff',
-        '0x95ebfcb1c6b345fda69cf56c51e30421e5a35aec'
-      ].map(a => a.toLowerCase());
+    const MARKET_ADDRESSES = [
+      '0x8d2e41be13f5c4ceec767fd02f5cbe3c5b7a93c6', // Reservoir example
+      '0x0000000000a39bb272e79075ade125fd351887ac'  // Placeholder aggregator
+    ].map(a => a.toLowerCase());
 
-      // Swap event topic hashes for common pair/router implementations
-      const SWAP_TOPIC_V2 = ethers.id('Swap(address,uint256,uint256,uint256,uint256,address)'); // UniswapV2-style (amount0In, amount1In, amount0Out, amount1Out, to)
-      const SWAP_TOPIC_V3 = ethers.id('Swap(address,address,int256,int256,uint160,uint128,int24)'); // UniswapV3-style
-
-      let sawSwapOrRouter = false;
-
-      for (const lg of receipt.logs) {
-        const lgAddr = (lg.address || '').toLowerCase();
-        // If a router emitted logs, it's a hint this tx used a router/aggregator
-        if (ROUTERS.includes(lgAddr)) {
-          sawSwapOrRouter = true;
-          break;
-        }
-        // Check for known Swap topics
-        if (lg.topics && lg.topics.length > 0) {
-          const t0 = lg.topics[0];
-          if (t0 === SWAP_TOPIC_V2 || t0 === SWAP_TOPIC_V3) {
-            sawSwapOrRouter = true;
-            break;
-          }
-        }
+    let isMarketplace = false;
+    for (const lg of receipt.logs) {
+      const a = (lg.address || '').toLowerCase();
+      if (MARKET_ADDRESSES.includes(a)) {
+        isMarketplace = true;
+        break;
       }
+    }
 
-      if (sawSwapOrRouter) {
-        // Try to infer the buyer address (we have it as `to`) and find the largest ERC20 transfer that originates from buyer.
-        const buyer = (() => { try { return ethers.getAddress(to); } catch { return (to || ''); } })().toLowerCase();
-        let best = { amount: 0, token: null, rawLog: null };
-
-        for (const lg of receipt.logs) {
-          // Skip logs emitted by the NFT contract itself
-          if ((lg.address || '').toLowerCase() === (contract.target || contract.address || '').toLowerCase()) continue;
-          if (lg.topics[0] !== TRANSFER_ERC20_TOPIC || lg.topics.length !== 3) continue;
-          try {
-            const fromAddr = '0x' + lg.topics[1].slice(26);
-            if ((fromAddr || '').toLowerCase() !== buyer) continue;
-            // candidate token is lg.address
-            const candidateToken = (lg.address || '').toLowerCase();
-            const amt = await formatErc20(provider, candidateToken, lg.data);
-            if (isFinite(amt) && amt > best.amount) {
-              best = { amount: amt, token: candidateToken, rawLog: lg };
-            }
-          } catch {}
-        }
-
-        if (best.amount > 0 && best.token) {
-          tokenAmount = best.amount;
-          const tokenContract = best.token;
-          inferredTokenAddr = tokenContract;
-          // Convert to ETH
-          try {
-            const maybeEth = await getRealDexPriceForToken(tokenAmount, tokenContract);
-            if (maybeEth && !isNaN(maybeEth)) {
-              ethValue = maybeEth;
-            } else {
-              const fallback = await getEthPriceFromToken(tokenContract);
-              if (fallback && !isNaN(fallback)) ethValue = tokenAmount * fallback;
-            }
-            methodUsed = `🔁 swap → ${mint_token_symbol || tokenContract || 'TOKEN'}`;
-          } catch (e) {
-            // ignore and leave tokenAmount/ethValue as best effort
-          }
-        }
-      }
-    } catch (err) {
-      // non-fatal — we only try to enhance detection
-      // console.warn('Swap-detect failed', err);
+    if (isMarketplace && from.toLowerCase() !== to.toLowerCase()) {
+      ethValue = 0;
+      tokenAmount = 0;
+      methodUsed = "🛒 Aggregated/Indirect Sale";
+    } else {
+      return;
     }
   }
-  // ---- END NEW: Swap-aware detection ----
-
-  // ---- BEGIN NEW: Marketplace event detection (Seaport/Reservoir/0x/etc) ----
-  // If still no tokenAmount/ethValue, try marketplace order event patterns (OrderFulfilled, TakerBid/TakerAsk, MatchOrders, ERC721OrderFilled...)
-  if (!tokenAmount || !ethValue) {
-    try {
-      // candidate event signatures (compute topic0 via ethers.id)
-      const MARKET_EVENTS = [
-        'OrderFulfilled(bytes32,address,address,tuple[])',
-        'TakerBid(address,address,uint256)',
-        'TakerAsk(address,address,uint256)',
-        'OrdersMatched(bytes32,bytes32,address,address,uint256,uint256)',
-        'MatchOrders((address,address,tuple[],tuple[]),(address,address,tuple[],tuple[]))',
-        'ERC721OrderFilled(bytes32,address,address,address,uint256,tuple[])',
-        'OrderExecuted(bytes32,address,address,uint256)',
-        'FillOrder(bytes32,address,address,uint256)'
-      ].map(s => ethers.id(s));
-
-      // scan logs for any marketplace topics
-      let sawMarketEvent = false;
-      for (const lg of receipt.logs) {
-        if (!lg.topics || lg.topics.length === 0) continue;
-        if (MARKET_EVENTS.includes(lg.topics[0])) {
-          sawMarketEvent = true;
-          break;
-        }
-        // fallback: many market contracts emit Transfer of ERC721 from seller to buyer (we already use that),
-        // or emit ERC20 transfer to marketplace then internal accounting. We'll rely on subsequent inference below.
-      }
-
-      if (sawMarketEvent) {
-        // Try to infer payment same as swap logic: largest ERC20 transfer from buyer in this receipt
-        const buyer = (() => { try { return ethers.getAddress(to); } catch { return (to || ''); } })().toLowerCase();
-        let best = { amount: 0, token: null };
-
-        for (const lg of receipt.logs) {
-          if ((lg.address || '').toLowerCase() === (contract.target || contract.address || '').toLowerCase()) continue;
-          if (lg.topics[0] !== TRANSFER_ERC20_TOPIC || lg.topics.length !== 3) continue;
-          try {
-            const fromAddr = '0x' + lg.topics[1].slice(26);
-            if ((fromAddr || '').toLowerCase() !== buyer) continue;
-            const candidateToken = (lg.address || '').toLowerCase();
-            const amt = await formatErc20(provider, candidateToken, lg.data);
-            if (isFinite(amt) && amt > best.amount) {
-              best = { amount: amt, token: candidateToken };
-            }
-          } catch {}
-        }
-
-        if (best.amount > 0 && best.token) {
-          tokenAmount = best.amount;
-          const tokenContract = best.token;
-          inferredTokenAddr = tokenContract;
-          try {
-            const maybeEth = await getRealDexPriceForToken(tokenAmount, tokenContract);
-            if (maybeEth && !isNaN(maybeEth)) {
-              ethValue = maybeEth;
-            } else {
-              const fallback = await getEthPriceFromToken(tokenContract);
-              if (fallback && !isNaN(fallback)) ethValue = tokenAmount * fallback;
-            }
-            methodUsed = `🛒 marketplace`;
-          } catch (e) {
-            // ignore
-          }
-        }
-      }
-    } catch (err) {
-      // ignore non-fatal
-    }
-  }
-  // ---- END NEW: Marketplace event detection ----
-
-  if (!tokenAmount || !ethValue) return;
+  // ============================================================
 
   const embed = {
     title: `💸 NFT SOLD – ${name || 'Collection'} #${tokenId}`,
@@ -616,8 +457,8 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     fields: [
       { name: '👤 Seller', value: shortWalletLink(from), inline: true },
       { name: '🧑‍💻 Buyer', value: shortWalletLink(to), inline: true },
-      { name: `💰 Paid`, value: `${tokenAmount.toFixed(4)}`, inline: true },
-      { name: `⇄ ETH Value`, value: `${ethValue.toFixed(4)} ETH`, inline: true },
+      { name: `💰 Paid`, value: tokenAmount ? tokenAmount.toFixed(4) : '0.0000', inline: true },
+      { name: `⇄ ETH Value`, value: ethValue ? `${ethValue.toFixed(4)} ETH` : '0.0000 ETH', inline: true },
       { name: `💳 Method`, value: methodUsed || 'Unknown', inline: true }
     ],
     thumbnail: { url: imageUrl },
@@ -641,4 +482,3 @@ module.exports = {
   trackBaseContracts,
   contractListeners
 };
-
