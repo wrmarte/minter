@@ -1,4 +1,3 @@
-// mintprocessorbase.js
 const { Interface, Contract, ethers } = require('ethers');
 const fetch = require('node-fetch');
 const { getRealDexPriceForToken, getEthPriceFromToken } = require('./price');
@@ -14,7 +13,7 @@ const TOKEN_NAME_TO_ADDRESS = {
 
 const ZERO_ADDRESS = ethers.ZeroAddress;
 const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
-const TRANSFER_ERC20_TOPIC = ethers.id('Transfer(address,address,uint256)'); // ERC20 shares the same signature
+const TRANSFER_ERC20_TOPIC = ethers.id('Transfer(address,address,uint256)'); // ERC20 shares same signature
 
 const IPFS_GATEWAYS = [
   'https://cloudflare-ipfs.com/ipfs/',
@@ -39,9 +38,6 @@ async function fetchJsonWithFallback(urlOrList, timeoutMs = 5000) {
       clearTimeout(t);
       if (!res.ok) continue;
       const ctype = (res.headers.get('content-type') || '').toLowerCase();
-      if (!ctype.includes('application/json') && !ctype.includes('text/plain') && !ctype.includes('application/octet-stream')) {
-        // still try to parse
-      }
       const json = await res.json().catch(() => null);
       if (json) return json;
     } catch {}
@@ -75,7 +71,7 @@ async function getErc20Decimals(provider, tokenAddr) {
     decimalsCache.set(key, d);
     return d;
   } catch {
-    decimalsCache.set(key, 18); // fallback
+    decimalsCache.set(key, 18);
     return 18;
   }
 }
@@ -89,6 +85,7 @@ async function formatErc20(provider, tokenAddr, rawDataHex) {
   }
 }
 
+/* Resolve ERC-20 name/symbol */
 async function getErc20NameSymbol(provider, tokenAddr) {
   try {
     const erc20 = new Contract(tokenAddr, [
@@ -139,7 +136,7 @@ function setupBaseBlockListener(client, contractRows) {
 
     const fromBlock = Math.max(blockNumber - 5, 0);
     const toBlock = blockNumber;
-    const mintTxMap = new Map();
+    const mintTxMap = new Map(); // txHash -> Map(guildId, { row, contract, tokenIds, to })
 
     for (const row of contractRows) {
       let logs = [];
@@ -198,10 +195,10 @@ function setupBaseBlockListener(client, contractRows) {
             saveJson(seenPath(name), [...seenTokenIds]);
           }
         } else {
-          // SALE/TRANSFER
+          // SALE / TRANSFER / SWAP fallback
           let shouldSend = false;
           for (const gid of allGuildIds) {
-            const dedupeKey = `${gid}-${txHash}`;
+            const dedupeKey = `${gid}-${txHash}-${tokenIdStr}`;
             if (globalSeenSales.has(dedupeKey)) continue;
             globalSeenSales.add(dedupeKey);
             shouldSend = true;
@@ -237,6 +234,10 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
   const provider = await safeRpcCall('base', p => p);
   if (!provider || !txHash) return;
 
+  const receipt = await provider.getTransactionReceipt(txHash).catch(() => null);
+  if (!receipt) return;
+
+  // Resolve token address if configured
   let tokenAddr = (mint_token || '').toLowerCase();
   if (!tokenAddr && mint_token_symbol) {
     const mapped = TOKEN_NAME_TO_ADDRESS[(mint_token_symbol || '').toUpperCase()];
@@ -246,6 +247,7 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
   let buyer = '';
   try { buyer = minterAddress ? ethers.getAddress(minterAddress) : ''; } catch { buyer = ''; }
 
+  // Compute tokenAmount / inferredTokenAddr
   let tokenAmount = null;
   let inferredTokenAddr = tokenAddr;
 
@@ -253,7 +255,7 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     const addrEq = (a, b) => (a || '').toLowerCase() === (b || '').toLowerCase();
 
     if (tokenAddr) {
-      for (const log of (await provider.getTransactionReceipt(txHash)).logs) {
+      for (const log of receipt.logs) {
         if (log.topics[0] === TRANSFER_ERC20_TOPIC && log.topics.length === 3 && (log.address || '').toLowerCase() === tokenAddr) {
           const from = '0x' + log.topics[1].slice(26);
           if (addrEq(from, buyer)) {
@@ -266,9 +268,10 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
       }
     }
 
+    // Fallback inference if not found or no tokenAddr configured
     if (!tokenAmount) {
       let best = { amount: 0, token: null };
-      for (const log of (await provider.getTransactionReceipt(txHash)).logs) {
+      for (const log of receipt.logs) {
         if ((log.address || '').toLowerCase() === (contract.target || contract.address || '').toLowerCase()) continue;
         if (log.topics[0] !== TRANSFER_ERC20_TOPIC || log.topics.length !== 3) continue;
         const from = '0x' + log.topics[1].slice(26);
@@ -286,15 +289,14 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     }
   }
 
+  // Resolve token name/symbol if unknown
   let displayTokenSymbol = mint_token_symbol || 'TOKEN';
   let displayTokenName = mint_token || null;
-
   const tokenToDescribe = inferredTokenAddr || tokenAddr;
   if (tokenToDescribe && (!mint_token_symbol || !mint_token)) {
     const { name: chainName, symbol: chainSym } = await getErc20NameSymbol(provider, tokenToDescribe);
     if (chainSym) displayTokenSymbol = chainSym;
     if (chainName) displayTokenName = chainName;
-
     try {
       const pg = client.pg;
       if (pg && (chainSym || chainName)) {
@@ -311,13 +313,13 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     } catch {}
   }
 
+  // Compute ETH value
   let ethValue = null;
   if (tokenAmount && tokenToDescribe) {
     try {
       ethValue = await getRealDexPriceForToken(tokenAmount, tokenToDescribe);
       if (!ethValue || isNaN(ethValue)) ethValue = null;
     } catch { ethValue = null; }
-
     if (!ethValue) {
       try {
         const fallback = await getEthPriceFromToken(tokenToDescribe);
@@ -326,6 +328,7 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     }
   }
 
+  // Resolve NFT image
   let imageUrl = 'https://via.placeholder.com/400x400.png?text=NFT';
   try {
     let uri = await contract.tokenURI(tokenIds[0]);
@@ -365,6 +368,7 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
 async function handleSale(client, contractRow, contract, tokenId, from, to, txHash, channel_ids) {
   const { name, mint_token_symbol } = contractRow;
 
+  // Resolve image
   let imageUrl = 'https://via.placeholder.com/400x400.png?text=SOLD';
   try {
     let uri = await contract.tokenURI(tokenId);
@@ -388,6 +392,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
 
   let tokenAmount = null, ethValue = null, methodUsed = null;
 
+  // Case 1: Native ETH
   try {
     if (tx.value && tx.value > 0n) {
       tokenAmount = parseFloat(ethers.formatEther(tx.value));
@@ -396,6 +401,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     }
   } catch {}
 
+  // Case 2: ERC20 payment
   if (!ethValue) {
     const seller = (() => { try { return ethers.getAddress(from); } catch { return (from || ''); } })();
     for (const log of receipt.logs) {
@@ -406,15 +412,12 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
             const tokenContract = (log.address || '').toLowerCase();
             const amt = await formatErc20(provider, tokenContract, log.data);
             if (!isFinite(amt) || amt <= 0) continue;
-
             tokenAmount = amt;
+
             let priceEth = null;
             try { priceEth = await getRealDexPriceForToken(amt, tokenContract); } catch {}
             if (!priceEth) {
-              try {
-                const px = await getEthPriceFromToken(tokenContract);
-                if (px) priceEth = amt * px;
-              } catch {}
+              try { const px = await getEthPriceFromToken(tokenContract); if (px) priceEth = amt * px; } catch {}
             }
             ethValue = priceEth || null;
             methodUsed = `🟨 ${mint_token_symbol || 'TOKEN'}`;
@@ -425,40 +428,21 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     }
   }
 
-  // ======= NEW PATCH: Fallback aggregated sale for Base =======
-  if (!tokenAmount || !ethValue) {
-    const MARKET_ADDRESSES = [
-      '0x8d2e41be13f5c4ceec767fd02f5cbe3c5b7a93c6', // Reservoir example
-      '0x0000000000a39bb272e79075ade125fd351887ac'  // Placeholder aggregator
-    ].map(a => a.toLowerCase());
-
-    let isMarketplace = false;
-    for (const lg of receipt.logs) {
-      const a = (lg.address || '').toLowerCase();
-      if (MARKET_ADDRESSES.includes(a)) {
-        isMarketplace = true;
-        break;
-      }
-    }
-
-    if (isMarketplace && from.toLowerCase() !== to.toLowerCase()) {
-      ethValue = 0;
-      tokenAmount = 0;
-      methodUsed = "🛒 Aggregated/Indirect Sale";
-    } else {
-      return;
-    }
+  // Case 3: Fallback – swap / marketplace transfers
+  if (!tokenAmount && !ethValue) {
+    tokenAmount = null;
+    ethValue = null;
+    methodUsed = '🔀 Swap / Marketplace';
   }
-  // ============================================================
 
   const embed = {
     title: `💸 NFT SOLD – ${name || 'Collection'} #${tokenId}`,
-    description: `Token \`${tokenId}\` just sold!`,
+    description: `Token \`${tokenId}\` just transferred/sold!`,
     fields: [
       { name: '👤 Seller', value: shortWalletLink(from), inline: true },
       { name: '🧑‍💻 Buyer', value: shortWalletLink(to), inline: true },
-      { name: `💰 Paid`, value: tokenAmount ? tokenAmount.toFixed(4) : '0.0000', inline: true },
-      { name: `⇄ ETH Value`, value: ethValue ? `${ethValue.toFixed(4)} ETH` : '0.0000 ETH', inline: true },
+      { name: `💰 Paid`, value: tokenAmount ? tokenAmount.toFixed(4) : 'N/A', inline: true },
+      { name: `⇄ ETH Value`, value: ethValue ? `${ethValue.toFixed(4)} ETH` : 'N/A', inline: true },
       { name: `💳 Method`, value: methodUsed || 'Unknown', inline: true }
     ],
     thumbnail: { url: imageUrl },
@@ -482,3 +466,4 @@ module.exports = {
   trackBaseContracts,
   contractListeners
 };
+
