@@ -59,7 +59,7 @@ function toShort(addr = '') {
   return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
 }
 
-/* ===================== ETH USD PRICE (CACHED) ===================== */
+/* ===================== ETH USD (CACHED) ===================== */
 
 let _ethUsdCache = { value: 0, ts: 0 };
 async function getEthUsdPriceCached(maxAgeMs = 30_000) {
@@ -259,7 +259,6 @@ function isValidBuyerTransfer(log, buyerAddr, nftAddr) {
     // Accept only transfers to NFT contract
     if (toLower === nftLower) return true;
 
-    // Otherwise ignore (tax, LP, router, etc)
     return false;
   } catch {
     return false;
@@ -276,50 +275,86 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
   const receipt = await provider.getTransactionReceipt(txHash).catch(() => null);
   if (!receipt) return;
 
+  // ✅ fetch tx (used for payer fallback + native value if any)
+  const tx = await provider.getTransaction(txHash).catch(() => null);
+
+  // Resolve configured token address if provided
   let tokenAddr = (mint_token || '').toLowerCase();
   if (!tokenAddr && mint_token_symbol) {
     const mapped = TOKEN_NAME_TO_ADDRESS[(mint_token_symbol || '').toUpperCase()];
     if (mapped) tokenAddr = mapped.toLowerCase();
   }
 
+  // Determine buyer/minter address safely (recipient)
   let buyer = '';
   try { buyer = minterAddress ? ethers.getAddress(minterAddress) : ''; } catch { buyer = ''; }
 
+  // ✅ Payer fallback (the wallet that submitted the tx)
+  let payer = '';
+  try { payer = tx?.from ? ethers.getAddress(tx.from) : ''; } catch { payer = tx?.from || ''; }
+
+  // ✅ This morning’s logic: find ERC20 Transfer(s) where from == payerCandidate
+  // - prioritize configured tokenAddr if present
+  // - otherwise infer best token by biggest amount
+  // - keep skipping NFT contract logs so we don’t grab NFT transfer events
   let tokenAmount = null;
   let inferredTokenAddr = tokenAddr;
 
-  if (buyer) {
+  const nftLower = (contract.target || contract.address || '').toLowerCase();
+  const addrEq = (a, b) => (a || '').toLowerCase() === (b || '').toLowerCase();
+
+  const payerCandidates = uniq([buyer, payer].filter(Boolean));
+
+  async function findPaymentFrom(fromAddrCandidate) {
+    if (!fromAddrCandidate) return { amount: null, token: null };
+
+    // A) If tokenAddr configured, look for that token first (from == candidate)
     if (tokenAddr) {
-      for (const log of receipt.logs) {
-        if (log.topics[0] === TRANSFER_ERC20_TOPIC && log.topics.length === 3 && (log.address || '').toLowerCase() === tokenAddr) {
-          if (isValidBuyerTransfer(log, buyer, contract.address)) {
-            try {
-              tokenAmount = await formatErc20(provider, tokenAddr, log.data);
-              break;
-            } catch {}
-          }
-        }
+      for (const lg of receipt.logs) {
+        if (lg.topics[0] !== TRANSFER_ERC20_TOPIC || lg.topics.length !== 3) continue;
+        if ((lg.address || '').toLowerCase() !== tokenAddr) continue;
+
+        const fromTopic = '0x' + lg.topics[1].slice(26);
+        if (!addrEq(fromTopic, fromAddrCandidate)) continue;
+
+        try {
+          const amt = await formatErc20(provider, tokenAddr, lg.data);
+          if (amt && amt > 0) return { amount: amt, token: tokenAddr };
+        } catch {}
       }
     }
 
-    if (!tokenAmount) {
-      let best = { amount: 0, token: null };
-      for (const log of receipt.logs) {
-        if (log.topics[0] !== TRANSFER_ERC20_TOPIC || log.topics.length !== 3) continue;
-        if (!isValidBuyerTransfer(log, buyer, contract.address)) continue;
-        try {
-          const candidateToken = (log.address || '').toLowerCase();
-          const amt = await formatErc20(provider, candidateToken, log.data);
-          if (amt > best.amount) best = { amount: amt, token: candidateToken };
-        } catch {}
-      }
-      if (best.amount > 0 && best.token) {
-        tokenAmount = best.amount;
-        inferredTokenAddr = best.token;
-      }
+    // B) Fallback inference: biggest ERC20 Transfer where from == candidate (skip NFT contract logs)
+    let best = { amount: 0, token: null };
+    for (const lg of receipt.logs) {
+      if (lg.topics[0] !== TRANSFER_ERC20_TOPIC || lg.topics.length !== 3) continue;
+
+      const logAddr = (lg.address || '').toLowerCase();
+      if (!logAddr || logAddr === nftLower) continue; // ✅ same as your working morning file
+
+      const fromTopic = '0x' + lg.topics[1].slice(26);
+      if (!addrEq(fromTopic, fromAddrCandidate)) continue;
+
+      try {
+        const amt = await formatErc20(provider, logAddr, lg.data);
+        if (amt > best.amount) best = { amount: amt, token: logAddr };
+      } catch {}
+    }
+
+    return best.amount > 0 ? best : { amount: null, token: null };
+  }
+
+  // Try candidates (buyer first, then payer)
+  for (const c of payerCandidates) {
+    const found = await findPaymentFrom(c);
+    if (found.amount && found.token) {
+      tokenAmount = found.amount;
+      inferredTokenAddr = found.token;
+      break;
     }
   }
 
+  // 🔹 If we have a token address but no known name/symbol, fetch from chain
   let displayTokenSymbol = mint_token_symbol || 'TOKEN';
   let displayTokenName = mint_token || null;
 
@@ -329,6 +364,7 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     if (chainSym) displayTokenSymbol = chainSym;
     if (chainName) displayTokenName = chainName;
 
+    // Optional: persist to DB so we don't fetch again next time
     try {
       const pg = client.pg;
       if (pg && (chainSym || chainName)) {
@@ -345,9 +381,18 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     } catch {}
   }
 
-  // ✅ ETH value (already)
+  // ✅ ETH value
+  // - if tx has native value (rare for token mints), use it
+  // - else convert tokenAmount -> ETH using your existing logic
   let ethValue = null;
-  if (tokenAmount && tokenToDescribe) {
+
+  try {
+    if (tx?.value && tx.value > 0n) {
+      ethValue = parseFloat(ethers.formatEther(tx.value));
+    }
+  } catch {}
+
+  if (!ethValue && tokenAmount && tokenToDescribe) {
     try {
       ethValue = await getRealDexPriceForToken(tokenAmount, tokenToDescribe);
       if (!ethValue || isNaN(ethValue)) ethValue = null;
@@ -361,7 +406,7 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     }
   }
 
-  // ✅ NEW: USD value derived from ETH value * ETH/USD
+  // ✅ USD value (derived from ETH value)
   let usdValue = null;
   try {
     if (ethValue && isFinite(ethValue) && ethValue > 0) {
@@ -370,6 +415,7 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     }
   } catch { usdValue = null; }
 
+  // Resolve image (tokenURI of first token)
   let imageUrl = 'https://via.placeholder.com/400x400.png?text=NFT';
   try {
     let uri = await contract.tokenURI(tokenIds[0]);
@@ -392,7 +438,7 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
       { name: `💰 Total Spent (${displayTokenSymbol})`, value: tokenAmount ? tokenAmount.toFixed(4) : '0.0000', inline: true },
       { name: `⇄ ETH Value`, value: ethValue ? `${ethValue.toFixed(4)} ETH` : 'N/A', inline: true },
       { name: `💵 USD Value`, value: usdValue ? `$${usdValue.toFixed(2)}` : 'N/A', inline: true },
-      { name: `👤 Minter`, value: buyer ? shortWalletLink(buyer) : (minterAddress ? shortWalletLink(minterAddress) : 'Unknown'), inline: true }
+      { name: `👤 Minter`, value: buyer ? shortWalletLink(buyer) : (minterAddress ? shortWalletLink(minterAddress) : (payer ? shortWalletLink(payer) : 'Unknown')), inline: true }
     ],
     thumbnail: { url: imageUrl },
     color: 0x35A3B3,
@@ -446,6 +492,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
   } catch {}
 
   if (!ethValue) {
+    const seller = (() => { try { return ethers.getAddress(from); } catch { return (from || ''); } })();
     for (const log of receipt.logs) {
       if (log.topics[0] !== TRANSFER_ERC20_TOPIC || log.topics.length !== 3) continue;
       if (!isValidBuyerTransfer(log, to, contract.address)) continue;
