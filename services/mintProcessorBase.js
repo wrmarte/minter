@@ -7,14 +7,9 @@ const delay = ms => new Promise(res => setTimeout(res, ms));
 
 /* ===================== CONSTANTS / HELPERS ===================== */
 
-const TOKEN_NAME_TO_ADDRESS = {
-  'ADRIAN': '0x7e99075ce287f1cf8cbcaaa6a1c7894e404fd7ea'
-};
-
 const ZERO_ADDRESS = ethers.ZeroAddress;
 const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
-const TRANSFER_ERC20_TOPIC = ethers.id('Transfer(address,address,uint256)'); // ERC20 shares the same signature
-
+const TRANSFER_ERC20_TOPIC = ethers.id('Transfer(address,address,uint256)'); // ERC20 transfer
 const IPFS_GATEWAYS = [
   'https://cloudflare-ipfs.com/ipfs/',
   'https://ipfs.io/ipfs/',
@@ -37,10 +32,6 @@ async function fetchJsonWithFallback(urlOrList, timeoutMs = 5000) {
       const res = await fetch(url, { signal: ctrl.signal });
       clearTimeout(t);
       if (!res.ok) continue;
-      const ctype = (res.headers.get('content-type') || '').toLowerCase();
-      if (!ctype.includes('application/json') && !ctype.includes('text/plain') && !ctype.includes('application/octet-stream')) {
-        // still try to parse; some IPFS gateways mislabel
-      }
       const json = await res.json().catch(() => null);
       if (json) return json;
     } catch {}
@@ -54,16 +45,10 @@ function normalizeChannels(channel_ids) {
   return channel_ids.toString().split(',').map(s => s.trim()).filter(Boolean);
 }
 
-function uniq(arr) {
-  return [...new Set(arr)];
-}
+function uniq(arr) { return [...new Set(arr)]; }
+function toShort(addr = '') { return addr ? `${addr.slice(0,6)}...${addr.slice(-4)}` : ''; }
 
-function toShort(addr = '') {
-  if (!addr) return '';
-  return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
-}
-
-/* Decimals cache for ERC20 tokens */
+/* Cache for ERC20 decimals */
 const decimalsCache = new Map();
 async function getErc20Decimals(provider, tokenAddr) {
   const key = (tokenAddr || '').toLowerCase();
@@ -73,19 +58,13 @@ async function getErc20Decimals(provider, tokenAddr) {
     const d = await erc20.decimals();
     decimalsCache.set(key, d);
     return d;
-  } catch {
-    decimalsCache.set(key, 18); // fallback
-    return 18;
-  }
+  } catch { decimalsCache.set(key, 18); return 18; }
 }
 
 async function formatErc20(provider, tokenAddr, rawDataHex) {
   const decimals = await getErc20Decimals(provider, tokenAddr);
-  try {
-    return parseFloat(ethers.formatUnits(rawDataHex, decimals));
-  } catch {
-    return parseFloat(ethers.formatUnits(rawDataHex, 18));
-  }
+  try { return parseFloat(ethers.formatUnits(rawDataHex, decimals)); }
+  catch { return parseFloat(ethers.formatUnits(rawDataHex, 18)); }
 }
 
 async function getErc20NameSymbol(provider, tokenAddr) {
@@ -94,20 +73,14 @@ async function getErc20NameSymbol(provider, tokenAddr) {
       'function name() view returns (string)',
       'function symbol() view returns (string)'
     ], provider);
-    const [nm, sym] = await Promise.all([
-      erc20.name().catch(() => null),
-      erc20.symbol().catch(() => null)
-    ]);
+    const [nm, sym] = await Promise.all([erc20.name().catch(()=>null), erc20.symbol().catch(()=>null)]);
     return { name: nm || null, symbol: sym || null };
-  } catch {
-    return { name: null, symbol: null };
-  }
+  } catch { return { name: null, symbol: null }; }
 }
 
 /* ===================== LISTENER BOOTSTRAP ===================== */
 
 const contractListeners = {};
-
 async function trackBaseContracts(client) {
   const pg = client.pg;
   const res = await pg.query("SELECT * FROM contract_watchlist WHERE chain = 'base'");
@@ -130,379 +103,320 @@ function setupBaseBlockListener(client, contractRows) {
   const globalSeenMints = new Set();
 
   setInterval(async () => {
-    const provider = await safeRpcCall('base', p => p);
+    const provider = await safeRpcCall('base', p=>p);
     if (!provider) return;
 
-    const blockNumber = await provider.getBlockNumber().catch(() => null);
+    const blockNumber = await provider.getBlockNumber().catch(()=>null);
     if (!blockNumber) return;
 
     const fromBlock = Math.max(blockNumber - 5, 0);
     const toBlock = blockNumber;
-    const mintTxMap = new Map(); // txHash -> Map(guildId, { row, contract, tokenIds, to })
+
+    const mintTxMap = new Map();
 
     for (const row of contractRows) {
       let logs = [];
-      try {
-        logs = await provider.getLogs({
-          address: (row.address || '').toLowerCase(),
-          topics: [TRANSFER_TOPIC],
-          fromBlock,
-          toBlock
-        });
-      } catch {}
+      try { logs = await provider.getLogs({address: (row.address||'').toLowerCase(), topics: [TRANSFER_TOPIC], fromBlock, toBlock}); } catch {}
 
       const nftAddress = row.address;
       const contract = new Contract(nftAddress, iface.fragments, provider);
       const name = row.name || 'Unknown';
-      let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
-      let seenSales = new Set((loadJson(seenSalesPath(name)) || []).map(tx => (tx || '').toLowerCase()));
+      let seenTokenIds = new Set(loadJson(seenPath(name))||[]);
+      let seenSales = new Set((loadJson(seenSalesPath(name))||[]).map(tx=>tx.toLowerCase()));
 
       const allChannelIds = uniq(normalizeChannels(row.channel_ids));
       const allGuildIds = [];
       for (const id of allChannelIds) {
-        try {
-          const ch = await client.channels.fetch(id);
-          if (ch?.guildId) allGuildIds.push(ch.guildId);
-        } catch {}
+        try { const ch = await client.channels.fetch(id); if(ch?.guildId) allGuildIds.push(ch.guildId); } catch {}
       }
 
       for (const log of logs) {
         if (log.topics[0] !== TRANSFER_TOPIC) continue;
-        let parsed;
-        try { parsed = iface.parseLog(log); } catch { continue; }
-
+        let parsed; try { parsed = iface.parseLog(log); } catch { continue; }
         const { from, to, tokenId } = parsed.args;
         const tokenIdStr = tokenId.toString();
-        const txHash = (log.transactionHash || '').toLowerCase();
-        if (!txHash) continue;
+        const txHash = (log.transactionHash||'').toLowerCase();
+        if(!txHash) continue;
 
-        const mintKey = `${(log.address || '').toLowerCase()}-${tokenIdStr}`;
+        const mintKey = `${(log.address||'').toLowerCase()}-${tokenIdStr}`;
 
-        if (from === ZERO_ADDRESS) {
+        if(from===ZERO_ADDRESS){
           // MINT
-          for (const gid of allGuildIds) {
+          for(const gid of allGuildIds){
             const dedupeKey = `${gid}-${mintKey}`;
-            if (globalSeenMints.has(dedupeKey)) continue;
+            if(globalSeenMints.has(dedupeKey)) continue;
             globalSeenMints.add(dedupeKey);
-
-            if (!mintTxMap.has(txHash)) mintTxMap.set(txHash, new Map());
+            if(!mintTxMap.has(txHash)) mintTxMap.set(txHash,new Map());
             const txGuildMap = mintTxMap.get(txHash);
-
-            if (!txGuildMap.has(gid)) txGuildMap.set(gid, { row, contract, tokenIds: new Set(), to });
+            if(!txGuildMap.has(gid)) txGuildMap.set(gid,{row, contract, tokenIds:new Set(), to});
             txGuildMap.get(gid).tokenIds.add(tokenIdStr);
           }
-
-          if (!seenTokenIds.has(tokenIdStr)) {
+          if(!seenTokenIds.has(tokenIdStr)){
             seenTokenIds.add(tokenIdStr);
             saveJson(seenPath(name), [...seenTokenIds]);
           }
         } else {
-          // SALE/TRANSFER
-          let shouldSend = false;
-          for (const gid of allGuildIds) {
+          // SALE
+          let shouldSend=false;
+          for(const gid of allGuildIds){
             const dedupeKey = `${gid}-${txHash}`;
-            if (globalSeenSales.has(dedupeKey)) continue;
+            if(globalSeenSales.has(dedupeKey)) continue;
             globalSeenSales.add(dedupeKey);
-            shouldSend = true;
+            shouldSend=true;
           }
-          if (!shouldSend || seenSales.has(txHash)) continue;
-
+          if(!shouldSend || seenSales.has(txHash)) continue;
           seenSales.add(txHash);
-          await handleSale(client, row, contract, tokenId, from, to, txHash, allChannelIds);
+          await handleSale(client,row,contract,tokenId,from,to,txHash,allChannelIds);
           saveJson(seenSalesPath(name), [...seenSales]);
         }
       }
     }
 
-    // ERC20 Swap / Token Payment Detection
-    try {
-      const swapLogs = await provider.getLogs({
-        topics: [TRANSFER_ERC20_TOPIC],
-        fromBlock,
-        toBlock
-      });
-
-      for (const log of swapLogs) {
-        const tokenAddr = (log.address || '').toLowerCase();
-        if (!Object.values(TOKEN_NAME_TO_ADDRESS).map(a => a.toLowerCase()).includes(tokenAddr)) continue;
-
-        const from = '0x' + log.topics[1].slice(26);
-        const to = '0x' + log.topics[2].slice(26);
-        const amount = await formatErc20(provider, tokenAddr, log.data);
-
-        const tokenSymbol = Object.keys(TOKEN_NAME_TO_ADDRESS).find(k => TOKEN_NAME_TO_ADDRESS[k].toLowerCase() === tokenAddr) || 'TOKEN';
-
-        const ethValue = await (async () => {
-          try {
-            return await getRealDexPriceForToken(amount, tokenAddr);
-          } catch { return null; }
-        })();
-
-        const embed = {
-          title: `💱 SWAP / TOKEN TRANSFER DETECTED`,
-          description: `Token \`${tokenSymbol}\` transferred`,
-          fields: [
-            { name: '👤 From', value: shortWalletLink(from), inline: true },
-            { name: '🧑‍💻 To', value: shortWalletLink(to), inline: true },
-            { name: `💰 Amount`, value: amount.toFixed(4), inline: true },
-            { name: `⇄ ETH Value`, value: ethValue ? `${ethValue.toFixed(4)} ETH` : 'N/A', inline: true }
-          ],
-          color: 0xffa500,
-          footer: { text: 'Live on Base • Powered by PimpsDev' },
-          timestamp: new Date().toISOString()
-        };
-
-        const sentChannels = new Set();
-        for (const row of contractRows) {
-          for (const id of normalizeChannels(row.channel_ids)) {
-            if (sentChannels.has(id)) continue;
-            sentChannels.add(id);
-            const ch = await client.channels.fetch(id).catch(() => null);
-            if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
-          }
-        }
-      }
-    } catch {}
-    
-    // Emit mint notifications grouped by tx + guild
-    for (const [txHash, txGuildMap] of mintTxMap.entries()) {
-      for (const [guildId, { row, contract, tokenIds, to }] of txGuildMap.entries()) {
+    // Emit mint notifications grouped by tx+guild
+    for(const [txHash, txGuildMap] of mintTxMap.entries()){
+      for(const [guildId,{row,contract,tokenIds,to}] of txGuildMap.entries()){
         const tokenIdArray = Array.from(tokenIds);
-        const isSingle = tokenIdArray.length === 1;
-        const channels = normalizeChannels(row.channel_ids).filter(id => {
+        const isSingle = tokenIdArray.length===1;
+        const channels = normalizeChannels(row.channel_ids).filter(id=>{
           const ch = client.channels.cache.get(id);
-          return ch?.guildId === guildId;
+          return ch?.guildId===guildId;
         });
-        await handleMintBulk(client, row, contract, tokenIdArray, txHash, channels, isSingle, to);
+        await handleMintBulk(client,row,contract,tokenIdArray,txHash,channels,isSingle,to);
       }
     }
 
-  }, 8000);
+    // ERC20 token buys
+    await handleTokenBuys(client,provider,contractRows);
+
+  },8000);
 }
 
 /* ===================== MINT HANDLER ===================== */
 
 async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, channel_ids, isSingle = false, minterAddress = '') {
-  let { name, mint_token, mint_token_symbol, address: nftAddress } = contractRow;
-  const provider = await safeRpcCall('base', p => p);
-  if (!provider || !txHash) return;
+  const provider = await safeRpcCall('base', p=>p);
+  if(!provider || !txHash) return;
 
-  const receipt = await provider.getTransactionReceipt(txHash).catch(() => null);
-  if (!receipt) return;
+  const receipt = await provider.getTransactionReceipt(txHash).catch(()=>null);
+  if(!receipt) return;
 
-  // Resolve token info
-  let tokenAddr = (mint_token || '').toLowerCase();
-  if (!tokenAddr && mint_token_symbol) {
-    const mapped = TOKEN_NAME_TO_ADDRESS[(mint_token_symbol || '').toUpperCase()];
-    if (mapped) tokenAddr = mapped.toLowerCase();
-  }
+  const { name, mint_token, mint_token_symbol } = contractRow;
 
+  // Fetch buyer/minter
   let buyer = '';
   try { buyer = minterAddress ? ethers.getAddress(minterAddress) : ''; } catch { buyer = ''; }
 
+  // Compute spent token amount
   let tokenAmount = null;
-  let inferredTokenAddr = tokenAddr;
-
-  if (buyer) {
-    const addrEq = (a, b) => (a || '').toLowerCase() === (b || '').toLowerCase();
-
-    if (tokenAddr) {
-      for (const log of receipt.logs) {
-        if (log.topics[0] === TRANSFER_ERC20_TOPIC && log.topics.length === 3 && (log.address || '').toLowerCase() === tokenAddr) {
-          const from = '0x' + log.topics[1].slice(26);
-          if (addrEq(from, buyer)) {
-            try {
-              tokenAmount = await formatErc20(provider, tokenAddr, log.data);
-              break;
-            } catch {}
-          }
-        }
-      }
-    }
-
-    if (!tokenAmount) {
-      let best = { amount: 0, token: null };
-      for (const log of receipt.logs) {
-        if ((log.address || '').toLowerCase() === (contract.target || contract.address || '').toLowerCase()) continue;
-        if (log.topics[0] !== TRANSFER_ERC20_TOPIC || log.topics.length !== 3) continue;
-        const from = '0x' + log.topics[1].slice(26);
-        if (!addrEq(from, buyer)) continue;
-        try {
-          const candidateToken = (log.address || '').toLowerCase();
-          const amt = await formatErc20(provider, candidateToken, log.data);
-          if (amt > best.amount) best = { amount: amt, token: candidateToken };
-        } catch {}
-      }
-      if (best.amount > 0 && best.token) {
-        tokenAmount = best.amount;
-        inferredTokenAddr = best.token;
-      }
-    }
-  }
-
   let displayTokenSymbol = mint_token_symbol || 'TOKEN';
   let displayTokenName = mint_token || null;
 
-  const tokenToDescribe = inferredTokenAddr || tokenAddr;
-  if (tokenToDescribe && (!mint_token_symbol || !mint_token)) {
-    const { name: chainName, symbol: chainSym } = await getErc20NameSymbol(provider, tokenToDescribe);
-    if (chainSym) displayTokenSymbol = chainSym;
-    if (chainName) displayTokenName = chainName;
-
-    try {
-      const pg = client.pg;
-      if (pg && (chainSym || chainName)) {
-        await pg.query(
-          `UPDATE contract_watchlist
-           SET mint_token = COALESCE(NULLIF($1,''), mint_token),
-               mint_token_symbol = COALESCE(NULLIF($2,''), mint_token_symbol)
-           WHERE address = $3 AND chain = 'base'`,
-          [chainName || '', chainSym || '', nftAddress]
-        );
-        contractRow.mint_token = contractRow.mint_token || chainName || null;
-        contractRow.mint_token_symbol = contractRow.mint_token_symbol || chainSym || null;
+  if(buyer && mint_token){
+    const tokenAddr = mint_token.toLowerCase();
+    for(const log of receipt.logs){
+      if(log.topics[0]===TRANSFER_ERC20_TOPIC && log.address.toLowerCase()===tokenAddr){
+        const from = '0x'+log.topics[1].slice(26);
+        if(from.toLowerCase()===buyer.toLowerCase()){
+          try{ tokenAmount = await formatErc20(provider, tokenAddr, log.data); break; } catch {}
+        }
       }
-    } catch {}
-  }
-
-  let ethValue = null;
-  if (tokenAmount && tokenToDescribe) {
-    try { ethValue = await getRealDexPriceForToken(tokenAmount, tokenToDescribe); } catch { ethValue = null; }
-    if (!ethValue) {
-      try {
-        const fallback = await getEthPriceFromToken(tokenToDescribe);
-        if (fallback && !isNaN(fallback)) ethValue = tokenAmount * fallback;
-      } catch {}
     }
   }
 
-  let imageUrl = 'https://via.placeholder.com/400x400.png?text=NFT';
-  try {
+  // ETH value
+  let ethValue=null;
+  if(tokenAmount && mint_token) {
+    try{ ethValue=await getRealDexPriceForToken(tokenAmount,mint_token); } catch {}
+    if(!ethValue){
+      try{ const px=await getEthPriceFromToken(mint_token); if(px) ethValue=tokenAmount*px; } catch{}
+    }
+  }
+
+  // Resolve image
+  let imageUrl='https://via.placeholder.com/400x400.png?text=NFT';
+  try{
     let uri = await contract.tokenURI(tokenIds[0]);
     const urls = uri.startsWith('ipfs://') ? toIpfsHttp(uri) : [uri];
-    const meta = await fetchJsonWithFallback(urls, 5000);
-    const img = meta?.image;
-    if (img) imageUrl = img.startsWith('ipfs://') ? (toIpfsHttp(img)[0] || imageUrl) : img;
-  } catch {}
+    const meta = await fetchJsonWithFallback(urls,5000);
+    if(meta?.image) imageUrl = meta.image.startsWith('ipfs://') ? (toIpfsHttp(meta.image)[0]||imageUrl) : meta.image;
+  } catch{}
 
-  const embed = {
-    title: isSingle ? `✨ NEW ${String(name || '').toUpperCase()} MINT!` : `✨ BULK ${String(name || '').toUpperCase()} MINT (${tokenIds.length})!`,
-    description: isSingle ? `Minted Token ID: #${tokenIds[0]}` : `Minted Token IDs: ${tokenIds.map(id => `#${id}`).join(', ')}`,
-    fields: [
-      { name: `💰 Total Spent (${displayTokenSymbol})`, value: tokenAmount ? tokenAmount.toFixed(4) : '0.0000', inline: true },
-      { name: `⇄ ETH Value`, value: ethValue ? `${ethValue.toFixed(4)} ETH` : 'N/A', inline: true },
-      { name: `👤 Minter`, value: buyer ? shortWalletLink(buyer) : (minterAddress ? shortWalletLink(minterAddress) : 'Unknown'), inline: true }
+  const embed={
+    title:isSingle?`✨ NEW ${String(name||'').toUpperCase()} MINT!`:`✨ BULK ${String(name||'').toUpperCase()} MINT (${tokenIds.length})!`,
+    description:isSingle?`Minted Token ID: #${tokenIds[0]}`:`Minted Token IDs: ${tokenIds.map(id=>`#${id}`).join(', ')}`,
+    fields:[
+      {name:`💰 Total Spent (${displayTokenSymbol})`,value:tokenAmount?tokenAmount.toFixed(4):'0.0000',inline:true},
+      {name:`⇄ ETH Value`,value:ethValue?`${ethValue.toFixed(4)} ETH`:'N/A',inline:true},
+      {name:`👤 Minter`,value:buyer?shortWalletLink(buyer):(minterAddress?shortWalletLink(minterAddress):'Unknown'),inline:true}
     ],
-    thumbnail: { url: imageUrl },
-    color: 0x35A3B3,
-    footer: { text: 'Live on Base • Powered by PimpsDev' },
-    timestamp: new Date().toISOString()
+    thumbnail:{url:imageUrl},
+    color:0x35A3B3,
+    footer:{text:'Live on Base • Powered by PimpsDev'},
+    timestamp:new Date().toISOString()
   };
 
   const sent = new Set();
-  for (const id of uniq(normalizeChannels(channel_ids))) {
-    if (sent.has(id)) continue;
+  for(const id of uniq(normalizeChannels(channel_ids))){
+    if(sent.has(id)) continue;
     sent.add(id);
-    const ch = await client.channels.fetch(id).catch(() => null);
-    if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
+    const ch = await client.channels.fetch(id).catch(()=>null);
+    if(ch) await ch.send({embeds:[embed]}).catch(()=>{});
   }
 }
 
 /* ===================== SALE HANDLER ===================== */
 
-async function handleSale(client, contractRow, contract, tokenId, from, to, txHash, channel_ids) {
-  const { name, mint_token_symbol } = contractRow;
-
-  let imageUrl = 'https://via.placeholder.com/400x400.png?text=SOLD';
-  try {
-    let uri = await contract.tokenURI(tokenId);
-    const urls = uri.startsWith('ipfs://') ? toIpfsHttp(uri) : [uri];
-    const meta = await fetchJsonWithFallback(urls, 5000);
-    const img = meta?.image;
-    if (img) imageUrl = img.startsWith('ipfs://') ? (toIpfsHttp(img)[0] || imageUrl) : img;
-  } catch {}
-
-  const provider = await safeRpcCall('base', p => p);
-  if (!provider) return;
+async function handleSale(client, contractRow, contract, tokenId, from, to, txHash, channel_ids){
+  const provider = await safeRpcCall('base',p=>p);
+  if(!provider) return;
 
   let receipt, tx;
-  try {
-    receipt = await provider.getTransactionReceipt(txHash);
-    tx = await provider.getTransaction(txHash);
-    if (!receipt || !tx) return;
-  } catch { return; }
+  try{ receipt=await provider.getTransactionReceipt(txHash); tx=await provider.getTransaction(txHash); } catch{return;}
 
-  let tokenAmount = null, ethValue = null, methodUsed = null;
+  if(!receipt || !tx) return;
 
-  try {
-    if (tx.value && tx.value > 0n) {
-      tokenAmount = parseFloat(ethers.formatEther(tx.value));
-      ethValue = tokenAmount;
-      methodUsed = '🟦 ETH';
+  const { name, mint_token_symbol } = contractRow;
+
+  // Compute ETH/token value
+  let tokenAmount=null, ethValue=null, methodUsed=null;
+
+  try{
+    if(tx.value && tx.value>0n){
+      tokenAmount=parseFloat(ethers.formatEther(tx.value));
+      ethValue=tokenAmount;
+      methodUsed='🟦 ETH';
     }
-  } catch {}
+  } catch{}
 
-  if (!ethValue) {
-    const seller = (() => { try { return ethers.getAddress(from); } catch { return (from || ''); } })();
-    for (const log of receipt.logs) {
-      if (log.topics[0] === TRANSFER_ERC20_TOPIC && log.topics.length === 3 && (log.address || '').toLowerCase() !== (contract.target || contract.address || '').toLowerCase()) {
-        try {
-          const toAddr = ethers.getAddress('0x' + log.topics[2].slice(26));
-          if (toAddr.toLowerCase() === seller.toLowerCase()) {
-            const tokenContract = (log.address || '').toLowerCase();
-            const amt = await formatErc20(provider, tokenContract, log.data);
-            if (!isFinite(amt) || amt <= 0) continue;
-
-            tokenAmount = amt;
-            let priceEth = null;
-            try { priceEth = await getRealDexPriceForToken(amt, tokenContract); } catch {}
-            if (!priceEth) {
-              try {
-                const px = await getEthPriceFromToken(tokenContract);
-                if (px) priceEth = amt * px;
-              } catch {}
-            }
-            ethValue = priceEth || null;
-            methodUsed = `🟨 ${mint_token_symbol || 'TOKEN'}`;
-            if (ethValue) break;
-          }
-        } catch {}
-      }
+  if(!ethValue){
+    const seller = ethers.getAddress(from);
+    for(const log of receipt.logs){
+      if(log.topics[0]!==TRANSFER_ERC20_TOPIC || log.topics.length!==3) continue;
+      const toAddr = ethers.getAddress('0x'+log.topics[2].slice(26));
+      if(toAddr.toLowerCase()!==seller.toLowerCase()) continue;
+      const tokenContract = log.address.toLowerCase();
+      try{
+        const amt = await formatErc20(provider, tokenContract, log.data);
+        if(!isFinite(amt) || amt<=0) continue;
+        tokenAmount=amt;
+        let priceEth=null;
+        try{ priceEth = await getRealDexPriceForToken(amt, tokenContract); } catch{}
+        if(!priceEth){
+          try{ const px=await getEthPriceFromToken(tokenContract); if(px) priceEth=amt*px; } catch{}
+        }
+        ethValue=priceEth||null;
+        methodUsed=`🟨 ${mint_token_symbol||'TOKEN'}`;
+        if(ethValue) break;
+      } catch{}
     }
   }
 
-  if (!tokenAmount || !ethValue) return;
+  if(!tokenAmount || !ethValue) return;
 
-  const embed = {
-    title: `💸 NFT SOLD – ${name || 'Collection'} #${tokenId}`,
-    description: `Token \`${tokenId}\` just sold!`,
-    fields: [
-      { name: '👤 Seller', value: shortWalletLink(from), inline: true },
-      { name: '🧑‍💻 Buyer', value: shortWalletLink(to), inline: true },
-      { name: `💰 Paid`, value: `${tokenAmount.toFixed(4)}`, inline: true },
-      { name: `⇄ ETH Value`, value: `${ethValue.toFixed(4)} ETH`, inline: true },
-      { name: `💳 Method`, value: methodUsed || 'Unknown', inline: true }
+  // Resolve image
+  let imageUrl='https://via.placeholder.com/400x400.png?text=SOLD';
+  try{
+    let uri = await contract.tokenURI(tokenId);
+    const urls = uri.startsWith('ipfs://')?toIpfsHttp(uri):[uri];
+    const meta = await fetchJsonWithFallback(urls,5000);
+    if(meta?.image) imageUrl = meta.image.startsWith('ipfs://') ? (toIpfsHttp(meta.image)[0]||imageUrl) : meta.image;
+  } catch{}
+
+  const embed={
+    title:`💸 NFT SOLD – ${name||'Collection'} #${tokenId}`,
+    description:`Token \`${tokenId}\` just sold!`,
+    fields:[
+      {name:'👤 Seller',value:shortWalletLink(from),inline:true},
+      {name:'🧑‍💻 Buyer',value:shortWalletLink(to),inline:true},
+      {name:`💰 Paid`,value:tokenAmount.toFixed(4),inline:true},
+      {name:`⇄ ETH Value`,value:`${ethValue.toFixed(4)} ETH`,inline:true},
+      {name:`💳 Method`,value:methodUsed||'Unknown',inline:true}
     ],
-    thumbnail: { url: imageUrl },
-    color: 0x66cc66,
-    footer: { text: 'Powered by PimpsDev' },
-    timestamp: new Date().toISOString()
+    thumbnail:{url:imageUrl},
+    color:0x66cc66,
+    footer:{text:'Powered by PimpsDev'},
+    timestamp:new Date().toISOString()
   };
 
-  const sentChannels = new Set();
-  for (const id of normalizeChannels(channel_ids)) {
-    if (sentChannels.has(id)) continue;
+  const sentChannels=new Set();
+  for(const id of normalizeChannels(channel_ids)){
+    if(sentChannels.has(id)) continue;
     sentChannels.add(id);
-    const ch = await client.channels.fetch(id).catch(() => null);
-    if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
+    const ch = await client.channels.fetch(id).catch(()=>null);
+    if(ch) await ch.send({embeds:[embed]}).catch(()=>{});
+  }
+}
+
+/* ===================== ERC20 BUY HANDLER ===================== */
+
+async function handleTokenBuys(client, provider, contractRows){
+  for(const row of contractRows){
+    const tokenAddr = (row.mint_token||'').toLowerCase();
+    if(!tokenAddr) continue;
+    const decimals = await getErc20Decimals(provider, tokenAddr);
+    const blockNumber = await provider.getBlockNumber();
+    let logs=[];
+    try{
+      logs = await provider.getLogs({
+        address: tokenAddr,
+        topics:[TRANSFER_TOPIC],
+        fromBlock:blockNumber-5,
+        toBlock:blockNumber
+      });
+    } catch{}
+
+    for(const log of logs){
+      if(log.topics.length!==3) continue;
+      const from = '0x'+log.topics[1].slice(26);
+      const to = '0x'+log.topics[2].slice(26);
+
+      // 🔹 Ignore internal contract addresses (tax/router)
+      try{
+        const code = await provider.getCode(to);
+        if(code!=='0x') continue;
+      } catch{ continue; }
+
+      if(from===ZERO_ADDRESS) continue;
+
+      let tokenAmount=0;
+      try{ tokenAmount = parseFloat(ethers.formatUnits(log.data,decimals)); } catch{}
+      if(tokenAmount<=0) continue;
+
+      let ethValue=null;
+      try{ ethValue=await getRealDexPriceForToken(tokenAmount, tokenAddr); } catch{}
+      if(!ethValue){
+        try{ const px=await getEthPriceFromToken(tokenAddr); if(px) ethValue=tokenAmount*px; } catch{}
+      }
+
+      const embed={
+        title:`🟦 TOKEN SWAP – ${row.mint_token_symbol||'TOKEN'} bought!`,
+        description:`Bought ${tokenAmount.toFixed(4)} ${row.mint_token_symbol||'TOKEN'}`,
+        fields:[
+          {name:'👤 Buyer',value:shortWalletLink(to),inline:true},
+          {name:'💰 Amount',value:tokenAmount.toFixed(4),inline:true},
+          {name:'⇄ ETH Value',value:ethValue?`${ethValue.toFixed(4)} ETH`:'N/A',inline:true}
+        ],
+        color:0x00aaff,
+        footer:{text:'Base Network • Token Buy Notification'},
+        timestamp:new Date().toISOString()
+      };
+
+      const sent=new Set();
+      for(const id of uniq(normalizeChannels(row.channel_ids))){
+        if(sent.has(id)) continue;
+        sent.add(id);
+        const ch = await client.channels.fetch(id).catch(()=>null);
+        if(ch) await ch.send({embeds:[embed]}).catch(()=>{});
+      }
+    }
   }
 }
 
 /* ===================== EXPORTS ===================== */
-
 module.exports = {
   trackBaseContracts,
   contractListeners
 };
+
 
 
