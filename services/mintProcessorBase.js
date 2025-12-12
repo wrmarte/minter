@@ -38,10 +38,14 @@ async function fetchJsonWithFallback(urlOrList, timeoutMs = 5000) {
       clearTimeout(t);
       if (!res.ok) continue;
       const ctype = (res.headers.get('content-type') || '').toLowerCase();
-      if (!ctype.includes('application/json') && !ctype.includes('text/plain') && !ctype.includes('application/octet-stream')) {}
+      if (!ctype.includes('application/json') && !ctype.includes('text/plain') && !ctype.includes('application/octet-stream')) {
+        // still try to parse; some IPFS gateways mislabel
+      }
       const json = await res.json().catch(() => null);
       if (json) return json;
-    } catch {}
+    } catch {
+      // try next
+    }
   }
   return null;
 }
@@ -82,6 +86,7 @@ async function formatErc20(provider, tokenAddr, rawDataHex) {
   try {
     return parseFloat(ethers.formatUnits(rawDataHex, decimals));
   } catch {
+    // as last resort assume 18
     return parseFloat(ethers.formatUnits(rawDataHex, 18));
   }
 }
@@ -315,10 +320,13 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
            WHERE address = $3 AND chain = 'base'`,
           [chainName || '', chainSym || '', nftAddress]
         );
+        // also update local row so future messages in this run use it
         contractRow.mint_token = contractRow.mint_token || chainName || null;
         contractRow.mint_token_symbol = contractRow.mint_token_symbol || chainSym || null;
       }
-    } catch {}
+    } catch (e) {
+      // silent: DB update is best-effort
+    }
   }
 
   // Compute ETH value from token via DEX/price fallbacks
@@ -413,49 +421,72 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
   // Case 2: Paid in ERC20 (fallback)
   if (!ethValue) {
     const seller = (() => { try { return ethers.getAddress(from); } catch { return (from || ''); } })();
+    // Find ERC20 transfer TO the seller address
     for (const log of receipt.logs) {
       if (log.topics[0] === TRANSFER_ERC20_TOPIC && log.topics.length === 3 && (log.address || '').toLowerCase() !== (contract.target || contract.address || '').toLowerCase()) {
         try {
           const toAddr = ethers.getAddress('0x' + log.topics[2].slice(26));
           if (toAddr.toLowerCase() === seller.toLowerCase()) {
-            tokenAmount = await formatErc20(provider, log.address, log.data);
-            ethValue = await getRealDexPriceForToken(tokenAmount, log.address);
-            methodUsed = `🟦 ${mint_token_symbol || 'TOKEN'}`;
-            break;
+            const tokenContract = (log.address || '').toLowerCase();
+            const amt = await formatErc20(provider, tokenContract, log.data);
+            if (!isFinite(amt) || amt <= 0) continue;
+
+            tokenAmount = amt;
+            // Convert to ETH value
+            let priceEth = null;
+            try {
+              priceEth = await getRealDexPriceForToken(amt, tokenContract);
+            } catch {}
+            if (!priceEth) {
+              try {
+                const px = await getEthPriceFromToken(tokenContract);
+                if (px) priceEth = amt * px;
+              } catch {}
+            }
+            ethValue = priceEth || null;
+            methodUsed = `🟨 ${mint_token_symbol || 'TOKEN'}`;
+            if (ethValue) break;
           }
         } catch {}
       }
     }
   }
 
+  if (!tokenAmount || !ethValue) return;
+
   const embed = {
     title: `💸 NFT SOLD – ${name || 'Collection'} #${tokenId}`,
     description: `Token \`${tokenId}\` just sold!`,
     fields: [
-      { name: `💰 Sale Price`, value: tokenAmount ? tokenAmount.toFixed(4) : 'N/A', inline: true },
-      { name: `⇄ ETH Value`, value: ethValue ? `${ethValue.toFixed(4)} ETH` : 'N/A', inline: true },
-      { name: `Payment Method`, value: methodUsed || 'Unknown', inline: true },
-      { name: `👤 From`, value: shortWalletLink(from), inline: true },
-      { name: `👤 To`, value: shortWalletLink(to), inline: true }
+      { name: '👤 Seller', value: shortWalletLink(from), inline: true },
+      { name: '🧑‍💻 Buyer', value: shortWalletLink(to), inline: true },
+      { name: `💰 Paid`, value: `${tokenAmount.toFixed(4)}`, inline: true },
+      { name: `⇄ ETH Value`, value: `${ethValue.toFixed(4)} ETH`, inline: true },
+      { name: `💳 Method`, value: methodUsed || 'Unknown', inline: true }
     ],
     thumbnail: { url: imageUrl },
-    color: 0xFF5733,
-    footer: { text: 'Live on Base • Powered by PimpsDev' },
+    color: 0x66cc66,
+    footer: { text: 'Powered by PimpsDev' },
     timestamp: new Date().toISOString()
   };
 
-  const sent = new Set();
-  for (const id of uniq(normalizeChannels(channel_ids))) {
-    if (sent.has(id)) continue;
-    sent.add(id);
+  const sentChannels = new Set();
+  for (const id of normalizeChannels(channel_ids)) {
+    if (sentChannels.has(id)) continue;
+    sentChannels.add(id);
     const ch = await client.channels.fetch(id).catch(() => null);
     if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
   }
 }
 
+/* ===================== EXPORTS ===================== */
+
 module.exports = {
-  trackBaseContracts
+  trackBaseContracts,
+  contractListeners
 };
+
+
 
 
 
