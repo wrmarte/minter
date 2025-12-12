@@ -16,13 +16,13 @@ const ROUTERS = [
 const seenTx = new Set();
 
 // ✅ Emoji bar logic:
-// - If the BUY > $10 => show 🐳 emoji
-// - For buys above $10, each $5 = 1 🐳 (whale emoji)
+// - If the BUY > $30 => show 🐳 emoji
+// - For buys above $30, each $5 = 1 🐳 (whale emoji)
 function buildEmojiLine({ isBuy, usdValue, tokenAmountRaw }) {
   const usd = Number(usdValue);
 
   // 🐳 RULE: any BUY above $10 shows whale emoji, scales by $5
-  if (isBuy && Number.isFinite(usd) && usd > 10) {
+  if (isBuy && Number.isFinite(usd) && usd > 30) {
     const whaleCount = Math.floor(usd / 5); // 1 🐳 per $5
     return '🐳'.repeat(whaleCount);          // Scale whale emoji per $5 spent
   }
