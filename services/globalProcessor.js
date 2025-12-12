@@ -90,26 +90,28 @@ async function handleTokenLog(client, tokenRows, log) {
     }
   } catch {}
 
-  const tokenAmountRaw = parseFloat(formatUnits(amount, 18));
+  // ✅ Calculate actual received tokens (after tax/LP)
+  let tokenAmountRaw = parseFloat(formatUnits(amount, 18));
+  try {
+    const abi = ['function balanceOf(address account) view returns (uint256)'];
+    const contract = new ethers.Contract(tokenAddress, abi, getProvider());
+
+    // previous and current balances
+    const prevBalanceBN = await contract.balanceOf(toAddr, { blockTag: log.blockNumber - 1 });
+    const newBalanceBN = await contract.balanceOf(toAddr, { blockTag: log.blockNumber });
+    const tokenAmountReceivedBN = newBalanceBN.sub(prevBalanceBN);
+
+    // use received amount if positive
+    if (tokenAmountReceivedBN > 0n) {
+      tokenAmountRaw = parseFloat(formatUnits(tokenAmountReceivedBN, 18));
+    }
+  } catch {}
 
   // ❌ Skip tiny tax reroutes
   if (usdSpent === 0 && ethSpent === 0 && tokenAmountRaw < 5) return;
 
-  // ⛔ LP removal filter
-  if (isBuy && usdSpent === 0 && ethSpent === 0) {
-    try {
-      const abi = ['function balanceOf(address account) view returns (uint256)'];
-      const contract = new ethers.Contract(tokenAddress, abi, getProvider());
-      const prevBalanceBN = await contract.balanceOf(toAddr, { blockTag: log.blockNumber - 1 });
-      const prevBalance = parseFloat(formatUnits(prevBalanceBN, 18));
-      if (prevBalance > 0) {
-        console.log(`⛔ Skipping LP removal pretending to be a buy [${toAddr}]`);
-        return;
-      }
-    } catch (err) {
-      console.warn(`⚠️ LP filter failed: ${err.message}`);
-    }
-  }
+  const tokenPrice = await getTokenPriceUSD(tokenAddress);
+  const marketCap = await getMarketCapUSD(tokenAddress);
 
   // 🧠 Buy label
   let buyLabel = isBuy ? '🆕 New Buy' : '💥 Sell';
@@ -126,21 +128,8 @@ async function handleTokenLog(client, tokenRows, log) {
     }
   } catch {}
 
-  const tokenPrice = await getTokenPriceUSD(tokenAddress);
-  const marketCap = await getMarketCapUSD(tokenAddress);
-
-  // 🔧 Display amount: keep your original ×1000, but if USD+price imply ~1000×, show implied instead
-  let displayAmount = tokenAmountRaw * 1000; // original behavior
-  try {
-    if (usdSpent > 0 && tokenPrice > 0 && tokenAmountRaw > 0) {
-      const implied = usdSpent / tokenPrice;          // tokens implied by USD/price
-      const ratio = implied / tokenAmountRaw;         // how many times raw
-      if (ratio > 800 && ratio < 1200) {              // roughly 1000× (±20%)
-        displayAmount = implied;
-      }
-    }
-  } catch {}
-  const tokenAmountFormatted = displayAmount.toLocaleString(undefined, {
+  // 🔧 Display amount
+  const tokenAmountFormatted = tokenAmountRaw.toLocaleString(undefined, {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2
   });
@@ -224,6 +213,7 @@ async function getMarketCapUSD(address) {
     return parseFloat(data?.data?.attributes?.fdv_usd || data?.data?.attributes?.market_cap_usd || '0');
   } catch { return 0; }
 }
+
 
 
 
