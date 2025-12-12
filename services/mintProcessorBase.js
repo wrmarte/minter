@@ -298,6 +298,7 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
       }
     }
   }
+
   // 🔹 If we have a token address but no known name/symbol, fetch from chain
   let displayTokenSymbol = mint_token_symbol || 'TOKEN';
   let displayTokenName = mint_token || null;
@@ -535,6 +536,78 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     }
   }
   // ---- END NEW: Swap-aware detection ----
+
+  // ---- BEGIN NEW: Marketplace event detection (Seaport/Reservoir/0x/etc) ----
+  // If still no tokenAmount/ethValue, try marketplace order event patterns (OrderFulfilled, TakerBid/TakerAsk, MatchOrders, ERC721OrderFilled...)
+  if (!tokenAmount || !ethValue) {
+    try {
+      // candidate event signatures (compute topic0 via ethers.id)
+      const MARKET_EVENTS = [
+        'OrderFulfilled(bytes32,address,address,tuple[])',
+        'TakerBid(address,address,uint256)',
+        'TakerAsk(address,address,uint256)',
+        'OrdersMatched(bytes32,bytes32,address,address,uint256,uint256)',
+        'MatchOrders((address,address,tuple[],tuple[]),(address,address,tuple[],tuple[]))',
+        'ERC721OrderFilled(bytes32,address,address,address,uint256,tuple[])',
+        'OrderExecuted(bytes32,address,address,uint256)',
+        'FillOrder(bytes32,address,address,uint256)'
+      ].map(s => ethers.id(s));
+
+      // scan logs for any marketplace topics
+      let sawMarketEvent = false;
+      for (const lg of receipt.logs) {
+        if (!lg.topics || lg.topics.length === 0) continue;
+        if (MARKET_EVENTS.includes(lg.topics[0])) {
+          sawMarketEvent = true;
+          break;
+        }
+        // fallback: many market contracts emit Transfer of ERC721 from seller to buyer (we already use that),
+        // or emit ERC20 transfer to marketplace then internal accounting. We'll rely on subsequent inference below.
+      }
+
+      if (sawMarketEvent) {
+        // Try to infer payment same as swap logic: largest ERC20 transfer from buyer in this receipt
+        const buyer = (() => { try { return ethers.getAddress(to); } catch { return (to || ''); } })().toLowerCase();
+        let best = { amount: 0, token: null };
+
+        for (const lg of receipt.logs) {
+          if ((lg.address || '').toLowerCase() === (contract.target || contract.address || '').toLowerCase()) continue;
+          if (lg.topics[0] !== TRANSFER_ERC20_TOPIC || lg.topics.length !== 3) continue;
+          try {
+            const fromAddr = '0x' + lg.topics[1].slice(26);
+            if ((fromAddr || '').toLowerCase() !== buyer) continue;
+            const candidateToken = (lg.address || '').toLowerCase();
+            const amt = await formatErc20(provider, candidateToken, lg.data);
+            if (isFinite(amt) && amt > best.amount) {
+              best = { amount: amt, token: candidateToken };
+            }
+          } catch {}
+        }
+
+        if (best.amount > 0 && best.token) {
+          tokenAmount = best.amount;
+          const tokenContract = best.token;
+          inferredTokenAddr = tokenContract;
+          try {
+            const maybeEth = await getRealDexPriceForToken(tokenAmount, tokenContract);
+            if (maybeEth && !isNaN(maybeEth)) {
+              ethValue = maybeEth;
+            } else {
+              const fallback = await getEthPriceFromToken(tokenContract);
+              if (fallback && !isNaN(fallback)) ethValue = tokenAmount * fallback;
+            }
+            methodUsed = `🛒 marketplace`;
+          } catch (e) {
+            // ignore
+          }
+        }
+      }
+    } catch (err) {
+      // ignore non-fatal
+    }
+  }
+  // ---- END NEW: Marketplace event detection ----
+
   if (!tokenAmount || !ethValue) return;
 
   const embed = {
@@ -568,6 +641,4 @@ module.exports = {
   trackBaseContracts,
   contractListeners
 };
-
-
 
