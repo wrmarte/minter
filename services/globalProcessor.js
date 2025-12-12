@@ -15,6 +15,25 @@ const ROUTERS = [
 
 const seenTx = new Set();
 
+// ✅ NEW: Emoji bar = proportional to USD spent + whale over $10
+function buildEmojiLine({ isBuy, usdSpent }) {
+  const usd = Number(usdSpent);
+
+  // fallback if unknown
+  if (!Number.isFinite(usd) || usd <= 0) {
+    return isBuy ? '🟦🚀' : '🔻💀';
+  }
+
+  // 1 emoji per $2 (micro friendly), capped to avoid spam
+  const count = Math.max(1, Math.floor(usd / 2));
+  const capped = Math.min(count, 20);
+
+  const base = isBuy ? '🟦🚀' : '🔻💀';
+  const whale = usd > 10 ? ' 🐳' : ''; // ✅ whale if MORE than $10 (not >=)
+
+  return `${base.repeat(capped)}${whale}`.trim();
+}
+
 module.exports = async function processUnifiedBlock(client, fromBlock, toBlock) {
   const pg = client.pg;
   const tokenRes = await pg.query('SELECT * FROM tracked_tokens');
@@ -129,28 +148,32 @@ async function handleTokenLog(client, tokenRows, log) {
   const tokenPrice = await getTokenPriceUSD(tokenAddress);
   const marketCap = await getMarketCapUSD(tokenAddress);
 
-  // 🔧 Display amount
-  let displayAmount = tokenAmountRaw * 1000; // fallback original behavior
+  // ✅ FIX: Display amount should NOT multiply by 1000.
+  // Start with raw amount as truth; only use implied if it's a reasonable match.
+  let displayAmount = tokenAmountRaw;
+
   try {
     if (usdSpent > 0 && tokenPrice > 0 && tokenAmountRaw > 0) {
-      const implied = usdSpent / tokenPrice;          // tokens implied by USD/price
+      const implied = usdSpent / tokenPrice; // tokens implied by USD/price
+
+      // accept implied if it's within a sane band of the raw transfer
+      // (prevents crazy jumps on micro-buys or taxed transfers)
       const ratio = implied / tokenAmountRaw;
-      if (ratio > 800 && ratio < 1200) {
+
+      // ✅ much safer band than 800..1200
+      if (ratio > 0.5 && ratio < 2.0) {
         displayAmount = implied;
       }
     }
   } catch {}
+
   const tokenAmountFormatted = displayAmount.toLocaleString(undefined, {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2
   });
 
-  // 🟢 Fix emoji repetition according to tokenAmountRaw
-  const emojiScale = 1000; // 1 emoji per 1000 tokens, adjust as needed
-  const emojiCount = Math.max(1, Math.floor(tokenAmountRaw / emojiScale));
-  const emojiLine = isBuy
-    ? '🟥🟦🚀'.repeat(emojiCount)
-    : '🔻💀🔻'.repeat(emojiCount);
+  // ✅ NEW: emoji line scales to USD spent + whale > $10
+  const emojiLine = buildEmojiLine({ isBuy, usdSpent });
 
   const getColorByUsd = (usd) => isBuy
     ? (usd < 10 ? 0xff0000 : usd < 20 ? 0x3498db : 0x00cc66)
@@ -196,6 +219,7 @@ async function handleTokenLog(client, tokenRows, log) {
         footer: { text: 'Live on Base • Powered by PimpsDev' },
         timestamp: new Date().toISOString()
       };
+
       await channel.send({ embeds: [embed] }).catch(err => {
         console.warn(`❌ Failed to send embed: ${err.message}`);
       });
@@ -227,11 +251,3 @@ async function getMarketCapUSD(address) {
     return parseFloat(data?.data?.attributes?.fdv_usd || data?.data?.attributes?.market_cap_usd || '0');
   } catch { return 0; }
 }
-
-
-
-
-
-
-
-
