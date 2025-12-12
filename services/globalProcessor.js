@@ -1,4 +1,4 @@
-const { Interface, formatUnits, ethers, id } = require('ethers');
+const { Interface, formatUnits, ethers } = require('ethers');
 const fetch = require('node-fetch');
 const { fetchLogs } = require('./logScanner');
 const { getProvider } = require('./providerM');
@@ -12,10 +12,6 @@ const ROUTERS = [
   '0xa5e0829CaCEd8fFDD4De3c43696c57F7D7A678ff',
   '0x95ebfcb1c6b345fda69cf56c51e30421e5a35aec'
 ];
-
-const ROUTERS_SET = new Set(ROUTERS.map(a => a.toLowerCase()));
-const SWAP_TOPIC_V2 = id('Swap(address,uint256,uint256,uint256,uint256,address)');
-const SWAP_TOPIC_V3 = id('Swap(address,address,int256,int256,uint160,uint128,int24)');
 
 const seenTx = new Set();
 
@@ -43,21 +39,6 @@ module.exports = async function processUnifiedBlock(client, fromBlock, toBlock) 
   }
 };
 
-async function txHasSwapOrRouterActivity(provider, txHash) {
-  try {
-    const receipt = await provider.getTransactionReceipt(txHash);
-    if (!receipt?.logs) return false;
-    for (const lg of receipt.logs) {
-      if (ROUTERS_SET.has((lg.address || '').toLowerCase())) return true;
-      if (lg.topics && lg.topics.length > 0) {
-        const t0 = lg.topics[0];
-        if (t0 === SWAP_TOPIC_V2 || t0 === SWAP_TOPIC_V3) return true;
-      }
-    }
-  } catch {}
-  return false;
-}
-
 async function handleTokenLog(client, tokenRows, log) {
   const iface = new Interface(['event Transfer(address indexed from, address indexed to, uint amount)']);
   let parsed;
@@ -73,7 +54,7 @@ async function handleTokenLog(client, tokenRows, log) {
   if (seenTx.has(log.transactionHash)) return;
   seenTx.add(log.transactionHash);
 
-  const ROUTERS_LOWER = [...ROUTERS_SET];
+  const ROUTERS_LOWER = ROUTERS.map(r => r.toLowerCase());
   const taxOrBurn = [
     '0x0000000000000000000000000000000000000000',
     '0x000000000000000000000000000000000000dEaD',
@@ -84,33 +65,18 @@ async function handleTokenLog(client, tokenRows, log) {
   if (ROUTERS_LOWER.includes(fromAddr) && ROUTERS_LOWER.includes(toAddr)) return;
   if (taxOrBurn.includes(toAddr) || taxOrBurn.includes(fromAddr)) return;
 
-  // Primary detection: check for router directly
-  let isBuy = ROUTERS_SET.has(fromAddr) && !ROUTERS_SET.has(toAddr);
-  let isSell = !ROUTERS_SET.has(fromAddr) && ROUTERS_SET.has(toAddr);
-
-  // Secondary detection: if not directly router, check tx receipt for swap/router activity
-  if (!isBuy && !isSell) {
-    try {
-      const saw = await txHasSwapOrRouterActivity(getProvider(), log.transactionHash);
-      // if saw and transfer is from pair -> probably a buy
-      if (saw && !ROUTERS_SET.has(fromAddr) && !ROUTERS_SET.has(toAddr)) {
-        // heuristics: if from is not EOA code and not a router, treat transfers where `from` is contract as pair -> could be buy
-        isBuy = true;
-      }
-    } catch {}
-  }
-
+  // ✅ Detect type
+  const isBuy = ROUTERS_LOWER.includes(fromAddr) && !ROUTERS_LOWER.includes(toAddr);
+  const isSell = !ROUTERS_LOWER.includes(fromAddr) && ROUTERS_LOWER.includes(toAddr);
   if (!isBuy && !isSell) return;
 
   // ⛔ Skip contract sell sources
   if (isSell) {
-    try {
-      const code = await getProvider().getCode(fromAddr);
-      if (code !== '0x') {
-        console.log(`⛔ Skipping contract sell from ${fromAddr}`);
-        return;
-      }
-    } catch {}
+    const code = await getProvider().getCode(fromAddr);
+    if (code !== '0x') {
+      console.log(`⛔ Skipping contract sell from ${fromAddr}`);
+      return;
+    }
   }
 
   // 💰 Value tracking
@@ -118,14 +84,9 @@ async function handleTokenLog(client, tokenRows, log) {
   try {
     const tx = await getProvider().getTransaction(log.transactionHash);
     const ethPrice = await getETHPrice();
-    if (tx?.value && tx.value > 0n) {
+    if (tx?.value) {
       ethSpent = parseFloat(formatUnits(tx.value, 18));
       usdSpent = ethSpent * ethPrice;
-    } else {
-      // fallback: attempt to approximate USD by token amount * token price (token price fetch below)
-      const tokenPrice = await getTokenPriceUSD(tokenAddress);
-      usdSpent = (parseFloat(formatUnits(amount, 18)) || 0) * tokenPrice;
-      ethSpent = 0;
     }
   } catch {}
 
@@ -263,6 +224,9 @@ async function getMarketCapUSD(address) {
     return parseFloat(data?.data?.attributes?.fdv_usd || data?.data?.attributes?.market_cap_usd || '0');
   } catch { return 0; }
 }
+
+
+
 
 
 
