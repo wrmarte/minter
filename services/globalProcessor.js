@@ -22,29 +22,20 @@ const seenTx = new Set();
 function buildEmojiLine({ isBuy, usdValue, tokenAmountRaw }) {
   const usd = Number(usdValue);
 
-  // 🐳 RULE: any BUY above $10 shows ONLY whale
-  if (isBuy && Number.isFinite(usd) && usd > 10) {
-    return '🐳';
-  }
+  if (isBuy && Number.isFinite(usd) && usd > 10) return '🐳';
 
-  // Primary: scale by USD
   if (Number.isFinite(usd) && usd > 0) {
-    const count = Math.max(1, Math.floor(usd / 2)); // 1 unit per $2
-    const capped = Math.min(count, 20);             // anti-spam cap
-    return isBuy
-      ? '🟥🟦🚀'.repeat(capped)
-      : '🔻💀🔻'.repeat(capped);
+    const count = Math.max(1, Math.floor(usd / 2));
+    const capped = Math.min(count, 20);
+    return isBuy ? '🟥🟦🚀'.repeat(capped) : '🔻💀🔻'.repeat(capped);
   }
 
-  // Fallback: scale by token amount
   const amt = Number(tokenAmountRaw);
   if (!Number.isFinite(amt) || amt <= 0) return isBuy ? '🟥🟦🚀' : '🔻💀🔻';
 
-  const count = Math.max(1, Math.floor(amt / 1000)); // 1 per 1000 tokens
+  const count = Math.max(1, Math.floor(amt / 1000));
   const capped = Math.min(count, 12);
-  return isBuy
-    ? '🟥🟦🚀'.repeat(capped)
-    : '🔻💀🔻'.repeat(capped);
+  return isBuy ? '🟥🟦🚀'.repeat(capped) : '🔻💀🔻'.repeat(capped);
 }
 
 module.exports = async function processUnifiedBlock(client, fromBlock, toBlock) {
@@ -145,10 +136,13 @@ async function handleTokenLog(client, tokenRows, log) {
     }
   }
 
-  // 🧠 Buy label
+  // ✅ Flag "unpriced buy" (usually LP/transfer style) so we DO NOT label as "New Buyer"
+  const isUnpricedBuy = isBuy && usdSpent === 0 && ethSpent === 0;
+
+  // 🧠 Buy label (but DO NOT treat unpriced buys as new buyer)
   let buyLabel = isBuy ? '🆕 New Buy' : '💥 Sell';
   try {
-    if (isBuy) {
+    if (isBuy && !isUnpricedBuy) {
       const abi = ['function balanceOf(address account) view returns (uint256)'];
       const contract = new ethers.Contract(tokenAddress, abi, getProvider());
       const prevBalanceBN = await contract.balanceOf(toAddr, { blockTag: log.blockNumber - 1 });
@@ -163,16 +157,13 @@ async function handleTokenLog(client, tokenRows, log) {
   const tokenPrice = await getTokenPriceUSD(tokenAddress);
   const marketCap = await getMarketCapUSD(tokenAddress);
 
-  // ✅ FIX: Display amount should be the real transfer amount (no *1000 inflation)
-  // Use implied tokens from USD/price ONLY when it's reasonably close to raw transfer.
+  // ✅ FIX: Display amount should be real transfer amount (no *1000 inflation)
   let displayAmount = tokenAmountRaw;
   try {
     if (usdSpent > 0 && tokenPrice > 0 && tokenAmountRaw > 0) {
       const implied = usdSpent / tokenPrice;
       const ratio = implied / tokenAmountRaw;
-      if (ratio > 0.5 && ratio < 2.0) {
-        displayAmount = implied;
-      }
+      if (ratio > 0.5 && ratio < 2.0) displayAmount = implied;
     }
   } catch {}
 
@@ -182,7 +173,6 @@ async function handleTokenLog(client, tokenRows, log) {
   });
 
   // ✅ SELL: estimate value sold using tokenPrice * tokensSold
-  // (Because tx.value is typically 0 on sells)
   let usdValueSold = 0, ethValueSold = 0;
   try {
     if (isSell && tokenPrice > 0 && displayAmount > 0) {
@@ -221,11 +211,10 @@ async function handleTokenLog(client, tokenRows, log) {
       const embed = {
         title: `${token.name.toUpperCase()} ${isBuy ? 'Buy' : 'Sell'}!`,
         description: emojiLine,
-        // ✅ Different image for sells
         image: {
           url: isBuy
             ? 'https://iili.io/3tSecKP.gif' // BUY
-            : 'https://iili.io/3tSeiEF.gif' // SELL (swap this URL anytime)
+            : 'https://iili.io/f7SxSte.gif' // SELL
         },
         fields: [
           {
@@ -238,13 +227,25 @@ async function handleTokenLog(client, tokenRows, log) {
             value: `${tokenAmountFormatted} ${token.name.toUpperCase()}`,
             inline: true
           },
-          ...(isBuy
+
+          // ✅ BUY ONLY: do NOT show "New Buyer" field if it's an unpriced buy (LP/transfer style)
+          ...(isBuy && !isUnpricedBuy
             ? [{
                 name: buyLabel.startsWith('🆕') ? '🆕 New Buyer' : '🔁 Accumulated',
                 value: buyLabel.replace(/^(🆕|🔁) /, ''),
                 inline: true
               }]
             : []),
+
+          // ✅ SELL ONLY: show seller wallet with middle finger emoji
+          ...(isSell
+            ? [{
+                name: '🖕 Seller',
+                value: shortWalletLink ? shortWalletLink(fromAddr) : fromAddr,
+                inline: true
+              }]
+            : []),
+
           { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
           { name: '📊 MCap', value: marketCap ? `$${marketCap.toLocaleString()}` : 'Fetching...', inline: true }
         ],
@@ -285,4 +286,5 @@ async function getMarketCapUSD(address) {
     return parseFloat(data?.data?.attributes?.fdv_usd || data?.data?.attributes?.market_cap_usd || '0');
   } catch { return 0; }
 }
+
 
