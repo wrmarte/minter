@@ -37,7 +37,6 @@ async function fetchJsonWithFallback(urlOrList, timeoutMs = 5000) {
       const res = await fetch(url, { signal: ctrl.signal });
       clearTimeout(t);
       if (!res.ok) continue;
-      const ctype = (res.headers.get('content-type') || '').toLowerCase();
       const json = await res.json().catch(() => null);
       if (json) return json;
     } catch {}
@@ -58,6 +57,26 @@ function uniq(arr) {
 function toShort(addr = '') {
   if (!addr) return '';
   return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
+}
+
+/* ===================== ETH USD PRICE (CACHED) ===================== */
+
+let _ethUsdCache = { value: 0, ts: 0 };
+async function getEthUsdPriceCached(maxAgeMs = 30_000) {
+  const now = Date.now();
+  if (_ethUsdCache.value > 0 && (now - _ethUsdCache.ts) < maxAgeMs) return _ethUsdCache.value;
+
+  try {
+    const res = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd');
+    const data = await res.json().catch(() => null);
+    const px = Number(data?.ethereum?.usd || 0);
+    if (px > 0) {
+      _ethUsdCache = { value: px, ts: now };
+      return px;
+    }
+  } catch {}
+
+  return _ethUsdCache.value || 0;
 }
 
 /* Decimals cache for ERC20 tokens */
@@ -270,8 +289,6 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
   let inferredTokenAddr = tokenAddr;
 
   if (buyer) {
-    const addrEq = (a, b) => (a || '').toLowerCase() === (b || '').toLowerCase();
-
     if (tokenAddr) {
       for (const log of receipt.logs) {
         if (log.topics[0] === TRANSFER_ERC20_TOPIC && log.topics.length === 3 && (log.address || '').toLowerCase() === tokenAddr) {
@@ -328,6 +345,7 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     } catch {}
   }
 
+  // ✅ ETH value (already)
   let ethValue = null;
   if (tokenAmount && tokenToDescribe) {
     try {
@@ -343,6 +361,15 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     }
   }
 
+  // ✅ NEW: USD value derived from ETH value * ETH/USD
+  let usdValue = null;
+  try {
+    if (ethValue && isFinite(ethValue) && ethValue > 0) {
+      const ethUsd = await getEthUsdPriceCached();
+      if (ethUsd && ethUsd > 0) usdValue = ethValue * ethUsd;
+    }
+  } catch { usdValue = null; }
+
   let imageUrl = 'https://via.placeholder.com/400x400.png?text=NFT';
   try {
     let uri = await contract.tokenURI(tokenIds[0]);
@@ -355,11 +382,16 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
   } catch {}
 
   const embed = {
-    title: isSingle ? `✨ NEW ${String(name || '').toUpperCase()} MINT!` : `✨ BULK ${String(name || '').toUpperCase()} MINT (${tokenIds.length})!`,
-    description: isSingle ? `Minted Token ID: #${tokenIds[0]}` : `Minted Token IDs: ${tokenIds.map(id => `#${id}`).join(', ')}`,
+    title: isSingle
+      ? `✨ NEW ${String(name || '').toUpperCase()} MINT!`
+      : `✨ BULK ${String(name || '').toUpperCase()} MINT (${tokenIds.length})!`,
+    description: isSingle
+      ? `Minted Token ID: #${tokenIds[0]}`
+      : `Minted Token IDs: ${tokenIds.map(id => `#${id}`).join(', ')}`,
     fields: [
       { name: `💰 Total Spent (${displayTokenSymbol})`, value: tokenAmount ? tokenAmount.toFixed(4) : '0.0000', inline: true },
       { name: `⇄ ETH Value`, value: ethValue ? `${ethValue.toFixed(4)} ETH` : 'N/A', inline: true },
+      { name: `💵 USD Value`, value: usdValue ? `$${usdValue.toFixed(2)}` : 'N/A', inline: true },
       { name: `👤 Minter`, value: buyer ? shortWalletLink(buyer) : (minterAddress ? shortWalletLink(minterAddress) : 'Unknown'), inline: true }
     ],
     thumbnail: { url: imageUrl },
@@ -414,7 +446,6 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
   } catch {}
 
   if (!ethValue) {
-    const seller = (() => { try { return ethers.getAddress(from); } catch { return (from || ''); } })();
     for (const log of receipt.logs) {
       if (log.topics[0] !== TRANSFER_ERC20_TOPIC || log.topics.length !== 3) continue;
       if (!isValidBuyerTransfer(log, to, contract.address)) continue;
@@ -476,7 +507,6 @@ module.exports = {
   trackBaseContracts,
   contractListeners
 };
-
 
 
 
