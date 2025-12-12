@@ -15,34 +15,36 @@ const ROUTERS = [
 
 const seenTx = new Set();
 
-// ✅ Emoji bar scales by USD spent.
-// - Buys use 🟥🟦🚀 like before
-// - Whale 🐳 for ALL buys > $10
-// - If usd is unknown/0, fallback to token amount scaling (so you still get a bar)
+// ✅ Emoji bar logic:
+// - BUY > $10 => ONLY 🐳
+// - Otherwise scale by USD if available
+// - Fallback to tokenAmountRaw scale if USD unknown/0
 function buildEmojiLine({ isBuy, usdValue, tokenAmountRaw }) {
   const usd = Number(usdValue);
+
+  // 🐳 RULE: any BUY above $10 shows ONLY whale
+  if (isBuy && Number.isFinite(usd) && usd > 10) {
+    return '🐳';
+  }
 
   // Primary: scale by USD
   if (Number.isFinite(usd) && usd > 0) {
     const count = Math.max(1, Math.floor(usd / 2)); // 1 unit per $2
     const capped = Math.min(count, 20);             // anti-spam cap
-
-    if (isBuy) {
-      const whale = usd > 10 ? ' 🐳' : '';          // ✅ whale for buys > $10
-      return `${'🟥🟦🚀'.repeat(capped)}${whale}`.trim();
-    }
-
-    return `${'🔻💀🔻'.repeat(capped)}`.trim();
+    return isBuy
+      ? '🟥🟦🚀'.repeat(capped)
+      : '🔻💀🔻'.repeat(capped);
   }
 
-  // Fallback: scale by token amount (keeps notis “looking alive” on token-based swaps)
+  // Fallback: scale by token amount
   const amt = Number(tokenAmountRaw);
   if (!Number.isFinite(amt) || amt <= 0) return isBuy ? '🟥🟦🚀' : '🔻💀🔻';
 
   const count = Math.max(1, Math.floor(amt / 1000)); // 1 per 1000 tokens
   const capped = Math.min(count, 12);
-
-  return isBuy ? '🟥🟦🚀'.repeat(capped) : '🔻💀🔻'.repeat(capped);
+  return isBuy
+    ? '🟥🟦🚀'.repeat(capped)
+    : '🔻💀🔻'.repeat(capped);
 }
 
 module.exports = async function processUnifiedBlock(client, fromBlock, toBlock) {
@@ -109,14 +111,13 @@ async function handleTokenLog(client, tokenRows, log) {
     }
   }
 
-  // 💰 Value tracking (native value only; sells usually have tx.value = 0)
+  // 💰 Value tracking (native value only; token swaps may have tx.value=0)
   let usdSpent = 0, ethSpent = 0;
   let ethPrice = 0;
 
   try {
     const tx = await getProvider().getTransaction(log.transactionHash);
     ethPrice = await getETHPrice();
-
     if (tx?.value) {
       ethSpent = parseFloat(formatUnits(tx.value, 18));
       usdSpent = ethSpent * ethPrice;
@@ -162,14 +163,16 @@ async function handleTokenLog(client, tokenRows, log) {
   const tokenPrice = await getTokenPriceUSD(tokenAddress);
   const marketCap = await getMarketCapUSD(tokenAddress);
 
-  // ✅ FIX “Got/Sold” amount (no more *1000 inflation)
-  // Use implied ONLY if close to raw (prevents wild jumps).
+  // ✅ FIX: Display amount should be the real transfer amount (no *1000 inflation)
+  // Use implied tokens from USD/price ONLY when it's reasonably close to raw transfer.
   let displayAmount = tokenAmountRaw;
   try {
     if (usdSpent > 0 && tokenPrice > 0 && tokenAmountRaw > 0) {
       const implied = usdSpent / tokenPrice;
       const ratio = implied / tokenAmountRaw;
-      if (ratio > 0.5 && ratio < 2.0) displayAmount = implied;
+      if (ratio > 0.5 && ratio < 2.0) {
+        displayAmount = implied;
+      }
     }
   } catch {}
 
@@ -178,8 +181,8 @@ async function handleTokenLog(client, tokenRows, log) {
     maximumFractionDigits: 2
   });
 
-  // ✅ SELL: compute “Value Sold” estimate using tokenPrice * tokensSold
-  // (tx.value is usually 0 on sells)
+  // ✅ SELL: estimate value sold using tokenPrice * tokensSold
+  // (Because tx.value is typically 0 on sells)
   let usdValueSold = 0, ethValueSold = 0;
   try {
     if (isSell && tokenPrice > 0 && displayAmount > 0) {
@@ -190,8 +193,8 @@ async function handleTokenLog(client, tokenRows, log) {
   } catch {}
 
   // ✅ Emoji line:
-  // - Buys: uses USD spent if available, whale if > $10
-  // - Sells: uses USD value sold if available
+  // - Buys: scale by USD spent (whale-only if > $10)
+  // - Sells: scale by USD value sold if available
   const emojiLine = buildEmojiLine({
     isBuy,
     usdValue: isBuy ? usdSpent : usdValueSold,
@@ -212,18 +215,22 @@ async function handleTokenLog(client, tokenRows, log) {
     }
 
     if (channel) {
-      const isBuyFieldValue = `$${usdSpent.toFixed(4)} / ${ethSpent.toFixed(4)} ETH`;
-      const isSellFieldValue = `$${usdValueSold.toFixed(4)} / ${ethValueSold.toFixed(4)} ETH`;
+      const buyValueLine = `$${usdSpent.toFixed(4)} / ${ethSpent.toFixed(4)} ETH`;
+      const sellValueLine = `$${usdValueSold.toFixed(4)} / ${ethValueSold.toFixed(4)} ETH`;
 
       const embed = {
         title: `${token.name.toUpperCase()} ${isBuy ? 'Buy' : 'Sell'}!`,
         description: emojiLine,
-        image: { url: isBuy ? 'https://iili.io/3tSecKP.gif' : 'https://iili.io/3tSeiEF.gif' },
+        // ✅ Different image for sells
+        image: {
+          url: isBuy
+            ? 'https://iili.io/3tSecKP.gif' // BUY
+            : 'https://iili.io/3tSeiEF.gif' // SELL (swap this URL anytime)
+        },
         fields: [
           {
-            // ✅ Sells now show “Value Sold” (USD/ETH), buys show “Spent”
             name: isBuy ? '💸 Spent' : '💰 Value Sold',
-            value: isBuy ? isBuyFieldValue : isSellFieldValue,
+            value: isBuy ? buyValueLine : sellValueLine,
             inline: true
           },
           {
