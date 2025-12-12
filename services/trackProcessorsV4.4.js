@@ -15,6 +15,10 @@ const ROUTERS = [
   '0x95ebfcb1c6b345fda69cf56c51e30421e5a35aec'
 ];
 
+const ROUTERS_SET = new Set(ROUTERS.map(a => a.toLowerCase()));
+const SWAP_TOPIC_V2 = id('Swap(address,uint256,uint256,uint256,uint256,address)');
+const SWAP_TOPIC_V3 = id('Swap(address,address,int256,int256,uint160,uint128,int24)');
+
 const seenTx = new Set();  // shared between token sales
 
 // Process NFT contracts
@@ -124,8 +128,33 @@ async function processTokenBuys(client, fromBlock, toBlock) {
 
       const { from, to, amount } = parsed.args;
       const fromAddr = from.toLowerCase();
-      if (!ROUTERS.includes(fromAddr)) continue;
       if (to.toLowerCase() === '0x0000000000000000000000000000000000000000') continue;
+
+      let isBuy = ROUTERS_SET.has(fromAddr);
+      if (!isBuy) {
+        try {
+          // inspect receipt
+          const receipt = await getProvider().getTransactionReceipt(log.transactionHash);
+          if (receipt && receipt.logs) {
+            for (const lg of receipt.logs) {
+              const lgAddr = (lg.address || '').toLowerCase();
+              if (ROUTERS_SET.has(lgAddr)) {
+                isBuy = true;
+                break;
+              }
+              if (lg.topics && lg.topics.length > 0) {
+                const t0 = lg.topics[0];
+                if (t0 === SWAP_TOPIC_V2 || t0 === SWAP_TOPIC_V3) {
+                  isBuy = true;
+                  break;
+                }
+              }
+            }
+          }
+        } catch {}
+      }
+
+      if (!isBuy) continue;
 
       const tokenAmountRaw = parseFloat(formatUnits(amount, 18));
 
@@ -136,9 +165,13 @@ async function processTokenBuys(client, fromBlock, toBlock) {
       try {
         const tx = await getProvider().getTransaction(log.transactionHash);
         const ethPrice = await getETHPrice();
-        if (tx?.value) {
+        if (tx?.value && tx.value > 0n) {
           ethSpent = parseFloat(formatUnits(tx.value, 18));
           usdSpent = ethSpent * ethPrice;
+        } else {
+          // fallback: approx USD as tokenAmount * tokenPrice
+          usdSpent = tokenAmountRaw * tokenPrice;
+          ethSpent = 0;
         }
       } catch {}
 
@@ -209,3 +242,4 @@ async function getMarketCapUSD(address) {
 }
 
 module.exports = { processContracts, processTokenBuys };
+
