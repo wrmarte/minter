@@ -1,4 +1,4 @@
-const { Interface, formatUnits } = require('ethers');
+const { Interface, formatUnits, id } = require('ethers');
 const { EmbedBuilder } = require('discord.js');
 const fetch = require('node-fetch');
 const { getProvider, rotateProvider } = require('./provider');
@@ -17,6 +17,10 @@ const ROUTERS = [
   '0xa5e0829CaCEd8fFDD4De3c43696c57F7D7A678ff',
   '0x95ebfcb1c6b345fda69cf56c51e30421e5a35aec'
 ];
+
+const ROUTERS_SET = new Set(ROUTERS.map(a => a.toLowerCase()));
+const SWAP_TOPIC_V2 = id('Swap(address,uint256,uint256,uint256,uint256,address)');
+const SWAP_TOPIC_V3 = id('Swap(address,address,int256,int256,uint160,uint128,int24)');
 
 const seenTx = new Set();
 
@@ -75,8 +79,35 @@ module.exports = async function trackTokenSales(client) {
 
         const { from, to, amount } = parsed.args;
         const fromAddr = from.toLowerCase();
-        if (!ROUTERS.includes(fromAddr)) continue;
         if (to.toLowerCase() === '0x0000000000000000000000000000000000000000') continue;
+
+        // Primary check: direct router -> buy
+        let isBuy = ROUTERS_SET.has(fromAddr);
+
+        // Secondary check: if not direct router, check tx receipt logs for swap/router activity (pair flows)
+        if (!isBuy) {
+          try {
+            const receipt = await getProvider().getTransactionReceipt(log.transactionHash);
+            if (receipt && receipt.logs) {
+              for (const lg of receipt.logs) {
+                const lgAddr = (lg.address || '').toLowerCase();
+                if (ROUTERS_SET.has(lgAddr)) {
+                  isBuy = true;
+                  break;
+                }
+                if (lg.topics && lg.topics.length > 0) {
+                  const t0 = lg.topics[0];
+                  if (t0 === SWAP_TOPIC_V2 || t0 === SWAP_TOPIC_V3) {
+                    isBuy = true;
+                    break;
+                  }
+                }
+              }
+            }
+          } catch {}
+        }
+
+        if (!isBuy) continue;
 
         const tokenAmountRaw = parseFloat(formatUnits(amount, 18));
         const tokenAmountFormatted = (tokenAmountRaw * 1000).toLocaleString(undefined, {
@@ -93,9 +124,13 @@ module.exports = async function trackTokenSales(client) {
         try {
           const tx = await getProvider().getTransaction(log.transactionHash);
           const ethPrice = await getETHPrice();
-          if (tx?.value) {
+          if (tx?.value && tx.value > 0n) {
             ethSpent = parseFloat(formatUnits(tx.value, 18));
             usdSpent = ethSpent * ethPrice;
+          } else {
+            // fallback: approximate USD spent by token amount * token price (best-effort)
+            usdSpent = tokenAmountRaw * tokenPrice;
+            ethSpent = 0;
           }
         } catch (err) {
           console.warn(`⚠️ TX fetch failed: ${err.message}`);
@@ -186,8 +221,6 @@ async function getMarketCapUSD(address) {
     return 0;
   }
 }
-
-
 
 
 
