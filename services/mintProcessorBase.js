@@ -13,7 +13,7 @@ const TOKEN_NAME_TO_ADDRESS = {
 
 const ZERO_ADDRESS = ethers.ZeroAddress;
 const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
-const TRANSFER_ERC20_TOPIC = ethers.id('Transfer(address,address,uint256)'); 
+const TRANSFER_ERC20_TOPIC = ethers.id('Transfer(address,address,uint256)');
 
 const IPFS_GATEWAYS = [
   'https://cloudflare-ipfs.com/ipfs/',
@@ -235,45 +235,51 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
   const receipt = await provider.getTransactionReceipt(txHash).catch(() => null);
   if (!receipt) return;
 
-  // Resolve token address if configured
   let tokenAddr = (mint_token || '').toLowerCase();
   if (!tokenAddr && mint_token_symbol) {
     const mapped = TOKEN_NAME_TO_ADDRESS[(mint_token_symbol || '').toUpperCase()];
     if (mapped) tokenAddr = mapped.toLowerCase();
   }
 
-  // Buyer address
   let buyer = '';
   try { buyer = minterAddress ? ethers.getAddress(minterAddress) : ''; } catch { buyer = ''; }
 
-  // Detect ERC20 payments: largest transfer from buyer
-  let tokenAmount = null, inferredTokenAddr = tokenAddr;
+  let tokenAmount = null;
+  let inferredTokenAddr = tokenAddr;
+
   if (buyer) {
     const addrEq = (a, b) => (a || '').toLowerCase() === (b || '').toLowerCase();
 
-    // Case 1: known mint token
     if (tokenAddr) {
       for (const log of receipt.logs) {
-        if (log.topics[0] === TRANSFER_ERC20_TOPIC && log.address?.toLowerCase() === tokenAddr) {
+        if (log.topics[0] === TRANSFER_ERC20_TOPIC && log.topics.length === 3 && (log.address || '').toLowerCase() === tokenAddr) {
           const from = '0x' + log.topics[1].slice(26);
-          if (addrEq(from, buyer)) {
-            tokenAmount = await formatErc20(provider, tokenAddr, log.data).catch(() => null);
-            break;
+          const toAddr = '0x' + log.topics[2].slice(26);
+          if (addrEq(toAddr, buyer)) {
+            try {
+              tokenAmount = await formatErc20(provider, tokenAddr, log.data);
+              break;
+            } catch {}
           }
         }
       }
     }
 
-    // Case 2: unknown token, pick largest transfer from buyer
+    // Fallback: detect largest incoming transfer to buyer (for third-party swaps)
     if (!tokenAmount) {
       let best = { amount: 0, token: null };
       for (const log of receipt.logs) {
         if (log.topics[0] !== TRANSFER_ERC20_TOPIC || log.topics.length !== 3) continue;
-        const from = '0x' + log.topics[1].slice(26);
-        if (!addrEq(from, buyer)) continue;
-        const candidateToken = log.address.toLowerCase();
-        const amt = await formatErc20(provider, candidateToken, log.data).catch(() => 0);
-        if (amt > best.amount) best = { amount: amt, token: candidateToken };
+        const toAddr = '0x' + log.topics[2].slice(26);
+        if (!addrEq(toAddr, buyer)) continue;
+
+        const candidateToken = (log.address || '').toLowerCase();
+        if (addrEq(candidateToken, contract.address.toLowerCase())) continue;
+
+        try {
+          const amt = await formatErc20(provider, candidateToken, log.data);
+          if (amt > best.amount && amt > 0.0001) best = { amount: amt, token: candidateToken };
+        } catch {}
       }
       if (best.amount > 0 && best.token) {
         tokenAmount = best.amount;
@@ -282,9 +288,10 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     }
   }
 
-  // Resolve name/symbol
+  // ERC20 name/symbol resolution
   let displayTokenSymbol = mint_token_symbol || 'TOKEN';
   let displayTokenName = mint_token || null;
+
   const tokenToDescribe = inferredTokenAddr || tokenAddr;
   if (tokenToDescribe && (!mint_token_symbol || !mint_token)) {
     const { name: chainName, symbol: chainSym } = await getErc20NameSymbol(provider, tokenToDescribe);
@@ -307,14 +314,18 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     } catch {}
   }
 
-  // Compute ETH value
+  // Compute ETH value from token
   let ethValue = null;
   if (tokenAmount && tokenToDescribe) {
-    try { ethValue = await getRealDexPriceForToken(tokenAmount, tokenToDescribe); } catch {}
+    try {
+      ethValue = await getRealDexPriceForToken(tokenAmount, tokenToDescribe);
+      if (!ethValue || isNaN(ethValue)) ethValue = null;
+    } catch { ethValue = null; }
+
     if (!ethValue) {
       try {
         const fallback = await getEthPriceFromToken(tokenToDescribe);
-        if (fallback) ethValue = tokenAmount * fallback;
+        if (fallback && !isNaN(fallback)) ethValue = tokenAmount * fallback;
       } catch {}
     }
   }
@@ -379,7 +390,7 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
 
   let tokenAmount = null, ethValue = null, methodUsed = null;
 
-  // Native ETH
+  // Native ETH case
   try {
     if (tx.value && tx.value > 0n) {
       tokenAmount = parseFloat(ethers.formatEther(tx.value));
@@ -388,30 +399,35 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     }
   } catch {}
 
-  // ERC20: largest transfer to seller (ignore small taxes)
+  // ERC20 sale
   if (!ethValue) {
     const seller = (() => { try { return ethers.getAddress(from); } catch { return (from || ''); } })();
     let best = { amount: 0, token: null };
+
     for (const log of receipt.logs) {
       if (log.topics[0] !== TRANSFER_ERC20_TOPIC || log.topics.length !== 3) continue;
+      const toAddr = '0x' + log.topics[2].slice(26);
+      if (toAddr.toLowerCase() !== seller.toLowerCase()) continue;
+
+      const tokenAddr = (log.address || '').toLowerCase();
+      if (tokenAddr === (contract.target || contract.address || '').toLowerCase()) continue;
+
       try {
-        const toAddr = ethers.getAddress('0x' + log.topics[2].slice(26));
-        if (toAddr.toLowerCase() !== seller.toLowerCase()) continue;
-        const amt = await formatErc20(provider, log.address, log.data).catch(() => 0);
-        if (amt > best.amount) best = { amount: amt, token: log.address };
+        const amt = await formatErc20(provider, tokenAddr, log.data);
+        if (!isFinite(amt) || amt <= 0) continue;
+        if (amt > best.amount) best = { amount: amt, token: tokenAddr };
       } catch {}
     }
+
     if (best.amount > 0 && best.token) {
       tokenAmount = best.amount;
-      let priceEth = null;
-      try { priceEth = await getRealDexPriceForToken(tokenAmount, best.token); } catch {}
-      if (!priceEth) {
-        try {
-          const px = await getEthPriceFromToken(best.token);
-          if (px) priceEth = tokenAmount * px;
-        } catch {}
-      }
-      ethValue = priceEth || null;
+      try {
+        ethValue = await getRealDexPriceForToken(tokenAmount, best.token);
+        if (!ethValue) {
+          const fallback = await getEthPriceFromToken(best.token);
+          if (fallback) ethValue = tokenAmount * fallback;
+        }
+      } catch {}
       methodUsed = `🟨 ${mint_token_symbol || 'TOKEN'}`;
     }
   }
@@ -423,14 +439,13 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     description: `Token \`${tokenId}\` just sold!`,
     fields: [
       { name: '👤 Seller', value: shortWalletLink(from), inline: true },
-      { name: '🧑‍💻 Buyer', value: shortWalletLink(to), inline: true },
-      { name: `💰 Paid`, value: `${tokenAmount.toFixed(4)} ${mint_token_symbol || 'TOKEN'}`, inline: true },
-      { name: '⇄ ETH Value', value: `${ethValue.toFixed(4)} ETH`, inline: true },
-      { name: '🔹 Method', value: methodUsed || 'N/A', inline: true }
+      { name: '👤 Buyer', value: shortWalletLink(to), inline: true },
+      { name: `💰 Amount (${methodUsed})`, value: tokenAmount.toFixed(4), inline: true },
+      { name: `⇄ ETH Value`, value: ethValue ? ethValue.toFixed(4) + ' ETH' : 'N/A', inline: true }
     ],
     thumbnail: { url: imageUrl },
-    color: 0xF7A800,
-    footer: { text: 'Base Network • Powered by PimpsDev' },
+    color: 0xFF5733,
+    footer: { text: 'Live on Base • Powered by PimpsDev' },
     timestamp: new Date().toISOString()
   };
 
@@ -443,7 +458,11 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
   }
 }
 
-module.exports = { trackBaseContracts };
+/* ===================== EXPORT ===================== */
+
+module.exports = {
+  trackBaseContracts
+};
 
 
 
