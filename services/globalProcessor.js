@@ -16,24 +16,31 @@ const ROUTERS = [
 const seenTx = new Set();
 
 // ✅ Emoji bar logic:
-// - BUY > $10 => ONLY 🐳
-// - Otherwise scale by USD if available
-// - Fallback to tokenAmountRaw scale if USD unknown/0
+// - If the BUY > $10 => show 🐳 emoji
+// - For buys above $10, each $5 = 1 🐳 (whale emoji)
 function buildEmojiLine({ isBuy, usdValue, tokenAmountRaw }) {
   const usd = Number(usdValue);
 
-  if (isBuy && Number.isFinite(usd) && usd > 10) return '🐳';
-
-  if (Number.isFinite(usd) && usd > 0) {
-    const count = Math.max(1, Math.floor(usd / 2));
-    const capped = Math.min(count, 20);
-    return isBuy ? '🟥🟦🚀'.repeat(capped) : '🔻💀🔻'.repeat(capped);
+  // 🐳 RULE: any BUY above $10 shows whale emoji, scales by $5
+  if (isBuy && Number.isFinite(usd) && usd > 10) {
+    const whaleCount = Math.floor(usd / 5); // 1 🐳 per $5
+    return '🐳'.repeat(whaleCount);          // Scale whale emoji per $5 spent
   }
 
+  // Primary: scale by USD
+  if (Number.isFinite(usd) && usd > 0) {
+    const count = Math.max(1, Math.floor(usd / 2)); // 1 emoji per $2
+    const capped = Math.min(count, 20);             // anti-spam cap
+    return isBuy
+      ? '🟥🟦🚀'.repeat(capped)
+      : '🔻💀🔻'.repeat(capped);
+  }
+
+  // Fallback: scale by token amount
   const amt = Number(tokenAmountRaw);
   if (!Number.isFinite(amt) || amt <= 0) return isBuy ? '🟥🟦🚀' : '🔻💀🔻';
 
-  const count = Math.max(1, Math.floor(amt / 1000));
+  const count = Math.max(1, Math.floor(amt / 1000)); // 1 per 1000 tokens
   const capped = Math.min(count, 12);
   return isBuy ? '🟥🟦🚀'.repeat(capped) : '🔻💀🔻'.repeat(capped);
 }
