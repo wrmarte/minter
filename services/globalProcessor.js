@@ -15,23 +15,29 @@ const ROUTERS = [
 
 const seenTx = new Set();
 
-// ✅ NEW: Emoji bar = proportional to USD spent + whale over $10
-function buildEmojiLine({ isBuy, usdSpent }) {
+// ✅ Emoji bar = proportional to USD spent (+ whale > $10)
+// If USD is unknown (0), we fallback to token amount so you still get a bar.
+function buildEmojiLine({ isBuy, usdSpent, tokenAmountRaw }) {
   const usd = Number(usdSpent);
 
-  // fallback if unknown
-  if (!Number.isFinite(usd) || usd <= 0) {
-    return isBuy ? '🟦🚀' : '🔻💀';
+  // If we have USD, scale by USD (value expended)
+  if (Number.isFinite(usd) && usd > 0) {
+    const count = Math.max(1, Math.floor(usd / 2)); // 1 emoji per $2
+    const capped = Math.min(count, 20);             // anti-spam cap
+    const whale = usd > 10 ? ' 🐳' : '';            // whale if > $10
+
+    const base = isBuy ? '🟦🚀' : '🔻💀';
+    return `${base.repeat(capped)}${whale}`.trim();
   }
 
-  // 1 emoji per $2 (micro friendly), capped to avoid spam
-  const count = Math.max(1, Math.floor(usd / 2));
-  const capped = Math.min(count, 20);
+  // Fallback if USD is 0 (token-based buys/sells):
+  const amt = Number(tokenAmountRaw);
+  if (!Number.isFinite(amt) || amt <= 0) return isBuy ? '🟦🚀' : '🔻💀';
 
+  const count = Math.max(1, Math.floor(amt / 1000)); // 1 per 1000 tokens
+  const capped = Math.min(count, 12);                 // keep it short
   const base = isBuy ? '🟦🚀' : '🔻💀';
-  const whale = usd > 10 ? ' 🐳' : ''; // ✅ whale if MORE than $10 (not >=)
-
-  return `${base.repeat(capped)}${whale}`.trim();
+  return `${base.repeat(capped)}`.trim();
 }
 
 module.exports = async function processUnifiedBlock(client, fromBlock, toBlock) {
@@ -111,7 +117,7 @@ async function handleTokenLog(client, tokenRows, log) {
 
   const tokenAmountRaw = parseFloat(formatUnits(amount, 18));
 
-  // ❌ Skip tiny tax reroutes
+  // ❌ Skip tiny tax reroutes (keep as your working logic)
   if (usdSpent === 0 && ethSpent === 0 && tokenAmountRaw < 5) return;
 
   // ⛔ LP removal filter
@@ -148,19 +154,16 @@ async function handleTokenLog(client, tokenRows, log) {
   const tokenPrice = await getTokenPriceUSD(tokenAddress);
   const marketCap = await getMarketCapUSD(tokenAddress);
 
-  // ✅ FIX: Display amount should NOT multiply by 1000.
-  // Start with raw amount as truth; only use implied if it's a reasonable match.
+  // ✅ FIX: Display amount should be the real transfer amount (no *1000 inflation)
+  // Use implied tokens from USD/price ONLY when it's reasonably close to the raw transfer.
   let displayAmount = tokenAmountRaw;
 
   try {
     if (usdSpent > 0 && tokenPrice > 0 && tokenAmountRaw > 0) {
-      const implied = usdSpent / tokenPrice; // tokens implied by USD/price
-
-      // accept implied if it's within a sane band of the raw transfer
-      // (prevents crazy jumps on micro-buys or taxed transfers)
+      const implied = usdSpent / tokenPrice;   // tokens implied by USD/price
       const ratio = implied / tokenAmountRaw;
 
-      // ✅ much safer band than 800..1200
+      // accept implied if it's close (prevents crazy jumps)
       if (ratio > 0.5 && ratio < 2.0) {
         displayAmount = implied;
       }
@@ -172,8 +175,8 @@ async function handleTokenLog(client, tokenRows, log) {
     maximumFractionDigits: 2
   });
 
-  // ✅ NEW: emoji line scales to USD spent + whale > $10
-  const emojiLine = buildEmojiLine({ isBuy, usdSpent });
+  // ✅ Emoji = value expended (USD), with whale > $10
+  const emojiLine = buildEmojiLine({ isBuy, usdSpent, tokenAmountRaw });
 
   const getColorByUsd = (usd) => isBuy
     ? (usd < 10 ? 0xff0000 : usd < 20 ? 0x3498db : 0x00cc66)
@@ -251,3 +254,4 @@ async function getMarketCapUSD(address) {
     return parseFloat(data?.data?.attributes?.fdv_usd || data?.data?.attributes?.market_cap_usd || '0');
   } catch { return 0; }
 }
+
