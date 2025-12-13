@@ -20,7 +20,7 @@ const SWAP_NOTI_CHANNELS = (process.env.SWAP_NOTI_CHANNELS || '')
 
 const MIN_USD_TO_POST   = Number(process.env.SWAP_MIN_USD || 0);
 const POLL_MS           = Number(process.env.SWAP_POLL_MS || 12000);
-const LOOKBACK_BLOCKS   = Number(process.env.SWAP_LOOKBACK_BLOCKS || 20);
+const LOOKBACK_BLOCKS   = Number(process.env.SWAP_LOOKBACK_BLOCKS || 20); // still used as safety fallback
 const MAX_EMOJI_REPEAT  = Number(process.env.SWAP_MAX_EMOJIS || 20);
 
 const BUY_IMG  = process.env.SWAP_BUY_IMG  || 'https://iili.io/f7ifqmB.gif';
@@ -29,6 +29,64 @@ const SELL_IMG = process.env.SWAP_SELL_IMG || 'https://iili.io/f7SxSte.gif';
 const DEBUG = String(process.env.SWAP_DEBUG || '').trim() === '1';
 const BOOT_PING = String(process.env.SWAP_BOOT_PING || '').trim() === '1';
 const TEST_TX = (process.env.SWAP_TEST_TX || '').trim().toLowerCase();
+
+// ======= CHECKPOINT (DB) =======
+const CHECKPOINT_CHAIN = 'base';
+const CHECKPOINT_KEY   = 'third_party_swaps_last_block';
+
+let _checkpointReady = false;
+async function ensureCheckpointTable(client) {
+  if (_checkpointReady) return true;
+  const pg = client.pg;
+  if (!pg) return false;
+  try {
+    await pg.query(`
+      CREATE TABLE IF NOT EXISTS swap_checkpoints (
+        chain TEXT NOT NULL,
+        key   TEXT NOT NULL,
+        value BIGINT NOT NULL,
+        updated_at TIMESTAMPTZ DEFAULT now(),
+        PRIMARY KEY (chain, key)
+      )
+    `);
+    _checkpointReady = true;
+    return true;
+  } catch (e) {
+    console.log(`[SWAP] ensureCheckpointTable failed: ${e?.message || e}`);
+    return false;
+  }
+}
+
+async function getLastBlockFromDb(client) {
+  const pg = client.pg;
+  if (!pg) return null;
+  try {
+    const res = await pg.query(
+      `SELECT value FROM swap_checkpoints WHERE chain=$1 AND key=$2`,
+      [CHECKPOINT_CHAIN, CHECKPOINT_KEY]
+    );
+    const v = res?.rows?.[0]?.value;
+    return (v !== undefined && v !== null) ? Number(v) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function setLastBlockInDb(client, blockNum) {
+  const pg = client.pg;
+  if (!pg) return;
+  const v = Number(blockNum);
+  if (!Number.isFinite(v) || v <= 0) return;
+  try {
+    await pg.query(
+      `INSERT INTO swap_checkpoints(chain, key, value)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (chain, key)
+       DO UPDATE SET value=EXCLUDED.value, updated_at=now()`,
+      [CHECKPOINT_CHAIN, CHECKPOINT_KEY, Math.floor(v)]
+    );
+  } catch {}
+}
 
 // ======= HELPERS =======
 const ERC20_IFACE = new Interface(['event Transfer(address indexed from, address indexed to, uint256 value)']);
@@ -83,7 +141,7 @@ function buildEmojiLine(isBuy, usd) {
   const u = Number(usd);
   if (!Number.isFinite(u) || u <= 0) return isBuy ? '🟥🟦🚀' : '🔻💀🔻';
 
-  // ✅ whale scaling: $10+ => 1 🐳 per $2
+  // ✅ whale scaling
   if (isBuy && u >= 30) {
     const whales = Math.max(1, Math.floor(u / 2));
     return '🐳🚀'.repeat(Math.min(whales, MAX_EMOJI_REPEAT));
@@ -325,6 +383,9 @@ async function tick(client) {
     return;
   }
 
+  // ✅ Ensure checkpoint table exists (best-effort)
+  await ensureCheckpointTable(client);
+
   // Force-test tx path
   if (TEST_TX && !isSeen(TEST_TX)) {
     markSeen(TEST_TX);
@@ -344,7 +405,20 @@ async function tick(client) {
   const blockNumber = await provider.getBlockNumber().catch(() => null);
   if (!blockNumber) return;
 
-  const fromBlock = Math.max(blockNumber - LOOKBACK_BLOCKS, 0);
+  // ✅ Checkpoint start:
+  // - if checkpoint exists => start from it
+  // - if not => start near head (prevents replay on first boot)
+  let last = await getLastBlockFromDb(client);
+
+  if (!last || last <= 0) {
+    // first boot: no replay history
+    last = Math.max(blockNumber - 2, 0);
+  }
+
+  // safety: if checkpoint lags too far (or chain reorg), clamp to lookback
+  const minFrom = Math.max(blockNumber - LOOKBACK_BLOCKS, 0);
+  const fromBlock = Math.max(Math.min(last, blockNumber), minFrom);
+
   const toBlock = blockNumber;
 
   if (DEBUG) console.log(`[SWAP] scan blocks ${fromBlock} -> ${toBlock}`);
@@ -354,7 +428,7 @@ async function tick(client) {
     return;
   }
 
-  // Pull tx hashes by scanning router "to" addresses (much lower volume than WETH)
+  // Pull tx hashes by scanning router addresses
   const txs = new Set();
 
   for (const router of ROUTERS_TO_WATCH) {
@@ -386,7 +460,10 @@ async function tick(client) {
     await sendSwapEmbed(client, swap);
   }
 
-  if (DEBUG) console.log(`[SWAP] analyzed=${analyzed} matched=${matched}`);
+  // ✅ advance checkpoint so restarts don't replay
+  await setLastBlockInDb(client, toBlock);
+
+  if (DEBUG) console.log(`[SWAP] analyzed=${analyzed} matched=${matched} checkpoint=${toBlock}`);
 }
 
 function startThirdPartySwapNotifierBase(client) {
@@ -395,7 +472,6 @@ function startThirdPartySwapNotifierBase(client) {
 
   console.log(`✅ Swap notifier starting (Base) | envChannels=${SWAP_NOTI_CHANNELS.length} | lookback=${LOOKBACK_BLOCKS} | debug=${DEBUG ? 'ON' : 'OFF'} | bootPing=${BOOT_PING ? 'ON' : 'OFF'}`);
 
-  // NOTE: no longer requires SWAP_NOTI_CHANNELS because DB routing may supply channels
   if (BOOT_PING) bootPing(client).catch(() => {});
   tick(client).catch(() => {});
 
