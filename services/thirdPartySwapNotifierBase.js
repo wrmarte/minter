@@ -3,8 +3,15 @@ const fetch = require('node-fetch');
 const { safeRpcCall } = require('./providerM');
 const { shortWalletLink } = require('../utils/helpers');
 
+// ======= CONFIG =======
 const ADRIAN = '0x7e99075ce287f1cf8cbcaaa6a1c7894e404fd7ea'.toLowerCase();
 const WETH   = '0x4200000000000000000000000000000000000006'.toLowerCase();
+
+// ✅ PUT YOUR ROUTERS HERE (lowercase)
+const ROUTERS_TO_WATCH = [
+  '0x498581ff718922c3f8e6a244956af099b2652b2b'
+].map(a => (a || '').toLowerCase()).filter(Boolean);
+
 
 const SWAP_NOTI_CHANNELS = (process.env.SWAP_NOTI_CHANNELS || '')
   .split(',')
@@ -12,8 +19,8 @@ const SWAP_NOTI_CHANNELS = (process.env.SWAP_NOTI_CHANNELS || '')
   .filter(Boolean);
 
 const MIN_USD_TO_POST   = Number(process.env.SWAP_MIN_USD || 0);
-const POLL_MS           = Number(process.env.SWAP_POLL_MS || 8000);
-const LOOKBACK_BLOCKS   = Number(process.env.SWAP_LOOKBACK_BLOCKS || 80);
+const POLL_MS           = Number(process.env.SWAP_POLL_MS || 12000);
+const LOOKBACK_BLOCKS   = Number(process.env.SWAP_LOOKBACK_BLOCKS || 20);
 const MAX_EMOJI_REPEAT  = Number(process.env.SWAP_MAX_EMOJIS || 20);
 
 const BUY_IMG  = process.env.SWAP_BUY_IMG  || 'https://iili.io/3tSecKP.gif';
@@ -23,10 +30,10 @@ const DEBUG = String(process.env.SWAP_DEBUG || '').trim() === '1';
 const BOOT_PING = String(process.env.SWAP_BOOT_PING || '').trim() === '1';
 const TEST_TX = (process.env.SWAP_TEST_TX || '').trim().toLowerCase();
 
+// ======= HELPERS =======
 const ERC20_IFACE = new Interface(['event Transfer(address indexed from, address indexed to, uint256 value)']);
 const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
 
-// Dedupe
 const seenTx = new Map();
 function markSeen(txh) {
   const now = Date.now();
@@ -38,7 +45,6 @@ function markSeen(txh) {
 }
 function isSeen(txh) { return seenTx.has(txh); }
 
-// ETH/USD cache
 let _ethUsdCache = { value: 0, ts: 0 };
 async function getEthUsdPriceCached(maxAgeMs = 30_000) {
   const now = Date.now();
@@ -55,7 +61,6 @@ async function getEthUsdPriceCached(maxAgeMs = 30_000) {
   return _ethUsdCache.value || 0;
 }
 
-// decimals cache
 const decimalsCache = new Map();
 async function getDecimals(provider, tokenAddr) {
   const key = tokenAddr.toLowerCase();
@@ -78,6 +83,7 @@ function buildEmojiLine(isBuy, usd) {
   const u = Number(usd);
   if (!Number.isFinite(u) || u <= 0) return isBuy ? '🟥🟦🚀' : '🔻💀🔻';
 
+  // ✅ whale scaling: $10+ => 1 🐳 per $5
   if (isBuy && u >= 10) {
     const whales = Math.max(1, Math.floor(u / 5));
     return '🐳'.repeat(Math.min(whales, MAX_EMOJI_REPEAT));
@@ -98,14 +104,12 @@ async function resolveChannels(client) {
       continue;
     }
 
-    // Text channel OR thread
     const isText = typeof ch.isTextBased === 'function' ? ch.isTextBased() : false;
     if (!isText) {
       if (DEBUG) console.log(`[SWAP] channel not text-based: ${id}`);
       continue;
     }
 
-    // Permissions: SendMessages (+ threads if needed)
     try {
       const guild = ch.guild;
       const me = guild?.members?.me;
@@ -115,21 +119,19 @@ async function resolveChannels(client) {
           if (DEBUG) console.log(`[SWAP] missing SendMessages in ${id}`);
           continue;
         }
-        // If it’s a thread, also require SendMessagesInThreads
         if (ch.isThread?.() && !perms?.has('SendMessagesInThreads')) {
           if (DEBUG) console.log(`[SWAP] missing SendMessagesInThreads in ${id}`);
           continue;
         }
       }
-    } catch (e) {
-      if (DEBUG) console.log(`[SWAP] perm check error ${id}: ${e?.message || e}`);
-    }
+    } catch {}
 
     out.push(ch);
   }
   return out;
 }
 
+// Core: compute net ADRIAN + (ETH native or WETH) for tx.from wallet
 async function analyzeSwap(provider, txHash) {
   const tx = await provider.getTransaction(txHash).catch(() => null);
   const receipt = await provider.getTransactionReceipt(txHash).catch(() => null);
@@ -178,13 +180,14 @@ async function analyzeSwap(provider, txHash) {
     if (tx.value && tx.value > 0n) ethNativeSpent = Number(ethers.formatEther(tx.value));
   } catch {}
 
-  const isBuy = netAdrian > 0 && (ethNativeSpent > 0 || wethOutF > 0);
-  const isSell = netAdrian < 0 && wethInF > 0;
+  const isBuy  = netAdrian > 0 && (ethNativeSpent > 0 || wethOutF > 0);
+  const isSell = netAdrian < 0 && (wethInF > 0 || ethNativeSpent > 0);
 
   if (!isBuy && !isSell) return null;
 
   const tokenAmount = Math.abs(netAdrian);
-  const ethValue = isBuy ? (ethNativeSpent > 0 ? ethNativeSpent : wethOutF) : wethInF;
+  const ethValue = isBuy ? (ethNativeSpent > 0 ? ethNativeSpent : wethOutF)
+                         : (wethInF > 0 ? wethInF : ethNativeSpent);
 
   if (!Number.isFinite(tokenAmount) || tokenAmount <= 0) return null;
   if (!Number.isFinite(ethValue) || ethValue <= 0) return null;
@@ -234,7 +237,6 @@ async function sendSwapEmbed(client, swap) {
 
   const chans = await resolveChannels(client);
   if (DEBUG) console.log(`[SWAP] send -> channels=${chans.length} tx=${txHash}`);
-
   for (const ch of chans) {
     await ch.send({ embeds: [embed] }).catch(err => {
       console.log(`[SWAP] send failed channel=${ch.id} err=${err?.message || err}`);
@@ -283,25 +285,28 @@ async function tick(client) {
 
   if (DEBUG) console.log(`[SWAP] scan blocks ${fromBlock} -> ${toBlock}`);
 
+  if (!ROUTERS_TO_WATCH.length) {
+    console.log('[SWAP] ROUTERS_TO_WATCH is empty. Paste router addresses to watch.');
+    return;
+  }
+
+  // Pull tx hashes by scanning router "to" addresses (much lower volume than WETH)
   const txs = new Set();
 
-  async function scanToken(addr, label) {
+  for (const router of ROUTERS_TO_WATCH) {
     let logs = [];
     try {
-      logs = await provider.getLogs({ address: addr, topics: [TRANSFER_TOPIC], fromBlock, toBlock });
+      logs = await provider.getLogs({ address: router, fromBlock, toBlock });
     } catch (e) {
-      console.log(`[SWAP] getLogs failed for ${label}: ${e?.message || e}`);
-      return;
+      console.log(`[SWAP] router getLogs failed ${router}: ${e?.message || e}`);
+      continue;
     }
-    if (DEBUG) console.log(`[SWAP] ${label} logs=${logs.length}`);
+    if (DEBUG) console.log(`[SWAP] router ${router} logs=${logs.length}`);
     for (const lg of logs) {
       const h = (lg.transactionHash || '').toLowerCase();
       if (h) txs.add(h);
     }
   }
-
-  await scanToken(ADRIAN, 'ADRIAN');
-  await scanToken(WETH, 'WETH');
 
   let analyzed = 0, matched = 0;
   for (const h of txs) {
@@ -309,12 +314,10 @@ async function tick(client) {
     markSeen(h);
 
     analyzed++;
-    const swap = await analyzeSwap(provider, h).catch(e => {
-      console.log(`[SWAP] analyze error tx=${h}: ${e?.message || e}`);
-      return null;
-    });
+    const swap = await analyzeSwap(provider, h).catch(() => null);
     if (!swap) continue;
 
+    // must involve ADRIAN net transfer
     matched++;
     if (DEBUG) console.log(`[SWAP] MATCH tx=${h} ${swap.isBuy ? 'BUY' : 'SELL'} usd=${swap.usdValue?.toFixed?.(2)} eth=${swap.ethValue?.toFixed?.(4)} adrian=${swap.tokenAmount?.toFixed?.(2)}`);
     await sendSwapEmbed(client, swap);
@@ -333,20 +336,13 @@ function startThirdPartySwapNotifierBase(client) {
     console.log('⚠️ SWAP_NOTI_CHANNELS is empty. Nothing can be posted.');
   }
 
-  // Boot ping (proves channel send works)
-  if (BOOT_PING) {
-    bootPing(client).catch(() => {});
-  }
-
-  // Immediate tick
+  if (BOOT_PING) bootPing(client).catch(() => {});
   tick(client).catch(() => {});
 
-  // Interval
   setInterval(() => {
     tick(client).catch(() => {});
   }, POLL_MS);
 }
 
-module.exports = {
-  startThirdPartySwapNotifierBase
-};
+module.exports = { startThirdPartySwapNotifierBase };
+
