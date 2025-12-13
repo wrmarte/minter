@@ -290,16 +290,66 @@ async function analyzeSwap(provider, txHash) {
     if (tx.value && tx.value > 0n) ethNativeSpent = Number(ethers.formatEther(tx.value));
   } catch {}
 
+  // ✅ keep your original buy/sell detection
   const isBuy  = netAdrian > 0 && (ethNativeSpent > 0 || wethOutF > 0);
-  const isSell = netAdrian < 0 && (wethInF > 0 || ethNativeSpent > 0);
+  const isSellOriginal = netAdrian < 0 && (wethInF > 0 || ethNativeSpent > 0);
 
-  if (!isBuy && !isSell) return null;
+  // ✅ PATCH: allow ADRIAN->ETH sells paid in *native ETH* (no WETH in, tx.value usually 0)
+  // We do NOT change buy logic. We only extend sell detection when netAdrian < 0.
+  let isSell = isSellOriginal;
 
+  // compute tokenAmount early (needed for sell fallback)
   const tokenAmount = Math.abs(netAdrian);
-  const ethValue = isBuy ? (ethNativeSpent > 0 ? ethNativeSpent : wethOutF)
-                         : (wethInF > 0 ? wethInF : ethNativeSpent);
-
   if (!Number.isFinite(tokenAmount) || tokenAmount <= 0) return null;
+
+  // Start with original ethValue logic
+  let ethValue = isBuy
+    ? (ethNativeSpent > 0 ? ethNativeSpent : wethOutF)
+    : (wethInF > 0 ? wethInF : ethNativeSpent);
+
+  // If neither buy nor original sell matched, you used to return null.
+  // We keep that behavior UNLESS it is the native-ETH sell case.
+  if (!isBuy && !isSellOriginal) {
+    // Only attempt sell fallback if ADRIAN moved out
+    if (!(netAdrian < 0)) return null;
+
+    // ✅ Native ETH received fallback:
+    // balance delta across block + gas reimbursement (+ tx.value)
+    try {
+      const bn = receipt.blockNumber;
+      if (typeof bn === 'number' && bn > 0) {
+        const [balBefore, balAfter] = await Promise.all([
+          provider.getBalance(wallet, bn - 1).catch(() => 0n),
+          provider.getBalance(wallet, bn).catch(() => 0n)
+        ]);
+
+        const gasUsed = receipt.gasUsed || 0n;
+        const gasPrice = receipt.effectiveGasPrice || 0n;
+        const gasCost = gasUsed * gasPrice;
+        const txValue = tx.value || 0n;
+
+        // received ≈ (after - before) + gas + tx.value
+        const delta = (balAfter - balBefore);
+        const receivedApprox = delta + gasCost + txValue;
+
+        const receivedEth = Number(ethers.formatEther(receivedApprox > 0n ? receivedApprox : 0n));
+        if (Number.isFinite(receivedEth) && receivedEth > 0) {
+          ethValue = receivedEth;
+          isSell = true;
+        } else {
+          return null;
+        }
+      } else {
+        return null;
+      }
+    } catch (e) {
+      if (DEBUG) console.log(`[SWAP] native-eth sell fallback failed tx=${txHash}: ${e?.message || e}`);
+      return null;
+    }
+  }
+
+  // ✅ If we matched original buy/sell, we keep your existing guardrails
+  if (!isBuy && !isSell) return null;
   if (!Number.isFinite(ethValue) || ethValue <= 0) return null;
 
   const ethUsd = await getEthUsdPriceCached();
