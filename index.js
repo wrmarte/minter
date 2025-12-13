@@ -224,7 +224,7 @@ const { trackAllContracts } = require('./services/mintRouter');
 trackAllContracts(client);
 
 const processUnifiedBlock = require('./services/globalProcessor');
-const { getProvider } = require('./services/providerM');
+const { getProvider, safeRpcCall } = require('./services/providerM');
 
 // keep references so we can clear them on shutdown
 const timers = {
@@ -232,14 +232,43 @@ const timers = {
   rewardPayout: null
 };
 
-timers.globalScan = setInterval(async () => {
+// =================== Global scanner (rate-limit safe) ===================
+let globalScanDelayMs = 15000;
+
+async function runGlobalScanTick() {
   try {
-    const latestBlock = await getProvider().getBlockNumber();
-    await processUnifiedBlock(client, latestBlock - 5, latestBlock);
+    // ✅ use rotating/failover provider if available
+    const provider = await safeRpcCall('base', p => p);
+    if (!provider) {
+      console.warn('⚠️ Global scan: no base provider available');
+      globalScanDelayMs = Math.min(globalScanDelayMs * 2, 120000);
+      return;
+    }
+
+    const latestBlock = await provider.getBlockNumber();
+    await processUnifiedBlock(client, Math.max(latestBlock - 5, 0), latestBlock);
+
+    // ✅ success: reset delay
+    globalScanDelayMs = 15000;
   } catch (err) {
-    console.error("Global scanner error:", err);
+    const msg = (err?.shortMessage || err?.message || '').toLowerCase();
+    const rpcCode = err?.error?.code;
+
+    if (rpcCode === -32016 || msg.includes('over rate limit') || msg.includes('rate limit')) {
+      globalScanDelayMs = Math.min(globalScanDelayMs * 2, 180000); // cap 3 minutes
+      console.warn(`⏳ Global scan rate-limited. Backing off to ${globalScanDelayMs}ms`);
+    } else {
+      console.error("Global scanner error:", err);
+      globalScanDelayMs = Math.min(globalScanDelayMs + 5000, 60000);
+    }
+  } finally {
+    // reschedule dynamically (replaces setInterval)
+    timers.globalScan = setTimeout(runGlobalScanTick, globalScanDelayMs);
   }
-}, 15000); // every 15 sec
+}
+
+// start scanner
+timers.globalScan = setTimeout(runGlobalScanTick, 15000);
 
 const autoRewardPayout = require('./services/autoRewardPayout');
 timers.rewardPayout = setInterval(() => {
@@ -362,7 +391,8 @@ async function gracefulShutdown(reason) {
   shuttingDown = true;
   console.log(`🛑 Shutting down (${reason})…`);
 
-  try { if (timers.globalScan) clearInterval(timers.globalScan); } catch {}
+  // NOTE: globalScan is now a setTimeout loop
+  try { if (timers.globalScan) clearTimeout(timers.globalScan); } catch {}
   try { if (timers.rewardPayout) clearInterval(timers.rewardPayout); } catch {}
   try { stopPresenceTicker(); } catch {}
 
@@ -391,5 +421,6 @@ TICKER_INTERVAL_MS=60000
 TICKER_SOURCE=coingecko      # coingecko | coincap
 TICKER_ASSETS=btc,eth
 */
+
 
 
