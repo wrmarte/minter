@@ -83,10 +83,10 @@ function buildEmojiLine(isBuy, usd) {
   const u = Number(usd);
   if (!Number.isFinite(u) || u <= 0) return isBuy ? '🟥🟦🚀' : '🔻💀🔻';
 
-  // ✅ whale scaling: $10+ => 1 🐳 per $5
-  if (isBuy && u >= 10) {
-    const whales = Math.max(1, Math.floor(u / 5));
-    return '🐳'.repeat(Math.min(whales, MAX_EMOJI_REPEAT));
+  // ✅ whale scaling: $10+ => 1 🐳 per $2
+  if (isBuy && u >= 30) {
+    const whales = Math.max(1, Math.floor(u / 2));
+    return '🐳🚀'.repeat(Math.min(whales, MAX_EMOJI_REPEAT));
   }
 
   const count = Math.max(1, Math.floor(u / 2));
@@ -261,7 +261,7 @@ async function sendSwapEmbed(client, swap) {
   const emojiLine = buildEmojiLine(isBuy, usdValue);
 
   const embed = {
-    title: isBuy ? `🅰️ ADRIAN SWAP BUY!` : `🅰️ ADRIAN SWAP SELL!`,
+    title: isBuy ? `🅰️DRIAN SWAP BUY!` : `🅰️DRIAN SWAP SELL!`,
     description: emojiLine,
     image: { url: isBuy ? BUY_IMG : SELL_IMG },
     fields: [
@@ -283,7 +283,7 @@ async function sendSwapEmbed(client, swap) {
     ],
     url: `https://basescan.org/tx/${txHash}`,
     color: isBuy ? 0x3498db : 0xff0000,
-    footer: { text: 'Third-Party Swap Feed • Powered by PimpsDev' },
+    footer: { text: 'AdrianSWAP • Powered by PimpsDev' },
     timestamp: new Date().toISOString()
   };
 
