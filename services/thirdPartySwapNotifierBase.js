@@ -1,3 +1,4 @@
+// services/thirdPartySwapNotifierBase.js
 const { Interface, Contract, ethers } = require('ethers');
 const fetch = require('node-fetch');
 const { safeRpcCall } = require('./providerM');
@@ -5,43 +6,42 @@ const { shortWalletLink } = require('../utils/helpers');
 
 /**
  * Third Party Swap Notifier (Base)
- * Detects swaps:
- *   - ETH/WETH -> ADRIAN  (BUY)
- *   - ADRIAN -> ETH/WETH  (SELL)
+ * Router-safe detection for swaps between ETH/WETH <-> ADRIAN:
+ *   - BUY: wallet receives ADRIAN AND spends ETH/WETH in same tx
+ *   - SELL: wallet sends ADRIAN AND receives WETH in same tx
  *
- * It only posts when it can infer BOTH sides of the swap (token + eth/weth).
+ * Uses same embed vibe you’ve been running:
+ *  - Spent/Received: USD + ETH
+ *  - Got/Sold: ADRIAN
+ *  - Wallet field (+ 🖕 on sell)
+ *  - Emoji bar w/ whales (>= $10 => 🐳 per $5)
  */
 
 // --- CONFIG ---
 const ADRIAN = '0x7e99075ce287f1cf8cbcaaa6a1c7894e404fd7ea'.toLowerCase();
+const WETH   = '0x4200000000000000000000000000000000000006'.toLowerCase(); // Base WETH
 
-// Base canonical WETH
-// (Base uses 0x4200...0006 for WETH)
-const WETH = '0x4200000000000000000000000000000000000006'.toLowerCase();
-
-// Where to post (comma list of Discord channel IDs)
-// Example: SWAP_NOTI_CHANNELS="123,456,789"
+// Where to post
 const SWAP_NOTI_CHANNELS = (process.env.SWAP_NOTI_CHANNELS || '')
   .split(',')
   .map(s => s.trim())
   .filter(Boolean);
 
-// Anti-spam: only post if >= this USD
-const MIN_USD_TO_POST = Number(process.env.SWAP_MIN_USD || 0.25);
+// Optional filters / tuning
+const MIN_USD_TO_POST   = Number(process.env.SWAP_MIN_USD || 0);     // set to 0 to post all
+const POLL_MS           = Number(process.env.SWAP_POLL_MS || 8000);
+const LOOKBACK_BLOCKS   = Number(process.env.SWAP_LOOKBACK_BLOCKS || 5);
+const MAX_EMOJI_REPEAT  = Number(process.env.SWAP_MAX_EMOJIS || 20);
 
-// Scan cadence / blocks
-const POLL_MS = Number(process.env.SWAP_POLL_MS || 8000);
-const LOOKBACK_BLOCKS = Number(process.env.SWAP_LOOKBACK_BLOCKS || 5);
-
-// Images (swap these anytime)
-const BUY_IMG = 'https://iili.io/3tSecKP.gif';
-const SELL_IMG = 'https://iili.io/f7SxSte.gif';
+// Images
+const BUY_IMG  = process.env.SWAP_BUY_IMG  || 'https://iili.io/3tSecKP.gif';
+const SELL_IMG = process.env.SWAP_SELL_IMG || 'https://iili.io/f7SxSte.gif';
 
 // --- Topics / iface ---
 const ERC20_IFACE = new Interface(['event Transfer(address indexed from, address indexed to, uint256 value)']);
 const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
 
-// tx dedupe
+// Dedupe
 const seenTx = new Set();
 
 // --- ETH/USD cache ---
@@ -61,7 +61,7 @@ async function getEthUsdPriceCached(maxAgeMs = 30_000) {
   return _ethUsdCache.value || 0;
 }
 
-// --- ERC20 decimals cache ---
+// --- decimals cache ---
 const decimalsCache = new Map();
 async function getDecimals(provider, tokenAddr) {
   const key = tokenAddr.toLowerCase();
@@ -77,15 +77,6 @@ async function getDecimals(provider, tokenAddr) {
   }
 }
 
-function normalizeChannels(chs) {
-  if (Array.isArray(chs)) return chs.map(String).filter(Boolean);
-  return [];
-}
-
-function sumBN(a, b) {
-  try { return (a || 0n) + (b || 0n); } catch { return a || 0n; }
-}
-
 function safeAddr(x) {
   try { return ethers.getAddress(x); } catch { return x || ''; }
 }
@@ -94,57 +85,62 @@ function addrEq(a, b) {
   return (a || '').toLowerCase() === (b || '').toLowerCase();
 }
 
-/**
- * Build emoji bar:
- * - if usd >= 10: 🐳 per $5
- * - else: 🟥🟦🚀 per $2
- */
+function normalizeChannels(chs) {
+  if (!chs || !Array.isArray(chs)) return [];
+  return chs.map(String).filter(Boolean);
+}
+
 function buildEmojiLine(isBuy, usd) {
   const u = Number(usd);
   if (!Number.isFinite(u) || u <= 0) return isBuy ? '🟥🟦🚀' : '🔻💀🔻';
 
+  // Whale mode for buys >= $10 => 🐳 per $5
   if (isBuy && u >= 10) {
     const whales = Math.max(1, Math.floor(u / 5));
-    return '🐳'.repeat(Math.min(whales, 20));
+    return '🐳'.repeat(Math.min(whales, MAX_EMOJI_REPEAT));
   }
 
+  // Normal scale: per $2
   const count = Math.max(1, Math.floor(u / 2));
-  const capped = Math.min(count, 20);
-  return isBuy ? '🟥🟦🚀'.repeat(capped) : '🔻💀🔻'.repeat(capped);
+  return (isBuy ? '🟥🟦🚀' : '🔻💀🔻').repeat(Math.min(count, MAX_EMOJI_REPEAT));
 }
 
 /**
- * Core: infer swap amounts from receipt logs.
- * We treat tx.from as the trader.
- * We compute net ADRIAN and net WETH for trader:
- *   received - sent
- * If trader net ADRIAN > 0 and net WETH/ETH < 0 => BUY
- * If trader net ADRIAN < 0 and net WETH/ETH > 0 => SELL
+ * Router-safe swap inference from receipt:
+ * BUY detection (common aggregator pattern):
+ *   - find ADRIAN Transfer(s) where to == tx.from (wallet receives ADRIAN)
+ *   - compute ETH spent from tx.value OR WETH outflow from wallet
+ *
+ * SELL detection (router-safe-ish):
+ *   - find ADRIAN Transfer(s) where from == tx.from (wallet sends ADRIAN)
+ *   - compute WETH received by wallet in logs (to == wallet)
+ *
+ * NOTE: Native ETH RECEIVED on sell is often internal and not visible in logs;
+ * we prioritize WETH receives for sells (works for most routers).
  */
 async function analyzeSwap(provider, txHash) {
   const tx = await provider.getTransaction(txHash).catch(() => null);
   const receipt = await provider.getTransactionReceipt(txHash).catch(() => null);
   if (!tx || !receipt) return null;
 
-  const trader = safeAddr(tx.from);
-  if (!trader) return null;
+  const wallet = safeAddr(tx.from);
+  if (!wallet) return null;
 
-  // ETH side (native)
-  let ethNative = 0;
-  try {
-    if (tx.value && tx.value > 0n) ethNative = Number(ethers.formatEther(tx.value));
-  } catch {}
+  const adrianDec = await getDecimals(provider, ADRIAN);
+  const wethDec = await getDecimals(provider, WETH);
 
-  // Token side raw sums (in smallest units)
-  let adrianIn = 0n, adrianOut = 0n;
-  let wethIn = 0n, wethOut = 0n;
+  let adrianIn = 0n;
+  let adrianOut = 0n;
 
+  let wethIn = 0n;
+  let wethOut = 0n;
+
+  // Sum token flows for the wallet only (router-safe)
   for (const lg of receipt.logs) {
-    const logAddr = (lg.address || '').toLowerCase();
     if (lg.topics?.[0] !== TRANSFER_TOPIC || lg.topics.length !== 3) continue;
 
-    // Only care about ADRIAN and WETH transfers
-    if (logAddr !== ADRIAN && logAddr !== WETH) continue;
+    const token = (lg.address || '').toLowerCase();
+    if (token !== ADRIAN && token !== WETH) continue;
 
     let parsed;
     try { parsed = ERC20_IFACE.parseLog(lg); } catch { continue; }
@@ -153,52 +149,55 @@ async function analyzeSwap(provider, txHash) {
     const to = safeAddr(parsed.args.to);
     const val = parsed.args.value;
 
-    if (logAddr === ADRIAN) {
-      if (addrEq(to, trader)) adrianIn = sumBN(adrianIn, val);
-      if (addrEq(from, trader)) adrianOut = sumBN(adrianOut, val);
-    }
-
-    if (logAddr === WETH) {
-      if (addrEq(to, trader)) wethIn = sumBN(wethIn, val);
-      if (addrEq(from, trader)) wethOut = sumBN(wethOut, val);
+    if (token === ADRIAN) {
+      if (addrEq(to, wallet)) adrianIn += val;
+      if (addrEq(from, wallet)) adrianOut += val;
+    } else if (token === WETH) {
+      if (addrEq(to, wallet)) wethIn += val;
+      if (addrEq(from, wallet)) wethOut += val;
     }
   }
 
-  // Convert to decimals
-  const adrianDec = await getDecimals(provider, ADRIAN);
-  const wethDec = await getDecimals(provider, WETH);
-
-  const adrianInF = Number(ethers.formatUnits(adrianIn, adrianDec));
+  const adrianInF  = Number(ethers.formatUnits(adrianIn, adrianDec));
   const adrianOutF = Number(ethers.formatUnits(adrianOut, adrianDec));
-  const wethInF = Number(ethers.formatUnits(wethIn, wethDec));
-  const wethOutF = Number(ethers.formatUnits(wethOut, wethDec));
+  const wethInF    = Number(ethers.formatUnits(wethIn, wethDec));
+  const wethOutF   = Number(ethers.formatUnits(wethOut, wethDec));
 
   const netAdrian = adrianInF - adrianOutF;
-  const netWeth = wethInF - wethOutF;
 
-  // We only want swaps, so we require BOTH sides to be present
-  // BUY: gets ADRIAN, pays ETH/WETH
-  const isBuy = netAdrian > 0 && (ethNative > 0 || netWeth < 0);
-  // SELL: gives ADRIAN, receives WETH (native receive isn't visible in tx.value)
-  const isSell = netAdrian < 0 && netWeth > 0;
+  // Native ETH spent (buy case)
+  let ethNativeSpent = 0;
+  try {
+    if (tx.value && tx.value > 0n) ethNativeSpent = Number(ethers.formatEther(tx.value));
+  } catch {}
+
+  // BUY: wallet receives ADRIAN (netAdrian > 0) and spends ETH/WETH
+  // spent ETH = tx.value if present else WETH outflow
+  const isBuy = netAdrian > 0 && (ethNativeSpent > 0 || wethOutF > 0);
+
+  // SELL: wallet sends ADRIAN (netAdrian < 0) and receives WETH
+  const isSell = netAdrian < 0 && wethInF > 0;
 
   if (!isBuy && !isSell) return null;
 
-  const ethValue = isBuy
-    ? (ethNative > 0 ? ethNative : Math.abs(netWeth)) // spent
-    : Math.abs(netWeth);                               // received
-
   const tokenAmount = Math.abs(netAdrian);
 
-  // sanity
-  if (!Number.isFinite(ethValue) || ethValue <= 0) return null;
+  let ethValue = 0;
+  if (isBuy) {
+    ethValue = ethNativeSpent > 0 ? ethNativeSpent : wethOutF;
+  } else {
+    // sell: value received (in ETH terms) approximated by WETH received
+    ethValue = wethInF;
+  }
+
   if (!Number.isFinite(tokenAmount) || tokenAmount <= 0) return null;
+  if (!Number.isFinite(ethValue) || ethValue <= 0) return null;
 
   const ethUsd = await getEthUsdPriceCached();
   const usdValue = ethUsd > 0 ? ethValue * ethUsd : 0;
 
   return {
-    trader,
+    wallet,
     txHash: txHash.toLowerCase(),
     isBuy,
     isSell,
@@ -209,10 +208,9 @@ async function analyzeSwap(provider, txHash) {
 }
 
 async function sendSwapEmbed(client, swap) {
-  const { trader, isBuy, ethValue, usdValue, tokenAmount, txHash } = swap;
+  const { wallet, isBuy, ethValue, usdValue, tokenAmount, txHash } = swap;
 
-  // Filter tiny swaps (optional)
-  if (usdValue && usdValue < MIN_USD_TO_POST) return;
+  if (MIN_USD_TO_POST > 0 && usdValue > 0 && usdValue < MIN_USD_TO_POST) return;
 
   const emojiLine = buildEmojiLine(isBuy, usdValue);
   const title = isBuy ? `🅰️ ADRIAN SWAP BUY!` : `🅰️ ADRIAN SWAP SELL!`;
@@ -234,7 +232,7 @@ async function sendSwapEmbed(client, swap) {
       },
       {
         name: isBuy ? '👤 Swapper' : '🖕 Seller',
-        value: shortWalletLink ? shortWalletLink(trader) : trader,
+        value: shortWalletLink ? shortWalletLink(wallet) : wallet,
         inline: true
       }
     ],
@@ -253,17 +251,12 @@ async function sendSwapEmbed(client, swap) {
   }
 }
 
-/**
- * Start the swap watcher
- * - Scans ADRIAN Transfer logs for the last N blocks
- * - Groups by txHash and analyzes receipts
- */
 function startThirdPartySwapNotifierBase(client) {
   if (global._third_party_swap_base) return;
   global._third_party_swap_base = true;
 
   if (!SWAP_NOTI_CHANNELS.length) {
-    console.log('⚠️ SWAP_NOTI_CHANNELS not set. Swap notifier will run but has nowhere to post.');
+    console.log('⚠️ SWAP_NOTI_CHANNELS not set. Swap notifier running but nowhere to post.');
   }
 
   setInterval(async () => {
@@ -276,7 +269,7 @@ function startThirdPartySwapNotifierBase(client) {
     const fromBlock = Math.max(blockNumber - LOOKBACK_BLOCKS, 0);
     const toBlock = blockNumber;
 
-    // pull ADRIAN transfers only (cheap)
+    // Watch ADRIAN transfers (cheap) and analyze by tx hash
     let logs = [];
     try {
       logs = await provider.getLogs({
@@ -289,7 +282,6 @@ function startThirdPartySwapNotifierBase(client) {
       return;
     }
 
-    // group unique txs
     const txs = [];
     for (const lg of logs) {
       const h = (lg.transactionHash || '').toLowerCase();
@@ -299,7 +291,6 @@ function startThirdPartySwapNotifierBase(client) {
       txs.push(h);
     }
 
-    // analyze + send
     for (const h of txs) {
       const swap = await analyzeSwap(provider, h);
       if (!swap) continue;
@@ -307,7 +298,7 @@ function startThirdPartySwapNotifierBase(client) {
     }
   }, POLL_MS);
 
-  console.log('✅ Third-party swap notifier (Base) started.');
+  console.log('✅ Third-party swap notifier (Base, router-safe) started.');
 }
 
 module.exports = {
