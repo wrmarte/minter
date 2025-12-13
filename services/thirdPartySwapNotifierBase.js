@@ -1,15 +1,8 @@
-// services/thirdPartySwapNotifierBase.js
 const { Interface, Contract, ethers } = require('ethers');
 const fetch = require('node-fetch');
 const { safeRpcCall } = require('./providerM');
 const { shortWalletLink } = require('../utils/helpers');
 
-/**
- * Third Party Swap Notifier (Base) — HARDENED + DEBUG
- * Router-safe swaps for ETH/WETH <-> ADRIAN
- */
-
-// --- CONFIG ---
 const ADRIAN = '0x7e99075ce287f1cf8cbcaaa6a1c7894e404fd7ea'.toLowerCase();
 const WETH   = '0x4200000000000000000000000000000000000006'.toLowerCase();
 
@@ -20,39 +13,32 @@ const SWAP_NOTI_CHANNELS = (process.env.SWAP_NOTI_CHANNELS || '')
 
 const MIN_USD_TO_POST   = Number(process.env.SWAP_MIN_USD || 0);
 const POLL_MS           = Number(process.env.SWAP_POLL_MS || 8000);
-const LOOKBACK_BLOCKS   = Number(process.env.SWAP_LOOKBACK_BLOCKS || 20); // 🔥 default higher
+const LOOKBACK_BLOCKS   = Number(process.env.SWAP_LOOKBACK_BLOCKS || 80);
 const MAX_EMOJI_REPEAT  = Number(process.env.SWAP_MAX_EMOJIS || 20);
 
 const BUY_IMG  = process.env.SWAP_BUY_IMG  || 'https://iili.io/3tSecKP.gif';
 const SELL_IMG = process.env.SWAP_SELL_IMG || 'https://iili.io/f7SxSte.gif';
 
 const DEBUG = String(process.env.SWAP_DEBUG || '').trim() === '1';
-
-// Optional: force-test a tx hash to verify delivery path
+const BOOT_PING = String(process.env.SWAP_BOOT_PING || '').trim() === '1';
 const TEST_TX = (process.env.SWAP_TEST_TX || '').trim().toLowerCase();
 
-// --- Topics / iface ---
 const ERC20_IFACE = new Interface(['event Transfer(address indexed from, address indexed to, uint256 value)']);
 const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
 
-// Dedupe (keep bounded)
-const seenTx = new Map(); // txHash -> ts
+// Dedupe
+const seenTx = new Map();
 function markSeen(txh) {
   const now = Date.now();
   seenTx.set(txh, now);
-  // prune old
   if (seenTx.size > 5000) {
-    const cutoff = now - 6 * 60 * 60 * 1000; // 6h
-    for (const [k, ts] of seenTx.entries()) {
-      if (ts < cutoff) seenTx.delete(k);
-    }
+    const cutoff = now - 6 * 60 * 60 * 1000;
+    for (const [k, ts] of seenTx.entries()) if (ts < cutoff) seenTx.delete(k);
   }
 }
-function isSeen(txh) {
-  return seenTx.has(txh);
-}
+function isSeen(txh) { return seenTx.has(txh); }
 
-// --- ETH/USD cache ---
+// ETH/USD cache
 let _ethUsdCache = { value: 0, ts: 0 };
 async function getEthUsdPriceCached(maxAgeMs = 30_000) {
   const now = Date.now();
@@ -69,7 +55,7 @@ async function getEthUsdPriceCached(maxAgeMs = 30_000) {
   return _ethUsdCache.value || 0;
 }
 
-// --- decimals cache ---
+// decimals cache
 const decimalsCache = new Map();
 async function getDecimals(provider, tokenAddr) {
   const key = tokenAddr.toLowerCase();
@@ -85,12 +71,8 @@ async function getDecimals(provider, tokenAddr) {
   }
 }
 
-function safeAddr(x) {
-  try { return ethers.getAddress(x); } catch { return x || ''; }
-}
-function addrEq(a, b) {
-  return (a || '').toLowerCase() === (b || '').toLowerCase();
-}
+function safeAddr(x) { try { return ethers.getAddress(x); } catch { return x || ''; } }
+function addrEq(a, b) { return (a || '').toLowerCase() === (b || '').toLowerCase(); }
 
 function buildEmojiLine(isBuy, usd) {
   const u = Number(usd);
@@ -105,11 +87,49 @@ function buildEmojiLine(isBuy, usd) {
   return (isBuy ? '🟥🟦🚀' : '🔻💀🔻').repeat(Math.min(count, MAX_EMOJI_REPEAT));
 }
 
-/**
- * Router-safe inference:
- * - BUY: wallet receives ADRIAN (netAdrian > 0) and spends ETH (tx.value) OR WETH outflow
- * - SELL: wallet sends ADRIAN (netAdrian < 0) and receives WETH inflow
- */
+async function resolveChannels(client) {
+  const out = [];
+  for (const id of SWAP_NOTI_CHANNELS) {
+    let ch = client.channels.cache.get(id) || null;
+    if (!ch) ch = await client.channels.fetch(id).catch(() => null);
+
+    if (!ch) {
+      if (DEBUG) console.log(`[SWAP] channel fetch failed: ${id}`);
+      continue;
+    }
+
+    // Text channel OR thread
+    const isText = typeof ch.isTextBased === 'function' ? ch.isTextBased() : false;
+    if (!isText) {
+      if (DEBUG) console.log(`[SWAP] channel not text-based: ${id}`);
+      continue;
+    }
+
+    // Permissions: SendMessages (+ threads if needed)
+    try {
+      const guild = ch.guild;
+      const me = guild?.members?.me;
+      if (guild && me) {
+        const perms = ch.permissionsFor(me);
+        if (!perms?.has('SendMessages')) {
+          if (DEBUG) console.log(`[SWAP] missing SendMessages in ${id}`);
+          continue;
+        }
+        // If it’s a thread, also require SendMessagesInThreads
+        if (ch.isThread?.() && !perms?.has('SendMessagesInThreads')) {
+          if (DEBUG) console.log(`[SWAP] missing SendMessagesInThreads in ${id}`);
+          continue;
+        }
+      }
+    } catch (e) {
+      if (DEBUG) console.log(`[SWAP] perm check error ${id}: ${e?.message || e}`);
+    }
+
+    out.push(ch);
+  }
+  return out;
+}
+
 async function analyzeSwap(provider, txHash) {
   const tx = await provider.getTransaction(txHash).catch(() => null);
   const receipt = await provider.getTransactionReceipt(txHash).catch(() => null);
@@ -126,6 +146,7 @@ async function analyzeSwap(provider, txHash) {
 
   for (const lg of receipt.logs) {
     if (lg.topics?.[0] !== TRANSFER_TOPIC || lg.topics.length !== 3) continue;
+
     const token = (lg.address || '').toLowerCase();
     if (token !== ADRIAN && token !== WETH) continue;
 
@@ -163,10 +184,7 @@ async function analyzeSwap(provider, txHash) {
   if (!isBuy && !isSell) return null;
 
   const tokenAmount = Math.abs(netAdrian);
-  let ethValue = 0;
-
-  if (isBuy) ethValue = ethNativeSpent > 0 ? ethNativeSpent : wethOutF;
-  else ethValue = wethInF;
+  const ethValue = isBuy ? (ethNativeSpent > 0 ? ethNativeSpent : wethOutF) : wethInF;
 
   if (!Number.isFinite(tokenAmount) || tokenAmount <= 0) return null;
   if (!Number.isFinite(ethValue) || ethValue <= 0) return null;
@@ -174,53 +192,21 @@ async function analyzeSwap(provider, txHash) {
   const ethUsd = await getEthUsdPriceCached();
   const usdValue = ethUsd > 0 ? ethValue * ethUsd : 0;
 
-  return {
-    wallet,
-    txHash: txHash.toLowerCase(),
-    isBuy,
-    isSell,
-    ethValue,
-    usdValue,
-    tokenAmount
-  };
-}
-
-async function resolveChannels(client) {
-  const out = [];
-  for (const id of SWAP_NOTI_CHANNELS) {
-    // cache first
-    let ch = client.channels.cache.get(id) || null;
-    if (!ch) ch = await client.channels.fetch(id).catch(() => null);
-    if (!ch || !ch.isTextBased?.()) continue;
-
-    // permission check
-    try {
-      const guild = ch.guild;
-      const me = guild?.members?.me;
-      if (guild && me) {
-        const perms = ch.permissionsFor(me);
-        if (!perms?.has('SendMessages')) continue;
-      }
-    } catch {}
-
-    out.push(ch);
-  }
-  return out;
+  return { wallet, txHash: txHash.toLowerCase(), isBuy, isSell, ethValue, usdValue, tokenAmount };
 }
 
 async function sendSwapEmbed(client, swap) {
   const { wallet, isBuy, ethValue, usdValue, tokenAmount, txHash } = swap;
 
   if (MIN_USD_TO_POST > 0 && usdValue > 0 && usdValue < MIN_USD_TO_POST) {
-    if (DEBUG) console.log(`[SWAP] skip < MIN_USD (${usdValue.toFixed(2)}) tx=${txHash}`);
+    if (DEBUG) console.log(`[SWAP] skip < MIN_USD ${usdValue.toFixed(2)} tx=${txHash}`);
     return;
   }
 
   const emojiLine = buildEmojiLine(isBuy, usdValue);
-  const title = isBuy ? `🅰️ ADRIAN SWAP BUY!` : `🅰️ ADRIAN SWAP SELL!`;
 
   const embed = {
-    title,
+    title: isBuy ? `🅰️ ADRIAN SWAP BUY!` : `🅰️ ADRIAN SWAP SELL!`,
     description: emojiLine,
     image: { url: isBuy ? BUY_IMG : SELL_IMG },
     fields: [
@@ -247,11 +233,21 @@ async function sendSwapEmbed(client, swap) {
   };
 
   const chans = await resolveChannels(client);
-  if (DEBUG) console.log(`[SWAP] sending to ${chans.length} channels tx=${txHash}`);
+  if (DEBUG) console.log(`[SWAP] send -> channels=${chans.length} tx=${txHash}`);
 
   for (const ch of chans) {
     await ch.send({ embeds: [embed] }).catch(err => {
-      if (DEBUG) console.log(`[SWAP] send failed channel=${ch.id} err=${err?.message || err}`);
+      console.log(`[SWAP] send failed channel=${ch.id} err=${err?.message || err}`);
+    });
+  }
+}
+
+async function bootPing(client) {
+  const chans = await resolveChannels(client);
+  if (DEBUG) console.log(`[SWAP] bootPing channels=${chans.length}`);
+  for (const ch of chans) {
+    await ch.send(`✅ Swap notifier online (Base).`).catch(err => {
+      console.log(`[SWAP] bootPing failed channel=${ch.id} err=${err?.message || err}`);
     });
   }
 }
@@ -259,23 +255,24 @@ async function sendSwapEmbed(client, swap) {
 async function tick(client) {
   const provider = await safeRpcCall('base', p => p);
   if (!provider) {
-    if (DEBUG) console.log('[SWAP] no provider from safeRpcCall(base)');
+    if (DEBUG) console.log('[SWAP] safeRpcCall(base) returned no provider');
     return;
   }
 
-  // 🔥 Force-test single tx if provided
-  if (TEST_TX) {
-    if (!isSeen(TEST_TX)) {
-      markSeen(TEST_TX);
-      if (DEBUG) console.log(`[SWAP] TEST_TX analyze ${TEST_TX}`);
-      const swap = await analyzeSwap(provider, TEST_TX).catch(e => {
-        if (DEBUG) console.log(`[SWAP] TEST_TX analyze error: ${e?.message || e}`);
-        return null;
-      });
-      if (swap) await sendSwapEmbed(client, swap);
-      else if (DEBUG) console.log('[SWAP] TEST_TX analyzed: not a swap by our rules');
+  // Force-test tx path
+  if (TEST_TX && !isSeen(TEST_TX)) {
+    markSeen(TEST_TX);
+    if (DEBUG) console.log(`[SWAP] TEST_TX analyze ${TEST_TX}`);
+    const swap = await analyzeSwap(provider, TEST_TX).catch(e => {
+      console.log(`[SWAP] TEST_TX analyze error: ${e?.message || e}`);
+      return null;
+    });
+    if (swap) {
+      if (DEBUG) console.log(`[SWAP] TEST_TX matched ${swap.isBuy ? 'BUY' : 'SELL'} usd=${swap.usdValue?.toFixed?.(2)} eth=${swap.ethValue?.toFixed?.(4)}`);
+      await sendSwapEmbed(client, swap);
+    } else {
+      console.log('[SWAP] TEST_TX did NOT match swap rules (or tx/receipt unavailable)');
     }
-    // don’t return; still scan live
   }
 
   const blockNumber = await provider.getBlockNumber().catch(() => null);
@@ -286,34 +283,26 @@ async function tick(client) {
 
   if (DEBUG) console.log(`[SWAP] scan blocks ${fromBlock} -> ${toBlock}`);
 
-  // Scan BOTH ADRIAN and WETH logs for better coverage
   const txs = new Set();
 
   async function scanToken(addr, label) {
     let logs = [];
     try {
-      logs = await provider.getLogs({
-        address: addr,
-        topics: [TRANSFER_TOPIC],
-        fromBlock,
-        toBlock
-      });
+      logs = await provider.getLogs({ address: addr, topics: [TRANSFER_TOPIC], fromBlock, toBlock });
     } catch (e) {
-      if (DEBUG) console.log(`[SWAP] getLogs failed for ${label}: ${e?.message || e}`);
+      console.log(`[SWAP] getLogs failed for ${label}: ${e?.message || e}`);
       return;
     }
     if (DEBUG) console.log(`[SWAP] ${label} logs=${logs.length}`);
     for (const lg of logs) {
       const h = (lg.transactionHash || '').toLowerCase();
-      if (!h) continue;
-      txs.add(h);
+      if (h) txs.add(h);
     }
   }
 
   await scanToken(ADRIAN, 'ADRIAN');
   await scanToken(WETH, 'WETH');
 
-  // Analyze txs
   let analyzed = 0, matched = 0;
   for (const h of txs) {
     if (isSeen(h)) continue;
@@ -321,17 +310,13 @@ async function tick(client) {
 
     analyzed++;
     const swap = await analyzeSwap(provider, h).catch(e => {
-      if (DEBUG) console.log(`[SWAP] analyze error tx=${h}: ${e?.message || e}`);
+      console.log(`[SWAP] analyze error tx=${h}: ${e?.message || e}`);
       return null;
     });
-
     if (!swap) continue;
+
     matched++;
-
-    if (DEBUG) {
-      console.log(`[SWAP] MATCH tx=${h} ${swap.isBuy ? 'BUY' : 'SELL'} eth=${swap.ethValue.toFixed(4)} usd=${swap.usdValue.toFixed(2)} adrian=${swap.tokenAmount.toFixed(2)}`);
-    }
-
+    if (DEBUG) console.log(`[SWAP] MATCH tx=${h} ${swap.isBuy ? 'BUY' : 'SELL'} usd=${swap.usdValue?.toFixed?.(2)} eth=${swap.ethValue?.toFixed?.(4)} adrian=${swap.tokenAmount?.toFixed?.(2)}`);
     await sendSwapEmbed(client, swap);
   }
 
@@ -342,16 +327,21 @@ function startThirdPartySwapNotifierBase(client) {
   if (global._third_party_swap_base) return;
   global._third_party_swap_base = true;
 
-  console.log(`✅ Swap notifier starting (Base) | channels=${SWAP_NOTI_CHANNELS.length} | lookback=${LOOKBACK_BLOCKS} | debug=${DEBUG ? 'ON' : 'OFF'}`);
+  console.log(`✅ Swap notifier starting (Base) | channels=${SWAP_NOTI_CHANNELS.length} | lookback=${LOOKBACK_BLOCKS} | debug=${DEBUG ? 'ON' : 'OFF'} | bootPing=${BOOT_PING ? 'ON' : 'OFF'}`);
 
   if (!SWAP_NOTI_CHANNELS.length) {
-    console.log('⚠️ SWAP_NOTI_CHANNELS is empty. Set it or nothing can be posted.');
+    console.log('⚠️ SWAP_NOTI_CHANNELS is empty. Nothing can be posted.');
   }
 
-  // immediate run
+  // Boot ping (proves channel send works)
+  if (BOOT_PING) {
+    bootPing(client).catch(() => {});
+  }
+
+  // Immediate tick
   tick(client).catch(() => {});
 
-  // schedule
+  // Interval
   setInterval(() => {
     tick(client).catch(() => {});
   }, POLL_MS);
@@ -360,4 +350,3 @@ function startThirdPartySwapNotifierBase(client) {
 module.exports = {
   startThirdPartySwapNotifierBase
 };
-
