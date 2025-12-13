@@ -12,7 +12,7 @@ const ROUTERS_TO_WATCH = [
   '0x498581ff718922c3f8e6a244956af099b2652b2b'
 ].map(a => (a || '').toLowerCase()).filter(Boolean);
 
-
+// ✅ ENV fallback channels (only used if DB returns 0)
 const SWAP_NOTI_CHANNELS = (process.env.SWAP_NOTI_CHANNELS || '')
   .split(',')
   .map(s => s.trim())
@@ -23,7 +23,7 @@ const POLL_MS           = Number(process.env.SWAP_POLL_MS || 12000);
 const LOOKBACK_BLOCKS   = Number(process.env.SWAP_LOOKBACK_BLOCKS || 20);
 const MAX_EMOJI_REPEAT  = Number(process.env.SWAP_MAX_EMOJIS || 20);
 
-const BUY_IMG  = process.env.SWAP_BUY_IMG  || 'https://iili.io/3tSecKP.gif';
+const BUY_IMG  = process.env.SWAP_BUY_IMG  || 'https://iili.io/f7ifqmB.gif';
 const SELL_IMG = process.env.SWAP_SELL_IMG || 'https://iili.io/f7SxSte.gif';
 
 const DEBUG = String(process.env.SWAP_DEBUG || '').trim() === '1';
@@ -93,42 +93,94 @@ function buildEmojiLine(isBuy, usd) {
   return (isBuy ? '🟥🟦🚀' : '🔻💀🔻').repeat(Math.min(count, MAX_EMOJI_REPEAT));
 }
 
+/**
+ * ✅ DB-backed channel routing (same DB the mint system uses)
+ * We route swaps to the channels where ADRIAN is tracked in `tracked_tokens`.
+ * Falls back to SWAP_NOTI_CHANNELS env if DB returns nothing.
+ */
 async function resolveChannels(client) {
   const out = [];
-  for (const id of SWAP_NOTI_CHANNELS) {
-    let ch = client.channels.cache.get(id) || null;
-    if (!ch) ch = await client.channels.fetch(id).catch(() => null);
+  const added = new Set();
 
-    if (!ch) {
-      if (DEBUG) console.log(`[SWAP] channel fetch failed: ${id}`);
-      continue;
-    }
+  // 1) Try DB routing via tracked_tokens
+  try {
+    const pg = client.pg;
+    if (pg) {
+      const res = await pg.query(
+        `SELECT DISTINCT channel_id
+         FROM tracked_tokens
+         WHERE lower(address) = $1
+           AND channel_id IS NOT NULL
+           AND channel_id <> ''`,
+        [ADRIAN]
+      );
+      const ids = (res.rows || [])
+        .map(r => String(r.channel_id || '').trim())
+        .filter(Boolean);
 
-    const isText = typeof ch.isTextBased === 'function' ? ch.isTextBased() : false;
-    if (!isText) {
-      if (DEBUG) console.log(`[SWAP] channel not text-based: ${id}`);
-      continue;
-    }
-
-    try {
-      const guild = ch.guild;
-      const me = guild?.members?.me;
-      if (guild && me) {
-        const perms = ch.permissionsFor(me);
-        if (!perms?.has('SendMessages')) {
-          if (DEBUG) console.log(`[SWAP] missing SendMessages in ${id}`);
-          continue;
-        }
-        if (ch.isThread?.() && !perms?.has('SendMessagesInThreads')) {
-          if (DEBUG) console.log(`[SWAP] missing SendMessagesInThreads in ${id}`);
-          continue;
+      for (const id of ids) {
+        if (added.has(id)) continue;
+        const ch = await fetchAndValidateChannel(client, id);
+        if (ch) {
+          out.push(ch);
+          added.add(id);
         }
       }
-    } catch {}
 
-    out.push(ch);
+      if (DEBUG) console.log(`[SWAP] DB channels=${out.length}`);
+    }
+  } catch (e) {
+    console.log(`[SWAP] DB channel lookup failed: ${e?.message || e}`);
   }
+
+  // 2) Fallback to env channels if DB returned none
+  if (out.length === 0 && SWAP_NOTI_CHANNELS.length) {
+    for (const id of SWAP_NOTI_CHANNELS) {
+      if (!id || added.has(id)) continue;
+      const ch = await fetchAndValidateChannel(client, id);
+      if (ch) {
+        out.push(ch);
+        added.add(id);
+      }
+    }
+    if (DEBUG) console.log(`[SWAP] ENV fallback channels=${out.length}`);
+  }
+
   return out;
+}
+
+async function fetchAndValidateChannel(client, id) {
+  let ch = client.channels.cache.get(id) || null;
+  if (!ch) ch = await client.channels.fetch(id).catch(() => null);
+
+  if (!ch) {
+    if (DEBUG) console.log(`[SWAP] channel fetch failed: ${id}`);
+    return null;
+  }
+
+  const isText = typeof ch.isTextBased === 'function' ? ch.isTextBased() : false;
+  if (!isText) {
+    if (DEBUG) console.log(`[SWAP] channel not text-based: ${id}`);
+    return null;
+  }
+
+  try {
+    const guild = ch.guild;
+    const me = guild?.members?.me;
+    if (guild && me) {
+      const perms = ch.permissionsFor(me);
+      if (!perms?.has('SendMessages')) {
+        if (DEBUG) console.log(`[SWAP] missing SendMessages in ${id}`);
+        return null;
+      }
+      if (ch.isThread?.() && !perms?.has('SendMessagesInThreads')) {
+        if (DEBUG) console.log(`[SWAP] missing SendMessagesInThreads in ${id}`);
+        return null;
+      }
+    }
+  } catch {}
+
+  return ch;
 }
 
 // Core: compute net ADRIAN + (ETH native or WETH) for tx.from wallet
@@ -237,6 +289,12 @@ async function sendSwapEmbed(client, swap) {
 
   const chans = await resolveChannels(client);
   if (DEBUG) console.log(`[SWAP] send -> channels=${chans.length} tx=${txHash}`);
+
+  if (!chans.length) {
+    console.log('[SWAP] No channels resolved (DB empty + env empty). Nothing to post.');
+    return;
+  }
+
   for (const ch of chans) {
     await ch.send({ embeds: [embed] }).catch(err => {
       console.log(`[SWAP] send failed channel=${ch.id} err=${err?.message || err}`);
@@ -247,6 +305,12 @@ async function sendSwapEmbed(client, swap) {
 async function bootPing(client) {
   const chans = await resolveChannels(client);
   if (DEBUG) console.log(`[SWAP] bootPing channels=${chans.length}`);
+
+  if (!chans.length) {
+    console.log('[SWAP] bootPing: No channels resolved (DB empty + env empty).');
+    return;
+  }
+
   for (const ch of chans) {
     await ch.send(`✅ Swap notifier online (Base).`).catch(err => {
       console.log(`[SWAP] bootPing failed channel=${ch.id} err=${err?.message || err}`);
@@ -317,7 +381,6 @@ async function tick(client) {
     const swap = await analyzeSwap(provider, h).catch(() => null);
     if (!swap) continue;
 
-    // must involve ADRIAN net transfer
     matched++;
     if (DEBUG) console.log(`[SWAP] MATCH tx=${h} ${swap.isBuy ? 'BUY' : 'SELL'} usd=${swap.usdValue?.toFixed?.(2)} eth=${swap.ethValue?.toFixed?.(4)} adrian=${swap.tokenAmount?.toFixed?.(2)}`);
     await sendSwapEmbed(client, swap);
@@ -330,12 +393,9 @@ function startThirdPartySwapNotifierBase(client) {
   if (global._third_party_swap_base) return;
   global._third_party_swap_base = true;
 
-  console.log(`✅ Swap notifier starting (Base) | channels=${SWAP_NOTI_CHANNELS.length} | lookback=${LOOKBACK_BLOCKS} | debug=${DEBUG ? 'ON' : 'OFF'} | bootPing=${BOOT_PING ? 'ON' : 'OFF'}`);
+  console.log(`✅ Swap notifier starting (Base) | envChannels=${SWAP_NOTI_CHANNELS.length} | lookback=${LOOKBACK_BLOCKS} | debug=${DEBUG ? 'ON' : 'OFF'} | bootPing=${BOOT_PING ? 'ON' : 'OFF'}`);
 
-  if (!SWAP_NOTI_CHANNELS.length) {
-    console.log('⚠️ SWAP_NOTI_CHANNELS is empty. Nothing can be posted.');
-  }
-
+  // NOTE: no longer requires SWAP_NOTI_CHANNELS because DB routing may supply channels
   if (BOOT_PING) bootPing(client).catch(() => {});
   tick(client).catch(() => {});
 
