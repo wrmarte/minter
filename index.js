@@ -26,6 +26,9 @@ require('./services/logScanner');
 // ⬇️ NEW: presence ticker (BTC/ETH in member list)
 const { startPresenceTicker, stopPresenceTicker } = require('./services/presenceTicker');
 
+// ⬇️ NEW: third-party swap notifier (Base)
+const { startThirdPartySwapNotifierBase } = require('./services/thirdPartySwapNotifierBase');
+
 console.log("👀 Booting from:", __dirname);
 
 // ✅ Create Discord client
@@ -329,6 +332,10 @@ async function onClientReady() {
       console.error('❌ Failed to register slash commands:', err);
     }
   }
+
+  // ⬇️ Start the third-party swap notifier (Base)
+  try { startThirdPartySwapNotifierBase(client); }
+  catch (e) { console.warn('⚠️ swap notifier start:', e?.message || e); }
 
   // ⬇️ Start the presence ticker (BTC/ETH)
   try { startPresenceTicker(client); } catch (e) { console.warn('⚠️ presence ticker start:', e?.message || e); }
