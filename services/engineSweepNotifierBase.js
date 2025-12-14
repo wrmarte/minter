@@ -146,17 +146,20 @@ async function tick(client) {
     catch { continue; }
 
     const tx = lg.transactionHash.toLowerCase();
+    const from = parsed.args.from;
     const to = parsed.args.to;
+    const tokenId = parsed.args.tokenId.toString();
 
     if (!sweeps.has(tx)) {
       sweeps.set(tx, {
         tx,
-        to,
+        buyer: to,
+        seller: from,
         tokenIds: []
       });
     }
 
-    sweeps.get(tx).tokenIds.push(parsed.args.tokenId.toString());
+    sweeps.get(tx).tokenIds.push(tokenId);
   }
 
   const channels = await resolveChannels(client);
@@ -165,25 +168,32 @@ async function tick(client) {
     const count = sweep.tokenIds.length;
     if (count === 0) continue;
 
+    // 🔥 SALE-STYLE EMBED (seller INCLUDED)
     const embed = {
-      title: '🧹 ENGINE SWEEP DETECTED!',
-      description: buildEmoji(count),
+      title: `🖼️ NFT SOLD – Engine Sweep`,
+      description: `**${count} NFT${count > 1 ? 's' : ''} just sold!**\n\n${buildEmoji(count)}`,
       image: { url: SWEEP_IMG },
       fields: [
         {
-          name: 'NFTs Swept',
-          value: `**${count}**`,
+          name: '👤 Seller',
+          value: shortWalletLink(sweep.seller),
           inline: true
         },
         {
-          name: 'Sweeper',
-          value: shortWalletLink(sweep.to),
+          name: '🧑‍🚀 Buyer',
+          value: shortWalletLink(sweep.buyer),
           inline: true
+        },
+        {
+          name: '🎯 Token IDs',
+          value: sweep.tokenIds.slice(0, 12).map(id => `#${id}`).join(', ') +
+            (sweep.tokenIds.length > 12 ? ' …' : ''),
+          inline: false
         }
       ],
       url: `https://basescan.org/tx/${sweep.tx}`,
-      color: 0xf1c40f,
-      footer: { text: 'Engine Sweep Feed • Powered by PimpsDev' },
+      color: 0x3498db,
+      footer: { text: 'Engine Sale • Powered by PimpsDev' },
       timestamp: new Date().toISOString()
     };
 
