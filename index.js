@@ -4,7 +4,7 @@ const { Pool } = require('pg');
 const fs = require('fs');
 const path = require('path');
 
-// ---------- Auto-integrate PG knobs & required envs ----------
+// ---------- Auto-integrate PG knobs ----------
 process.env.PGSSL_DISABLE      ??= '0';
 process.env.PG_POOL_MAX        ??= '5';
 process.env.PG_IDLE_TIMEOUT_MS ??= '30000';
@@ -19,22 +19,17 @@ if (!process.env.DISCORD_BOT_TOKEN) {
   process.exit(1);
 }
 
-// Helper services
+// ================= Core Services =================
 require('./services/providerM');
 require('./services/logScanner');
 
-// Presence ticker
 const { startPresenceTicker, stopPresenceTicker } = require('./services/presenceTicker');
-
-// Third-party swap notifier
 const { startThirdPartySwapNotifierBase } = require('./services/thirdPartySwapNotifierBase');
-
-// 🆕 Engine sweep notifier
 const { startEngineSweepNotifierBase } = require('./services/engineSweepNotifierBase');
 
 console.log('👀 Booting from:', __dirname);
 
-// ================= Discord client =================
+// ================= Discord Client =================
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -129,7 +124,7 @@ async function runGlobalScanTick() {
 
 timers.globalScan = setTimeout(runGlobalScanTick, 15000);
 
-// ================= Auto rewards =================
+// ================= Auto Rewards =================
 const autoRewardPayout = require('./services/autoRewardPayout');
 timers.rewardPayout = setInterval(() => {
   console.log('💸 Running autoRewardPayout...');
@@ -152,22 +147,24 @@ client.login(process.env.DISCORD_BOT_TOKEN)
     process.exit(1);
   });
 
-// ================= Ready =================
+// ================= Ready (ORDER MATTERS) =================
 async function onClientReady() {
   if (client.__readyRan) return;
   client.__readyRan = true;
 
-  // Swap notifier
+  console.log('🚀 Client ready — starting services');
+
+  // 1️⃣ Swap notifier
   try { startThirdPartySwapNotifierBase(client); }
-  catch (e) { console.warn('⚠️ swap notifier start:', e?.message || e); }
+  catch (e) { console.warn('⚠️ swap notifier:', e?.message || e); }
 
-  // 🧹 Engine sweep notifier
+  // 2️⃣ Engine sweep notifier (AFTER swaps + mint router)
   try { startEngineSweepNotifierBase(client); }
-  catch (e) { console.warn('⚠️ engine sweep notifier start:', e?.message || e); }
+  catch (e) { console.warn('⚠️ engine sweep notifier:', e?.message || e); }
 
-  // Presence ticker
+  // 3️⃣ Presence ticker (last)
   try { startPresenceTicker(client); }
-  catch (e) { console.warn('⚠️ presence ticker start:', e?.message || e); }
+  catch (e) { console.warn('⚠️ presence ticker:', e?.message || e); }
 }
 
 client.once('clientReady', onClientReady);
@@ -199,5 +196,6 @@ async function gracefulShutdown(sig) {
 
 process.once('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.once('SIGINT', () => gracefulShutdown('SIGINT'));
+
 
 
