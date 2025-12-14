@@ -2,30 +2,40 @@ const { Interface, ethers } = require('ethers');
 const { safeRpcCall } = require('./providerM');
 const { shortWalletLink } = require('../utils/helpers');
 
-// ================= CONFIG =================
+/* ======================================================
+   CONFIG
+====================================================== */
 const ENGINE_CONTRACT =
   '0x0351f7cba83277e891d4a85da498a7eacd764d58'.toLowerCase();
 
-const POLL_MS = Number(process.env.SWEEP_POLL_MS || 12000);
-const LOOKBACK_BLOCKS = Number(process.env.SWEEP_LOOKBACK_BLOCKS || 40);
-const MAX_BLOCKS_PER_TICK = Number(process.env.SWEEP_MAX_BLOCKS_PER_TICK || 10);
-const MAX_TX_PER_BLOCK = Number(process.env.SWEEP_MAX_TX_PER_BLOCK || 200);
+const EXTRA_ROUTERS = (process.env.SWEEP_ROUTERS || '')
+  .split(',')
+  .map(s => s.trim().toLowerCase())
+  .filter(Boolean);
 
-const DEBUG = String(process.env.SWEEP_DEBUG || '').trim() === '1';
-const BOOT_PING = String(process.env.SWEEP_BOOT_PING || '').trim() === '1';
+const ROUTERS_TO_WATCH = Array.from(
+  new Set([ENGINE_CONTRACT, ...EXTRA_ROUTERS])
+);
+
+const POLL_MS  = Number(process.env.SWEEP_POLL_MS || 12000);
+const LOOKBACK = Number(process.env.SWEEP_LOOKBACK_BLOCKS || 60);
+const MAX_BLOCKS = Number(process.env.SWEEP_MAX_BLOCKS_PER_TICK || 20);
+const MAX_TXS = Number(process.env.SWEEP_MAX_TX_PER_TICK || 250);
+
+const DEBUG     = process.env.SWEEP_DEBUG === '1';
+const BOOT_PING = process.env.SWEEP_BOOT_PING === '1';
+const TEST_TX   = (process.env.SWEEP_TEST_TX || '').toLowerCase();
 
 const SWEEP_IMG =
   process.env.SWEEP_IMG || 'https://iili.io/3tSecKP.gif';
 
-// ================= CHECKPOINT =================
+/* ======================================================
+   CHECKPOINT
+====================================================== */
 const CHECKPOINT_CHAIN = 'base';
-const CHECKPOINT_KEY = 'engine_sweep_last_block';
+const CHECKPOINT_KEY   = 'engine_sweep_last_block';
 
-let _checkpointReady = false;
-async function ensureCheckpointTable(client) {
-  if (_checkpointReady) return true;
-  if (!client.pg) return false;
-
+async function ensureCheckpoint(client) {
   await client.pg.query(`
     CREATE TABLE IF NOT EXISTS sweep_checkpoints (
       chain TEXT NOT NULL,
@@ -35,216 +45,219 @@ async function ensureCheckpointTable(client) {
       PRIMARY KEY (chain, key)
     )
   `);
-
-  _checkpointReady = true;
-  return true;
 }
 
 async function getLastBlock(client) {
-  try {
-    const r = await client.pg.query(
-      `SELECT value FROM sweep_checkpoints WHERE chain=$1 AND key=$2`,
-      [CHECKPOINT_CHAIN, CHECKPOINT_KEY]
-    );
-    return r.rows[0]?.value ? Number(r.rows[0].value) : null;
-  } catch {
-    return null;
-  }
+  const r = await client.pg.query(
+    `SELECT value FROM sweep_checkpoints WHERE chain=$1 AND key=$2`,
+    [CHECKPOINT_CHAIN, CHECKPOINT_KEY]
+  );
+  return r.rows?.[0]?.value ? Number(r.rows[0].value) : null;
 }
 
 async function setLastBlock(client, block) {
-  try {
-    await client.pg.query(
-      `INSERT INTO sweep_checkpoints(chain,key,value)
-       VALUES ($1,$2,$3)
-       ON CONFLICT (chain,key)
-       DO UPDATE SET value=EXCLUDED.value, updated_at=now()`,
-      [CHECKPOINT_CHAIN, CHECKPOINT_KEY, Math.floor(block)]
-    );
-  } catch {}
+  await client.pg.query(
+    `INSERT INTO sweep_checkpoints(chain,key,value)
+     VALUES ($1,$2,$3)
+     ON CONFLICT (chain,key)
+     DO UPDATE SET value=EXCLUDED.value, updated_at=now()`,
+    [CHECKPOINT_CHAIN, CHECKPOINT_KEY, Math.floor(block)]
+  );
 }
 
-// ================= ABI =================
-const ERC721_IFACE = new Interface([
+/* ======================================================
+   ABI / TOPICS
+====================================================== */
+const ERC721 = new Interface([
   'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
   'event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId)',
-  'event ApprovalForAll(address indexed owner, address indexed operator, bool approved)',
+  'event ApprovalForAll(address indexed owner, address indexed operator, bool approved)'
 ]);
 
 const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
 const APPROVAL_TOPIC = ethers.id('Approval(address,address,uint256)');
-const APPROVAL_FOR_ALL_TOPIC = ethers.id('ApprovalForAll(address,address,bool)');
+const APPROVAL_ALL_TOPIC = ethers.id('ApprovalForAll(address,address,bool)');
 
-// ================= HELPERS =================
-function safeAddr(a) {
-  try { return ethers.getAddress(a); } catch { return a || ''; }
-}
+/* ======================================================
+   HELPERS
+====================================================== */
+const seen = new Set();
 
-function buildEmoji(n) {
+function emoji(n) {
   if (n >= 20) return '🐳🐳🐳🐳';
   if (n >= 10) return '🐳🐳🐳';
-  if (n >= 5) return '🐳🐳';
-  if (n >= 3) return '🐳';
+  if (n >= 5)  return '🐳🐳';
+  if (n >= 3)  return '🐳';
   return '🧹';
 }
 
-function formatTokenIds(ids, max = 25) {
-  const out = ids.slice(0, max).map(i => `#${i}`).join(', ');
+function shortList(ids, max = 25) {
+  const out = ids.slice(0, max).map(id => `#${id}`).join(', ');
   return ids.length > max ? `${out} … +${ids.length - max}` : out;
 }
 
-// ================= DEDUPE =================
-const seenTx = new Set();
-
-// ================= CHANNELS =================
+/* ======================================================
+   CHANNEL ROUTING (same DB mint uses)
+====================================================== */
 async function resolveChannels(client) {
   const out = [];
-  const rows = await client.pg.query(`
+  const r = await client.pg.query(`
     SELECT DISTINCT channel_id
     FROM tracked_tokens
     WHERE channel_id IS NOT NULL AND channel_id <> ''
   `);
 
-  for (const r of rows.rows) {
-    const ch = await client.channels.fetch(r.channel_id).catch(() => null);
+  for (const row of r.rows) {
+    const ch =
+      client.channels.cache.get(row.channel_id) ||
+      await client.channels.fetch(row.channel_id).catch(() => null);
     if (ch?.isTextBased()) out.push(ch);
   }
   return out;
 }
 
-// ================= ANALYSIS =================
-async function analyzeReceipt(provider, txHash) {
-  const receipt = await provider.getTransactionReceipt(txHash).catch(() => null);
-  if (!receipt) return null;
+/* ======================================================
+   ANALYSIS
+====================================================== */
+async function analyzeTx(provider, hash) {
+  const tx = await provider.getTransaction(hash);
+  const rc = await provider.getTransactionReceipt(hash);
+  if (!tx || !rc) return null;
 
-  const tokenIds = [];
-  const sellers = new Set();
-  let approvals = 0;
+  const transfers = [];
+  const approvals = [];
 
-  for (const lg of receipt.logs) {
-    const t0 = lg.topics?.[0];
-
-    // ---- SWEEP ----
-    if (t0 === TRANSFER_TOPIC && lg.topics.length >= 4) {
-      const parsed = ERC721_IFACE.parseLog(lg);
-      if (parsed.args.from !== ethers.ZeroAddress) {
-        tokenIds.push(parsed.args.tokenId.toString());
-        sellers.add(parsed.args.from);
+  for (const log of rc.logs) {
+    if (log.topics[0] === TRANSFER_TOPIC && log.topics.length >= 4) {
+      const p = ERC721.parseLog(log);
+      if (p.args.from !== ethers.ZeroAddress) {
+        transfers.push({
+          tokenId: p.args.tokenId.toString(),
+          to: p.args.to
+        });
       }
-      continue;
     }
 
-    // ---- LISTING ----
-    if (t0 === APPROVAL_TOPIC) {
-      const approved = safeAddr(`0x${lg.topics[2].slice(26)}`);
-      if (approved.toLowerCase() === ENGINE_CONTRACT) approvals++;
-    }
+    if (
+      log.topics[0] === APPROVAL_TOPIC &&
+      log.topics.length >= 4 &&
+      log.topics[2].toLowerCase().endsWith(ENGINE_CONTRACT.slice(2))
+    ) approvals.push(1);
 
-    if (t0 === APPROVAL_FOR_ALL_TOPIC) {
-      const operator = safeAddr(`0x${lg.topics[2].slice(26)}`);
-      const approved = lg.data.endsWith('1');
-      if (approved && operator.toLowerCase() === ENGINE_CONTRACT) approvals++;
+    if (log.topics[0] === APPROVAL_ALL_TOPIC) {
+      const decoded = ethers.AbiCoder.defaultAbiCoder()
+        .decode(['bool'], log.data);
+      if (decoded[0]) approvals.push(1);
     }
   }
 
-  if (tokenIds.length >= 2) {
-    return { type: 'SWEEP', txHash, tokenIds, sellers: [...sellers] };
+  if (transfers.length >= 2) {
+    return { type: 'SWEEP', tx, transfers };
   }
-
-  if (approvals > 0) {
-    return { type: 'LISTING', txHash, approvals };
+  if (approvals.length) {
+    return { type: 'LIST', tx };
   }
-
   return null;
 }
 
-// ================= EMBEDS =================
-async function sendSweep(client, data, channels) {
+/* ======================================================
+   EMBEDS
+====================================================== */
+async function sendSweep(client, data, chans) {
   const embed = {
-    title: `🧹 ENGINE SWEPT – ${data.tokenIds.length} NFTs`,
-    description: `${buildEmoji(data.tokenIds.length)}\n${formatTokenIds(data.tokenIds)}`,
+    title: `🧹 ENGINE SWEPT – ${data.transfers.length} NFTs`,
+    description: `${emoji(data.transfers.length)}\n${shortList(
+      data.transfers.map(t => t.tokenId)
+    )}`,
     image: { url: SWEEP_IMG },
     fields: [
-      { name: 'Seller(s)', value: data.sellers.length > 1 ? 'Multiple' : shortWalletLink(data.sellers[0]), inline: true },
+      { name: 'Buyer', value: shortWalletLink(data.tx.from), inline: true },
       { name: 'Method', value: 'ENGINE', inline: true }
     ],
-    url: `https://basescan.org/tx/${data.txHash}`,
+    url: `https://basescan.org/tx/${data.tx.hash}`,
     color: 0xf1c40f,
     footer: { text: 'Engine Feed • Powered by PimpsDev' },
     timestamp: new Date().toISOString()
   };
 
-  for (const ch of channels) await ch.send({ embeds: [embed] }).catch(() => {});
+  for (const c of chans) await c.send({ embeds: [embed] }).catch(() => {});
 }
 
-async function sendListing(client, data, channels) {
+async function sendList(client, data, chans) {
   const embed = {
     title: '📌 NFT LISTED TO ENGINE',
     description: `Approval granted to Engine`,
     image: { url: SWEEP_IMG },
     fields: [
-      { name: 'Approvals', value: String(data.approvals), inline: true },
+      { name: 'Lister', value: shortWalletLink(data.tx.from), inline: true },
       { name: 'Method', value: 'ENGINE', inline: true }
     ],
-    url: `https://basescan.org/tx/${data.txHash}`,
+    url: `https://basescan.org/tx/${data.tx.hash}`,
     color: 0x2ecc71,
     footer: { text: 'Engine Feed • Powered by PimpsDev' },
     timestamp: new Date().toISOString()
   };
 
-  for (const ch of channels) await ch.send({ embeds: [embed] }).catch(() => {});
+  for (const c of chans) await c.send({ embeds: [embed] }).catch(() => {});
 }
 
-// ================= SCANNER =================
+/* ======================================================
+   MAIN LOOP  ✅ FIXED LOG-BASED SCAN
+====================================================== */
 async function tick(client) {
   const provider = await safeRpcCall('base', p => p);
   if (!provider) return;
 
-  await ensureCheckpointTable(client);
+  await ensureCheckpoint(client);
 
   const latest = await provider.getBlockNumber();
   let last = await getLastBlock(client);
   if (!last) last = latest - 2;
 
-  let from = Math.max(last + 1, latest - LOOKBACK_BLOCKS);
-  let to = Math.min(from + MAX_BLOCKS_PER_TICK, latest);
+  const from = Math.max(last + 1, latest - LOOKBACK);
+  const to = Math.min(latest, from + MAX_BLOCKS);
 
   if (DEBUG) console.log(`[SWEEP] blocks ${from} → ${to}`);
 
-  const channels = await resolveChannels(client);
+  const logs = await provider.getLogs({
+    address: ENGINE_CONTRACT,
+    fromBlock: from,
+    toBlock: to
+  });
 
-  for (let bn = from; bn <= to; bn++) {
-    const block = await provider.getBlock(bn, true).catch(() => null);
-    if (!block?.transactions) continue;
+  const txs = [...new Set(logs.map(l => l.transactionHash))].slice(0, MAX_TXS);
+  const chans = await resolveChannels(client);
 
-    for (const tx of block.transactions.slice(0, MAX_TX_PER_BLOCK)) {
-      if (!tx?.hash || seenTx.has(tx.hash)) continue;
-      seenTx.add(tx.hash);
+  for (const h of txs) {
+    if (seen.has(h)) continue;
+    seen.add(h);
 
-      const res = await analyzeReceipt(provider, tx.hash);
-      if (!res) continue;
+    const res = await analyzeTx(provider, h);
+    if (!res) continue;
 
-      if (DEBUG) console.log(`[SWEEP] MATCH ${res.type} tx=${tx.hash}`);
+    DEBUG && console.log(`[SWEEP] MATCH ${res.type} ${h}`);
 
-      if (res.type === 'SWEEP') await sendSweep(client, res, channels);
-      if (res.type === 'LISTING') await sendListing(client, res, channels);
-    }
+    if (res.type === 'SWEEP') await sendSweep(client, res, chans);
+    if (res.type === 'LIST')  await sendList(client, res, chans);
   }
 
   await setLastBlock(client, to);
 }
 
-// ================= START =================
+/* ======================================================
+   START
+====================================================== */
 function startEngineSweepNotifierBase(client) {
-  if (global._engine_sweep_base) return;
-  global._engine_sweep_base = true;
+  if (global.__engineSweepStarted) return;
+  global.__engineSweepStarted = true;
 
-  console.log('🧹 Engine Sweep notifier started (Base)');
+  console.log('🧹 Engine Sweep notifier started');
 
   if (BOOT_PING) {
-    resolveChannels(client).then(chs =>
-      chs.forEach(ch => ch.send('🧹 Engine Sweep notifier online').catch(() => {}))
-    );
+    resolveChannels(client).then(chs => {
+      for (const ch of chs)
+        ch.send('🧹 Engine Sweep notifier online').catch(() => {});
+    });
   }
 
   tick(client).catch(() => {});
@@ -252,5 +265,4 @@ function startEngineSweepNotifierBase(client) {
 }
 
 module.exports = { startEngineSweepNotifierBase };
-
 
