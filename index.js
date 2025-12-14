@@ -155,16 +155,34 @@ async function onClientReady() {
   console.log('🚀 Client ready — starting services');
 
   // 1️⃣ Swap notifier
-  try { startThirdPartySwapNotifierBase(client); }
-  catch (e) { console.warn('⚠️ swap notifier:', e?.message || e); }
+  try {
+    startThirdPartySwapNotifierBase(client);
+    console.log('✅ Third-party swap notifier started');
+  } catch (e) {
+    console.warn('⚠️ swap notifier:', e?.message || e);
+  }
 
-  // 2️⃣ Engine sweep notifier (AFTER swaps + mint router)
-  try { startEngineSweepNotifierBase(client); }
-  catch (e) { console.warn('⚠️ engine sweep notifier:', e?.message || e); }
+  // ⏳ Delay Engine Sweep to allow:
+  // - PG ready
+  // - channel cache warm
+  // - mintRouter attached
+  setTimeout(() => {
+    try {
+      console.log('🧹 Starting Engine Sweep notifier (delayed)');
+      startEngineSweepNotifierBase(client);
+      console.log('✅ Engine Sweep notifier started');
+    } catch (e) {
+      console.warn('⚠️ engine sweep notifier:', e?.message || e);
+    }
+  }, 5000);
 
-  // 3️⃣ Presence ticker (last)
-  try { startPresenceTicker(client); }
-  catch (e) { console.warn('⚠️ presence ticker:', e?.message || e); }
+  // 3️⃣ Presence ticker
+  try {
+    startPresenceTicker(client);
+    console.log('✅ Presence ticker started');
+  } catch (e) {
+    console.warn('⚠️ presence ticker:', e?.message || e);
+  }
 }
 
 client.once('clientReady', onClientReady);
@@ -196,6 +214,5 @@ async function gracefulShutdown(sig) {
 
 process.once('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.once('SIGINT', () => gracefulShutdown('SIGINT'));
-
 
 
