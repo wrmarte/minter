@@ -8,23 +8,13 @@ const { shortWalletLink } = require('../utils/helpers');
 const ENGINE_CONTRACT =
   '0x0351f7cba83277e891d4a85da498a7eacd764d58'.toLowerCase();
 
-const EXTRA_ROUTERS = (process.env.SWEEP_ROUTERS || '')
-  .split(',')
-  .map(s => s.trim().toLowerCase())
-  .filter(Boolean);
+const POLL_MS     = Number(process.env.SWEEP_POLL_MS || 12000);
+const LOOKBACK    = Number(process.env.SWEEP_LOOKBACK_BLOCKS || 60);
+const MAX_BLOCKS  = Number(process.env.SWEEP_MAX_BLOCKS_PER_TICK || 20);
+const MAX_TXS     = Number(process.env.SWEEP_MAX_TX_PER_TICK || 250);
 
-const ROUTERS_TO_WATCH = Array.from(
-  new Set([ENGINE_CONTRACT, ...EXTRA_ROUTERS])
-);
-
-const POLL_MS  = Number(process.env.SWEEP_POLL_MS || 12000);
-const LOOKBACK = Number(process.env.SWEEP_LOOKBACK_BLOCKS || 60);
-const MAX_BLOCKS = Number(process.env.SWEEP_MAX_BLOCKS_PER_TICK || 20);
-const MAX_TXS = Number(process.env.SWEEP_MAX_TX_PER_TICK || 250);
-
-const DEBUG     = process.env.SWEEP_DEBUG === '1';
-const BOOT_PING = process.env.SWEEP_BOOT_PING === '1';
-const TEST_TX   = (process.env.SWEEP_TEST_TX || '').toLowerCase();
+const DEBUG       = process.env.SWEEP_DEBUG === '1';
+const BOOT_PING   = process.env.SWEEP_BOOT_PING === '1';
 
 const SWEEP_IMG =
   process.env.SWEEP_IMG || 'https://iili.io/3tSecKP.gif';
@@ -66,17 +56,13 @@ async function setLastBlock(client, block) {
 }
 
 /* ======================================================
-   ABI / TOPICS
+   ABI / TOPIC
 ====================================================== */
 const ERC721 = new Interface([
-  'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
-  'event Approval(address indexed owner, address indexed approved, uint256 indexed tokenId)',
-  'event ApprovalForAll(address indexed owner, address indexed operator, bool approved)'
+  'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)'
 ]);
 
 const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
-const APPROVAL_TOPIC = ethers.id('Approval(address,address,uint256)');
-const APPROVAL_ALL_TOPIC = ethers.id('ApprovalForAll(address,address,bool)');
 
 /* ======================================================
    HELPERS
@@ -97,7 +83,7 @@ function shortList(ids, max = 25) {
 }
 
 /* ======================================================
-   CHANNEL ROUTING (same DB mint uses)
+   CHANNEL ROUTING
 ====================================================== */
 async function resolveChannels(client) {
   const out = [];
@@ -117,46 +103,50 @@ async function resolveChannels(client) {
 }
 
 /* ======================================================
-   ANALYSIS
+   TX ANALYSIS  ✅ ENGINE-CUSTODY AWARE
 ====================================================== */
 async function analyzeTx(provider, hash) {
   const tx = await provider.getTransaction(hash);
   const rc = await provider.getTransactionReceipt(hash);
   if (!tx || !rc) return null;
 
-  const transfers = [];
-  const approvals = [];
+  const listed = [];
+  const bought = [];
 
   for (const log of rc.logs) {
-    if (log.topics[0] === TRANSFER_TOPIC && log.topics.length >= 4) {
-      const p = ERC721.parseLog(log);
-      if (p.args.from !== ethers.ZeroAddress) {
-        transfers.push({
-          tokenId: p.args.tokenId.toString(),
-          to: p.args.to
-        });
-      }
+    if (log.topics[0] !== TRANSFER_TOPIC || log.topics.length < 4) continue;
+
+    const from = '0x' + log.topics[1].slice(26).toLowerCase();
+    const to   = '0x' + log.topics[2].slice(26).toLowerCase();
+    const tokenId = BigInt(log.topics[3]).toString();
+
+    // 📌 LIST → NFT sent INTO engine
+    if (to === ENGINE_CONTRACT && from !== ethers.ZeroAddress) {
+      listed.push({ tokenId, from });
     }
 
-    if (
-      log.topics[0] === APPROVAL_TOPIC &&
-      log.topics.length >= 4 &&
-      log.topics[2].toLowerCase().endsWith(ENGINE_CONTRACT.slice(2))
-    ) approvals.push(1);
-
-    if (log.topics[0] === APPROVAL_ALL_TOPIC) {
-      const decoded = ethers.AbiCoder.defaultAbiCoder()
-        .decode(['bool'], log.data);
-      if (decoded[0]) approvals.push(1);
+    // 🧹 BUY / SWEEP → NFT sent OUT of engine
+    if (from === ENGINE_CONTRACT) {
+      bought.push({ tokenId, to });
     }
   }
 
-  if (transfers.length >= 2) {
-    return { type: 'SWEEP', tx, transfers };
+  if (bought.length) {
+    return {
+      type: bought.length > 1 ? 'SWEEP' : 'BUY',
+      tx,
+      transfers: bought
+    };
   }
-  if (approvals.length) {
-    return { type: 'LIST', tx };
+
+  if (listed.length) {
+    return {
+      type: 'LIST',
+      tx,
+      transfers: listed
+    };
   }
+
   return null;
 }
 
@@ -171,7 +161,7 @@ async function sendSweep(client, data, chans) {
     )}`,
     image: { url: SWEEP_IMG },
     fields: [
-      { name: 'Buyer', value: shortWalletLink(data.tx.from), inline: true },
+      { name: 'Buyer', value: shortWalletLink(data.transfers[0].to), inline: true },
       { name: 'Method', value: 'ENGINE', inline: true }
     ],
     url: `https://basescan.org/tx/${data.tx.hash}`,
@@ -186,10 +176,10 @@ async function sendSweep(client, data, chans) {
 async function sendList(client, data, chans) {
   const embed = {
     title: '📌 NFT LISTED TO ENGINE',
-    description: `Approval granted to Engine`,
+    description: `${shortList(data.transfers.map(t => t.tokenId))}`,
     image: { url: SWEEP_IMG },
     fields: [
-      { name: 'Lister', value: shortWalletLink(data.tx.from), inline: true },
+      { name: 'Lister', value: shortWalletLink(data.transfers[0].from), inline: true },
       { name: 'Method', value: 'ENGINE', inline: true }
     ],
     url: `https://basescan.org/tx/${data.tx.hash}`,
@@ -202,7 +192,7 @@ async function sendList(client, data, chans) {
 }
 
 /* ======================================================
-   MAIN LOOP  ✅ FIXED LOG-BASED SCAN
+   MAIN LOOP  ✅ LOG-BASED SCAN
 ====================================================== */
 async function tick(client) {
   const provider = await safeRpcCall('base', p => p);
@@ -215,12 +205,12 @@ async function tick(client) {
   if (!last) last = latest - 2;
 
   const from = Math.max(last + 1, latest - LOOKBACK);
-  const to = Math.min(latest, from + MAX_BLOCKS);
+  const to   = Math.min(latest, from + MAX_BLOCKS);
 
-  if (DEBUG) console.log(`[SWEEP] blocks ${from} → ${to}`);
+  DEBUG && console.log(`[SWEEP] blocks ${from} → ${to}`);
 
   const logs = await provider.getLogs({
-    address: ENGINE_CONTRACT,
+    topics: [TRANSFER_TOPIC],
     fromBlock: from,
     toBlock: to
   });
@@ -237,8 +227,11 @@ async function tick(client) {
 
     DEBUG && console.log(`[SWEEP] MATCH ${res.type} ${h}`);
 
-    if (res.type === 'SWEEP') await sendSweep(client, res, chans);
-    if (res.type === 'LIST')  await sendList(client, res, chans);
+    if (res.type === 'SWEEP' || res.type === 'BUY')
+      await sendSweep(client, res, chans);
+
+    if (res.type === 'LIST')
+      await sendList(client, res, chans);
   }
 
   await setLastBlock(client, to);
@@ -265,4 +258,5 @@ function startEngineSweepNotifierBase(client) {
 }
 
 module.exports = { startEngineSweepNotifierBase };
+
 
