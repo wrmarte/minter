@@ -19,6 +19,9 @@ const MAX_TXS    = Number(process.env.SWEEP_MAX_TX_PER_TICK || 300);
 const DEBUG     = process.env.SWEEP_DEBUG === '1';
 const BOOT_PING = process.env.SWEEP_BOOT_PING === '1';
 
+// 🔥 one-time reset helper (SET TO false AFTER FIRST MATCH)
+const FORCE_RESET_SWEEP = true;
+
 const SWEEP_IMG =
   process.env.SWEEP_IMG || 'https://iili.io/3tSecKP.gif';
 
@@ -168,9 +171,9 @@ async function analyzeTx(provider, hash) {
 
       const from = decoded[1].toLowerCase();
       const to   = decoded[2].toLowerCase();
-      const tokenIds = decoded[3].map(id => id.toString());
 
-      for (const tokenId of tokenIds) {
+      for (const id of decoded[3]) {
+        const tokenId = id.toString();
         if (to === ENGINE_CONTRACT) {
           listed.push({ tokenId, from });
         }
@@ -242,37 +245,55 @@ async function sendList(client, data, chans) {
 }
 
 /* ======================================================
-   MAIN LOOP (INDEXED TOPIC FILTERED)
+   MAIN LOOP (CORRECT INDEXED FILTERING)
 ====================================================== */
 async function tick(client) {
-const latest = await provider.getBlockNumber();
-let last;
+  const provider = await safeRpcCall('base', p => p);
+  if (!provider) return;
 
-if (FORCE_RESET_SWEEP) {
-  last = latest - 5;
-  await setLastBlock(client, last);
-  console.log('🧹 [SWEEP] checkpoint force-reset');
-} else {
-  last = await getLastBlock(client);
-  if (!last) last = latest - 5;
-}
+  await ensureCheckpoint(client);
 
-const from = Math.max(last + 1, latest - LOOKBACK);
-const to   = Math.min(latest, from + MAX_BLOCKS);
+  const latest = await provider.getBlockNumber();
+  let last;
 
-DEBUG && console.log(`[SWEEP] blocks ${from} → ${to}`);
+  if (FORCE_RESET_SWEEP) {
+    last = latest - 5;
+    await setLastBlock(client, last);
+    console.log('🧹 [SWEEP] checkpoint force-reset');
+  } else {
+    last = await getLastBlock(client);
+    if (!last) last = latest - 5;
+  }
 
-const logs = await provider.getLogs({
-  topics: [
-    [ERC721_TRANSFER, ERC1155_SINGLE, ERC1155_BATCH],
-    [ENGINE_TOPIC, null],
-    [ENGINE_TOPIC, null]
-  ],
-  fromBlock: from,
-  toBlock: to
-});
+  const from = Math.max(last + 1, latest - LOOKBACK);
+  const to   = Math.min(latest, from + MAX_BLOCKS);
 
+  DEBUG && console.log(`[SWEEP] blocks ${from} → ${to}`);
 
+  // ----- ERC721 -----
+  const logs721 = await provider.getLogs({
+    topics: [
+      [ERC721_TRANSFER],
+      [ENGINE_TOPIC, null],
+      [ENGINE_TOPIC, null]
+    ],
+    fromBlock: from,
+    toBlock: to
+  });
+
+  // ----- ERC1155 -----
+  const logs1155 = await provider.getLogs({
+    topics: [
+      [ERC1155_SINGLE, ERC1155_BATCH],
+      null,
+      [ENGINE_TOPIC, null],
+      [ENGINE_TOPIC, null]
+    ],
+    fromBlock: from,
+    toBlock: to
+  });
+
+  const logs = [...logs721, ...logs1155];
   const txs = [...new Set(logs.map(l => l.transactionHash))].slice(0, MAX_TXS);
   const chans = await resolveChannels(client);
 
@@ -285,9 +306,7 @@ const logs = await provider.getLogs({
 
     DEBUG && console.log(`[SWEEP] MATCH ${res.type} ${h}`);
 
-    if (res.type === 'LIST')
-      await sendList(client, res, chans);
-
+    if (res.type === 'LIST')  await sendList(client, res, chans);
     if (res.type === 'BUY' || res.type === 'SWEEP')
       await sendSweep(client, res, chans);
   }
