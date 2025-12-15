@@ -1,4 +1,4 @@
-const { Interface, ethers } = require('ethers');
+const { ethers } = require('ethers');
 const { safeRpcCall } = require('./providerM');
 const { shortWalletLink } = require('../utils/helpers');
 
@@ -8,13 +8,16 @@ const { shortWalletLink } = require('../utils/helpers');
 const ENGINE_CONTRACT =
   '0x0351f7cba83277e891d4a85da498a7eacd764d58'.toLowerCase();
 
-const POLL_MS     = Number(process.env.SWEEP_POLL_MS || 12000);
-const LOOKBACK    = Number(process.env.SWEEP_LOOKBACK_BLOCKS || 80);
-const MAX_BLOCKS  = Number(process.env.SWEEP_MAX_BLOCKS_PER_TICK || 25);
-const MAX_TXS     = Number(process.env.SWEEP_MAX_TX_PER_TICK || 300);
+const ENGINE_TOPIC =
+  '0x000000000000000000000000' + ENGINE_CONTRACT.slice(2);
 
-const DEBUG       = process.env.SWEEP_DEBUG === '1';
-const BOOT_PING   = process.env.SWEEP_BOOT_PING === '1';
+const POLL_MS    = Number(process.env.SWEEP_POLL_MS || 12000);
+const LOOKBACK   = Number(process.env.SWEEP_LOOKBACK_BLOCKS || 80);
+const MAX_BLOCKS = Number(process.env.SWEEP_MAX_BLOCKS_PER_TICK || 25);
+const MAX_TXS    = Number(process.env.SWEEP_MAX_TX_PER_TICK || 300);
+
+const DEBUG     = process.env.SWEEP_DEBUG === '1';
+const BOOT_PING = process.env.SWEEP_BOOT_PING === '1';
 
 const SWEEP_IMG =
   process.env.SWEEP_IMG || 'https://iili.io/3tSecKP.gif';
@@ -109,11 +112,11 @@ async function resolveChannels(client) {
 }
 
 /* ======================================================
-   TX ANALYSIS (ERC721 + ERC1155, ENGINE CUSTODY)
+   TX ANALYSIS (ENGINE CUSTODY)
 ====================================================== */
 async function analyzeTx(provider, hash) {
-  const tx = await provider.getTransaction(hash);
   const rc = await provider.getTransactionReceipt(hash);
+  const tx = await provider.getTransaction(hash);
   if (!tx || !rc) return null;
 
   const listed = [];
@@ -121,7 +124,7 @@ async function analyzeTx(provider, hash) {
 
   for (const log of rc.logs) {
 
-    // ===== ERC721 =====
+    // ---------- ERC721 ----------
     if (log.topics[0] === ERC721_TRANSFER && log.topics.length >= 4) {
       const from = '0x' + log.topics[1].slice(26).toLowerCase();
       const to   = '0x' + log.topics[2].slice(26).toLowerCase();
@@ -136,7 +139,7 @@ async function analyzeTx(provider, hash) {
       }
     }
 
-    // ===== ERC1155 SINGLE =====
+    // ---------- ERC1155 SINGLE ----------
     if (log.topics[0] === ERC1155_SINGLE) {
       const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
         ['address','address','address','uint256','uint256'],
@@ -156,7 +159,7 @@ async function analyzeTx(provider, hash) {
       }
     }
 
-    // ===== ERC1155 BATCH =====
+    // ---------- ERC1155 BATCH ----------
     if (log.topics[0] === ERC1155_BATCH) {
       const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
         ['address','address','address','uint256[]','uint256[]'],
@@ -239,7 +242,7 @@ async function sendList(client, data, chans) {
 }
 
 /* ======================================================
-   MAIN LOOP
+   MAIN LOOP (INDEXED TOPIC FILTERED)
 ====================================================== */
 async function tick(client) {
   const provider = await safeRpcCall('base', p => p);
@@ -247,9 +250,9 @@ async function tick(client) {
 
   await ensureCheckpoint(client);
 
-const latest = await provider.getBlockNumber();
-let last = latest - 100;
-
+  const latest = await provider.getBlockNumber();
+  let last = await getLastBlock(client);
+  if (!last) last = latest - 5;
 
   const from = Math.max(last + 1, latest - LOOKBACK);
   const to   = Math.min(latest, from + MAX_BLOCKS);
@@ -257,7 +260,11 @@ let last = latest - 100;
   DEBUG && console.log(`[SWEEP] blocks ${from} → ${to}`);
 
   const logs = await provider.getLogs({
-    topics: [[ERC721_TRANSFER, ERC1155_SINGLE, ERC1155_BATCH]],
+    topics: [
+      [ERC721_TRANSFER, ERC1155_SINGLE, ERC1155_BATCH],
+      [ENGINE_TOPIC, null],
+      [ENGINE_TOPIC, null]
+    ],
     fromBlock: from,
     toBlock: to
   });
@@ -274,11 +281,11 @@ let last = latest - 100;
 
     DEBUG && console.log(`[SWEEP] MATCH ${res.type} ${h}`);
 
-    if (res.type === 'SWEEP' || res.type === 'BUY')
-      await sendSweep(client, res, chans);
-
     if (res.type === 'LIST')
       await sendList(client, res, chans);
+
+    if (res.type === 'BUY' || res.type === 'SWEEP')
+      await sendSweep(client, res, chans);
   }
 
   await setLastBlock(client, to);
