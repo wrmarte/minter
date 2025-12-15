@@ -247,9 +247,9 @@ async function tick(client) {
 
   await ensureCheckpoint(client);
 
-  const latest = await provider.getBlockNumber();
-  let last = await getLastBlock(client);
-  if (!last) last = latest - 5;
+const latest = await provider.getBlockNumber();
+let last = latest - 100;
+
 
   const from = Math.max(last + 1, latest - LOOKBACK);
   const to   = Math.min(latest, from + MAX_BLOCKS);
