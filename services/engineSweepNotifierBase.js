@@ -9,9 +9,9 @@ const ENGINE_CONTRACT =
   '0x0351f7cba83277e891d4a85da498a7eacd764d58'.toLowerCase();
 
 const POLL_MS     = Number(process.env.SWEEP_POLL_MS || 12000);
-const LOOKBACK    = Number(process.env.SWEEP_LOOKBACK_BLOCKS || 60);
-const MAX_BLOCKS  = Number(process.env.SWEEP_MAX_BLOCKS_PER_TICK || 20);
-const MAX_TXS     = Number(process.env.SWEEP_MAX_TX_PER_TICK || 250);
+const LOOKBACK    = Number(process.env.SWEEP_LOOKBACK_BLOCKS || 80);
+const MAX_BLOCKS  = Number(process.env.SWEEP_MAX_BLOCKS_PER_TICK || 25);
+const MAX_TXS     = Number(process.env.SWEEP_MAX_TX_PER_TICK || 300);
 
 const DEBUG       = process.env.SWEEP_DEBUG === '1';
 const BOOT_PING   = process.env.SWEEP_BOOT_PING === '1';
@@ -56,13 +56,19 @@ async function setLastBlock(client, block) {
 }
 
 /* ======================================================
-   ABI / TOPIC
+   EVENT TOPICS
 ====================================================== */
-const ERC721 = new Interface([
-  'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)'
-]);
+const ERC721_TRANSFER = ethers.id(
+  'Transfer(address,address,uint256)'
+);
 
-const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
+const ERC1155_SINGLE = ethers.id(
+  'TransferSingle(address,address,address,uint256,uint256)'
+);
+
+const ERC1155_BATCH = ethers.id(
+  'TransferBatch(address,address,address,uint256[],uint256[])'
+);
 
 /* ======================================================
    HELPERS
@@ -103,7 +109,7 @@ async function resolveChannels(client) {
 }
 
 /* ======================================================
-   TX ANALYSIS  ✅ ENGINE-CUSTODY AWARE
+   TX ANALYSIS (ERC721 + ERC1155, ENGINE CUSTODY)
 ====================================================== */
 async function analyzeTx(provider, hash) {
   const tx = await provider.getTransaction(hash);
@@ -114,20 +120,61 @@ async function analyzeTx(provider, hash) {
   const bought = [];
 
   for (const log of rc.logs) {
-    if (log.topics[0] !== TRANSFER_TOPIC || log.topics.length < 4) continue;
 
-    const from = '0x' + log.topics[1].slice(26).toLowerCase();
-    const to   = '0x' + log.topics[2].slice(26).toLowerCase();
-    const tokenId = BigInt(log.topics[3]).toString();
+    // ===== ERC721 =====
+    if (log.topics[0] === ERC721_TRANSFER && log.topics.length >= 4) {
+      const from = '0x' + log.topics[1].slice(26).toLowerCase();
+      const to   = '0x' + log.topics[2].slice(26).toLowerCase();
+      const tokenId = BigInt(log.topics[3]).toString();
 
-    // 📌 LIST → NFT sent INTO engine
-    if (to === ENGINE_CONTRACT && from !== ethers.ZeroAddress) {
-      listed.push({ tokenId, from });
+      if (to === ENGINE_CONTRACT && from !== ethers.ZeroAddress) {
+        listed.push({ tokenId, from });
+      }
+
+      if (from === ENGINE_CONTRACT) {
+        bought.push({ tokenId, to });
+      }
     }
 
-    // 🧹 BUY / SWEEP → NFT sent OUT of engine
-    if (from === ENGINE_CONTRACT) {
-      bought.push({ tokenId, to });
+    // ===== ERC1155 SINGLE =====
+    if (log.topics[0] === ERC1155_SINGLE) {
+      const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
+        ['address','address','address','uint256','uint256'],
+        log.data
+      );
+
+      const from = decoded[1].toLowerCase();
+      const to   = decoded[2].toLowerCase();
+      const tokenId = decoded[3].toString();
+
+      if (to === ENGINE_CONTRACT) {
+        listed.push({ tokenId, from });
+      }
+
+      if (from === ENGINE_CONTRACT) {
+        bought.push({ tokenId, to });
+      }
+    }
+
+    // ===== ERC1155 BATCH =====
+    if (log.topics[0] === ERC1155_BATCH) {
+      const decoded = ethers.AbiCoder.defaultAbiCoder().decode(
+        ['address','address','address','uint256[]','uint256[]'],
+        log.data
+      );
+
+      const from = decoded[1].toLowerCase();
+      const to   = decoded[2].toLowerCase();
+      const tokenIds = decoded[3].map(id => id.toString());
+
+      for (const tokenId of tokenIds) {
+        if (to === ENGINE_CONTRACT) {
+          listed.push({ tokenId, from });
+        }
+        if (from === ENGINE_CONTRACT) {
+          bought.push({ tokenId, to });
+        }
+      }
     }
   }
 
@@ -176,7 +223,7 @@ async function sendSweep(client, data, chans) {
 async function sendList(client, data, chans) {
   const embed = {
     title: '📌 NFT LISTED TO ENGINE',
-    description: `${shortList(data.transfers.map(t => t.tokenId))}`,
+    description: shortList(data.transfers.map(t => t.tokenId)),
     image: { url: SWEEP_IMG },
     fields: [
       { name: 'Lister', value: shortWalletLink(data.transfers[0].from), inline: true },
@@ -192,7 +239,7 @@ async function sendList(client, data, chans) {
 }
 
 /* ======================================================
-   MAIN LOOP  ✅ LOG-BASED SCAN
+   MAIN LOOP
 ====================================================== */
 async function tick(client) {
   const provider = await safeRpcCall('base', p => p);
@@ -202,7 +249,7 @@ async function tick(client) {
 
   const latest = await provider.getBlockNumber();
   let last = await getLastBlock(client);
-  if (!last) last = latest - 2;
+  if (!last) last = latest - 5;
 
   const from = Math.max(last + 1, latest - LOOKBACK);
   const to   = Math.min(latest, from + MAX_BLOCKS);
@@ -210,7 +257,7 @@ async function tick(client) {
   DEBUG && console.log(`[SWEEP] blocks ${from} → ${to}`);
 
   const logs = await provider.getLogs({
-    topics: [TRANSFER_TOPIC],
+    topics: [[ERC721_TRANSFER, ERC1155_SINGLE, ERC1155_BATCH]],
     fromBlock: from,
     toBlock: to
   });
@@ -258,5 +305,4 @@ function startEngineSweepNotifierBase(client) {
 }
 
 module.exports = { startEngineSweepNotifierBase };
-
 
