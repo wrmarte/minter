@@ -245,29 +245,33 @@ async function sendList(client, data, chans) {
    MAIN LOOP (INDEXED TOPIC FILTERED)
 ====================================================== */
 async function tick(client) {
-  const provider = await safeRpcCall('base', p => p);
-  if (!provider) return;
+const latest = await provider.getBlockNumber();
+let last;
 
-  await ensureCheckpoint(client);
-
-  const latest = await provider.getBlockNumber();
-  let last = await getLastBlock(client);
+if (FORCE_RESET_SWEEP) {
+  last = latest - 5;
+  await setLastBlock(client, last);
+  console.log('🧹 [SWEEP] checkpoint force-reset');
+} else {
+  last = await getLastBlock(client);
   if (!last) last = latest - 5;
+}
 
-  const from = Math.max(last + 1, latest - LOOKBACK);
-  const to   = Math.min(latest, from + MAX_BLOCKS);
+const from = Math.max(last + 1, latest - LOOKBACK);
+const to   = Math.min(latest, from + MAX_BLOCKS);
 
-  DEBUG && console.log(`[SWEEP] blocks ${from} → ${to}`);
+DEBUG && console.log(`[SWEEP] blocks ${from} → ${to}`);
 
-  const logs = await provider.getLogs({
-    topics: [
-      [ERC721_TRANSFER, ERC1155_SINGLE, ERC1155_BATCH],
-      [ENGINE_TOPIC, null],
-      [ENGINE_TOPIC, null]
-    ],
-    fromBlock: from,
-    toBlock: to
-  });
+const logs = await provider.getLogs({
+  topics: [
+    [ERC721_TRANSFER, ERC1155_SINGLE, ERC1155_BATCH],
+    [ENGINE_TOPIC, null],
+    [ENGINE_TOPIC, null]
+  ],
+  fromBlock: from,
+  toBlock: to
+});
+
 
   const txs = [...new Set(logs.map(l => l.transactionHash))].slice(0, MAX_TXS);
   const chans = await resolveChannels(client);
