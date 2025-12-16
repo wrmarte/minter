@@ -2,9 +2,6 @@ const { Interface, ethers } = require("ethers");
 const { safeRpcCall } = require("./providerM");
 const { shortWalletLink } = require("../utils/helpers");
 
-/* 🔥 SWEEP-POWER PATCH (ADD ONLY) */
-const { initSweepPower, applySweepPower } = require("./sweepPower");
-
 /* ======================================================
    CONFIG
 ====================================================== */
@@ -148,6 +145,7 @@ async function buildTokenAmountString(provider, tokenAddr, amountBN) {
     const amt = ethers.formatUnits(amountBN, info.decimals);
     return `${fmtNumber(amt)} ${info.symbol}`;
   }
+  // fallback
   return `${fmtNumber(ethers.formatUnits(amountBN, 18))} TOKEN`;
 }
 
@@ -173,7 +171,6 @@ async function resolveChannels(client) {
   if (DEBUG) console.log(`[SWEEP] channels(test guild)=${out.length}`);
   return out;
 }
-
 
 /* ======================================================
    ANALYZE TX (USER LIST + USER BUY ONLY)
@@ -381,7 +378,9 @@ async function sendEmbed(client, provider, data, chans) {
   }
 }
 
-
+/* ======================================================
+   MAIN LOOP (WORKING SCAN: engine + approvals)
+====================================================== */
 async function tick(client) {
   const provider = await safeRpcCall("base", (p) => p);
   if (!provider) return;
@@ -402,6 +401,8 @@ async function tick(client) {
   const from = Math.max(last + 1, latest - LOOKBACK);
   const to = Math.min(latest, from + MAX_BLOCKS);
 
+  DEBUG && console.log(`[SWEEP] blocks ${from} → ${to}`);
+
   const engineLogs = await provider
     .getLogs({ address: ENGINE_CONTRACT, fromBlock: from, toBlock: to })
     .catch(() => []);
@@ -414,19 +415,19 @@ async function tick(client) {
     .getLogs({ fromBlock: from, toBlock: to, topics: [T_ERC721_APPROVAL_ALL, null, ENGINE_TOPIC] })
     .catch(() => []);
 
-  /* 🔥 FIX: also scan ERC721 Transfer logs so real buys are not missed */
-  const nftTransferLogs = await provider
-    .getLogs({ fromBlock: from, toBlock: to, topics: [T_ERC721_TRANSFER] })
-    .catch(() => []);
-
   const merged = [
-    ...engineLogs.map(l => l.transactionHash),
-    ...approvalLogs.map(l => l.transactionHash),
-    ...approvalAllLogs.map(l => l.transactionHash),
-    ...nftTransferLogs.map(l => l.transactionHash)
+    ...engineLogs.map((l) => l.transactionHash),
+    ...approvalLogs.map((l) => l.transactionHash),
+    ...approvalAllLogs.map((l) => l.transactionHash)
   ];
 
   const txs = [...new Set(merged)].slice(0, MAX_TXS);
+
+  DEBUG &&
+    console.log(
+      `[SWEEP] logs engine=${engineLogs.length} approval=${approvalLogs.length} approvalAll=${approvalAllLogs.length} txs=${txs.length}`
+    );
+
   const chans = await resolveChannels(client);
 
   for (const h of txs) {
@@ -436,13 +437,8 @@ async function tick(client) {
     const res = await analyzeTx(provider, h);
     if (!res) continue;
 
-    /* ✅ ORIGINAL NOTIFICATION */
+    // ✅ only user LIST + user BUY already enforced in analyzeTx
     await sendEmbed(client, provider, res, chans);
-
-    /* 🔥 SWEEP-POWER PATCH (ADD ONLY, NON-BLOCKING) */
-    applySweepPower(client, chans, res, {
-      scope: `guild:${TEST_GUILD_ID}`
-    }).catch(() => {});
   }
 
   await setLastBlock(client, to);
@@ -457,9 +453,7 @@ function startEngineSweepNotifierBase(client) {
 
   console.log("🧹 Engine Sweep notifier started (TEST SERVER ONLY)");
 
-  /* 🔥 SWEEP-POWER INIT (ADD ONLY) */
-  initSweepPower(client).catch(() => {});
-
+  // ✅ run immediately
   tick(client).catch(() => {});
   setInterval(() => tick(client).catch(() => {}), POLL_MS);
 }
