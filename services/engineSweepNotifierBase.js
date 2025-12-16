@@ -2,7 +2,7 @@ const { Interface, ethers } = require("ethers");
 const { safeRpcCall } = require("./providerM");
 const { shortWalletLink } = require("../utils/helpers");
 
-/* 🔥 SWEEP-POWER PATCH (ADD ONLY) */
+/* 🔥 PATCH: sweep-power sidecar */
 const { initSweepPower, applySweepPower } = require("./sweepPower");
 
 /* ======================================================
@@ -387,7 +387,6 @@ async function tick(client) {
   if (!provider) return;
 
   await ensureCheckpoint(client);
-
   const latest = await provider.getBlockNumber();
 
   if (FORCE_RESET_SWEEP && !global.__engineSweepResetDone) {
@@ -402,6 +401,8 @@ async function tick(client) {
   const from = Math.max(last + 1, latest - LOOKBACK);
   const to = Math.min(latest, from + MAX_BLOCKS);
 
+  DEBUG && console.log(`[SWEEP] blocks ${from} → ${to}`);
+
   const engineLogs = await provider
     .getLogs({ address: ENGINE_CONTRACT, fromBlock: from, toBlock: to })
     .catch(() => []);
@@ -414,13 +415,25 @@ async function tick(client) {
     .getLogs({ fromBlock: from, toBlock: to, topics: [T_ERC721_APPROVAL_ALL, null, ENGINE_TOPIC] })
     .catch(() => []);
 
+  /* 🔥 PATCH: capture REAL buys (ERC721 transfers) */
+  const nftTransferLogs = await provider
+    .getLogs({ fromBlock: from, toBlock: to, topics: [T_ERC721_TRANSFER] })
+    .catch(() => []);
+
   const merged = [
     ...engineLogs.map(l => l.transactionHash),
     ...approvalLogs.map(l => l.transactionHash),
-    ...approvalAllLogs.map(l => l.transactionHash)
+    ...approvalAllLogs.map(l => l.transactionHash),
+    ...nftTransferLogs.map(l => l.transactionHash) // 🔥 PATCH
   ];
 
   const txs = [...new Set(merged)].slice(0, MAX_TXS);
+
+  DEBUG &&
+    console.log(
+      `[SWEEP] logs engine=${engineLogs.length} approval=${approvalLogs.length} approvalAll=${approvalAllLogs.length} nft=${nftTransferLogs.length} txs=${txs.length}`
+    );
+
   const chans = await resolveChannels(client);
 
   for (const h of txs) {
@@ -430,10 +443,9 @@ async function tick(client) {
     const res = await analyzeTx(provider, h);
     if (!res) continue;
 
-    /* ✅ ORIGINAL NOTIFICATION */
     await sendEmbed(client, provider, res, chans);
 
-    /* 🔥 SWEEP-POWER PATCH (ADD ONLY, NON-BLOCKING) */
+    /* 🔥 PATCH: sweep-power piggy-bank */
     applySweepPower(client, chans, res, {
       scope: `guild:${TEST_GUILD_ID}`
     }).catch(() => {});
@@ -451,7 +463,7 @@ function startEngineSweepNotifierBase(client) {
 
   console.log("🧹 Engine Sweep notifier started (TEST SERVER ONLY)");
 
-  /* 🔥 SWEEP-POWER INIT (ADD ONLY) */
+  /* 🔥 PATCH: init sweep-power once */
   initSweepPower(client).catch(() => {});
 
   tick(client).catch(() => {});
@@ -459,5 +471,6 @@ function startEngineSweepNotifierBase(client) {
 }
 
 module.exports = { startEngineSweepNotifierBase };
+
 
 
