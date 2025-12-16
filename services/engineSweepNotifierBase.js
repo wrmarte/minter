@@ -174,19 +174,214 @@ async function resolveChannels(client) {
   return out;
 }
 
-/* ======================================================
-   ANALYZE TX
-====================================================== */
-/* ❗ UNCHANGED — EXACTLY AS PROVIDED */
 
 /* ======================================================
-   EMBEDS
+   ANALYZE TX (USER LIST + USER BUY ONLY)
+   - LIST: approval to engine (and possibly escrow transfer to engine)
+   - BUY: buyer != engine
 ====================================================== */
-/* ❗ UNCHANGED — EXACTLY AS PROVIDED */
+async function analyzeTx(provider, hash) {
+  const tx = await provider.getTransaction(hash);
+  const rc = await provider.getTransactionReceipt(hash);
+  if (!tx || !rc) return null;
+
+  let nft = null;
+  let tokenId = null;
+
+  let buyer = null;
+  let seller = null;
+
+  let approvedToEngine = false;
+
+  let ethPaid = tx.value && tx.value > 0n ? tx.value : 0n;
+
+  // payments:
+  // - tokenPayment: token transfer to seller (for BUY)
+  // - listPayment: token transfer seller -> engine (heuristic list price)
+  let tokenPayment = null;
+  let listPayment = null;
+
+  /* ---------- PASS 1: Find any ERC721 transfers (source of truth for tokenId) ---------- */
+  // Prefer the transfer that goes TO engine (escrow) OR any transfer that indicates sale.
+  for (const log of rc.logs) {
+    if (log.topics?.[0] !== T_ERC721_TRANSFER || log.topics.length < 4) continue;
+
+    const from = ("0x" + log.topics[1].slice(26)).toLowerCase();
+    const to = ("0x" + log.topics[2].slice(26)).toLowerCase();
+    const id = BigInt(log.topics[3]).toString();
+    const addr = log.address.toLowerCase();
+
+    // Keep first seen; override if it’s the escrow transfer to engine (best for listing)
+    if (!nft) {
+      nft = addr;
+      tokenId = id;
+      seller = from;
+      buyer = to;
+    } else if (to === ENGINE_CONTRACT) {
+      nft = addr;
+      tokenId = id;
+      seller = from;
+      buyer = to;
+    }
+  }
+
+  /* ---------- PASS 2: approvals (LIST signal) ---------- */
+  for (const log of rc.logs) {
+    const t0 = log.topics?.[0];
+
+    if (t0 === T_ERC721_APPROVAL && log.topics.length >= 4) {
+      const approved = ("0x" + log.topics[2].slice(26)).toLowerCase();
+      if (approved === ENGINE_CONTRACT) {
+        approvedToEngine = true;
+        nft = nft || log.address.toLowerCase();
+
+        // approval includes tokenId, use as fallback if we still don’t have one
+        if (!tokenId) {
+          try { tokenId = BigInt(log.topics[3]).toString(); } catch {}
+        }
+      }
+      continue;
+    }
+
+    if (t0 === T_ERC721_APPROVAL_ALL && log.topics.length >= 3) {
+      const operator = ("0x" + log.topics[2].slice(26)).toLowerCase();
+      if (operator === ENGINE_CONTRACT) {
+        // only true approvals
+        let ok = false;
+        try {
+          ok = ethers.AbiCoder.defaultAbiCoder().decode(["bool"], log.data)?.[0];
+        } catch {}
+        if (ok) {
+          approvedToEngine = true;
+          nft = nft || log.address.toLowerCase();
+        }
+      }
+      continue;
+    }
+  }
+
+  /* ---------- PASS 3: ERC20 transfers (price heuristics) ---------- */
+  for (const log of rc.logs) {
+    if (log.topics?.[0] !== T_ERC20_TRANSFER || log.topics.length < 3) continue;
+
+    const from = ("0x" + log.topics[1].slice(26)).toLowerCase();
+    const to = ("0x" + log.topics[2].slice(26)).toLowerCase();
+
+    let parsed;
+    try { parsed = ERC20.parseLog(log); } catch { continue; }
+
+    // BUY price heuristic: token -> seller
+    if (seller && to === seller) {
+      tokenPayment = { token: log.address.toLowerCase(), amount: parsed.args.value };
+    }
+
+    // LIST price heuristic: seller -> engine (if approval happened)
+    if (approvedToEngine && seller && from === seller && to === ENGINE_CONTRACT) {
+      listPayment = { token: log.address.toLowerCase(), amount: parsed.args.value };
+    }
+  }
+
+  /* ---------- CLASSIFICATION ---------- */
+
+  // If we have approval AND buyer is engine OR no transfer buyer known -> LIST
+  // (this catches: approval only, and approval+escrow transfer)
+  if (approvedToEngine && (!buyer || buyer === ENGINE_CONTRACT)) {
+    // treat seller as tx.from if missing
+    const listSeller = (seller || tx.from || "").toLowerCase();
+
+    // Must have tokenId to post a good embed (else skip)
+    if (!tokenId) return null;
+
+    return {
+      type: "LIST",
+      nft,
+      tokenId,
+      seller: listSeller,
+      listPayment,
+      tx
+    };
+  }
+
+  // USER BUY ONLY: buyer exists and is NOT engine
+  if (buyer && buyer !== ENGINE_CONTRACT) {
+    if (!tokenId) return null;
+
+    return {
+      type: "BUY",
+      nft,
+      tokenId,
+      buyer,
+      seller: (seller || "").toLowerCase(),
+      ethPaid,
+      tokenPayment,
+      tx
+    };
+  }
+
+  return null;
+}
 
 /* ======================================================
-   MAIN LOOP
+   EMBEDS (POLISHED)
 ====================================================== */
+async function sendEmbed(client, provider, data, chans) {
+  if (!data?.tokenId || !data?.nft) return;
+
+  const name = await safeName(provider, data.nft);
+  const thumb = await safeThumb(provider, data.nft, data.tokenId);
+
+  const fields = [];
+
+  if (data.type === "LIST") {
+    const price = data.listPayment
+      ? await buildTokenAmountString(provider, data.listPayment.token, data.listPayment.amount)
+      : "N/A (Engine order)";
+
+    fields.push(
+      { name: "List Price", value: price, inline: false },
+      { name: "Seller", value: shortWalletLink(data.seller), inline: false },
+      { name: "Method", value: "ENGINE", inline: false }
+    );
+  }
+
+  if (data.type === "BUY") {
+    let price = "N/A";
+
+    if (data.ethPaid && data.ethPaid > 0n) {
+      price = `${fmtNumber(ethers.formatEther(data.ethPaid))} ETH`;
+    } else if (data.tokenPayment) {
+      price = await buildTokenAmountString(provider, data.tokenPayment.token, data.tokenPayment.amount);
+    }
+
+    fields.push(
+      { name: "Sale Price", value: price, inline: false },
+      { name: "Buyer", value: shortWalletLink(data.buyer), inline: false },
+      { name: "Seller", value: shortWalletLink(data.seller), inline: false },
+      { name: "Method", value: "ENGINE", inline: false }
+    );
+  }
+
+  const embed = {
+    title:
+      data.type === "LIST"
+        ? `📌 ${name} #${data.tokenId} — LISTED`
+        : `🛒 ${name} #${data.tokenId} — SOLD`,
+    fields,
+    url: `https://basescan.org/tx/${data.tx.hash}`,
+    color: data.type === "LIST" ? 0x2ecc71 : 0xf1c40f,
+    footer: { text: "AdrianEngine • Powered by PimpsDev" },
+    timestamp: new Date().toISOString()
+  };
+
+  // ✅ top-right thumbnail only
+  if (thumb) embed.thumbnail = { url: thumb };
+
+  for (const c of chans) {
+    await c.send({ embeds: [embed] }).catch(() => {});
+  }
+}
+
+
 async function tick(client) {
   const provider = await safeRpcCall("base", (p) => p);
   if (!provider) return;
