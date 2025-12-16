@@ -8,15 +8,11 @@ const { shortWalletLink } = require("../utils/helpers");
 const ENGINE_CONTRACT =
   "0x0351f7cba83277e891d4a85da498a7eacd764d58".toLowerCase();
 
-// 🔒 TEST SERVER ONLY
+// 🔒 TEST SERVER ONLY (TEMP)
 const TEST_GUILD_ID = "1109969059497386054";
 
 const POLL_MS = Number(process.env.SWEEP_POLL_MS || 12000);
 const LOOKBACK = 80;
-const MAX_BLOCKS = 25;
-const MAX_TXS = 150;
-
-const DEBUG = process.env.SWEEP_DEBUG === "1";
 
 /* ======================================================
    ABIs / TOPICS
@@ -41,37 +37,11 @@ const T_ERC721_APPROVAL_ALL = ethers.id("ApprovalForAll(address,address,bool)");
 const T_ERC20_TRANSFER = ethers.id("Transfer(address,address,uint256)");
 
 /* ======================================================
-   TIMEOUT GUARD
-====================================================== */
-function withTimeout(p, ms = 7000) {
-  return Promise.race([
-    p,
-    new Promise((_, r) => setTimeout(() => r(new Error("timeout")), ms))
-  ]);
-}
-
-/* ======================================================
-   CACHES
-====================================================== */
-const nameCache = new Map();
-const tokenCache = new Map();
-
-/* ======================================================
    HELPERS
 ====================================================== */
-function fmt(x) {
-  const [a, b] = String(x).split(".");
-  return b ? `${a.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${b}` : a;
-}
-
 async function safeName(provider, addr) {
-  if (nameCache.has(addr)) return nameCache.get(addr);
   try {
-    const n = await withTimeout(
-      new ethers.Contract(addr, ERC721, provider).name()
-    );
-    nameCache.set(addr, n);
-    return n;
+    return await new ethers.Contract(addr, ERC721, provider).name();
   } catch {
     return "NFT";
   }
@@ -79,21 +49,15 @@ async function safeName(provider, addr) {
 
 async function safeThumb(provider, addr, id) {
   try {
-    let uri = await withTimeout(
-      new ethers.Contract(addr, ERC721, provider).tokenURI(id)
-    );
-    if (!uri) return null;
-
+    let uri = await new ethers.Contract(addr, ERC721, provider).tokenURI(id);
     if (uri.startsWith("ipfs://"))
       uri = "https://ipfs.io/ipfs/" + uri.slice(7);
 
-    const r = await withTimeout(fetch(uri));
+    const r = await fetch(uri);
     const j = await r.json();
 
     let img = j.image || j.image_url;
-    if (!img) return null;
-
-    if (img.startsWith("ipfs://"))
+    if (img?.startsWith("ipfs://"))
       img = "https://ipfs.io/ipfs/" + img.slice(7);
 
     return img;
@@ -103,15 +67,9 @@ async function safeThumb(provider, addr, id) {
 }
 
 async function tokenInfo(provider, addr) {
-  if (tokenCache.has(addr)) return tokenCache.get(addr);
   try {
     const c = new ethers.Contract(addr, ERC20, provider);
-    const [symbol, decimals] = await withTimeout(
-      Promise.all([c.symbol(), c.decimals()])
-    );
-    const info = { symbol, decimals };
-    tokenCache.set(addr, info);
-    return info;
+    return { symbol: await c.symbol(), decimals: await c.decimals() };
   } catch {
     return null;
   }
@@ -133,49 +91,26 @@ async function resolveChannels(client) {
       client.channels.cache.get(row.channel_id) ||
       await client.channels.fetch(row.channel_id).catch(() => null);
 
-    if (ch?.isTextBased() && ch.guild?.id === TEST_GUILD_ID) out.push(ch);
+    if (ch?.guild?.id === TEST_GUILD_ID) out.push(ch);
   }
   return out;
 }
 
 /* ======================================================
-   SAFE LOG FETCH (ENGINE ONLY)
-====================================================== */
-async function getEngineLogs(provider, from, to) {
-  try {
-    return await withTimeout(
-      provider.getLogs({
-        address: ENGINE_CONTRACT,
-        fromBlock: from,
-        toBlock: to
-      })
-    );
-  } catch (e) {
-    DEBUG && console.log(`[SWEEP] log fetch failed ${from}-${to}, splitting`);
-    if (to - from <= 1) return [];
-    const mid = Math.floor((from + to) / 2);
-    const a = await getEngineLogs(provider, from, mid);
-    const b = await getEngineLogs(provider, mid + 1, to);
-    return [...a, ...b];
-  }
-}
-
-/* ======================================================
-   ANALYZE TX (UNCHANGED LOGIC)
+   ANALYZE TX (WORKING LOGIC)
 ====================================================== */
 async function analyzeTx(provider, hash) {
-  const rc = await withTimeout(provider.getTransactionReceipt(hash));
-  if (!rc) return null;
+  const tx = await provider.getTransaction(hash);
+  const rc = await provider.getTransactionReceipt(hash);
+  if (!tx || !rc) return null;
 
   let nft, tokenId, buyer, seller;
-  let approved = false;
+  let approvedToEngine = false;
+  let ethPaid = tx.value && tx.value > 0n ? tx.value : 0n;
   let tokenPayment = null;
 
   for (const log of rc.logs) {
-    if (
-      log.topics[0] === T_ERC721_TRANSFER &&
-      log.topics.length === 4
-    ) {
+    if (log.topics[0] === T_ERC721_TRANSFER && log.topics.length === 4) {
       nft = log.address.toLowerCase();
       seller = "0x" + log.topics[1].slice(26);
       buyer  = "0x" + log.topics[2].slice(26);
@@ -188,10 +123,10 @@ async function analyzeTx(provider, hash) {
       log.topics[0] === T_ERC721_APPROVAL ||
       log.topics[0] === T_ERC721_APPROVAL_ALL
     ) {
-      const op = "0x" + log.topics[2].slice(26);
-      if (op.toLowerCase() === ENGINE_CONTRACT) {
-        approved = true;
-        seller = seller || rc.from.toLowerCase();
+      const operator = "0x" + log.topics[2].slice(26);
+      if (operator.toLowerCase() === ENGINE_CONTRACT) {
+        approvedToEngine = true;
+        seller = tx.from.toLowerCase();
         nft = nft || log.address.toLowerCase();
       }
     }
@@ -208,27 +143,34 @@ async function analyzeTx(provider, hash) {
     }
   }
 
-  if (approved && (!buyer || buyer.toLowerCase() === ENGINE_CONTRACT)) {
-    if (!tokenId) return null;
-    return { type: "LIST", nft, tokenId, seller, txHash: hash };
+  if (approvedToEngine && !buyer) {
+    return { type: "LIST", nft, tokenId, seller, tx };
   }
 
   if (buyer && buyer.toLowerCase() !== ENGINE_CONTRACT) {
-    if (!tokenId) return null;
-    return { type: "BUY", nft, tokenId, buyer, seller, tokenPayment, txHash: hash };
+    return {
+      type: "BUY",
+      nft,
+      tokenId,
+      buyer,
+      seller,
+      ethPaid,
+      tokenPayment,
+      tx
+    };
   }
 
   return null;
 }
 
 /* ======================================================
-   EMBEDS (UNCHANGED)
+   EMBEDS (WORKING)
 ====================================================== */
 async function sendEmbed(client, provider, data, chans) {
-  const [name, thumb] = await Promise.all([
-    safeName(provider, data.nft),
-    safeThumb(provider, data.nft, data.tokenId)
-  ]);
+  if (!data.tokenId) return;
+
+  const name = await safeName(provider, data.nft);
+  const thumb = await safeThumb(provider, data.nft, data.tokenId);
 
   const fields = [];
 
@@ -242,14 +184,18 @@ async function sendEmbed(client, provider, data, chans) {
 
   if (data.type === "BUY") {
     let price = "N/A";
+    if (data.ethPaid > 0n)
+      price = `${ethers.formatEther(data.ethPaid)} ETH`;
+
     if (data.tokenPayment) {
       const info = await tokenInfo(provider, data.tokenPayment.token);
-      if (info) {
-        price = `${fmt(
-          ethers.formatUnits(data.tokenPayment.amount, info.decimals)
+      if (info)
+        price = `${ethers.formatUnits(
+          data.tokenPayment.amount,
+          info.decimals
         )} ${info.symbol}`;
-      }
     }
+
     fields.push(
       { name: "Sale Price", value: price },
       { name: "Buyer", value: shortWalletLink(data.buyer) },
@@ -264,7 +210,7 @@ async function sendEmbed(client, provider, data, chans) {
         ? `📌 ${name} #${data.tokenId} — LISTED`
         : `🛒 ${name} #${data.tokenId} — SOLD`,
     fields,
-    url: `https://basescan.org/tx/${data.txHash}`,
+    url: `https://basescan.org/tx/${data.tx.hash}`,
     color: data.type === "LIST" ? 0x2ecc71 : 0xf1c40f,
     footer: { text: "AdrianEngine • Powered by PimpsDev" },
     timestamp: new Date().toISOString()
@@ -286,8 +232,8 @@ async function tick(client) {
   const from = latest - LOOKBACK;
   const to = latest;
 
-  const logs = await getEngineLogs(provider, from, to);
-  const txs = [...new Set(logs.map(l => l.transactionHash))].slice(0, MAX_TXS);
+  const logs = await provider.getLogs({ fromBlock: from, toBlock: to });
+  const txs = [...new Set(logs.map(l => l.transactionHash))];
   const chans = await resolveChannels(client);
 
   for (const h of txs) {
@@ -300,7 +246,7 @@ async function tick(client) {
    START
 ====================================================== */
 function startEngineSweepNotifierBase(client) {
-  console.log("🧹 Engine Sweep notifier started (stable)");
+  console.log("🧹 Engine Sweep notifier started (BASELINE)");
   tick(client).catch(() => {});
   setInterval(() => tick(client).catch(() => {}), POLL_MS);
 }
