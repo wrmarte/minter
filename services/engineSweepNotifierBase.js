@@ -414,10 +414,16 @@ async function tick(client) {
     .getLogs({ fromBlock: from, toBlock: to, topics: [T_ERC721_APPROVAL_ALL, null, ENGINE_TOPIC] })
     .catch(() => []);
 
+  /* 🔥 FIX: also scan ERC721 Transfer logs so real buys are not missed */
+  const nftTransferLogs = await provider
+    .getLogs({ fromBlock: from, toBlock: to, topics: [T_ERC721_TRANSFER] })
+    .catch(() => []);
+
   const merged = [
     ...engineLogs.map(l => l.transactionHash),
     ...approvalLogs.map(l => l.transactionHash),
-    ...approvalAllLogs.map(l => l.transactionHash)
+    ...approvalAllLogs.map(l => l.transactionHash),
+    ...nftTransferLogs.map(l => l.transactionHash)
   ];
 
   const txs = [...new Set(merged)].slice(0, MAX_TXS);
@@ -459,6 +465,7 @@ function startEngineSweepNotifierBase(client) {
 }
 
 module.exports = { startEngineSweepNotifierBase };
+
 
 
 
