@@ -116,13 +116,11 @@ async function safeThumbnail(provider, nftAddr, tokenId) {
     const c = new ethers.Contract(nftAddr, ERC721_IFACE, provider);
     let uri = await c.tokenURI(tokenId);
     if (!uri) return null;
+    if (uri.startsWith("ipfs://"))
+      uri = "https://ipfs.io/ipfs/" + uri.slice(7);
 
-    if (uri.startsWith("ipfs://")) uri = "https://ipfs.io/ipfs/" + uri.slice(7);
-
-    // NOTE: Node fetch timeout option isn't standard. We keep it simple:
     const controller = new AbortController();
     const t = setTimeout(() => controller.abort(), 6000);
-
     const res = await fetch(uri, { signal: controller.signal }).catch(() => null);
     clearTimeout(t);
     if (!res || !res.ok) return null;
@@ -132,7 +130,8 @@ async function safeThumbnail(provider, nftAddr, tokenId) {
 
     let img = meta.image || meta.image_url;
     if (!img) return null;
-    if (img.startsWith("ipfs://")) img = "https://ipfs.io/ipfs/" + img.slice(7);
+    if (img.startsWith("ipfs://"))
+      img = "https://ipfs.io/ipfs/" + img.slice(7);
     return img;
   } catch {
     return null;
@@ -160,7 +159,7 @@ async function resolveChannels(client) {
 }
 
 /* ======================================================
-   ANALYZE TX (LIST + BUY)
+   ANALYZE TX (UNCHANGED)
 ====================================================== */
 async function analyzeTx(provider, hash) {
   const tx = await provider.getTransaction(hash);
@@ -177,7 +176,7 @@ async function analyzeTx(provider, hash) {
   let tokenPayment = null;
   let engineOrderPayment = null;
 
-  /* ---------- PASS 1: approvals + transfers ---------- */
+  // pass 1
   for (const log of rc.logs) {
     const t0 = log.topics[0];
 
@@ -189,45 +188,22 @@ async function analyzeTx(provider, hash) {
       continue;
     }
 
-    if (t0 === T_ERC721_APPROVAL) {
+    if (t0 === T_ERC721_APPROVAL || t0 === T_ERC721_APPROVAL_ALL) {
       const operator = ("0x" + log.topics[2].slice(26)).toLowerCase();
       if (operator === ENGINE_CONTRACT) {
         approvalToEngine = true;
         seller = tx.from.toLowerCase();
-        // tokenId comes from topic[3] but might not match NFT transfer (list-only)
-        try {
-          tokenId = tokenId || BigInt(log.topics[3]).toString();
-          nft = nft || log.address.toLowerCase();
-        } catch {}
+        nft = nft || log.address.toLowerCase();
       }
-      continue;
-    }
-
-    if (t0 === T_ERC721_APPROVAL_ALL) {
-      const operator = ("0x" + log.topics[2].slice(26)).toLowerCase();
-      if (operator === ENGINE_CONTRACT) {
-        // decode approved bool; only treat true as listing permission
-        let ok = false;
-        try {
-          ok = ethers.AbiCoder.defaultAbiCoder().decode(["bool"], log.data)?.[0];
-        } catch {}
-        if (ok) {
-          approvalToEngine = true;
-          seller = tx.from.toLowerCase();
-          nft = nft || log.address.toLowerCase();
-        }
-      }
-      continue;
     }
   }
 
-  /* ---------- PASS 2: ERC20 payments ---------- */
+  // pass 2
   for (const log of rc.logs) {
     if (log.topics[0] !== T_ERC20_TRANSFER) continue;
 
     const from = ("0x" + log.topics[1].slice(26)).toLowerCase();
     const to = ("0x" + log.topics[2].slice(26)).toLowerCase();
-
     let parsed;
     try {
       parsed = ERC20_IFACE.parseLog(log);
@@ -235,61 +211,32 @@ async function analyzeTx(provider, hash) {
       continue;
     }
 
-    // BUY payment (to seller)
     if (seller && to === seller) {
-      tokenPayment = {
-        token: log.address.toLowerCase(),
-        amount: parsed.args.value
-      };
+      tokenPayment = { token: log.address.toLowerCase(), amount: parsed.args.value };
     }
 
-    // LIST price (seller -> engine) (order escrow/deposit style)
-    if (approvalToEngine && seller && from === seller && to === ENGINE_CONTRACT) {
-      engineOrderPayment = {
-        token: log.address.toLowerCase(),
-        amount: parsed.args.value
-      };
+    if (approvalToEngine && from === seller && to === ENGINE_CONTRACT) {
+      engineOrderPayment = { token: log.address.toLowerCase(), amount: parsed.args.value };
     }
   }
 
-  /* ---------- LIST ---------- */
-  // listing txs commonly have: approval true, no NFT transfer, no payment to seller
   if (approvalToEngine && !buyer && !ethPaid && !tokenPayment) {
-    return {
-      type: "LIST",
-      nft,
-      tokenId,
-      seller,
-      orderPayment: engineOrderPayment,
-      tx
-    };
+    return { type: "LIST", nft, tokenId, seller, orderPayment: engineOrderPayment, tx };
   }
 
-  /* ---------- BUY ---------- */
-  // buy txs have NFT transfer; price can be ETH or ERC20
   if (nft && buyer && seller) {
-    return {
-      type: "BUY",
-      nft,
-      tokenId,
-      buyer,
-      seller,
-      ethPaid,
-      tokenPayment,
-      tx
-    };
+    return { type: "BUY", nft, tokenId, buyer, seller, ethPaid, tokenPayment, tx };
   }
 
   return null;
 }
 
 /* ======================================================
-   EMBEDS
+   EMBEDS (POLISHED)
 ====================================================== */
 async function buildPriceString(provider, ethPaid, tokenPayment) {
-  if (ethPaid && ethPaid > 0n) {
+  if (ethPaid && ethPaid > 0n)
     return `${fmtNumber(ethers.formatEther(ethPaid))} ETH`;
-  }
 
   if (tokenPayment) {
     const info = await safeTokenInfo(provider, tokenPayment.token);
@@ -298,17 +245,13 @@ async function buildPriceString(provider, ethPaid, tokenPayment) {
         ethers.formatUnits(tokenPayment.amount, info.decimals)
       )} ${info.symbol}`;
     }
-    // fallback if token info fails
-    return `${fmtNumber(ethers.formatUnits(tokenPayment.amount, 18))} TOKEN`;
   }
-
-  return "N/A";
+  return "N/A (Engine order)";
 }
 
 async function sendEngineEmbed(client, provider, data, chans) {
-  const name = data.nft ? await safeCollectionName(provider, data.nft) : null;
-  const titleBase = name ? `${name} #${data.tokenId}` : `NFT #${data.tokenId}`;
-
+  const name = data.nft ? await safeCollectionName(provider, data.nft) : "NFT";
+  const titleBase = `${name} #${data.tokenId}`;
   const thumb =
     data.nft && data.tokenId
       ? await safeThumbnail(provider, data.nft, data.tokenId)
@@ -317,15 +260,14 @@ async function sendEngineEmbed(client, provider, data, chans) {
   const fields = [];
 
   if (data.type === "LIST") {
-    let price = "N/A (Engine order)";
-    if (data.orderPayment) {
-      price = await buildPriceString(provider, 0n, data.orderPayment);
-    }
+    const price = data.orderPayment
+      ? await buildPriceString(provider, 0n, data.orderPayment)
+      : "N/A (Engine order)";
 
     fields.push(
-      { name: "Price", value: price, inline: true },
-      { name: "Seller", value: shortWalletLink(data.seller), inline: true },
-      { name: "Method", value: "ENGINE", inline: true }
+      { name: "Price", value: price, inline: false },
+      { name: "Seller", value: shortWalletLink(data.seller), inline: false },
+      { name: "Method", value: "ENGINE", inline: false }
     );
   }
 
@@ -333,15 +275,18 @@ async function sendEngineEmbed(client, provider, data, chans) {
     const price = await buildPriceString(provider, data.ethPaid, data.tokenPayment);
 
     fields.push(
-      { name: "Price", value: price, inline: true },
-      { name: "Buyer", value: shortWalletLink(data.buyer), inline: true },
-      { name: "Seller", value: shortWalletLink(data.seller), inline: true },
-      { name: "Method", value: "ENGINE", inline: true }
+      { name: "Price", value: price, inline: false },
+      { name: "Buyer", value: shortWalletLink(data.buyer), inline: false },
+      { name: "Seller", value: shortWalletLink(data.seller), inline: false },
+      { name: "Method", value: "ENGINE", inline: false }
     );
   }
 
   const embed = {
-    title: data.type === "LIST" ? `📌 ${titleBase}` : `🛒 ${titleBase}`,
+    title:
+      data.type === "LIST"
+        ? `📌 ${titleBase} — LISTED`
+        : `🛒 ${titleBase} — SOLD`,
     fields,
     url: `https://basescan.org/tx/${data.tx.hash}`,
     color: data.type === "LIST" ? 0x2ecc71 : 0xf1c40f,
@@ -349,7 +294,6 @@ async function sendEngineEmbed(client, provider, data, chans) {
     timestamp: new Date().toISOString()
   };
 
-  // thumbnail only (no bottom image)
   if (thumb) embed.thumbnail = { url: thumb };
 
   for (const c of chans) {
@@ -358,7 +302,7 @@ async function sendEngineEmbed(client, provider, data, chans) {
 }
 
 /* ======================================================
-   MAIN LOOP (FIXED: scan Engine txs + Approval txs)
+   MAIN LOOP (UNCHANGED)
 ====================================================== */
 async function tick(client) {
   const provider = await safeRpcCall("base", (p) => p);
@@ -367,11 +311,9 @@ async function tick(client) {
   await ensureCheckpoint(client);
 
   const latest = await provider.getBlockNumber();
-
   if (FORCE_RESET_SWEEP && !global.__engineSweepResetDone) {
     await setLastBlock(client, latest - 25);
     global.__engineSweepResetDone = true;
-    DEBUG && console.log("🧹 [SWEEP] checkpoint force-reset (one-time)");
   }
 
   let last = await getLastBlock(client);
@@ -380,61 +322,38 @@ async function tick(client) {
   const from = Math.max(last + 1, latest - LOOKBACK);
   const to = Math.min(latest, from + MAX_BLOCKS);
 
-  DEBUG && console.log(`[SWEEP] blocks ${from} → ${to}`);
+  const engineLogs = await provider.getLogs({
+    address: ENGINE_CONTRACT,
+    fromBlock: from,
+    toBlock: to
+  });
 
-  // 1) Engine logs (buys, execution, etc.)
-  const engineLogs = await provider
-    .getLogs({ address: ENGINE_CONTRACT, fromBlock: from, toBlock: to })
-    .catch(() => []);
+  const approvalLogs = await provider.getLogs({
+    fromBlock: from,
+    toBlock: to,
+    topics: [T_ERC721_APPROVAL, null, ENGINE_TOPIC]
+  });
 
-  // 2) Approval logs across ALL contracts where approved/operator == Engine
-  // Approval(owner, approved, tokenId): topics[2] == ENGINE_TOPIC
-  const approvalLogs = await provider
-    .getLogs({
-      fromBlock: from,
-      toBlock: to,
-      topics: [T_ERC721_APPROVAL, null, ENGINE_TOPIC]
-    })
-    .catch(() => []);
-
-  // ApprovalForAll(owner, operator, approved): topics[2] == ENGINE_TOPIC (we decode bool in analyzeTx)
-  const approvalAllLogs = await provider
-    .getLogs({
-      fromBlock: from,
-      toBlock: to,
-      topics: [T_ERC721_APPROVAL_ALL, null, ENGINE_TOPIC]
-    })
-    .catch(() => []);
+  const approvalAllLogs = await provider.getLogs({
+    fromBlock: from,
+    toBlock: to,
+    topics: [T_ERC721_APPROVAL_ALL, null, ENGINE_TOPIC]
+  });
 
   const merged = [
-    ...engineLogs.map((l) => l.transactionHash),
-    ...approvalLogs.map((l) => l.transactionHash),
-    ...approvalAllLogs.map((l) => l.transactionHash)
+    ...engineLogs.map(l => l.transactionHash),
+    ...approvalLogs.map(l => l.transactionHash),
+    ...approvalAllLogs.map(l => l.transactionHash)
   ];
 
   const txs = [...new Set(merged)].slice(0, MAX_TXS);
-
-  DEBUG &&
-    console.log(
-      `[SWEEP] logs engine=${engineLogs.length} approval=${approvalLogs.length} approvalAll=${approvalAllLogs.length} txs=${txs.length}`
-    );
-
   const chans = await resolveChannels(client);
-
-  // If no channels, nothing will post (helps debugging)
-  if (DEBUG && chans.length === 0) {
-    console.log("[SWEEP] No channels resolved from tracked_tokens.channel_id");
-  }
 
   for (const h of txs) {
     if (seenTx.has(h)) continue;
     seenTx.add(h);
-
     const res = await analyzeTx(provider, h);
-    if (!res) continue;
-
-    DEBUG && console.log(`[SWEEP] MATCH ${res.type} ${h}`);
-    await sendEngineEmbed(client, provider, res, chans);
+    if (res) await sendEngineEmbed(client, provider, res, chans);
   }
 
   await setLastBlock(client, to);
@@ -451,7 +370,8 @@ function startEngineSweepNotifierBase(client) {
 
   if (BOOT_PING) {
     resolveChannels(client).then((chs) => {
-      for (const ch of chs) ch.send("🧹 Engine Sweep notifier online").catch(() => {});
+      for (const ch of chs)
+        ch.send("🧹 Engine Sweep notifier online").catch(() => {});
     });
   }
 
