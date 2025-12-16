@@ -9,7 +9,7 @@ const ENGINE_CONTRACT =
   "0x0351f7cba83277e891d4a85da498a7eacd764d58".toLowerCase();
 
 // 🔒 TEST SERVER ONLY (TEMP)
-const TEST_GUILD_ID = "1109969060315283521";
+const TEST_GUILD_ID = "1109969059497386054";
 
 const POLL_MS = Number(process.env.SWEEP_POLL_MS || 12000);
 const LOOKBACK = 80;
