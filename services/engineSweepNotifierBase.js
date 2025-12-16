@@ -8,6 +8,7 @@ const { shortWalletLink } = require("../utils/helpers");
 const ENGINE_CONTRACT =
   "0x0351f7cba83277e891d4a85da498a7eacd764d58".toLowerCase();
 
+// 🔒 TEST SERVER ONLY
 const TEST_GUILD_ID = "1109969059497386054";
 
 const POLL_MS = Number(process.env.SWEEP_POLL_MS || 12000);
@@ -82,13 +83,19 @@ async function safeThumb(provider, addr, id) {
       new ethers.Contract(addr, ERC721, provider).tokenURI(id)
     );
     if (!uri) return null;
+
     if (uri.startsWith("ipfs://"))
       uri = "https://ipfs.io/ipfs/" + uri.slice(7);
+
     const r = await withTimeout(fetch(uri));
     const j = await r.json();
+
     let img = j.image || j.image_url;
-    if (img?.startsWith("ipfs://"))
+    if (!img) return null;
+
+    if (img.startsWith("ipfs://"))
       img = "https://ipfs.io/ipfs/" + img.slice(7);
+
     return img;
   } catch {
     return null;
@@ -111,7 +118,7 @@ async function tokenInfo(provider, addr) {
 }
 
 /* ======================================================
-   CHANNEL ROUTING (TEST ONLY)
+   CHANNEL ROUTING (TEST SERVER ONLY)
 ====================================================== */
 async function resolveChannels(client) {
   const r = await client.pg.query(`
@@ -119,18 +126,42 @@ async function resolveChannels(client) {
     FROM tracked_tokens
     WHERE channel_id IS NOT NULL AND channel_id <> ''
   `);
+
   const out = [];
   for (const row of r.rows) {
     const ch =
       client.channels.cache.get(row.channel_id) ||
       await client.channels.fetch(row.channel_id).catch(() => null);
-    if (ch?.guild?.id === TEST_GUILD_ID) out.push(ch);
+
+    if (ch?.isTextBased() && ch.guild?.id === TEST_GUILD_ID) out.push(ch);
   }
   return out;
 }
 
 /* ======================================================
-   ANALYZE TX (FIXED)
+   SAFE LOG FETCH (ENGINE ONLY)
+====================================================== */
+async function getEngineLogs(provider, from, to) {
+  try {
+    return await withTimeout(
+      provider.getLogs({
+        address: ENGINE_CONTRACT,
+        fromBlock: from,
+        toBlock: to
+      })
+    );
+  } catch (e) {
+    DEBUG && console.log(`[SWEEP] log fetch failed ${from}-${to}, splitting`);
+    if (to - from <= 1) return [];
+    const mid = Math.floor((from + to) / 2);
+    const a = await getEngineLogs(provider, from, mid);
+    const b = await getEngineLogs(provider, mid + 1, to);
+    return [...a, ...b];
+  }
+}
+
+/* ======================================================
+   ANALYZE TX (UNCHANGED LOGIC)
 ====================================================== */
 async function analyzeTx(provider, hash) {
   const rc = await withTimeout(provider.getTransactionReceipt(hash));
@@ -140,7 +171,6 @@ async function analyzeTx(provider, hash) {
   let approved = false;
   let tokenPayment = null;
 
-  /* ERC721 Transfers ONLY */
   for (const log of rc.logs) {
     if (
       log.topics[0] === T_ERC721_TRANSFER &&
@@ -153,7 +183,6 @@ async function analyzeTx(provider, hash) {
     }
   }
 
-  /* Approvals */
   for (const log of rc.logs) {
     if (
       log.topics[0] === T_ERC721_APPROVAL ||
@@ -168,7 +197,6 @@ async function analyzeTx(provider, hash) {
     }
   }
 
-  /* ERC20 Sale Payment */
   for (const log of rc.logs) {
     if (log.topics[0] !== T_ERC20_TRANSFER) continue;
     const to = "0x" + log.topics[2].slice(26);
@@ -194,7 +222,7 @@ async function analyzeTx(provider, hash) {
 }
 
 /* ======================================================
-   EMBEDS
+   EMBEDS (UNCHANGED)
 ====================================================== */
 async function sendEmbed(client, provider, data, chans) {
   const [name, thumb] = await Promise.all([
@@ -255,10 +283,10 @@ async function tick(client) {
   if (!provider) return;
 
   const latest = await provider.getBlockNumber();
-  const logs = await withTimeout(
-    provider.getLogs({ fromBlock: latest - LOOKBACK, toBlock: latest })
-  ).catch(() => []);
+  const from = latest - LOOKBACK;
+  const to = latest;
 
+  const logs = await getEngineLogs(provider, from, to);
   const txs = [...new Set(logs.map(l => l.transactionHash))].slice(0, MAX_TXS);
   const chans = await resolveChannels(client);
 
@@ -272,7 +300,7 @@ async function tick(client) {
    START
 ====================================================== */
 function startEngineSweepNotifierBase(client) {
-  console.log("🧹 Engine Sweep notifier started (stable optimized)");
+  console.log("🧹 Engine Sweep notifier started (stable)");
   tick(client).catch(() => {});
   setInterval(() => tick(client).catch(() => {}), POLL_MS);
 }
