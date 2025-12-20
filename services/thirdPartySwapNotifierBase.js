@@ -93,7 +93,9 @@ async function setLastBlockInDb(client, blockNum) {
 }
 
 // ======= HELPERS =======
-const ERC20_IFACE = new Interface(['event Transfer(address indexed from, address indexed to, uint256 value)']);
+const ERC20_IFACE = new Interface([
+  'event Transfer(address indexed from, address indexed to, uint256 value)'
+]);
 const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
 
 const seenTx = new Map();
@@ -102,18 +104,26 @@ function markSeen(txh) {
   seenTx.set(txh, now);
   if (seenTx.size > 5000) {
     const cutoff = now - 6 * 60 * 60 * 1000;
-    for (const [k, ts] of seenTx.entries()) if (ts < cutoff) seenTx.delete(k);
+    for (const [k, ts] of seenTx.entries()) {
+      if (ts < cutoff) seenTx.delete(k);
+    }
   }
 }
-function isSeen(txh) { return seenTx.has(txh); }
+function isSeen(txh) {
+  return seenTx.has(txh);
+}
 
 let _ethUsdCache = { value: 0, ts: 0 };
-async function getEthUsdPriceCached(maxAgeMs = 30_000) {
+async function getEthUsdPriceCached(maxAgeMs = 30000) {
   const now = Date.now();
-  if (_ethUsdCache.value > 0 && (now - _ethUsdCache.ts) < maxAgeMs) return _ethUsdCache.value;
+  if (_ethUsdCache.value && now - _ethUsdCache.ts < maxAgeMs) {
+    return _ethUsdCache.value;
+  }
   try {
-    const res = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd');
-    const data = await res.json().catch(() => null);
+    const res = await fetch(
+      'https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd'
+    );
+    const data = await res.json();
     const px = Number(data?.ethereum?.usd || 0);
     if (px > 0) {
       _ethUsdCache = { value: px, ts: now };
@@ -138,8 +148,13 @@ async function getDecimals(provider, tokenAddr) {
   }
 }
 
-function safeAddr(x) { try { return ethers.getAddress(x); } catch { return x || ''; } }
-function addrEq(a, b) { return (a || '').toLowerCase() === (b || '').toLowerCase(); }
+function safeAddr(x) {
+  try { return ethers.getAddress(x); }
+  catch { return x || ''; }
+}
+function addrEq(a, b) {
+  return (a || '').toLowerCase() === (b || '').toLowerCase();
+}
 
 function buildEmojiLine(isBuy, usd) {
   const u = Number(usd);
@@ -149,13 +164,14 @@ function buildEmojiLine(isBuy, usd) {
     return '🐳🚀'.repeat(Math.min(whales, MAX_EMOJI_REPEAT));
   }
   const count = Math.max(1, Math.floor(u / 2));
-  return (isBuy ? '🟥🟦🚀' : '🔻💀🔻').repeat(Math.min(count, MAX_EMOJI_REPEAT));
+  return (isBuy ? '🟥🟦🚀' : '🔻💀🔻')
+    .repeat(Math.min(count, MAX_EMOJI_REPEAT));
 }
 
 // ======= TAG HELPERS =======
 function resolveRoleTag(channel, roleName) {
   try {
-    const role = channel.guild.roles.cache.find(r => r.name === roleName);
+    const role = channel.guild?.roles?.cache?.find(r => r.name === roleName);
     return role ? { mention: `<@&${role.id}>`, roleId: role.id } : null;
   } catch {
     return null;
@@ -164,81 +180,225 @@ function resolveRoleTag(channel, roleName) {
 
 // ======= MARKET CAP HELPERS =======
 const totalSupplyCache = new Map();
-
 async function getTotalSupplyCached(provider, tokenAddr) {
   if (totalSupplyCache.has(tokenAddr)) return totalSupplyCache.get(tokenAddr);
   try {
-    const erc20 = new Contract(tokenAddr, ['function totalSupply() view returns (uint256)'], provider);
+    const erc20 = new Contract(
+      tokenAddr,
+      ['function totalSupply() view returns (uint256)'],
+      provider
+    );
     const raw = await erc20.totalSupply();
     const dec = await getDecimals(provider, tokenAddr);
     const supply = Number(ethers.formatUnits(raw, dec));
-    totalSupplyCache.set(tokenAddr, supply);
-    return supply;
-  } catch {
-    return 0;
-  }
+    if (supply > 0) {
+      totalSupplyCache.set(tokenAddr, supply);
+      return supply;
+    }
+  } catch {}
+  return 0;
 }
 
 function formatCompactUsd(n) {
-  if (!n || !isFinite(n)) return 'N/A';
-  if (n >= 1e12) return `$${(n / 1e12).toFixed(2)}T`;
-  if (n >= 1e9)  return `$${(n / 1e9).toFixed(2)}B`;
-  if (n >= 1e6)  return `$${(n / 1e6).toFixed(2)}M`;
-  if (n >= 1e3)  return `$${(n / 1e3).toFixed(2)}K`;
-  return `$${n.toFixed(2)}`;
+  const v = Number(n);
+  if (!Number.isFinite(v) || v <= 0) return 'N/A';
+  if (v >= 1e12) return `$${(v / 1e12).toFixed(2)}T`;
+  if (v >= 1e9)  return `$${(v / 1e9).toFixed(2)}B`;
+  if (v >= 1e6)  return `$${(v / 1e6).toFixed(2)}M`;
+  if (v >= 1e3)  return `$${(v / 1e3).toFixed(2)}K`;
+  return `$${v.toFixed(4)}`;
 }
 
-// ================= EMBED (ONLY PATCHED PART) =================
-async function sendSwapEmbed(client, swap, provider) {
-  const { wallet, isBuy, ethValue, usdValue, tokenAmount, txHash } = swap;
+// ======= CHANNEL RESOLUTION =======
+async function resolveChannels(client) {
+  const out = [];
+  const added = new Set();
 
-  const emojiLine = buildEmojiLine(isBuy, usdValue);
+  try {
+    const pg = client.pg;
+    if (pg) {
+      const res = await pg.query(
+        `SELECT DISTINCT channel_id
+         FROM tracked_tokens
+         WHERE lower(address)=$1
+           AND channel_id IS NOT NULL
+           AND channel_id <> ''`,
+        [ADRIAN]
+      );
+      for (const r of res.rows || []) {
+        const id = String(r.channel_id || '').trim();
+        if (!id || added.has(id)) continue;
+        const ch = await fetchAndValidateChannel(client, id);
+        if (ch) {
+          out.push(ch);
+          added.add(id);
+        }
+      }
+    }
+  } catch {}
 
-  const priceUsd = usdValue && tokenAmount ? usdValue / tokenAmount : 0;
-  const priceEth = ethValue && tokenAmount ? ethValue / tokenAmount : 0;
-
-  let marketCapText = 'N/A';
-  if (priceUsd > 0) {
-    const supply = await getTotalSupplyCached(provider, ADRIAN);
-    if (supply > 0) marketCapText = formatCompactUsd(priceUsd * supply);
+  if (!out.length && SWAP_NOTI_CHANNELS.length) {
+    for (const id of SWAP_NOTI_CHANNELS) {
+      if (added.has(id)) continue;
+      const ch = await fetchAndValidateChannel(client, id);
+      if (ch) {
+        out.push(ch);
+        added.add(id);
+      }
+    }
   }
 
+  return out;
+}
+
+async function fetchAndValidateChannel(client, id) {
+  let ch = client.channels.cache.get(id) || null;
+  if (!ch) ch = await client.channels.fetch(id).catch(() => null);
+  if (!ch || !ch.isTextBased()) return null;
+
+  try {
+    const me = ch.guild?.members?.me;
+    const perms = me ? ch.permissionsFor(me) : null;
+    if (!perms?.has('SendMessages')) return null;
+    if (ch.isThread?.() && !perms?.has('SendMessagesInThreads')) return null;
+  } catch {}
+
+  return ch;
+}
+
+// ======= ANALYZE SWAP =======
+async function analyzeSwap(provider, txHash) {
+  const tx = await provider.getTransaction(txHash).catch(() => null);
+  const receipt = await provider.getTransactionReceipt(txHash).catch(() => null);
+  if (!tx || !receipt) return null;
+
+  const wallet = safeAddr(tx.from);
+  let adrianIn = 0n, adrianOut = 0n, wethIn = 0n, wethOut = 0n;
+
+  for (const lg of receipt.logs) {
+    if (lg.topics?.[0] !== TRANSFER_TOPIC) continue;
+    const token = lg.address.toLowerCase();
+    if (token !== ADRIAN && token !== WETH) continue;
+    const p = ERC20_IFACE.parseLog(lg);
+    if (addrEq(p.args.to, wallet)) token === ADRIAN ? adrianIn += p.args.value : wethIn += p.args.value;
+    if (addrEq(p.args.from, wallet)) token === ADRIAN ? adrianOut += p.args.value : wethOut += p.args.value;
+  }
+
+  const adrianDec = await getDecimals(provider, ADRIAN);
+  const wethDec   = await getDecimals(provider, WETH);
+
+  const netAdrian = Number(ethers.formatUnits(adrianIn - adrianOut, adrianDec));
+  let ethValue = Number(ethers.formatUnits(wethOut || tx.value || 0n, wethDec));
+  if (!netAdrian || !ethValue) return null;
+
+  const ethUsd = await getEthUsdPriceCached();
+  return {
+    wallet,
+    txHash: txHash.toLowerCase(),
+    isBuy: netAdrian > 0,
+    tokenAmount: Math.abs(netAdrian),
+    ethValue,
+    usdValue: ethValue * ethUsd
+  };
+}
+
+// ======= SEND EMBED =======
+async function sendSwapEmbed(client, swap, provider) {
+  const { wallet, isBuy, ethValue, usdValue, tokenAmount, txHash } = swap;
+  if (MIN_USD_TO_POST > 0 && usdValue < MIN_USD_TO_POST) return;
+
+  const emojiLine = buildEmojiLine(isBuy, usdValue);
+  const priceUsd = usdValue / tokenAmount;
+  const priceEth = ethValue / tokenAmount;
+  const supply = await getTotalSupplyCached(provider, ADRIAN);
+  const marketCap = supply ? priceUsd * supply : 0;
+
   const embed = {
-    title: isBuy ? `🅰️ ADRIAN BUY` : `🅰️ ADRIAN SELL`,
-    description: emojiLine,
+    title: isBuy ? '🅰️ ADRIAN SWAP BUY!' : '🅰️ ADRIAN SWAP SELL!',
+    description: `${emojiLine}\n**Price:** $${priceUsd.toFixed(6)} • ${priceEth.toFixed(8)} ETH`,
     image: { url: isBuy ? BUY_IMG : SELL_IMG },
     fields: [
-      { name: '💸 Value', value: `$${usdValue.toFixed(2)} / ${ethValue.toFixed(4)} ETH`, inline: true },
-      { name: '🎯 Amount', value: `${tokenAmount.toLocaleString()} ADRIAN`, inline: true },
-      { name: '🏷️ Price', value: `$${priceUsd.toFixed(6)} / ${priceEth.toFixed(8)} ETH`, inline: true },
-      { name: '📊 Market Cap', value: marketCapText, inline: true },
-      { name: '👤 Wallet', value: shortWalletLink(wallet), inline: true }
+      {
+        name: isBuy ? '💸 Spent' : '💰 Received',
+        value: `$${usdValue.toFixed(2)}\n${ethValue.toFixed(4)} ETH`,
+        inline: true
+      },
+      {
+        name: isBuy ? '🎯 Got' : '📤 Sold',
+        value: `${tokenAmount.toLocaleString(undefined, { maximumFractionDigits: 2 })} ADRIAN`,
+        inline: true
+      },
+      {
+        name: '📊 Market Cap',
+        value: formatCompactUsd(marketCap),
+        inline: true
+      },
+      {
+        name: isBuy ? '👤 Swapper' : '🖕 Seller',
+        value: shortWalletLink(wallet),
+        inline: false
+      }
     ],
     url: `https://basescan.org/tx/${txHash}`,
     color: isBuy ? 0x2ecc71 : 0xe74c3c,
-    footer: { text: 'AdrianSWAP • PimpsDev' },
+    footer: { text: 'AdrianSWAP • Powered by PimpsDev' },
     timestamp: new Date().toISOString()
   };
 
-  const channels = await resolveChannels(client);
-  for (const ch of channels) {
-    const tag = isBuy ? resolveRoleTag(ch, BUY_TAG_ROLE_NAME) : resolveRoleTag(ch, SELL_TAG_ROLE_NAME);
-    const payload = tag
-      ? { content: tag.mention, embeds: [embed], allowedMentions: { roles: [tag.roleId] } }
-      : { embeds: [embed] };
-    await ch.send(payload).catch(() => {});
+  const chans = await resolveChannels(client);
+  for (const ch of chans) {
+    const tag = resolveRoleTag(ch, isBuy ? BUY_TAG_ROLE_NAME : SELL_TAG_ROLE_NAME);
+    await ch.send(
+      tag
+        ? { content: tag.mention, embeds: [embed], allowedMentions: { roles: [tag.roleId] } }
+        : { embeds: [embed] }
+    ).catch(() => {});
   }
 }
 
-// ======= START LOOP (UNCHANGED) =======
+// ======= LOOP =======
+async function tick(client) {
+  const provider = await safeRpcCall('base', p => p);
+  if (!provider) return;
+
+  await ensureCheckpointTable(client);
+
+  if (TEST_TX && !isSeen(TEST_TX)) {
+    markSeen(TEST_TX);
+    const swap = await analyzeSwap(provider, TEST_TX);
+    if (swap) await sendSwapEmbed(client, swap, provider);
+  }
+
+  const blockNumber = await provider.getBlockNumber();
+  let last = await getLastBlockFromDb(client);
+  if (!last) last = Math.max(blockNumber - 2, 0);
+
+  const fromBlock = Math.max(blockNumber - LOOKBACK_BLOCKS, last);
+  const toBlock = blockNumber;
+
+  const txs = new Set();
+  for (const router of ROUTERS_TO_WATCH) {
+    const logs = await provider.getLogs({ address: router, fromBlock, toBlock });
+    for (const lg of logs) txs.add(lg.transactionHash.toLowerCase());
+  }
+
+  for (const h of txs) {
+    if (isSeen(h)) continue;
+    markSeen(h);
+    const swap = await analyzeSwap(provider, h);
+    if (swap) await sendSwapEmbed(client, swap, provider);
+  }
+
+  await setLastBlockInDb(client, toBlock);
+}
+
+// ======= START =======
 function startThirdPartySwapNotifierBase(client) {
   if (global._third_party_swap_base) return;
   global._third_party_swap_base = true;
-
-  if (BOOT_PING) bootPing(client);
-  tick(client);
-
-  setInterval(() => tick(client), POLL_MS);
+  if (BOOT_PING) console.log('Swap notifier online');
+  tick(client).catch(() => {});
+  setInterval(() => tick(client).catch(() => {}), POLL_MS);
 }
 
 module.exports = { startThirdPartySwapNotifierBase };
