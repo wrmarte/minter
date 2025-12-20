@@ -20,7 +20,7 @@ const SWAP_NOTI_CHANNELS = (process.env.SWAP_NOTI_CHANNELS || '')
 
 const MIN_USD_TO_POST   = Number(process.env.SWAP_MIN_USD || 0);
 const POLL_MS           = Number(process.env.SWAP_POLL_MS || 12000);
-const LOOKBACK_BLOCKS   = Number(process.env.SWAP_LOOKBACK_BLOCKS || 20); // still used as safety fallback
+const LOOKBACK_BLOCKS   = Number(process.env.SWAP_LOOKBACK_BLOCKS || 20);
 const MAX_EMOJI_REPEAT  = Number(process.env.SWAP_MAX_EMOJIS || 20);
 
 const BUY_IMG  = process.env.SWAP_BUY_IMG  || 'https://iili.io/f7ifqmB.gif';
@@ -30,8 +30,7 @@ const DEBUG = String(process.env.SWAP_DEBUG || '').trim() === '1';
 const BOOT_PING = String(process.env.SWAP_BOOT_PING || '').trim() === '1';
 const TEST_TX = (process.env.SWAP_TEST_TX || '').trim().toLowerCase();
 
-// ======= TAG SYSTEM (PATCH) =======
-// These should be ROLE NAMES in the server. Create roles named exactly "WAGMI" and "NGMI".
+// ======= TAG SYSTEM =======
 const BUY_TAG_ROLE_NAME  = 'WAGMI';
 const SELL_TAG_ROLE_NAME = 'NGMI';
 
@@ -94,7 +93,9 @@ async function setLastBlockInDb(client, blockNum) {
 }
 
 // ======= HELPERS =======
-const ERC20_IFACE = new Interface(['event Transfer(address indexed from, address indexed to, uint256 value)']);
+const ERC20_IFACE = new Interface([
+  'event Transfer(address indexed from, address indexed to, uint256 value)'
+]);
 const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
 
 const seenTx = new Map();
@@ -103,17 +104,24 @@ function markSeen(txh) {
   seenTx.set(txh, now);
   if (seenTx.size > 5000) {
     const cutoff = now - 6 * 60 * 60 * 1000;
-    for (const [k, ts] of seenTx.entries()) if (ts < cutoff) seenTx.delete(k);
+    for (const [k, ts] of seenTx.entries()) {
+      if (ts < cutoff) seenTx.delete(k);
+    }
   }
 }
 function isSeen(txh) { return seenTx.has(txh); }
 
+// ======= ETH USD CACHE =======
 let _ethUsdCache = { value: 0, ts: 0 };
 async function getEthUsdPriceCached(maxAgeMs = 30_000) {
   const now = Date.now();
-  if (_ethUsdCache.value > 0 && (now - _ethUsdCache.ts) < maxAgeMs) return _ethUsdCache.value;
+  if (_ethUsdCache.value > 0 && (now - _ethUsdCache.ts) < maxAgeMs) {
+    return _ethUsdCache.value;
+  }
   try {
-    const res = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd');
+    const res = await fetch(
+      'https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd'
+    );
     const data = await res.json().catch(() => null);
     const px = Number(data?.ethereum?.usd || 0);
     if (px > 0) {
@@ -124,6 +132,7 @@ async function getEthUsdPriceCached(maxAgeMs = 30_000) {
   return _ethUsdCache.value || 0;
 }
 
+// ======= DECIMALS =======
 const decimalsCache = new Map();
 async function getDecimals(provider, tokenAddr) {
   const key = tokenAddr.toLowerCase();
@@ -139,29 +148,30 @@ async function getDecimals(provider, tokenAddr) {
   }
 }
 
-function safeAddr(x) { try { return ethers.getAddress(x); } catch { return x || ''; } }
-function addrEq(a, b) { return (a || '').toLowerCase() === (b || '').toLowerCase(); }
+function safeAddr(x) {
+  try { return ethers.getAddress(x); } catch { return x || ''; }
+}
+function addrEq(a, b) {
+  return (a || '').toLowerCase() === (b || '').toLowerCase();
+}
 
 function buildEmojiLine(isBuy, usd) {
   const u = Number(usd);
   if (!Number.isFinite(u) || u <= 0) return isBuy ? '🟥🟦🚀' : '🔻💀🔻';
-
-  // ✅ whale scaling
   if (isBuy && u >= 30) {
     const whales = Math.max(1, Math.floor(u / 2));
     return '🐳🚀'.repeat(Math.min(whales, MAX_EMOJI_REPEAT));
   }
-
   const count = Math.max(1, Math.floor(u / 2));
   return (isBuy ? '🟥🟦🚀' : '🔻💀🔻').repeat(Math.min(count, MAX_EMOJI_REPEAT));
 }
 
-// ======= TAG HELPERS (PATCH) =======
+// ======= TAG HELPERS =======
 function resolveRoleTag(channel, roleName) {
   try {
-    const guild = channel?.guild;
+    const guild = channel.guild;
     if (!guild) return null;
-    const role = guild.roles?.cache?.find(r => r?.name === roleName) || null;
+    const role = guild.roles.cache.find(r => r.name === roleName);
     if (!role) return null;
     return { mention: `<@&${role.id}>`, roleId: role.id };
   } catch {
@@ -169,130 +179,36 @@ function resolveRoleTag(channel, roleName) {
   }
 }
 
-// ======= MARKET CAP HELPERS (PATCH) =======
+// ======= MARKET CAP HELPERS =======
 const totalSupplyCache = new Map();
 
 async function getTotalSupplyCached(provider, tokenAddr, maxAgeMs = 10 * 60 * 1000) {
-  const key = (tokenAddr || '').toLowerCase();
+  const key = tokenAddr.toLowerCase();
   const now = Date.now();
   const hit = totalSupplyCache.get(key);
-  if (hit && hit.value > 0 && (now - hit.ts) < maxAgeMs) return hit.value;
+  if (hit && (now - hit.ts) < maxAgeMs) return hit.value;
 
   try {
     const erc20 = new Contract(tokenAddr, ['function totalSupply() view returns (uint256)'], provider);
     const raw = await erc20.totalSupply();
     const dec = await getDecimals(provider, tokenAddr);
     const supply = Number(ethers.formatUnits(raw, dec));
-    if (Number.isFinite(supply) && supply > 0) {
+    if (supply > 0) {
       totalSupplyCache.set(key, { value: supply, ts: now });
       return supply;
     }
   } catch {}
-
   return hit?.value || 0;
 }
 
-function formatCompactUsd(n) {
-  const v = Number(n);
-  if (!Number.isFinite(v) || v <= 0) return 'N/A';
-  if (v >= 1e12) return `$${(v / 1e12).toFixed(2)}T`;
-  if (v >= 1e9)  return `$${(v / 1e9).toFixed(2)}B`;
-  if (v >= 1e6)  return `$${(v / 1e6).toFixed(2)}M`;
-  if (v >= 1e3)  return `$${(v / 1e3).toFixed(2)}K`;
+function formatCompactUsd(v) {
+  if (!v || !isFinite(v)) return 'N/A';
+  if (v >= 1e9) return `$${(v / 1e9).toFixed(2)}B`;
+  if (v >= 1e6) return `$${(v / 1e6).toFixed(2)}M`;
+  if (v >= 1e3) return `$${(v / 1e3).toFixed(2)}K`;
   return `$${v.toFixed(2)}`;
 }
-
-/**
- * ✅ DB-backed channel routing (same DB the mint system uses)
- * We route swaps to the channels where ADRIAN is tracked in `tracked_tokens`.
- * Falls back to SWAP_NOTI_CHANNELS env if DB returns nothing.
- */
-async function resolveChannels(client) {
-  const out = [];
-  const added = new Set();
-
-  // 1) Try DB routing via tracked_tokens
-  try {
-    const pg = client.pg;
-    if (pg) {
-      const res = await pg.query(
-        `SELECT DISTINCT channel_id
-         FROM tracked_tokens
-         WHERE lower(address) = $1
-           AND channel_id IS NOT NULL
-           AND channel_id <> ''`,
-        [ADRIAN]
-      );
-      const ids = (res.rows || [])
-        .map(r => String(r.channel_id || '').trim())
-        .filter(Boolean);
-
-      for (const id of ids) {
-        if (added.has(id)) continue;
-        const ch = await fetchAndValidateChannel(client, id);
-        if (ch) {
-          out.push(ch);
-          added.add(id);
-        }
-      }
-
-      if (DEBUG) console.log(`[SWAP] DB channels=${out.length}`);
-    }
-  } catch (e) {
-    console.log(`[SWAP] DB channel lookup failed: ${e?.message || e}`);
-  }
-
-  // 2) Fallback to env channels if DB returned none
-  if (out.length === 0 && SWAP_NOTI_CHANNELS.length) {
-    for (const id of SWAP_NOTI_CHANNELS) {
-      if (!id || added.has(id)) continue;
-      const ch = await fetchAndValidateChannel(client, id);
-      if (ch) {
-        out.push(ch);
-        added.add(id);
-      }
-    }
-    if (DEBUG) console.log(`[SWAP] ENV fallback channels=${out.length}`);
-  }
-
-  return out;
-}
-
-async function fetchAndValidateChannel(client, id) {
-  let ch = client.channels.cache.get(id) || null;
-  if (!ch) ch = await client.channels.fetch(id).catch(() => null);
-
-  if (!ch) {
-    if (DEBUG) console.log(`[SWAP] channel fetch failed: ${id}`);
-    return null;
-  }
-
-  const isText = typeof ch.isTextBased === 'function' ? ch.isTextBased() : false;
-  if (!isText) {
-    if (DEBUG) console.log(`[SWAP] channel not text-based: ${id}`);
-    return null;
-  }
-
-  try {
-    const guild = ch.guild;
-    const me = guild?.members?.me;
-    if (guild && me) {
-      const perms = ch.permissionsFor(me);
-      if (!perms?.has('SendMessages')) {
-        if (DEBUG) console.log(`[SWAP] missing SendMessages in ${id}`);
-        return null;
-      }
-      if (ch.isThread?.() && !perms?.has('SendMessagesInThreads')) {
-        if (DEBUG) console.log(`[SWAP] missing SendMessagesInThreads in ${id}`);
-        return null;
-      }
-    }
-  } catch {}
-
-  return ch;
-}
-
-// Core: compute net ADRIAN + (ETH native or WETH) for tx.from wallet
+// ================= ANALYZE SWAP =================
 async function analyzeSwap(provider, txHash) {
   const tx = await provider.getTransaction(txHash).catch(() => null);
   const receipt = await provider.getTransactionReceipt(txHash).catch(() => null);
@@ -302,7 +218,7 @@ async function analyzeSwap(provider, txHash) {
   if (!wallet) return null;
 
   const adrianDec = await getDecimals(provider, ADRIAN);
-  const wethDec = await getDecimals(provider, WETH);
+  const wethDec   = await getDecimals(provider, WETH);
 
   let adrianIn = 0n, adrianOut = 0n;
   let wethIn = 0n, wethOut = 0n;
@@ -317,14 +233,14 @@ async function analyzeSwap(provider, txHash) {
     try { parsed = ERC20_IFACE.parseLog(lg); } catch { continue; }
 
     const from = safeAddr(parsed.args.from);
-    const to = safeAddr(parsed.args.to);
-    const val = parsed.args.value;
+    const to   = safeAddr(parsed.args.to);
+    const val  = parsed.args.value;
 
     if (token === ADRIAN) {
-      if (addrEq(to, wallet)) adrianIn += val;
+      if (addrEq(to, wallet))   adrianIn  += val;
       if (addrEq(from, wallet)) adrianOut += val;
     } else {
-      if (addrEq(to, wallet)) wethIn += val;
+      if (addrEq(to, wallet))   wethIn  += val;
       if (addrEq(from, wallet)) wethOut += val;
     }
   }
@@ -338,104 +254,84 @@ async function analyzeSwap(provider, txHash) {
 
   let ethNativeSpent = 0;
   try {
-    if (tx.value && tx.value > 0n) ethNativeSpent = Number(ethers.formatEther(tx.value));
+    if (tx.value && tx.value > 0n) {
+      ethNativeSpent = Number(ethers.formatEther(tx.value));
+    }
   } catch {}
 
-  // ✅ keep your original buy/sell detection
   const isBuy  = netAdrian > 0 && (ethNativeSpent > 0 || wethOutF > 0);
   const isSellOriginal = netAdrian < 0 && (wethInF > 0 || ethNativeSpent > 0);
-
-  // ✅ PATCH: allow ADRIAN->ETH sells paid in *native ETH* (no WETH in, tx.value usually 0)
-  // We do NOT change buy logic. We only extend sell detection when netAdrian < 0.
   let isSell = isSellOriginal;
 
-  // compute tokenAmount early (needed for sell fallback)
   const tokenAmount = Math.abs(netAdrian);
   if (!Number.isFinite(tokenAmount) || tokenAmount <= 0) return null;
 
-  // Start with original ethValue logic
   let ethValue = isBuy
     ? (ethNativeSpent > 0 ? ethNativeSpent : wethOutF)
     : (wethInF > 0 ? wethInF : ethNativeSpent);
 
-  // If neither buy nor original sell matched, you used to return null.
-  // We keep that behavior UNLESS it is the native-ETH sell case.
+  // Native ETH sell fallback
   if (!isBuy && !isSellOriginal) {
-    // Only attempt sell fallback if ADRIAN moved out
     if (!(netAdrian < 0)) return null;
-
-    // ✅ Native ETH received fallback:
-    // balance delta across block + gas reimbursement (+ tx.value)
     try {
       const bn = receipt.blockNumber;
-      if (typeof bn === 'number' && bn > 0) {
-        const [balBefore, balAfter] = await Promise.all([
-          provider.getBalance(wallet, bn - 1).catch(() => 0n),
-          provider.getBalance(wallet, bn).catch(() => 0n)
-        ]);
+      const [balBefore, balAfter] = await Promise.all([
+        provider.getBalance(wallet, bn - 1).catch(() => 0n),
+        provider.getBalance(wallet, bn).catch(() => 0n)
+      ]);
 
-        const gasUsed = receipt.gasUsed || 0n;
-        const gasPrice = receipt.effectiveGasPrice || 0n;
-        const gasCost = gasUsed * gasPrice;
-        const txValue = tx.value || 0n;
+      const gasCost = (receipt.gasUsed || 0n) * (receipt.effectiveGasPrice || 0n);
+      const delta = balAfter - balBefore;
+      const received = delta + gasCost + (tx.value || 0n);
 
-        // received ≈ (after - before) + gas + tx.value
-        const delta = (balAfter - balBefore);
-        const receivedApprox = delta + gasCost + txValue;
-
-        const receivedEth = Number(ethers.formatEther(receivedApprox > 0n ? receivedApprox : 0n));
-        if (Number.isFinite(receivedEth) && receivedEth > 0) {
-          ethValue = receivedEth;
-          isSell = true;
-        } else {
-          return null;
-        }
+      const receivedEth = Number(ethers.formatEther(received > 0n ? received : 0n));
+      if (receivedEth > 0) {
+        ethValue = receivedEth;
+        isSell = true;
       } else {
         return null;
       }
-    } catch (e) {
-      if (DEBUG) console.log(`[SWAP] native-eth sell fallback failed tx=${txHash}: ${e?.message || e}`);
+    } catch {
       return null;
     }
   }
 
-  // ✅ If we matched original buy/sell, we keep your existing guardrails
   if (!isBuy && !isSell) return null;
   if (!Number.isFinite(ethValue) || ethValue <= 0) return null;
 
   const ethUsd = await getEthUsdPriceCached();
   const usdValue = ethUsd > 0 ? ethValue * ethUsd : 0;
 
-  return { wallet, txHash: txHash.toLowerCase(), isBuy, isSell, ethValue, usdValue, tokenAmount };
+  return {
+    wallet,
+    txHash: txHash.toLowerCase(),
+    isBuy,
+    isSell,
+    ethValue,
+    usdValue,
+    tokenAmount
+  };
 }
 
+// ================= SEND EMBED =================
 async function sendSwapEmbed(client, swap, provider) {
   const { wallet, isBuy, ethValue, usdValue, tokenAmount, txHash } = swap;
 
-  if (MIN_USD_TO_POST > 0 && usdValue > 0 && usdValue < MIN_USD_TO_POST) {
-    if (DEBUG) console.log(`[SWAP] skip < MIN_USD ${usdValue.toFixed(2)} tx=${txHash}`);
-    return;
-  }
+  if (MIN_USD_TO_POST > 0 && usdValue > 0 && usdValue < MIN_USD_TO_POST) return;
 
   const emojiLine = buildEmojiLine(isBuy, usdValue);
 
-  // ======= MARKET CAP CALC (PATCH) =======
   let marketCapText = 'N/A';
   try {
-    if (provider && usdValue && tokenAmount && tokenAmount > 0) {
-      const priceUsd = usdValue / tokenAmount;
-      const supply = await getTotalSupplyCached(provider, ADRIAN);
-      if (Number.isFinite(priceUsd) && priceUsd > 0 && Number.isFinite(supply) && supply > 0) {
-        const mc = priceUsd * supply;
-        marketCapText = formatCompactUsd(mc);
-      }
+    const priceUsd = usdValue / tokenAmount;
+    const supply = await getTotalSupplyCached(provider, ADRIAN);
+    if (priceUsd > 0 && supply > 0) {
+      marketCapText = formatCompactUsd(priceUsd * supply);
     }
-  } catch {
-    marketCapText = 'N/A';
-  }
+  } catch {}
 
   const embed = {
-    title: isBuy ? `🅰️DRIAN SWAP BUY!` : `🅰️DRIAN SWAP SELL!`,
+    title: isBuy ? '🅰️ ADRIAN SWAP BUY!' : '🅰️ ADRIAN SWAP SELL!',
     description: emojiLine,
     image: { url: isBuy ? BUY_IMG : SELL_IMG },
     fields: [
@@ -456,7 +352,7 @@ async function sendSwapEmbed(client, swap, provider) {
       },
       {
         name: isBuy ? '👤 Swapper' : '🖕 Seller',
-        value: shortWalletLink ? shortWalletLink(wallet) : wallet,
+        value: shortWalletLink(wallet),
         inline: true
       }
     ],
@@ -467,15 +363,7 @@ async function sendSwapEmbed(client, swap, provider) {
   };
 
   const chans = await resolveChannels(client);
-  if (DEBUG) console.log(`[SWAP] send -> channels=${chans.length} tx=${txHash}`);
-
-  if (!chans.length) {
-    console.log('[SWAP] No channels resolved (DB empty + env empty). Nothing to post.');
-    return;
-  }
-
   for (const ch of chans) {
-    // ======= TAG PATCH (per-channel / per-guild) =======
     const tag = isBuy
       ? resolveRoleTag(ch, BUY_TAG_ROLE_NAME)
       : resolveRoleTag(ch, SELL_TAG_ROLE_NAME);
@@ -484,132 +372,78 @@ async function sendSwapEmbed(client, swap, provider) {
       ? { content: tag.mention, embeds: [embed], allowedMentions: { roles: [tag.roleId] } }
       : { embeds: [embed] };
 
-    await ch.send(payload).catch(err => {
-      console.log(`[SWAP] send failed channel=${ch.id} err=${err?.message || err}`);
-    });
+    await ch.send(payload).catch(() => {});
   }
 }
 
+// ================= BOOT PING =================
 async function bootPing(client) {
   const chans = await resolveChannels(client);
-  if (DEBUG) console.log(`[SWAP] bootPing channels=${chans.length}`);
-
-  if (!chans.length) {
-    console.log('[SWAP] bootPing: No channels resolved (DB empty + env empty).');
-    return;
-  }
-
   for (const ch of chans) {
-    await ch.send(`✅ Swap notifier online (Base).`).catch(err => {
-      console.log(`[SWAP] bootPing failed channel=${ch.id} err=${err?.message || err}`);
-    });
+    await ch.send('✅ Swap notifier online (Base).').catch(() => {});
   }
 }
 
+// ================= MAIN LOOP =================
 async function tick(client) {
   const provider = await safeRpcCall('base', p => p);
-  if (!provider) {
-    if (DEBUG) console.log('[SWAP] safeRpcCall(base) returned no provider');
-    return;
-  }
+  if (!provider) return;
 
-  // ✅ Ensure checkpoint table exists (best-effort)
   await ensureCheckpointTable(client);
 
-  // Force-test tx path
   if (TEST_TX && !isSeen(TEST_TX)) {
     markSeen(TEST_TX);
-    if (DEBUG) console.log(`[SWAP] TEST_TX analyze ${TEST_TX}`);
-    const swap = await analyzeSwap(provider, TEST_TX).catch(e => {
-      console.log(`[SWAP] TEST_TX analyze error: ${e?.message || e}`);
-      return null;
-    });
-    if (swap) {
-      if (DEBUG) console.log(`[SWAP] TEST_TX matched ${swap.isBuy ? 'BUY' : 'SELL'} usd=${swap.usdValue?.toFixed?.(2)} eth=${swap.ethValue?.toFixed?.(4)}`);
-      await sendSwapEmbed(client, swap, provider);
-    } else {
-      console.log('[SWAP] TEST_TX did NOT match swap rules (or tx/receipt unavailable)');
-    }
+    const swap = await analyzeSwap(provider, TEST_TX);
+    if (swap) await sendSwapEmbed(client, swap, provider);
   }
 
   const blockNumber = await provider.getBlockNumber().catch(() => null);
   if (!blockNumber) return;
 
-  // ✅ Checkpoint start:
-  // - if checkpoint exists => start from it
-  // - if not => start near head (prevents replay on first boot)
   let last = await getLastBlockFromDb(client);
+  if (!last || last <= 0) last = Math.max(blockNumber - 2, 0);
 
-  if (!last || last <= 0) {
-    // first boot: no replay history
-    last = Math.max(blockNumber - 2, 0);
-  }
-
-  // safety: if checkpoint lags too far (or chain reorg), clamp to lookback
   const minFrom = Math.max(blockNumber - LOOKBACK_BLOCKS, 0);
   const fromBlock = Math.max(Math.min(last, blockNumber), minFrom);
-
   const toBlock = blockNumber;
 
-  if (DEBUG) console.log(`[SWAP] scan blocks ${fromBlock} -> ${toBlock}`);
-
-  if (!ROUTERS_TO_WATCH.length) {
-    console.log('[SWAP] ROUTERS_TO_WATCH is empty. Paste router addresses to watch.');
-    return;
-  }
-
-  // Pull tx hashes by scanning router addresses
   const txs = new Set();
 
   for (const router of ROUTERS_TO_WATCH) {
-    let logs = [];
     try {
-      logs = await provider.getLogs({ address: router, fromBlock, toBlock });
-    } catch (e) {
-      console.log(`[SWAP] router getLogs failed ${router}: ${e?.message || e}`);
-      continue;
-    }
-    if (DEBUG) console.log(`[SWAP] router ${router} logs=${logs.length}`);
-    for (const lg of logs) {
-      const h = (lg.transactionHash || '').toLowerCase();
-      if (h) txs.add(h);
-    }
+      const logs = await provider.getLogs({ address: router, fromBlock, toBlock });
+      for (const lg of logs) {
+        if (lg.transactionHash) txs.add(lg.transactionHash.toLowerCase());
+      }
+    } catch {}
   }
 
-  let analyzed = 0, matched = 0;
   for (const h of txs) {
     if (isSeen(h)) continue;
     markSeen(h);
-
-    analyzed++;
-    const swap = await analyzeSwap(provider, h).catch(() => null);
-    if (!swap) continue;
-
-    matched++;
-    if (DEBUG) console.log(`[SWAP] MATCH tx=${h} ${swap.isBuy ? 'BUY' : 'SELL'} usd=${swap.usdValue?.toFixed?.(2)} eth=${swap.ethValue?.toFixed?.(4)} adrian=${swap.tokenAmount?.toFixed?.(2)}`);
-    await sendSwapEmbed(client, swap, provider);
+    const swap = await analyzeSwap(provider, h);
+    if (swap) await sendSwapEmbed(client, swap, provider);
   }
 
-  // ✅ advance checkpoint so restarts don't replay
   await setLastBlockInDb(client, toBlock);
-
-  if (DEBUG) console.log(`[SWAP] analyzed=${analyzed} matched=${matched} checkpoint=${toBlock}`);
 }
 
+// ================= START =================
 function startThirdPartySwapNotifierBase(client) {
   if (global._third_party_swap_base) return;
   global._third_party_swap_base = true;
 
-  console.log(`✅ Swap notifier starting (Base) | envChannels=${SWAP_NOTI_CHANNELS.length} | lookback=${LOOKBACK_BLOCKS} | debug=${DEBUG ? 'ON' : 'OFF'} | bootPing=${BOOT_PING ? 'ON' : 'OFF'}`);
+  console.log(
+    `✅ Swap notifier starting (Base) | envChannels=${SWAP_NOTI_CHANNELS.length} | lookback=${LOOKBACK_BLOCKS}`
+  );
 
   if (BOOT_PING) bootPing(client).catch(() => {});
   tick(client).catch(() => {});
-
-  setInterval(() => {
-    tick(client).catch(() => {});
-  }, POLL_MS);
+  setInterval(() => tick(client).catch(() => {}), POLL_MS);
 }
 
 module.exports = { startThirdPartySwapNotifierBase };
+
+
 
 
