@@ -375,7 +375,7 @@ async function analyzeSwap(provider, txHash) {
   };
 }
 
-// ======= SEND EMBED (PATCH: correct price + correct mcap + field order) =======
+// ======= SEND EMBED (PATCH: PRICE shows USD only) =======
 async function sendSwapEmbed(client, swap, provider) {
   const { wallet, isBuy, ethValue, usdValue, tokenAmount, txHash } = swap;
 
@@ -388,14 +388,10 @@ async function sendSwapEmbed(client, swap, provider) {
 
   // tx-implied fallback
   const impliedPriceUsd = (usdValue > 0 && tokenAmount > 0) ? (usdValue / tokenAmount) : 0;
-  const impliedPriceEth = (ethValue > 0 && tokenAmount > 0) ? (ethValue / tokenAmount) : 0;
 
   // market data (preferred)
   const md = await getAdrianMarketDataCached().catch(() => null);
   const priceUsd = (md && md.priceUsd > 0) ? md.priceUsd : impliedPriceUsd;
-
-  const ethUsd = await getEthUsdPriceCached().catch(() => 0);
-  const priceEth = (priceUsd > 0 && ethUsd > 0) ? (priceUsd / ethUsd) : impliedPriceEth;
 
   // market cap: API mcap first; if missing use FDV; if missing compute supply*priceUsd
   let marketCapUsd = (md && md.marketCapUsd > 0) ? md.marketCapUsd : 0;
@@ -408,17 +404,13 @@ async function sendSwapEmbed(client, swap, provider) {
 
   if (!marketCapUsd && provider && priceUsd > 0) {
     const supply = await getTotalSupplyCached(provider, ADRIAN).catch(() => 0);
-    if (supply > 0) {
-      marketCapUsd = supply * priceUsd;
-    }
+    if (supply > 0) marketCapUsd = supply * priceUsd;
   }
 
   const marketCapText = marketCapUsd > 0 ? `${formatCompactUsd(marketCapUsd)}${marketCapLabelSuffix}` : 'N/A';
 
-  const priceText =
-    (priceUsd > 0 || priceEth > 0)
-      ? `${priceUsd > 0 ? `$${priceUsd.toFixed(6)}` : 'N/A'}\n${priceEth > 0 ? `${priceEth.toFixed(10)} ETH` : 'N/A'}`
-      : 'N/A';
+  // ✅ Price: USD only (no ETH line)
+  const priceText = (priceUsd > 0) ? `$${priceUsd.toFixed(6)}` : `N/A`;
 
   const embed = {
     title: isBuy ? '🅰️ ADRIAN SWAP BUY!' : '🅰️ ADRIAN SWAP SELL!',
@@ -454,12 +446,11 @@ async function sendSwapEmbed(client, swap, provider) {
       }
     ],
 
-    url: `https://basescan.org/tx/${txHash}`,
-    color: isBuy ? 0x2ecc71 : 0xe74c3c,
-    footer: {
-      text: `AdrianSWAP • Powered by PimpsDev${md?.source ? ` • ${md.source}` : ''}`
-    },
-    timestamp: new Date().toISOString()
+url: `https://basescan.org/tx/${txHash}`,
+color: isBuy ? 0x2ecc71 : 0xe74c3c,
+footer: { text: 'AdrianSWAP • Powered by PimpsDev' },
+timestamp: new Date().toISOString()
+
   };
 
   const chans = await resolveChannels(client);
@@ -537,3 +528,4 @@ function startThirdPartySwapNotifierBase(client) {
 }
 
 module.exports = { startThirdPartySwapNotifierBase };
+
