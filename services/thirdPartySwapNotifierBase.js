@@ -181,7 +181,8 @@ function resolveRoleTag(channel, roleName) {
 // ======= MARKET CAP HELPERS =======
 const totalSupplyCache = new Map();
 async function getTotalSupplyCached(provider, tokenAddr) {
-  if (totalSupplyCache.has(tokenAddr)) return totalSupplyCache.get(tokenAddr);
+  const key = tokenAddr.toLowerCase();
+  if (totalSupplyCache.has(key)) return totalSupplyCache.get(key);
   try {
     const erc20 = new Contract(
       tokenAddr,
@@ -191,8 +192,8 @@ async function getTotalSupplyCached(provider, tokenAddr) {
     const raw = await erc20.totalSupply();
     const dec = await getDecimals(provider, tokenAddr);
     const supply = Number(ethers.formatUnits(raw, dec));
-    if (supply > 0) {
-      totalSupplyCache.set(tokenAddr, supply);
+    if (Number.isFinite(supply) && supply > 0) {
+      totalSupplyCache.set(key, supply);
       return supply;
     }
   } catch {}
@@ -207,6 +208,71 @@ function formatCompactUsd(n) {
   if (v >= 1e6)  return `$${(v / 1e6).toFixed(2)}M`;
   if (v >= 1e3)  return `$${(v / 1e3).toFixed(2)}K`;
   return `$${v.toFixed(4)}`;
+}
+
+// ======= TOKEN PRICE + MCAP (PATCH) =======
+let _tokenMarketCache = { ts: 0, data: null };
+
+async function getAdrianMarketDataCached(maxAgeMs = 30_000) {
+  const now = Date.now();
+  if (_tokenMarketCache.data && (now - _tokenMarketCache.ts) < maxAgeMs) return _tokenMarketCache.data;
+
+  const out = {
+    priceUsd: 0,
+    marketCapUsd: 0,
+    fdvUsd: 0,
+    liquidityUsd: 0,
+    source: ''
+  };
+
+  // 1) GeckoTerminal (Base)
+  try {
+    const url = `https://api.geckoterminal.com/api/v2/networks/base/tokens/${ADRIAN}`;
+    const res = await fetch(url, { headers: { accept: 'application/json' } }).catch(() => null);
+    const js = res ? await res.json().catch(() => null) : null;
+    const attrs = js?.data?.attributes || null;
+
+    const priceUsd = Number(attrs?.price_usd || 0);
+    const mcap = Number(attrs?.market_cap_usd || 0);
+    const fdv  = Number(attrs?.fdv_usd || 0);
+    const liq  = Number(attrs?.total_reserve_in_usd || 0);
+
+    if (priceUsd > 0) {
+      out.priceUsd = priceUsd;
+      out.marketCapUsd = mcap > 0 ? mcap : 0;
+      out.fdvUsd = fdv > 0 ? fdv : 0;
+      out.liquidityUsd = liq > 0 ? liq : 0;
+      out.source = 'geckoterminal';
+      _tokenMarketCache = { ts: now, data: out };
+      return out;
+    }
+  } catch {}
+
+  // 2) DexScreener fallback
+  try {
+    const url = `https://api.dexscreener.com/latest/dex/tokens/${ADRIAN}`;
+    const res = await fetch(url, { headers: { accept: 'application/json' } }).catch(() => null);
+    const js = res ? await res.json().catch(() => null) : null;
+    const pair = (js?.pairs || [])[0] || null;
+
+    const priceUsd = Number(pair?.priceUsd || 0);
+    const mcap = Number(pair?.marketCap || 0);
+    const fdv = Number(pair?.fdv || 0);
+    const liq = Number(pair?.liquidity?.usd || 0);
+
+    if (priceUsd > 0) {
+      out.priceUsd = priceUsd;
+      out.marketCapUsd = mcap > 0 ? mcap : 0;
+      out.fdvUsd = fdv > 0 ? fdv : 0;
+      out.liquidityUsd = liq > 0 ? liq : 0;
+      out.source = 'dexscreener';
+      _tokenMarketCache = { ts: now, data: out };
+      return out;
+    }
+  } catch {}
+
+  _tokenMarketCache = { ts: now, data: out };
+  return out;
 }
 
 // ======= CHANNEL RESOLUTION =======
@@ -234,18 +300,22 @@ async function resolveChannels(client) {
           added.add(id);
         }
       }
+      if (DEBUG) console.log(`[SWAP] DB channels=${out.length}`);
     }
-  } catch {}
+  } catch (e) {
+    if (DEBUG) console.log(`[SWAP] DB channel lookup failed: ${e?.message || e}`);
+  }
 
   if (!out.length && SWAP_NOTI_CHANNELS.length) {
     for (const id of SWAP_NOTI_CHANNELS) {
-      if (added.has(id)) continue;
+      if (!id || added.has(id)) continue;
       const ch = await fetchAndValidateChannel(client, id);
       if (ch) {
         out.push(ch);
         added.add(id);
       }
     }
+    if (DEBUG) console.log(`[SWAP] ENV channels=${out.length}`);
   }
 
   return out;
@@ -254,7 +324,10 @@ async function resolveChannels(client) {
 async function fetchAndValidateChannel(client, id) {
   let ch = client.channels.cache.get(id) || null;
   if (!ch) ch = await client.channels.fetch(id).catch(() => null);
-  if (!ch || !ch.isTextBased()) return null;
+  if (!ch) return null;
+
+  const isText = typeof ch.isTextBased === 'function' ? ch.isTextBased() : false;
+  if (!isText) return null;
 
   try {
     const me = ch.guild?.members?.me;
@@ -266,7 +339,7 @@ async function fetchAndValidateChannel(client, id) {
   return ch;
 }
 
-// ======= ANALYZE SWAP =======
+// ======= ANALYZE SWAP (LOGIC UNCHANGED) =======
 async function analyzeSwap(provider, txHash) {
   const tx = await provider.getTransaction(txHash).catch(() => null);
   const receipt = await provider.getTransactionReceipt(txHash).catch(() => null);
@@ -298,29 +371,65 @@ async function analyzeSwap(provider, txHash) {
     isBuy: netAdrian > 0,
     tokenAmount: Math.abs(netAdrian),
     ethValue,
-    usdValue: ethValue * ethUsd
+    usdValue: ethUsd > 0 ? (ethValue * ethUsd) : 0
   };
 }
 
-// ======= SEND EMBED =======
+// ======= SEND EMBED (PATCH: correct price + correct mcap + field order) =======
 async function sendSwapEmbed(client, swap, provider) {
   const { wallet, isBuy, ethValue, usdValue, tokenAmount, txHash } = swap;
-  if (MIN_USD_TO_POST > 0 && usdValue < MIN_USD_TO_POST) return;
+
+  if (MIN_USD_TO_POST > 0 && usdValue > 0 && usdValue < MIN_USD_TO_POST) {
+    if (DEBUG) console.log(`[SWAP] skip < MIN_USD ${usdValue.toFixed(2)} tx=${txHash}`);
+    return;
+  }
 
   const emojiLine = buildEmojiLine(isBuy, usdValue);
-  const priceUsd = usdValue / tokenAmount;
-  const priceEth = ethValue / tokenAmount;
-  const supply = await getTotalSupplyCached(provider, ADRIAN);
-  const marketCap = supply ? priceUsd * supply : 0;
+
+  // tx-implied fallback
+  const impliedPriceUsd = (usdValue > 0 && tokenAmount > 0) ? (usdValue / tokenAmount) : 0;
+  const impliedPriceEth = (ethValue > 0 && tokenAmount > 0) ? (ethValue / tokenAmount) : 0;
+
+  // market data (preferred)
+  const md = await getAdrianMarketDataCached().catch(() => null);
+  const priceUsd = (md && md.priceUsd > 0) ? md.priceUsd : impliedPriceUsd;
+
+  const ethUsd = await getEthUsdPriceCached().catch(() => 0);
+  const priceEth = (priceUsd > 0 && ethUsd > 0) ? (priceUsd / ethUsd) : impliedPriceEth;
+
+  // market cap: API mcap first; if missing use FDV; if missing compute supply*priceUsd
+  let marketCapUsd = (md && md.marketCapUsd > 0) ? md.marketCapUsd : 0;
+  let marketCapLabelSuffix = '';
+
+  if (!marketCapUsd && md && md.fdvUsd > 0) {
+    marketCapUsd = md.fdvUsd;
+    marketCapLabelSuffix = ' (FDV)';
+  }
+
+  if (!marketCapUsd && provider && priceUsd > 0) {
+    const supply = await getTotalSupplyCached(provider, ADRIAN).catch(() => 0);
+    if (supply > 0) {
+      marketCapUsd = supply * priceUsd;
+    }
+  }
+
+  const marketCapText = marketCapUsd > 0 ? `${formatCompactUsd(marketCapUsd)}${marketCapLabelSuffix}` : 'N/A';
+
+  const priceText =
+    (priceUsd > 0 || priceEth > 0)
+      ? `${priceUsd > 0 ? `$${priceUsd.toFixed(6)}` : 'N/A'}\n${priceEth > 0 ? `${priceEth.toFixed(10)} ETH` : 'N/A'}`
+      : 'N/A';
 
   const embed = {
     title: isBuy ? '🅰️ ADRIAN SWAP BUY!' : '🅰️ ADRIAN SWAP SELL!',
-    description: `${emojiLine}\n**Price:** $${priceUsd.toFixed(6)} • ${priceEth.toFixed(8)} ETH`,
+    description: `${emojiLine}`,
     image: { url: isBuy ? BUY_IMG : SELL_IMG },
+
+    // ✅ ORDER: spent, got, price, market cap, swapper
     fields: [
       {
         name: isBuy ? '💸 Spent' : '💰 Received',
-        value: `$${usdValue.toFixed(2)}\n${ethValue.toFixed(4)} ETH`,
+        value: `${usdValue > 0 ? `$${usdValue.toFixed(2)}` : 'N/A'}\n${ethValue.toFixed(4)} ETH`,
         inline: true
       },
       {
@@ -329,47 +438,64 @@ async function sendSwapEmbed(client, swap, provider) {
         inline: true
       },
       {
+        name: '🏷️ Price',
+        value: priceText,
+        inline: true
+      },
+      {
         name: '📊 Market Cap',
-        value: formatCompactUsd(marketCap),
+        value: marketCapText,
         inline: true
       },
       {
         name: isBuy ? '👤 Swapper' : '🖕 Seller',
-        value: shortWalletLink(wallet),
+        value: shortWalletLink ? shortWalletLink(wallet) : wallet,
         inline: false
       }
     ],
+
     url: `https://basescan.org/tx/${txHash}`,
     color: isBuy ? 0x2ecc71 : 0xe74c3c,
-    footer: { text: 'AdrianSWAP • Powered by PimpsDev' },
+    footer: {
+      text: `AdrianSWAP • Powered by PimpsDev${md?.source ? ` • ${md.source}` : ''}`
+    },
     timestamp: new Date().toISOString()
   };
 
   const chans = await resolveChannels(client);
+  if (DEBUG) console.log(`[SWAP] send -> channels=${chans.length} tx=${txHash}`);
+
   for (const ch of chans) {
     const tag = resolveRoleTag(ch, isBuy ? BUY_TAG_ROLE_NAME : SELL_TAG_ROLE_NAME);
     await ch.send(
       tag
         ? { content: tag.mention, embeds: [embed], allowedMentions: { roles: [tag.roleId] } }
         : { embeds: [embed] }
-    ).catch(() => {});
+    ).catch(err => {
+      if (DEBUG) console.log(`[SWAP] send failed channel=${ch?.id} err=${err?.message || err}`);
+    });
   }
 }
 
 // ======= LOOP =======
 async function tick(client) {
   const provider = await safeRpcCall('base', p => p);
-  if (!provider) return;
+  if (!provider) {
+    if (DEBUG) console.log('[SWAP] safeRpcCall(base) returned no provider');
+    return;
+  }
 
   await ensureCheckpointTable(client);
 
   if (TEST_TX && !isSeen(TEST_TX)) {
     markSeen(TEST_TX);
-    const swap = await analyzeSwap(provider, TEST_TX);
+    const swap = await analyzeSwap(provider, TEST_TX).catch(() => null);
     if (swap) await sendSwapEmbed(client, swap, provider);
   }
 
-  const blockNumber = await provider.getBlockNumber();
+  const blockNumber = await provider.getBlockNumber().catch(() => null);
+  if (!blockNumber) return;
+
   let last = await getLastBlockFromDb(client);
   if (!last) last = Math.max(blockNumber - 2, 0);
 
@@ -378,14 +504,23 @@ async function tick(client) {
 
   const txs = new Set();
   for (const router of ROUTERS_TO_WATCH) {
-    const logs = await provider.getLogs({ address: router, fromBlock, toBlock });
-    for (const lg of logs) txs.add(lg.transactionHash.toLowerCase());
+    let logs = [];
+    try {
+      logs = await provider.getLogs({ address: router, fromBlock, toBlock });
+    } catch (e) {
+      if (DEBUG) console.log(`[SWAP] router getLogs failed ${router}: ${e?.message || e}`);
+      continue;
+    }
+    for (const lg of logs) {
+      const h = (lg.transactionHash || '').toLowerCase();
+      if (h) txs.add(h);
+    }
   }
 
   for (const h of txs) {
     if (isSeen(h)) continue;
     markSeen(h);
-    const swap = await analyzeSwap(provider, h);
+    const swap = await analyzeSwap(provider, h).catch(() => null);
     if (swap) await sendSwapEmbed(client, swap, provider);
   }
 
@@ -402,7 +537,3 @@ function startThirdPartySwapNotifierBase(client) {
 }
 
 module.exports = { startThirdPartySwapNotifierBase };
-
-
-
-
