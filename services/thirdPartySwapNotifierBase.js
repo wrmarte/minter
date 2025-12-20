@@ -30,6 +30,11 @@ const DEBUG = String(process.env.SWAP_DEBUG || '').trim() === '1';
 const BOOT_PING = String(process.env.SWAP_BOOT_PING || '').trim() === '1';
 const TEST_TX = (process.env.SWAP_TEST_TX || '').trim().toLowerCase();
 
+// ======= TAG SYSTEM (PATCH) =======
+// These should be ROLE NAMES in the server. Create roles named exactly "WAGMI" and "NGMI".
+const BUY_TAG_ROLE_NAME  = 'WAGMI';
+const SELL_TAG_ROLE_NAME = 'NGMI';
+
 // ======= CHECKPOINT (DB) =======
 const CHECKPOINT_CHAIN = 'base';
 const CHECKPOINT_KEY   = 'third_party_swaps_last_block';
@@ -149,6 +154,19 @@ function buildEmojiLine(isBuy, usd) {
 
   const count = Math.max(1, Math.floor(u / 2));
   return (isBuy ? '🟥🟦🚀' : '🔻💀🔻').repeat(Math.min(count, MAX_EMOJI_REPEAT));
+}
+
+// ======= TAG HELPERS (PATCH) =======
+function resolveRoleTag(channel, roleName) {
+  try {
+    const guild = channel?.guild;
+    if (!guild) return null;
+    const role = guild.roles?.cache?.find(r => r?.name === roleName) || null;
+    if (!role) return null;
+    return { mention: `<@&${role.id}>`, roleId: role.id };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -404,7 +422,16 @@ async function sendSwapEmbed(client, swap) {
   }
 
   for (const ch of chans) {
-    await ch.send({ embeds: [embed] }).catch(err => {
+    // ======= TAG PATCH (per-channel / per-guild) =======
+    const tag = isBuy
+      ? resolveRoleTag(ch, BUY_TAG_ROLE_NAME)
+      : resolveRoleTag(ch, SELL_TAG_ROLE_NAME);
+
+    const payload = tag
+      ? { content: tag.mention, embeds: [embed], allowedMentions: { roles: [tag.roleId] } }
+      : { embeds: [embed] };
+
+    await ch.send(payload).catch(err => {
       console.log(`[SWAP] send failed channel=${ch.id} err=${err?.message || err}`);
     });
   }
@@ -531,4 +558,5 @@ function startThirdPartySwapNotifierBase(client) {
 }
 
 module.exports = { startThirdPartySwapNotifierBase };
+
 
