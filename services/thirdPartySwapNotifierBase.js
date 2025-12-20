@@ -169,6 +169,39 @@ function resolveRoleTag(channel, roleName) {
   }
 }
 
+// ======= MARKET CAP HELPERS (PATCH) =======
+const totalSupplyCache = new Map();
+
+async function getTotalSupplyCached(provider, tokenAddr, maxAgeMs = 10 * 60 * 1000) {
+  const key = (tokenAddr || '').toLowerCase();
+  const now = Date.now();
+  const hit = totalSupplyCache.get(key);
+  if (hit && hit.value > 0 && (now - hit.ts) < maxAgeMs) return hit.value;
+
+  try {
+    const erc20 = new Contract(tokenAddr, ['function totalSupply() view returns (uint256)'], provider);
+    const raw = await erc20.totalSupply();
+    const dec = await getDecimals(provider, tokenAddr);
+    const supply = Number(ethers.formatUnits(raw, dec));
+    if (Number.isFinite(supply) && supply > 0) {
+      totalSupplyCache.set(key, { value: supply, ts: now });
+      return supply;
+    }
+  } catch {}
+
+  return hit?.value || 0;
+}
+
+function formatCompactUsd(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v <= 0) return 'N/A';
+  if (v >= 1e12) return `$${(v / 1e12).toFixed(2)}T`;
+  if (v >= 1e9)  return `$${(v / 1e9).toFixed(2)}B`;
+  if (v >= 1e6)  return `$${(v / 1e6).toFixed(2)}M`;
+  if (v >= 1e3)  return `$${(v / 1e3).toFixed(2)}K`;
+  return `$${v.toFixed(2)}`;
+}
+
 /**
  * ✅ DB-backed channel routing (same DB the mint system uses)
  * We route swaps to the channels where ADRIAN is tracked in `tracked_tokens`.
@@ -376,7 +409,7 @@ async function analyzeSwap(provider, txHash) {
   return { wallet, txHash: txHash.toLowerCase(), isBuy, isSell, ethValue, usdValue, tokenAmount };
 }
 
-async function sendSwapEmbed(client, swap) {
+async function sendSwapEmbed(client, swap, provider) {
   const { wallet, isBuy, ethValue, usdValue, tokenAmount, txHash } = swap;
 
   if (MIN_USD_TO_POST > 0 && usdValue > 0 && usdValue < MIN_USD_TO_POST) {
@@ -385,6 +418,21 @@ async function sendSwapEmbed(client, swap) {
   }
 
   const emojiLine = buildEmojiLine(isBuy, usdValue);
+
+  // ======= MARKET CAP CALC (PATCH) =======
+  let marketCapText = 'N/A';
+  try {
+    if (provider && usdValue && tokenAmount && tokenAmount > 0) {
+      const priceUsd = usdValue / tokenAmount;
+      const supply = await getTotalSupplyCached(provider, ADRIAN);
+      if (Number.isFinite(priceUsd) && priceUsd > 0 && Number.isFinite(supply) && supply > 0) {
+        const mc = priceUsd * supply;
+        marketCapText = formatCompactUsd(mc);
+      }
+    }
+  } catch {
+    marketCapText = 'N/A';
+  }
 
   const embed = {
     title: isBuy ? `🅰️DRIAN SWAP BUY!` : `🅰️DRIAN SWAP SELL!`,
@@ -399,6 +447,11 @@ async function sendSwapEmbed(client, swap) {
       {
         name: isBuy ? '🎯 Got' : '📤 Sold',
         value: `${tokenAmount.toLocaleString(undefined, { maximumFractionDigits: 2 })} ADRIAN`,
+        inline: true
+      },
+      {
+        name: '📊 Market Cap',
+        value: marketCapText,
         inline: true
       },
       {
@@ -473,7 +526,7 @@ async function tick(client) {
     });
     if (swap) {
       if (DEBUG) console.log(`[SWAP] TEST_TX matched ${swap.isBuy ? 'BUY' : 'SELL'} usd=${swap.usdValue?.toFixed?.(2)} eth=${swap.ethValue?.toFixed?.(4)}`);
-      await sendSwapEmbed(client, swap);
+      await sendSwapEmbed(client, swap, provider);
     } else {
       console.log('[SWAP] TEST_TX did NOT match swap rules (or tx/receipt unavailable)');
     }
@@ -534,7 +587,7 @@ async function tick(client) {
 
     matched++;
     if (DEBUG) console.log(`[SWAP] MATCH tx=${h} ${swap.isBuy ? 'BUY' : 'SELL'} usd=${swap.usdValue?.toFixed?.(2)} eth=${swap.ethValue?.toFixed?.(4)} adrian=${swap.tokenAmount?.toFixed?.(2)}`);
-    await sendSwapEmbed(client, swap);
+    await sendSwapEmbed(client, swap, provider);
   }
 
   // ✅ advance checkpoint so restarts don't replay
