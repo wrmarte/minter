@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, Partials, Collection, REST, Routes } = require('discord.js');
+const { Client, GatewayIntentBits, Partials, Collection } = require('discord.js');
 const { Pool } = require('pg');
 const fs = require('fs');
 const path = require('path');
@@ -27,8 +27,8 @@ const { startPresenceTicker, stopPresenceTicker } = require('./services/presence
 const { startThirdPartySwapNotifierBase } = require('./services/thirdPartySwapNotifierBase');
 const { startEngineSweepNotifierBase } = require('./services/engineSweepNotifierBase');
 
-// ✅ ADRIAN SWEEP ENGINE (GLOBAL)
-const { startAdrianSweepEngine } = require('./services/adrianSweepEngine');
+// ✅ ADRIAN SWEEP ENGINE (BALANCE-BASED, GLOBAL)
+const { startSweepEngine } = require('./services/adrianSweepEngine');
 
 console.log('👀 Booting from:', __dirname);
 
@@ -165,10 +165,10 @@ async function onClientReady() {
     console.warn('⚠️ swap notifier:', e?.message || e);
   }
 
-  // 2️⃣ ADRIAN SWEEP ENGINE (GLOBAL SOURCE OF TRUTH)
+  // 2️⃣ ADRIAN SWEEP ENGINE (BALANCE SOURCE OF TRUTH)
   try {
-    console.log('🧹 Starting ADRIAN sweep engine (global)');
-    startAdrianSweepEngine(client);
+    console.log('🧹 Starting ADRIAN sweep engine (balance-based)');
+    await startSweepEngine(client);
     console.log('✅ ADRIAN sweep engine started');
   } catch (e) {
     console.warn('⚠️ ADRIAN sweep engine:', e?.message || e);
