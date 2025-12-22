@@ -28,6 +28,11 @@ const NICE_SCAN_EVERY_MS = 60 * 60 * 1000;     // scan hourly
 const NICE_ACTIVE_WINDOW_MS = 45 * 60 * 1000;  // “active” = last 45 minutes
 const NICE_ANALYZE_LIMIT = Number(process.env.NICE_ANALYZE_LIMIT || 40); // messages to scan for mood
 
+/** ===== NEW: Sweep reader config ===== */
+const SWEEP_TRIGGERS = ['sweep', 'sweep power', 'sweeppower', 'engine sweep', 'sweep-power', 'power'];
+const SWEEP_COOLDOWN_MS = Number(process.env.SWEEP_READER_COOLDOWN_MS || 8000);
+const sweepCooldownByUser = new Map(); // `${guildId}:${userId}` -> ts
+
 /** ===== Categorized NICE_LINES with extra nutty/thoughtful/degen/chaotic/funny ===== */
 const NICE_LINES = {
   focus: [
@@ -613,6 +618,172 @@ function markTypingSuppressed(client, channelId, ms = 11000) {
   }, ms + 500);
 }
 
+/** ---------- NEW: Sweep reader helpers ---------- */
+function isSweepReaderTriggered(lowered) {
+  const t = (lowered || '').toLowerCase();
+  return SWEEP_TRIGGERS.some(x => t.includes(x));
+}
+
+function fmtNum(n, decimals = 0) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return 'N/A';
+  return x.toLocaleString(undefined, { maximumFractionDigits: decimals, minimumFractionDigits: decimals });
+}
+
+function fmtSigned(n, decimals = 0) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return 'N/A';
+  const sign = x > 0 ? '+' : '';
+  return `${sign}${fmtNum(x, decimals)}`;
+}
+
+function safeDate(ts) {
+  const n = Number(ts);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const d = new Date(n);
+  if (String(d) === 'Invalid Date') return null;
+  return d;
+}
+
+async function getSweepSnapshot(client, guildId) {
+  // 1) If another listener stored sweepPower state on the client
+  //    Supported shapes:
+  //      client.sweepPower.getSnapshot(guildId?)
+  //      client.sweepPowerSnapshot (object)
+  //      client.__sweepPowerCache (Map)
+  try {
+    if (client?.sweepPower && typeof client.sweepPower.getSnapshot === 'function') {
+      const snap = await client.sweepPower.getSnapshot(guildId);
+      if (snap) return { source: 'client.sweepPower.getSnapshot', snap };
+    }
+  } catch {}
+
+  try {
+    if (client?.sweepPowerSnapshot && typeof client.sweepPowerSnapshot === 'object') {
+      return { source: 'client.sweepPowerSnapshot', snap: client.sweepPowerSnapshot };
+    }
+  } catch {}
+
+  try {
+    if (client?.__sweepPowerCache && typeof client.__sweepPowerCache.get === 'function') {
+      const snap = client.__sweepPowerCache.get(guildId) || client.__sweepPowerCache.get('global') || null;
+      if (snap) return { source: 'client.__sweepPowerCache', snap };
+    }
+  } catch {}
+
+  // 2) Postgres fallback (best-effort). We won’t assume your exact schema,
+  //    so we try a few common patterns safely.
+  if (!client?.pg || typeof client.pg.query !== 'function') {
+    return { source: 'none', snap: null };
+  }
+
+  const queries = [
+    // pattern A: per-server rows
+    {
+      name: 'sweep_power (per server)',
+      sql: `SELECT * FROM sweep_power WHERE server_id = $1 ORDER BY updated_at DESC NULLS LAST, ts DESC NULLS LAST, id DESC NULLS LAST LIMIT 1`,
+      params: [guildId],
+    },
+    // pattern B: global single table, latest row
+    {
+      name: 'sweep_power (global)',
+      sql: `SELECT * FROM sweep_power ORDER BY updated_at DESC NULLS LAST, ts DESC NULLS LAST, id DESC NULLS LAST LIMIT 1`,
+      params: [],
+    },
+    // pattern C: checkpoints style
+    {
+      name: 'sweep_power_checkpoints',
+      sql: `SELECT * FROM sweep_power_checkpoints WHERE server_id = $1 ORDER BY ts DESC NULLS LAST, id DESC NULLS LAST LIMIT 1`,
+      params: [guildId],
+    },
+  ];
+
+  for (const q of queries) {
+    try {
+      const r = await client.pg.query(q.sql, q.params);
+      const row = r?.rows?.[0];
+      if (row) return { source: `pg:${q.name}`, snap: row };
+    } catch {
+      // ignore and try next
+    }
+  }
+
+  return { source: 'pg:none', snap: null };
+}
+
+function normalizeSweepSnapshot(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+
+  // Try to map common fields.
+  // Expected output:
+  // { power, delta, total, lastTs, lastBlock, engineTx, note }
+  const power =
+    raw.power ?? raw.sweep_power ?? raw.sweeppower ?? raw.current_power ?? raw.current ?? raw.value ?? null;
+
+  const delta =
+    raw.delta ?? raw.power_delta ?? raw.change ?? raw.diff ?? raw.delta_power ?? null;
+
+  const total =
+    raw.total ?? raw.total_power ?? raw.sum ?? raw.accum ?? null;
+
+  const lastTs =
+    raw.updated_at?.getTime?.() ? raw.updated_at.getTime()
+    : raw.updated_at ?? raw.ts ?? raw.timestamp ?? raw.last_ts ?? null;
+
+  const lastBlock =
+    raw.block ?? raw.last_block ?? raw.block_number ?? raw.lastBlock ?? null;
+
+  const engineTx =
+    raw.tx ?? raw.tx_hash ?? raw.transaction_hash ?? raw.hash ?? raw.engine_tx ?? null;
+
+  const note =
+    raw.note ?? raw.reason ?? raw.meta ?? null;
+
+  return { power, delta, total, lastTs, lastBlock, engineTx, note };
+}
+
+async function sendSweepEmbed(message, snapshot, sourceLabel = '') {
+  const norm = normalizeSweepSnapshot(snapshot);
+  if (!norm) {
+    try { await message.reply('⚠️ Sweep reader: no snapshot available yet.'); } catch {}
+    return;
+  }
+
+  const d = safeDate(norm.lastTs);
+  const updatedStr = d ? `<t:${Math.floor(d.getTime() / 1000)}:R>` : 'Unknown';
+
+  const color = '#2ecc71';
+  const embed = new EmbedBuilder()
+    .setColor(color)
+    .setTitle('🧹 Engine Sweep — Power Read')
+    .setDescription('Here’s the latest sweep-power snapshot I can see.')
+    .addFields(
+      { name: 'Power', value: `**${fmtNum(norm.power, 2)}**`, inline: true },
+      { name: 'Δ Change', value: `**${fmtSigned(norm.delta, 2)}**`, inline: true },
+      { name: 'Total', value: `**${fmtNum(norm.total, 2)}**`, inline: true },
+      { name: 'Updated', value: updatedStr, inline: true },
+      { name: 'Block', value: norm.lastBlock != null ? String(norm.lastBlock) : 'N/A', inline: true },
+      { name: 'Source', value: sourceLabel || 'unknown', inline: true },
+    );
+
+  if (norm.engineTx) {
+    const tx = String(norm.engineTx);
+    embed.addFields({ name: 'Tx', value: tx.length > 80 ? `${tx.slice(0, 77)}…` : tx, inline: false });
+  }
+  if (norm.note) {
+    const n = String(norm.note);
+    embed.addFields({ name: 'Note', value: n.length > 250 ? `${n.slice(0, 247)}…` : n, inline: false });
+  }
+
+  try {
+    await message.reply({ embeds: [embed] });
+  } catch (e) {
+    try {
+      await message.reply(`🧹 Sweep Power: ${fmtNum(norm.power, 2)} | Δ ${fmtSigned(norm.delta, 2)} | Updated: ${updatedStr}`);
+    } catch {}
+  }
+}
+
 /** ---------------- Module export: keeps your original logic ---------------- */
 module.exports = (client) => {
   /** 🔎 MBella-post detector: if MBella just posted in a channel,
@@ -705,6 +876,30 @@ module.exports = (client) => {
 
     // Don’t compete directly with MBella triggers
     if (FEMALE_TRIGGERS.some(t => lowered.includes(t))) return;
+
+    /** ===== NEW: Sweep reader (non-invasive; runs BEFORE AI trigger logic) ===== */
+    try {
+      if (isSweepReaderTriggered(lowered)) {
+        const key = `${message.guild.id}:${message.author.id}`;
+        const lastTs = sweepCooldownByUser.get(key) || 0;
+        const now = Date.now();
+        const isOwner = message.author.id === process.env.BOT_OWNER_ID;
+
+        if (!isOwner && now - lastTs < SWEEP_COOLDOWN_MS) return;
+        sweepCooldownByUser.set(key, now);
+
+        const { source, snap } = await getSweepSnapshot(client, message.guild.id);
+        if (!snap) {
+          try { await message.reply('🧹 Sweep reader: no sweep-power stored yet. (Run the sweep tracker first.)'); } catch {}
+          return;
+        }
+        await sendSweepEmbed(message, snap, source);
+        return; // IMPORTANT: don’t fall through into MuscleMB AI response
+      }
+    } catch (e) {
+      console.warn('⚠️ sweep reader failed:', e?.message || String(e));
+      // If sweep reader fails, we continue to normal MB flow.
+    }
 
     const botMentioned = message.mentions.has(client.user);
     const hasTriggerWord = TRIGGERS.some(trigger => lowered.includes(trigger));
@@ -894,7 +1089,6 @@ module.exports = (client) => {
     }
   });
 };
-
 
 
 
