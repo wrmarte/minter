@@ -27,6 +27,9 @@ const { startPresenceTicker, stopPresenceTicker } = require('./services/presence
 const { startThirdPartySwapNotifierBase } = require('./services/thirdPartySwapNotifierBase');
 const { startEngineSweepNotifierBase } = require('./services/engineSweepNotifierBase');
 
+// ✅ ADRIAN SWEEP ENGINE (GLOBAL)
+const { startAdrianSweepEngine } = require('./services/adrianSweepEngine');
+
 console.log('👀 Booting from:', __dirname);
 
 // ================= Discord Client =================
@@ -154,7 +157,7 @@ async function onClientReady() {
 
   console.log('🚀 Client ready — starting services');
 
-  // 1️⃣ Swap notifier
+  // 1️⃣ Third-party swap notifier
   try {
     startThirdPartySwapNotifierBase(client);
     console.log('✅ Third-party swap notifier started');
@@ -162,10 +165,16 @@ async function onClientReady() {
     console.warn('⚠️ swap notifier:', e?.message || e);
   }
 
-  // ⏳ Delay Engine Sweep to allow:
-  // - PG ready
-  // - channel cache warm
-  // - mintRouter attached
+  // 2️⃣ ADRIAN SWEEP ENGINE (GLOBAL SOURCE OF TRUTH)
+  try {
+    console.log('🧹 Starting ADRIAN sweep engine (global)');
+    startAdrianSweepEngine(client);
+    console.log('✅ ADRIAN sweep engine started');
+  } catch (e) {
+    console.warn('⚠️ ADRIAN sweep engine:', e?.message || e);
+  }
+
+  // ⏳ Delay legacy Engine Sweep notifier (kept intact)
   setTimeout(() => {
     try {
       console.log('🧹 Starting Engine Sweep notifier (delayed)');
@@ -214,5 +223,4 @@ async function gracefulShutdown(sig) {
 
 process.once('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.once('SIGINT', () => gracefulShutdown('SIGINT'));
-
 
