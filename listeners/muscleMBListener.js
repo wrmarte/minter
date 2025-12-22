@@ -29,7 +29,7 @@ const NICE_ACTIVE_WINDOW_MS = 45 * 60 * 1000;  // “active” = last 45 minutes
 const NICE_ANALYZE_LIMIT = Number(process.env.NICE_ANALYZE_LIMIT || 40); // messages to scan for mood
 
 /** ===== NEW: Sweep reader config ===== */
-const SWEEP_TRIGGERS = ['sweep', 'sweep power', 'sweeppower', 'engine sweep', 'sweep-power', 'power'];
+const SWEEP_TRIGGERS = ['sweeppower', 'enginesweep', 'sweep-power'];
 const SWEEP_COOLDOWN_MS = Number(process.env.SWEEP_READER_COOLDOWN_MS || 8000);
 const sweepCooldownByUser = new Map(); // `${guildId}:${userId}` -> ts
 
