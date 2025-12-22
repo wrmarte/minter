@@ -4,6 +4,7 @@
 // - MUST NEVER block or suppress sale/list notifications.
 // - Observes BUY events and accumulates "power" with decay.
 // - Stores state in Postgres for safety across restarts.
+// - Exposes a live snapshot for readers (MuscleMB, etc.)
 // ======================================================
 
 const { ethers } = require("ethers");
@@ -58,21 +59,18 @@ function decayPower(power, dtSec) {
 // A safe default delta formula based on ETH value.
 // If token sale (no ethPaid), delta defaults small unless you extend it later.
 function computeDeltaFromEvent(event) {
-  // event.ethPaid is BigInt (wei)
   let ethValue = 0;
 
   if (event?.ethPaid && typeof event.ethPaid === "bigint" && event.ethPaid > 0n) {
     ethValue = Number(ethers.formatEther(event.ethPaid));
   } else {
-    // token-based sales: we can’t reliably value without price oracle.
-    // keep a small non-zero delta so activity still counts.
-    ethValue = 0.02; // default “token sale weight” (tweak later)
+    // token-based sales: keep small weight
+    ethValue = 0.02;
   }
 
   let delta = DELTA_SQRT_ETH ? Math.sqrt(Math.max(0, ethValue)) : ethValue;
-
-  // clamp (but do not use this to suppress notifications!)
   delta = clamp(delta, DELTA_MIN, DELTA_MAX);
+
   return { delta, ethValue };
 }
 
@@ -81,7 +79,7 @@ async function ensureSweepPowerTables(pg) {
   await pg.query(`
     CREATE TABLE IF NOT EXISTS sweep_power_state (
       chain TEXT NOT NULL,
-      scope TEXT NOT NULL,         -- e.g. "guild:<id>" or "global"
+      scope TEXT NOT NULL,
       power DOUBLE PRECISION NOT NULL DEFAULT 0,
       last_ts BIGINT NOT NULL DEFAULT 0,
       last_alert_tier INT NOT NULL DEFAULT 0,
@@ -122,7 +120,8 @@ async function setState(pg, chain, scope, power, ts, lastAlertTier) {
     `INSERT INTO sweep_power_state(chain, scope, power, last_ts, last_alert_tier)
      VALUES ($1,$2,$3,$4,$5)
      ON CONFLICT (chain, scope)
-     DO UPDATE SET power=EXCLUDED.power, last_ts=EXCLUDED.last_ts, last_alert_tier=EXCLUDED.last_alert_tier, updated_at=now()`,
+     DO UPDATE SET power=EXCLUDED.power, last_ts=EXCLUDED.last_ts,
+       last_alert_tier=EXCLUDED.last_alert_tier, updated_at=now()`,
     [chain, scope, power, Math.floor(ts), Math.floor(lastAlertTier)]
   );
 }
@@ -136,7 +135,6 @@ async function insertRecent(pg, chain, scope, txHash, buyer, ts, ethValue, delta
   );
 }
 
-// Cleanup old recent rows (keep table small)
 async function pruneRecent(pg, chain, scope) {
   const cutoff = nowSec() - Math.max(60, UNIQUE_BUYER_WINDOW_SEC) - 60;
   await pg.query(
@@ -150,8 +148,7 @@ async function isBuyerUniqueRecently(pg, chain, scope, buyer) {
   const cutoff = nowSec() - UNIQUE_BUYER_WINDOW_SEC;
   const r = await pg.query(
     `SELECT 1 FROM sweep_power_recent
-     WHERE chain=$1 AND scope=$2 AND buyer=$3 AND ts >= $4
-     LIMIT 1`,
+     WHERE chain=$1 AND scope=$2 AND buyer=$3 AND ts >= $4 LIMIT 1`,
     [chain, scope, buyer.toLowerCase(), cutoff]
   );
   return r.rows?.length ? false : true;
@@ -161,8 +158,7 @@ async function wasRecentBurst(pg, chain, scope) {
   const cutoff = nowSec() - BURST_WINDOW_SEC;
   const r = await pg.query(
     `SELECT 1 FROM sweep_power_recent
-     WHERE chain=$1 AND scope=$2 AND ts >= $3
-     LIMIT 1`,
+     WHERE chain=$1 AND scope=$2 AND ts >= $3 LIMIT 1`,
     [chain, scope, cutoff]
   );
   return !!r.rows?.length;
@@ -195,11 +191,10 @@ async function maybeAlert(client, chans, scope, power, tier, event) {
     footer: { text: "Sweep-Power • Piggy Bank Mode" },
   };
 
-  // add context
   if (event?.nft && event?.tokenId) {
     embed.fields = [
-      { name: "Last Sale", value: `${event.nft} #${event.tokenId}`, inline: false },
-      { name: "Tx", value: `https://basescan.org/tx/${event.tx?.hash || ""}`.trim(), inline: false },
+      { name: "Last Sale", value: `${event.nft} #${event.tokenId}` },
+      { name: "Tx", value: `https://basescan.org/tx/${event.tx?.hash || ""}` },
     ];
   }
 
@@ -210,27 +205,21 @@ async function maybeAlert(client, chans, scope, power, tier, event) {
 
 // ---------------- Public API ----------------
 
-// call once at startup
 async function initSweepPower(client) {
   try {
     await ensureSweepPowerTables(client.pg);
+
+    // expose reader interface
+    client.sweepPower = {
+      getSnapshot: async () => client.sweepPowerSnapshot || null
+    };
+
   } catch (e) {
-    // never crash caller
     console.log("[SWEEP-POWER] init error:", e?.message || e);
   }
 }
 
-/**
- * Apply Sweep-Power update for a detected event.
- * MUST be called AFTER sendEmbed() in CompleteSweepJS.
- *
- * @param {object} client discord client (must have .pg)
- * @param {object} chans resolved channels array (same as notifier uses)
- * @param {object} event result from analyzeTx() (type BUY/LIST)
- * @param {object} opts { scope?: string } scope defaults "global"
- */
 async function applySweepPower(client, chans, event, opts = {}) {
-  // Only BUY events contribute to sweep momentum
   if (!event || event.type !== "BUY") return;
 
   const scope = opts.scope || "global";
@@ -242,47 +231,53 @@ async function applySweepPower(client, chans, event, opts = {}) {
     const ts = nowSec();
     const state = await getState(client.pg, chain, scope);
 
-    // decay since last update
     const dt = state.last_ts ? Math.max(0, ts - state.last_ts) : 0;
     let power = decayPower(state.power, dt);
 
-    // base delta
     const { delta: baseDelta, ethValue } = computeDeltaFromEvent(event);
     let delta = baseDelta;
 
-    // burst boost (if there was activity very recently)
     const burst = await wasRecentBurst(client.pg, chain, scope);
     if (burst) delta *= BURST_MULT;
 
-    // unique buyer boost
     const buyer = (event.buyer || "").toLowerCase();
     const unique = await isBuyerUniqueRecently(client.pg, chain, scope, buyer);
     if (unique) delta *= UNIQUE_BUYER_MULT;
 
-    // add to piggy bank
-    power = power + delta;
+    power += delta;
 
-    // record recent (dedupe by tx hash)
     const txHash = event.tx?.hash;
     if (txHash) {
       await insertRecent(client.pg, chain, scope, txHash, buyer, ts, ethValue, delta);
       await pruneRecent(client.pg, chain, scope);
     }
 
-    // alert logic (optional)
     const tier = tierFromPower(power);
     const lastTier = state.last_alert_tier || 0;
 
-    // only alert on tier increase
     if (tier > lastTier) {
       await maybeAlert(client, chans, scope, power, tier, event);
     }
 
     await setState(client.pg, chain, scope, power, ts, Math.max(lastTier, tier));
 
-    return { scope, power, delta, ethValue, tier, burst, unique };
+    // 🔥 LIVE SNAPSHOT FOR READERS
+    client.sweepPowerSnapshot = {
+      chain,
+      scope,
+      power,
+      delta,
+      ethValue,
+      tier,
+      burst,
+      unique,
+      txHash,
+      updated_at: Date.now(),
+    };
+
+    return client.sweepPowerSnapshot;
+
   } catch (e) {
-    // swallow errors to protect notis
     if (String(process.env.SWEEP_POWER_DEBUG || "") === "1") {
       console.log("[SWEEP-POWER] apply error:", e?.message || e);
     }
@@ -291,3 +286,4 @@ async function applySweepPower(client, chans, event, opts = {}) {
 }
 
 module.exports = { initSweepPower, applySweepPower };
+
