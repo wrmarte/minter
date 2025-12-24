@@ -11,6 +11,9 @@ const TOKEN_NAME_TO_ADDRESS = {
   'ADRIAN': '0x7e99075ce287f1cf8cbcaaa6a1c7894e404fd7ea'
 };
 
+// ✅ FIX: If payment token contract == this CA, show "AdrianBot" in Method field
+const ADRIANBOT_PAYMENT_CA = '0xa41d5faf7ba8b82e276125de2a053216e91f4814';
+
 const ZERO_ADDRESS = ethers.ZeroAddress;
 const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
 const TRANSFER_ERC20_TOPIC = ethers.id('Transfer(address,address,uint256)'); // ERC20 shares same signature
@@ -515,7 +518,14 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
           } catch {}
         }
         ethValue = priceEth || null;
-        methodUsed = `🟨 ${mint_token_symbol || 'TOKEN'}`;
+
+        // ✅ FIX: If payment token contract == AdrianBot CA, show AdrianBot instead of token/ETH label
+        if (tokenContract === ADRIANBOT_PAYMENT_CA) {
+          methodUsed = '🤖 AdrianBot';
+        } else {
+          methodUsed = `🟨 ${mint_token_symbol || 'TOKEN'}`;
+        }
+
         if (ethValue) break;
       } catch {}
     }
@@ -554,7 +564,3 @@ module.exports = {
   trackBaseContracts,
   contractListeners
 };
-
-
-
-
