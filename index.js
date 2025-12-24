@@ -157,6 +157,21 @@ async function onClientReady() {
 
   console.log('🚀 Client ready — starting services');
 
+  // ✅ INIT PER-SERVER WEBHOOK TABLE
+  try {
+    await client.pg.query(`
+      CREATE TABLE IF NOT EXISTS guild_webhooks (
+        guild_id TEXT PRIMARY KEY,
+        channel_id TEXT,
+        webhook_url TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    console.log('✅ guild_webhooks table ready');
+  } catch (e) {
+    console.error('❌ Failed to init guild_webhooks table:', e);
+  }
+
   // 1️⃣ Third-party swap notifier
   try {
     startThirdPartySwapNotifierBase(client);
@@ -223,4 +238,3 @@ async function gracefulShutdown(sig) {
 
 process.once('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.once('SIGINT', () => gracefulShutdown('SIGINT'));
-
