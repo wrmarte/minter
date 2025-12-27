@@ -8,7 +8,7 @@ const path = require('path');
 // ENV
 // -----------------------------
 // COMMAND_SCOPE: "global" or "guild"
-// TEST_GUILD_IDS: comma-separated guild IDs (required for guild scope; used to clear guild when switching to global)
+// TEST_GUILD_IDS: comma-separated guild IDs (required for guild scope; used to clear guild when switching to global).
 // CLIENT_ID: your application (bot) id
 // DISCORD_BOT_TOKEN: bot token
 // PURGE_BOTH: if "true", clears BOTH global and provided guilds BEFORE registering (belt & suspenders)
