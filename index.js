@@ -1,4 +1,17 @@
 require('dotenv').config();
+
+/* ======================================================
+   🚀 ONE-TIME SLASH COMMAND DEPLOY (SAFE GUARD)
+   ------------------------------------------------------
+   Run only when:
+   RUN_DEPLOY=true
+   Then REMOVE the env var after success.
+====================================================== */
+if (process.env.RUN_DEPLOY === 'true') {
+  console.log('🚀 Running slash command deploy...');
+  require('./registerCommands');
+}
+
 const { Client, GatewayIntentBits, Partials, Collection } = require('discord.js');
 const { Pool } = require('pg');
 const fs = require('fs');
@@ -238,3 +251,4 @@ async function gracefulShutdown(sig) {
 
 process.once('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.once('SIGINT', () => gracefulShutdown('SIGINT'));
+
