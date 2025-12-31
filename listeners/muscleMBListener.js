@@ -796,39 +796,65 @@ function _findArrayOfArrays(obj) {
   return null;
 }
 
+/**
+ * PATCH: 3D-glasses theme chart
+ * - Blue = true series
+ * - Red  = tiny offset series
+ * - Dark background + soft grid
+ */
 function _buildQuickChartUrl(points, subtitle = 'GeckoTerminal') {
   const labels = points.map(p => new Date(p.t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
-  const data = points.map(p => Number(p.c));
+  const dataBlue = points.map(p => Number(p.c));
+  const dataRed = dataBlue.map(v => Number(v) * 1.004); // slight separation for "3D" effect
 
   const cfg = {
     type: 'line',
     data: {
       labels,
-      datasets: [{
-        label: '$ADRIAN',
-        data,
-        fill: true,
-        pointRadius: 0,
-        borderWidth: 2,
-        tension: 0.25
-      }]
+      datasets: [
+        {
+          label: '$ADRIAN (red)',
+          data: dataRed,
+          fill: false,
+          pointRadius: 0,
+          borderWidth: 4,
+          tension: 0.25,
+          borderColor: 'rgba(255, 0, 0, 0.75)'
+        },
+        {
+          label: '$ADRIAN (blue)',
+          data: dataBlue,
+          fill: false,
+          pointRadius: 0,
+          borderWidth: 4,
+          tension: 0.25,
+          borderColor: 'rgba(0, 140, 255, 0.95)'
+        }
+      ]
     },
     options: {
       responsive: true,
       plugins: {
         legend: { display: false },
-        title: { display: true, text: '$ADRIAN price (USD)' },
-        subtitle: { display: true, text: subtitle }
+        title: { display: true, text: '🟥🟦 $ADRIAN price (USD) — 3D Mode', color: 'rgba(235,235,235,0.95)' },
+        subtitle: { display: true, text: subtitle, color: 'rgba(200,200,200,0.9)' }
       },
       scales: {
-        x: { ticks: { maxTicksLimit: 6 } },
-        y: { ticks: { maxTicksLimit: 6 } }
+        x: {
+          ticks: { maxTicksLimit: 6, color: 'rgba(210,210,210,0.9)' },
+          grid: { color: 'rgba(255,255,255,0.08)' }
+        },
+        y: {
+          ticks: { maxTicksLimit: 6, color: 'rgba(210,210,210,0.9)' },
+          grid: { color: 'rgba(255,255,255,0.08)' }
+        }
       }
     }
   };
 
   const encoded = encodeURIComponent(JSON.stringify(cfg));
-  return `https://quickchart.io/chart?width=1000&height=500&format=png&c=${encoded}`;
+  // PATCH: dark background + crisper render
+  return `https://quickchart.io/chart?width=1000&height=500&format=png&devicePixelRatio=2&backgroundColor=rgba(12,12,12,1)&c=${encoded}`;
 }
 
 async function _fetchAdrianOhlcvList() {
@@ -982,18 +1008,22 @@ async function sendAdrianChartEmbed(message) {
       ? `Range: <t:${Math.floor(startTs)}:R> → <t:${Math.floor(endTs)}:R>`
       : null;
 
+    // PATCH: hide pool addy (no raw poolApi printed), keep masked clickable text only
+    const poolWeb = `https://www.geckoterminal.com/${encodeURIComponent(ADRIAN_GT_NETWORK)}/pools/${encodeURIComponent(ADRIAN_GT_POOL_ID)}`;
+
     const embed = new EmbedBuilder()
-      .setColor('#f1c40f')
-      .setTitle('📈 $ADRIAN Chart')
-      .setDescription([descBits.join(' • '), rangeLine].filter(Boolean).join('\n') || 'Live chart from GeckoTerminal.')
+      // PATCH: blue/red theme (embed border is blue; emojis add the red)
+      .setColor('#1e90ff')
+      .setTitle('🟥🟦 $ADRIAN Chart (3D Mode)')
+      .setDescription([descBits.join(' • '), rangeLine, '_3D-glasses theme: red/blue overlay._'].filter(Boolean).join('\n') || 'Live chart from GeckoTerminal.')
       .setImage(url)
       .addFields(
         { name: 'High', value: Number.isFinite(hi) ? `**${_fmtMoney(hi, 6)}**` : 'N/A', inline: true },
         { name: 'Low', value: Number.isFinite(lo) ? `**${_fmtMoney(lo, 6)}**` : 'N/A', inline: true },
         { name: 'Vol (sum)', value: Number.isFinite(vol) ? `**${_fmtVol(vol)}**` : 'N/A', inline: true },
-        { name: 'Pool', value: meta?.poolApi ? meta.poolApi : 'N/A', inline: false },
+        { name: 'Pool', value: poolWeb ? `[View Pool](${poolWeb})` : 'N/A', inline: false },
       )
-      .setFooter({ text: 'Source: GeckoTerminal → QuickChart' })
+      .setFooter({ text: '🟥🟦 Source: GeckoTerminal → QuickChart (3D Mode)' })
       .setTimestamp();
 
     await safeReplyMessage(message.client, message, { embeds: [embed], allowedMentions: { parse: [] } });
@@ -1575,4 +1605,3 @@ module.exports = (client) => {
     }
   });
 };
-
