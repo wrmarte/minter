@@ -41,6 +41,19 @@ const SWEEP_TRIGGERS = ['sweeppower', 'enginesweep', 'sweep-power'];
 const SWEEP_COOLDOWN_MS = Number(process.env.SWEEP_READER_COOLDOWN_MS || 8000);
 const sweepCooldownByUser = new Map(); // `${guildId}:${userId}` -> ts
 
+/** ===== NEW: $ADRIAN chart trigger config ===== */
+const ADRIAN_CHART_TRIGGERS = ['adrian-chart', 'chart-adrian'];
+const ADRIAN_CHART_COOLDOWN_MS = Number(process.env.ADRIAN_CHART_COOLDOWN_MS || 8000);
+const adrianChartCooldownByUser = new Map(); // `${guildId}:${userId}` -> ts
+
+// GeckoTerminal mapping for $ADRIAN pool (defaults to the pool you gave)
+const ADRIAN_GT_NETWORK = (process.env.ADRIAN_GT_NETWORK || 'base').trim().toLowerCase();
+const ADRIAN_GT_POOL_ID = (process.env.ADRIAN_GT_POOL_ID ||
+  '0x79cdf2d48abd42872a26d1b1c92ece4245327a4837b427dc9cff5f1acc40e379'
+).trim().toLowerCase();
+const ADRIAN_CHART_POINTS = Math.max(20, Math.min(240, Number(process.env.ADRIAN_CHART_POINTS || 96))); // 96 ≈ last day @ 15m
+const ADRIAN_CHART_CACHE_MS = Math.max(10_000, Number(process.env.ADRIAN_CHART_CACHE_MS || 60_000));
+
 /** ===== Categorized NICE_LINES with extra nutty/thoughtful/degen/chaotic/funny ===== */
 const NICE_LINES = {
   focus: [
@@ -732,6 +745,171 @@ async function safeReplyMessage(client, message, payload) {
   }
 }
 
+/** ---------- NEW: $ADRIAN chart helpers (inline, no extra files needed) ---------- */
+let _adrianChartCache = { ts: 0, url: null, meta: null };
+
+function isAdrianChartTriggered(lowered) {
+  const t = (lowered || '').toLowerCase();
+  return ADRIAN_CHART_TRIGGERS.some(x => t.includes(x));
+}
+
+function _findArrayOfArrays(obj) {
+  const seen = new Set();
+  const stack = [{ v: obj, d: 0 }];
+  while (stack.length) {
+    const { v, d } = stack.pop();
+    if (!v || typeof v !== 'object') continue;
+    if (seen.has(v)) continue;
+    seen.add(v);
+    if (d > 6) continue;
+
+    if (Array.isArray(v) && v.length && Array.isArray(v[0]) && v[0].length >= 5) return v;
+
+    for (const k of Object.keys(v)) stack.push({ v: v[k], d: d + 1 });
+  }
+  return null;
+}
+
+function _buildQuickChartUrl(points, subtitle = 'GeckoTerminal') {
+  const labels = points.map(p => new Date(p.t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+  const data = points.map(p => Number(p.c));
+
+  const cfg = {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        label: '$ADRIAN',
+        data,
+        fill: false,
+        pointRadius: 0,
+        borderWidth: 2,
+        tension: 0.25
+      }]
+    },
+    options: {
+      responsive: true,
+      plugins: {
+        legend: { display: false },
+        title: { display: true, text: '$ADRIAN price (USD)' },
+        subtitle: { display: true, text: subtitle }
+      },
+      scales: {
+        x: { ticks: { maxTicksLimit: 6 } },
+        y: { ticks: { maxTicksLimit: 6 } }
+      }
+    }
+  };
+
+  const encoded = encodeURIComponent(JSON.stringify(cfg));
+  return `https://quickchart.io/chart?width=900&height=450&format=png&c=${encoded}`;
+}
+
+async function _fetchAdrianOhlcvList() {
+  const base = `https://api.geckoterminal.com/api/v2/networks/${encodeURIComponent(ADRIAN_GT_NETWORK)}/pools/${encodeURIComponent(ADRIAN_GT_POOL_ID)}`;
+
+  const candidates = [
+    `${base}/ohlcv/day?aggregate=15&limit=${ADRIAN_CHART_POINTS}`,
+    `${base}/ohlcv/minute?aggregate=15&limit=${ADRIAN_CHART_POINTS}`,
+    `${base}/ohlcv/hour?aggregate=1&limit=${Math.min(ADRIAN_CHART_POINTS, 168)}`,
+    `${base}/ohlcv?timeframe=day&aggregate=15&limit=${ADRIAN_CHART_POINTS}`,
+    `${base}/ohlcv?timeframe=minute&aggregate=15&limit=${ADRIAN_CHART_POINTS}`,
+    `${base}/ohlcv?timeframe=hour&aggregate=1&limit=${Math.min(ADRIAN_CHART_POINTS, 168)}`
+  ];
+
+  let lastErr = null;
+
+  for (const url of candidates) {
+    try {
+      const { res, bodyText } = await fetchWithTimeout(url, {}, 12000);
+      if (!res.ok) {
+        lastErr = new Error(`GT HTTP ${res.status}: ${bodyText?.slice(0, 120)}`);
+        continue;
+      }
+      const json = safeJsonParse(bodyText);
+      if (!json) { lastErr = new Error('GT non-json response'); continue; }
+
+      const list =
+        json?.data?.attributes?.ohlcv_list ||
+        json?.data?.attributes?.ohlcvList ||
+        json?.data?.ohlcv_list ||
+        json?.ohlcv_list ||
+        null;
+
+      if (Array.isArray(list) && list.length) return list;
+
+      const maybe = _findArrayOfArrays(json);
+      if (maybe?.length) return maybe;
+
+      lastErr = new Error('GT response had no ohlcv_list');
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+
+  throw lastErr || new Error('Unable to fetch OHLCV list from GeckoTerminal');
+}
+
+async function getAdrianChartUrlCached() {
+  const now = Date.now();
+  if (_adrianChartCache.url && (now - _adrianChartCache.ts) < ADRIAN_CHART_CACHE_MS) return _adrianChartCache;
+
+  const list = await _fetchAdrianOhlcvList();
+
+  const pts = [];
+  for (const row of list.slice(0, ADRIAN_CHART_POINTS)) {
+    if (!Array.isArray(row) || row.length < 5) continue;
+    const ts = Number(row[0]);
+    const c = Number(row[4]); // close
+    if (!Number.isFinite(ts) || !Number.isFinite(c)) continue;
+
+    const tSec = ts > 2_000_000_000_000 ? Math.floor(ts / 1000) : ts;
+    pts.push({ t: tSec, c });
+  }
+
+  pts.sort((a, b) => a.t - b.t);
+
+  if (pts.length < 5) throw new Error('Not enough chart points');
+
+  const first = pts[0];
+  const last = pts[pts.length - 1];
+  const deltaPct = ((last.c - first.c) / (first.c || 1)) * 100;
+
+  const subtitle = `${ADRIAN_GT_NETWORK} pool • ${pts.length} pts • Δ ${deltaPct >= 0 ? '+' : ''}${deltaPct.toFixed(2)}%`;
+  const url = _buildQuickChartUrl(pts, subtitle);
+
+  _adrianChartCache = { ts: now, url, meta: { lastPrice: last.c, deltaPct } };
+  return _adrianChartCache;
+}
+
+async function sendAdrianChartEmbed(message) {
+  try {
+    const { url, meta } = await getAdrianChartUrlCached();
+    const lastPrice = meta?.lastPrice;
+    const deltaPct = meta?.deltaPct;
+
+    const descBits = [];
+    if (Number.isFinite(lastPrice)) descBits.push(`Last: **$${Number(lastPrice).toFixed(6)}**`);
+    if (Number.isFinite(deltaPct)) descBits.push(`Δ: **${deltaPct >= 0 ? '+' : ''}${Number(deltaPct).toFixed(2)}%**`);
+
+    const embed = new EmbedBuilder()
+      .setColor('#f1c40f')
+      .setTitle('📈 $ADRIAN Chart')
+      .setDescription(descBits.join(' • ') || 'Live chart from GeckoTerminal.')
+      .setImage(url)
+      .setFooter({ text: 'Source: GeckoTerminal → QuickChart' })
+      .setTimestamp();
+
+    await safeReplyMessage(message.client, message, { embeds: [embed], allowedMentions: { parse: [] } });
+  } catch (e) {
+    console.warn('⚠️ adrian chart failed:', e?.message || String(e));
+    await safeReplyMessage(message.client, message, {
+      content: '⚠️ Couldn’t pull $ADRIAN chart right now. Try again in a sec.',
+      allowedMentions: { parse: [] }
+    }).catch(() => {});
+  }
+}
+
 /** ---------- NEW: Sweep reader helpers ---------- */
 function isSweepReaderTriggered(lowered) {
   const t = (lowered || '').toLowerCase();
@@ -1000,6 +1178,25 @@ module.exports = (client) => {
 
     // If MBella recently posted/claimed the channel, suppress MuscleMB here
     if (isTypingSuppressed(client, message.channel.id)) return;
+
+    /** ===== NEW: $ADRIAN chart trigger (runs BEFORE MBella-avoid + AI) ===== */
+    try {
+      if (isAdrianChartTriggered(lowered)) {
+        const key = `${message.guild.id}:${message.author.id}`;
+        const lastTs = adrianChartCooldownByUser.get(key) || 0;
+        const now = Date.now();
+        const isOwner = message.author.id === process.env.BOT_OWNER_ID;
+
+        if (!isOwner && now - lastTs < ADRIAN_CHART_COOLDOWN_MS) return;
+        adrianChartCooldownByUser.set(key, now);
+
+        await sendAdrianChartEmbed(message);
+        return; // IMPORTANT: don't fall through into AI
+      }
+    } catch (e) {
+      console.warn('⚠️ adrian chart trigger failed:', e?.message || String(e));
+      // if this fails, continue to normal logic
+    }
 
     // Don’t compete directly with MBella triggers
     if (FEMALE_TRIGGERS.some(t => lowered.includes(t))) return;
