@@ -43,6 +43,21 @@ const { startEngineSweepNotifierBase } = require('./services/engineSweepNotifier
 // ✅ ADRIAN SWEEP ENGINE (BALANCE-BASED, GLOBAL)
 const { startSweepEngine } = require('./services/adrianSweepEngine');
 
+// ✅ WEBHOOK AUTO (MB RELAY)
+// IMPORTANT: This is what makes “MBella identity” possible (messages sent as webhook username/avatar)
+const webhookAuto = require('./services/webhookAuto');
+
+// Optional identity envs (used by helper below)
+const MBELLA_NAME = (process.env.MBELLA_NAME || 'MBella').trim();
+const MBELLA_AVATAR =
+  (process.env.MBELLA_AVATAR_URL || process.env.MBELLA_AVATAR || process.env.MBELLA_PFP || '').trim() || null;
+
+// Webhook name to find/use in channels (manual webhook must match this name if you want the bot to “see” it)
+const MB_RELAY_WEBHOOK_NAME = (process.env.MB_RELAY_WEBHOOK_NAME || 'MB Relay').trim();
+
+// Debug
+const WEBHOOKAUTO_DEBUG = String(process.env.WEBHOOKAUTO_DEBUG || '').trim() === '1';
+
 console.log('👀 Booting from:', __dirname);
 
 // ================= Discord Client =================
@@ -55,6 +70,49 @@ const client = new Client({
   ],
   partials: [Partials.GuildMember, Partials.User]
 });
+
+// ✅ Attach webhookAuto to client so ALL listeners can use it (this is the missing “integration” most of the time)
+client.webhookAuto = webhookAuto;
+
+// ✅ Convenience helper: send as MBella via webhookAuto (falls back to normal send if webhook fails)
+// Listeners can call: await client.sendAsMBella(channel, { content, embeds })
+client.sendAsMBella = async (channel, payload = {}) => {
+  try {
+    if (!channel) return false;
+
+    // Always block mass mentions through relay
+    const safePayload = {
+      ...payload,
+      allowedMentions: payload.allowedMentions || { parse: [] },
+      // Force the webhook “display identity”
+      username: payload.username || MBELLA_NAME,
+      avatarURL: payload.avatarURL || (MBELLA_AVATAR || undefined),
+    };
+
+    const ok = await client.webhookAuto.sendViaWebhook(
+      channel,
+      safePayload,
+      {
+        // This is the webhook object name in Discord (used to discover manual webhooks too)
+        name: MB_RELAY_WEBHOOK_NAME,
+        // This only affects bot-owned webhooks (manual ones won’t be edited)
+        avatarURL: MBELLA_AVATAR
+      }
+    );
+
+    if (ok) return true;
+
+    // Fallback: normal send (will show as bot user, not MBella)
+    await channel.send(payload);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+if (WEBHOOKAUTO_DEBUG) {
+  console.log(`🪝 webhookAuto DEBUG=1 | relayName="${MB_RELAY_WEBHOOK_NAME}" | mbella="${MBELLA_NAME}" | avatar=${MBELLA_AVATAR ? 'set' : 'none'}`);
+}
 
 // ================= PostgreSQL =================
 const wantSsl = !/^1|true$/i.test(process.env.PGSSL_DISABLE || '');
@@ -184,6 +242,15 @@ async function onClientReady() {
   } catch (e) {
     console.error('❌ Failed to init guild_webhooks table:', e);
   }
+
+  // ✅ Quick diagnostic: confirm webhookAuto is attached
+  try {
+    if (!client.webhookAuto || typeof client.webhookAuto.sendViaWebhook !== 'function') {
+      console.warn('⚠️ webhookAuto not attached or invalid. MB relay will NOT show as MBella.');
+    } else {
+      console.log('✅ webhookAuto attached (MB relay ready)');
+    }
+  } catch {}
 
   // 1️⃣ Third-party swap notifier
   try {
