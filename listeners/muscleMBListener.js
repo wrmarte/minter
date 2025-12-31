@@ -37,12 +37,30 @@ const NICE_ACTIVE_WINDOW_MS = 45 * 60 * 1000;  // “active” = last 45 minutes
 const NICE_ANALYZE_LIMIT = Number(process.env.NICE_ANALYZE_LIMIT || 40); // messages to scan for mood
 
 /** ===== NEW: Sweep reader config ===== */
-const SWEEP_TRIGGERS = ['sweeppower', 'enginesweep', 'sweep-power'];
+const SWEEP_TRIGGERS = ['sweeppower', 'engine sweep', 'enginesweep', 'sweep-power', 'sweep power'];
 const SWEEP_COOLDOWN_MS = Number(process.env.SWEEP_READER_COOLDOWN_MS || 8000);
 const sweepCooldownByUser = new Map(); // `${guildId}:${userId}` -> ts
 
 /** ===== NEW: $ADRIAN chart trigger config ===== */
-const ADRIAN_CHART_TRIGGERS = ['adrian-chart', 'chart-adrian'];
+const ADRIAN_CHART_DEBUG = String(process.env.ADRIAN_CHART_DEBUG || '').trim() === '1';
+
+// Expanded triggers (supports hyphen, space, and “$adrian” variants)
+const ADRIAN_CHART_TRIGGERS = [
+  'adrian-chart',
+  'chart-adrian',
+  'adrian chart',
+  'chart adrian',
+  'adrianchart',
+  'chart$adrian',
+  'chart $adrian',
+  '$adrian chart',
+  'price adrian',
+  'adrian price'
+];
+
+// Stronger regex (catches common variations)
+const ADRIAN_CHART_REGEX = /\b(chart|price)\s*[- ]?\s*\$?adrian\b|\b\$?adrian\s*[- ]?\s*(chart|price)\b/i;
+
 const ADRIAN_CHART_COOLDOWN_MS = Number(process.env.ADRIAN_CHART_COOLDOWN_MS || 8000);
 const adrianChartCooldownByUser = new Map(); // `${guildId}:${userId}` -> ts
 
@@ -53,6 +71,14 @@ const ADRIAN_GT_POOL_ID = (process.env.ADRIAN_GT_POOL_ID ||
 ).trim().toLowerCase();
 const ADRIAN_CHART_POINTS = Math.max(20, Math.min(240, Number(process.env.ADRIAN_CHART_POINTS || 96))); // 96 ≈ last day @ 15m
 const ADRIAN_CHART_CACHE_MS = Math.max(10_000, Number(process.env.ADRIAN_CHART_CACHE_MS || 60_000));
+
+/** ===== Optional: use your existing services/adrianchart if present ===== */
+let _adrianChartService = null;
+try {
+  _adrianChartService = require('../services/adrianchart');
+} catch {
+  _adrianChartService = null;
+}
 
 /** ===== Categorized NICE_LINES with extra nutty/thoughtful/degen/chaotic/funny ===== */
 const NICE_LINES = {
@@ -745,12 +771,46 @@ async function safeReplyMessage(client, message, payload) {
   }
 }
 
-/** ---------- NEW: $ADRIAN chart helpers (inline, no extra files needed) ---------- */
+/** ---------- $ADRIAN chart helpers (service-first, fallback inline) ---------- */
 let _adrianChartCache = { ts: 0, url: null, meta: null };
 
 function isAdrianChartTriggered(lowered) {
   const t = (lowered || '').toLowerCase();
-  return ADRIAN_CHART_TRIGGERS.some(x => t.includes(x));
+  if (ADRIAN_CHART_TRIGGERS.some(x => t.includes(x))) return true;
+  return ADRIAN_CHART_REGEX.test(t);
+}
+
+async function tryServiceAdrianChartEmbed(message) {
+  if (!_adrianChartService) return false;
+
+  try {
+    // If service exports a function, call it
+    if (typeof _adrianChartService === 'function') {
+      const out = await _adrianChartService(message);
+      return Boolean(out);
+    }
+
+    // Common method names
+    const candidates = [
+      _adrianChartService.sendAdrianChartEmbed,
+      _adrianChartService.sendChart,
+      _adrianChartService.handle,
+      _adrianChartService.run,
+      _adrianChartService.post,
+      _adrianChartService.buildEmbed,
+      _adrianChartService.getEmbed,
+    ].filter(fn => typeof fn === 'function');
+
+    for (const fn of candidates) {
+      try {
+        const out = await fn(message);
+        if (out) return true;
+      } catch {}
+    }
+  } catch (e) {
+    if (ADRIAN_CHART_DEBUG) console.warn('ADRIAN chart service error:', e?.message || String(e));
+  }
+  return false;
 }
 
 function _findArrayOfArrays(obj) {
@@ -883,6 +943,11 @@ async function getAdrianChartUrlCached() {
 }
 
 async function sendAdrianChartEmbed(message) {
+  // Service-first (if you already have /services/adrianchart)
+  const usedService = await tryServiceAdrianChartEmbed(message);
+  if (usedService) return;
+
+  // Fallback inline
   try {
     const { url, meta } = await getAdrianChartUrlCached();
     const lastPrice = meta?.lastPrice;
@@ -910,7 +975,7 @@ async function sendAdrianChartEmbed(message) {
   }
 }
 
-/** ---------- NEW: Sweep reader helpers ---------- */
+/** ---------- Sweep reader helpers ---------- */
 function isSweepReaderTriggered(lowered) {
   const t = (lowered || '').toLowerCase();
   return SWEEP_TRIGGERS.some(x => t.includes(x));
@@ -1176,18 +1241,31 @@ module.exports = (client) => {
 
     const lowered = (message.content || '').toLowerCase();
 
-    // If MBella recently posted/claimed the channel, suppress MuscleMB here
-    if (isTypingSuppressed(client, message.channel.id)) return;
+    // Precompute utility triggers EARLY (so they can bypass suppression)
+    const wantsAdrianChart = isAdrianChartTriggered(lowered);
+    const wantsSweepRead = isSweepReaderTriggered(lowered);
 
-    /** ===== NEW: $ADRIAN chart trigger (runs BEFORE MBella-avoid + AI) ===== */
+    if (ADRIAN_CHART_DEBUG && wantsAdrianChart) {
+      console.log(`[ADRIAN_CHART] triggered by "${message.content}" in guild=${message.guild.id} channel=${message.channel.id}`);
+    }
+
+    /**
+     * ✅ PATCH: Utility triggers must run BEFORE suppression-return.
+     * Otherwise “typing suppressed” blocks chart/sweep completely.
+     */
+
+    /** ===== $ADRIAN chart trigger (runs FIRST, even if suppressed) ===== */
     try {
-      if (isAdrianChartTriggered(lowered)) {
+      if (wantsAdrianChart) {
         const key = `${message.guild.id}:${message.author.id}`;
         const lastTs = adrianChartCooldownByUser.get(key) || 0;
         const now = Date.now();
         const isOwner = message.author.id === process.env.BOT_OWNER_ID;
 
-        if (!isOwner && now - lastTs < ADRIAN_CHART_COOLDOWN_MS) return;
+        if (!isOwner && now - lastTs < ADRIAN_CHART_COOLDOWN_MS) {
+          if (ADRIAN_CHART_DEBUG) console.log('[ADRIAN_CHART] cooldown hit');
+          return;
+        }
         adrianChartCooldownByUser.set(key, now);
 
         await sendAdrianChartEmbed(message);
@@ -1195,15 +1273,12 @@ module.exports = (client) => {
       }
     } catch (e) {
       console.warn('⚠️ adrian chart trigger failed:', e?.message || String(e));
-      // if this fails, continue to normal logic
+      // continue
     }
 
-    // Don’t compete directly with MBella triggers
-    if (FEMALE_TRIGGERS.some(t => lowered.includes(t))) return;
-
-    /** ===== NEW: Sweep reader (non-invasive; runs BEFORE AI trigger logic) ===== */
+    /** ===== Sweep reader (runs EARLY, even if suppressed) ===== */
     try {
-      if (isSweepReaderTriggered(lowered)) {
+      if (wantsSweepRead) {
         const key = `${message.guild.id}:${message.author.id}`;
         const lastTs = sweepCooldownByUser.get(key) || 0;
         const now = Date.now();
@@ -1227,8 +1302,14 @@ module.exports = (client) => {
       }
     } catch (e) {
       console.warn('⚠️ sweep reader failed:', e?.message || String(e));
-      // If sweep reader fails, we continue to normal MB flow.
+      // continue
     }
+
+    // If MBella recently posted/claimed the channel, suppress MuscleMB here
+    if (isTypingSuppressed(client, message.channel.id)) return;
+
+    // Don’t compete directly with MBella triggers
+    if (FEMALE_TRIGGERS.some(t => lowered.includes(t))) return;
 
     const botMentioned = message.mentions.has(client.user);
     const hasTriggerWord = TRIGGERS.some(trigger => lowered.includes(trigger));
