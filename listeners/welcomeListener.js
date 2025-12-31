@@ -43,7 +43,8 @@ async function getWelcomeSettings(pg, guildId) {
     `SELECT enabled, welcome_channel_id, dm_enabled, delete_after_sec,
             message_template, image_url, ping_role_id
      FROM welcome_settings
-     WHERE guild_id = $1`,
+     WHERE guild_id = $1
+     LIMIT 1`,
     [guildId]
   );
 
@@ -56,9 +57,30 @@ function formatTemplate(tpl, { member, guild, memberCount }) {
   const user = member.user;
   return String(tpl || '')
     .replaceAll('{user}', `${user.username}`)
+    .replaceAll('{user_tag}', `${user.tag || user.username}`)
+    .replaceAll('{user_id}', `${user.id}`)
     .replaceAll('{user_mention}', `<@${user.id}>`)
     .replaceAll('{server}', `${guild.name}`)
+    .replaceAll('{server_id}', `${guild.id}`)
     .replaceAll('{member_count}', `${memberCount}`);
+}
+
+async function getMemberCountSafe(guild) {
+  try {
+    if (Number.isFinite(guild.memberCount) && guild.memberCount > 0) return guild.memberCount;
+  } catch {}
+  try {
+    const refreshed = await guild.fetch().catch(() => null);
+    if (refreshed && Number.isFinite(refreshed.memberCount) && refreshed.memberCount > 0) return refreshed.memberCount;
+  } catch {}
+  return 'N/A';
+}
+
+function safeHttpUrl(url) {
+  const u = String(url || '').trim();
+  if (!u) return null;
+  if (!/^https?:\/\//i.test(u)) return null;
+  return u;
 }
 
 /* ============== Local fallback welcome sender ============== */
@@ -67,18 +89,24 @@ async function sendWelcomeFallback({ member, guild, cfg }) {
   if (!cfg?.enabled) return;
 
   const channel = await guild.channels.fetch(cfg.welcome_channel_id).catch(() => null);
-  if (!channel) return;
+  if (!channel || !channel.isTextBased?.()) return;
 
   // Permission check
   const me = guild.members.me || await guild.members.fetchMe().catch(() => null);
   if (!me) return;
   const perms = channel.permissionsFor(me);
-  if (!perms?.has(PermissionFlagsBits.ViewChannel) || !perms?.has(PermissionFlagsBits.SendMessages)) {
-    console.log(`[welcome:test] Missing perms in channel ${cfg.welcome_channel_id} (guild=${guild.id})`);
+
+  const canView = perms?.has(PermissionFlagsBits.ViewChannel);
+  const canSend = perms?.has(PermissionFlagsBits.SendMessages);
+  const canEmbed = perms?.has(PermissionFlagsBits.EmbedLinks);
+  const canManageMessages = perms?.has(PermissionFlagsBits.ManageMessages);
+
+  if (!canView || !canSend) {
+    console.log(`[welcome:test] Missing perms (view/send) in channel ${cfg.welcome_channel_id} (guild=${guild.id})`);
     return;
   }
 
-  const memberCount = guild.memberCount ?? (await guild.members.fetch()).size;
+  const memberCount = await getMemberCountSafe(guild);
 
   const colors = ['#00FF99', '#FF69B4', '#FFD700', '#7289DA', '#FF4500', '#00BFFF', '#8A2BE2'];
   const emojis = ['🌀', '🎯', '🔥', '👑', '🛸', '🚀', '💀', '😈', '🍄', '🎮'];
@@ -92,41 +120,61 @@ async function sendWelcomeFallback({ member, guild, cfg }) {
     `📦 {user_mention} dropped in with the alpha. Give 'em love.`,
   ];
 
-  const template = (cfg.message_template && cfg.message_template.trim().length > 0)
-    ? cfg.message_template
+  const template = (cfg.message_template && String(cfg.message_template).trim().length > 0)
+    ? String(cfg.message_template)
     : pick(defaults);
 
   const description = formatTemplate(template, { member, guild, memberCount });
 
   const embed = new EmbedBuilder()
-    .setTitle(`🌊 A New Member Has Surfaced`)
-    .setDescription(description)
+    .setTitle('🌊 A New Member Has Surfaced')
+    .setDescription(description.slice(0, 4096))
     .setColor(pick(colors))
     .setTimestamp();
 
   const avatarUrl = safeAvatar(member);
   if (avatarUrl) embed.setThumbnail(avatarUrl);
-  if (cfg.image_url) embed.setImage(cfg.image_url);
+
+  const img = safeHttpUrl(cfg.image_url);
+  if (img) embed.setImage(img);
+
   embed.setFooter({ text: 'Powered by Muscle MB • No mercy, only vibes.' });
 
+  // Mentions
   const contentBits = [];
-  if (cfg.ping_role_id) contentBits.push(`<@&${cfg.ping_role_id}>`);
-  // If template doesn’t mention the user, tag them in content for visibility
+  let pingRoleId = cfg.ping_role_id ? String(cfg.ping_role_id) : null;
+
+  if (pingRoleId && !guild.roles.cache.has(pingRoleId)) {
+    try { await guild.roles.fetch(pingRoleId).catch(() => null); } catch {}
+  }
+  if (pingRoleId && guild.roles.cache.has(pingRoleId)) contentBits.push(`<@&${pingRoleId}>`);
+  else pingRoleId = null;
+
   if (!template.includes('{user_mention}')) contentBits.push(`<@${member.id}>`);
+
+  const allowedMentions = {
+    parse: [],
+    users: [member.id],
+    roles: pingRoleId ? [pingRoleId] : []
+  };
 
   const sent = await channel.send({
     content: contentBits.join(' ') || `🎉 Welcome <@${member.id}> (trigger test)`,
-    embeds: [embed],
+    embeds: canEmbed ? [embed] : undefined,
+    allowedMentions
   }).catch(() => null);
 
-  if (sent && cfg.delete_after_sec && cfg.delete_after_sec > 0) {
-    setTimeout(() => sent.delete().catch(() => {}), cfg.delete_after_sec * 1000);
+  const delSec = Number(cfg.delete_after_sec || 0);
+  if (sent && delSec > 0) {
+    if (!canManageMessages) {
+      console.log(`[welcome:test] delete_after_sec set but missing ManageMessages (guild=${guild.id}, channel=${cfg.welcome_channel_id})`);
+    } else {
+      setTimeout(() => sent.delete().catch(() => {}), delSec * 1000);
+    }
   }
 
   // For "test" we skip DM to avoid surprising users; enable if you prefer:
-  // if (cfg.dm_enabled) {
-  //   await member.send({ embeds: [embed] }).catch(() => {});
-  // }
+  // if (cfg.dm_enabled) await member.send({ embeds: [embed], allowedMentions: { parse: [] } }).catch(() => {});
 }
 
 /* ======================== Listener ======================== */
@@ -135,8 +183,12 @@ module.exports = (client, pgFromCaller) => {
     try {
       if (message.author.bot || !message.guild) return;
 
-      const content = message.content.trim().toLowerCase();
-      if (!TRIGGERS.has(content)) return;
+      const raw = String(message.content || '').trim();
+      const content = raw.toLowerCase();
+
+      // ✅ Accept exact trigger OR trigger as first token (optional usability)
+      const firstToken = content.split(/\s+/)[0];
+      if (!TRIGGERS.has(content) && !TRIGGERS.has(firstToken)) return;
 
       // Per-guild cooldown (spam guard)
       const last = guildCooldown.get(message.guild.id) || 0;
@@ -144,18 +196,20 @@ module.exports = (client, pgFromCaller) => {
       guildCooldown.set(message.guild.id, now());
 
       const pg = pgFromCaller || client.pg;
+      if (!pg || typeof pg.query !== 'function') return;
+
       const guild = message.guild;
-      const member = message.member;
+
+      // ✅ Ensure we have a GuildMember for the author
+      let member = message.member;
+      if (!member) {
+        member = await guild.members.fetch(message.author.id).catch(() => null);
+      }
+      if (!member) return;
 
       // Load welcome settings (cached)
       const cfg = await getWelcomeSettings(pg, guild.id);
-      if (!cfg || !cfg.enabled || !cfg.welcome_channel_id) {
-        // Optional: inform admins only
-        // if (message.member.permissions.has(PermissionFlagsBits.Administrator)) {
-        //   message.reply({ content: '⚠️ Welcome isn’t configured. Use /setwelcome first.', allowedMentions: { repliedUser: false } }).catch(() => {});
-        // }
-        return;
-      }
+      if (!cfg || !cfg.enabled || !cfg.welcome_channel_id) return;
 
       // Prefer the shared service to keep behavior identical to real joins
       if (typeof sendWelcomeService === 'function') {
@@ -168,7 +222,7 @@ module.exports = (client, pgFromCaller) => {
       // Quick visual confirmation (non-intrusive)
       await message.react('✅').catch(() => {});
     } catch (err) {
-      console.error('❌ Welcome trigger error:', err);
+      console.error('❌ Welcome trigger error:', err?.stack || err?.message || err);
     }
   });
 };
