@@ -11,6 +11,12 @@ const MBELLA_NAME = (process.env.MBELLA_NAME || 'MBella').trim();
 // ⚠️ Use a DIRECT image URL (not an HTML page), e.g. https://iili.io/KnsvEAl.png
 const MBELLA_AVATAR_URL = (process.env.MBELLA_AVATAR_URL || '').trim();
 
+// Webhook discovery name (manual webhook must match this to be reused)
+const MB_RELAY_WEBHOOK_NAME = (process.env.MB_RELAY_WEBHOOK_NAME || 'MB Relay').trim();
+
+// Debug
+const DEBUG = String(process.env.WEBHOOKAUTO_DEBUG || '').trim() === '1';
+
 // Pace (match MuscleMB by default)
 const MBELLA_MS_PER_CHAR = Number(process.env.MBELLA_MS_PER_CHAR || '40');     // 40ms/char
 const MBELLA_MAX_DELAY_MS = Number(process.env.MBELLA_MAX_DELAY_MS || '5000'); // 5s cap
@@ -34,7 +40,6 @@ if (!GROQ_API_KEY || GROQ_API_KEY.trim().length < 10) {
 
 /** ================== STATE ================== */
 const cooldown = new Set();
-const channelWebhookCache = new Map(); // channelId -> webhook
 
 function alreadyHandled(client, messageId) {
   if (!client.__mbHandled) client.__mbHandled = new Set();
@@ -231,57 +236,49 @@ function canSendInChannel(guild, channel) {
   return channel.isTextBased?.() && channel.permissionsFor(me)?.has(PermissionsBitField.Flags.SendMessages);
 }
 
-async function getOrCreateWebhook(channel) {
+/** ===== NEW: Use shared webhookAuto from index.js (client.webhookAuto) ===== */
+async function getBellaWebhook(client, channel) {
   try {
-    if (!channel || !channel.guild) return null;
-    const cached = channelWebhookCache.get(channel.id);
-    if (cached) return cached;
-
-    const me = channel.guild.members.me;
-    if (!me) return null;
-    const perms = channel.permissionsFor(me);
-    if (!perms?.has(PermissionsBitField.Flags.ManageWebhooks)) return null;
-
-    const hooks = await channel.fetchWebhooks().catch(() => null);
-    let hook = hooks?.find(h => h.owner?.id === channel.client.user.id);
-
-    // Refresh name/avatar so cached look stays current
-    if (hook) {
-      try {
-        await hook.edit({
-          name: 'MB Relay',
-          avatar: MBELLA_AVATAR_URL || undefined
-        });
-      } catch {}
+    const wa = client?.webhookAuto;
+    if (!wa || typeof wa.getOrCreateWebhook !== 'function') {
+      if (DEBUG) console.log('[MBella] client.webhookAuto missing. (Did you patch index.js?)');
+      return null;
     }
-
-    if (!hook) {
-      hook = await channel.createWebhook({
-        name: 'MB Relay',
-        avatar: MBELLA_AVATAR_URL || undefined
-      }).catch(() => null);
+    const hook = await wa.getOrCreateWebhook(channel, {
+      name: MB_RELAY_WEBHOOK_NAME,
+      avatarURL: MBELLA_AVATAR_URL || null
+    });
+    if (!hook && DEBUG) {
+      // Permission hint
+      const me = channel?.guild?.members?.me;
+      const perms = (me && channel?.permissionsFor?.(me)) ? channel.permissionsFor(me) : null;
+      const hasMW = perms?.has(PermissionsBitField.Flags.ManageWebhooks);
+      console.log(`[MBella] No webhook returned. ManageWebhooks=${hasMW ? 'YES' : 'NO'} channel=${channel?.id} guild=${channel?.guild?.id}`);
     }
-
-    if (hook) channelWebhookCache.set(channel.id, hook);
     return hook || null;
-  } catch {
+  } catch (e) {
+    if (DEBUG) console.log('[MBella] getBellaWebhook failed:', e?.message || e);
     return null;
   }
 }
 
 // Send via webhook and return { hook, message }
-async function sendViaWebhook(channel, { username, avatarURL, embeds, content }) {
-  const hook = await getOrCreateWebhook(channel);
+async function sendViaBellaWebhook(client, channel, { username, avatarURL, embeds, content }) {
+  const hook = await getBellaWebhook(client, channel);
   if (!hook) return { hook: null, message: null };
   try {
     const message = await hook.send({
-      username,
-      avatarURL: avatarURL || undefined,
+      username: username || MBELLA_NAME,
+      avatarURL: (avatarURL || MBELLA_AVATAR_URL || undefined),
       embeds,
-      content
+      content,
+      allowedMentions: { parse: [] },
     });
     return { hook, message };
-  } catch {
+  } catch (e) {
+    if (DEBUG) console.log('[MBella] webhook send failed:', e?.message || e);
+    // Important: clear cache so next attempt re-discovers/creates
+    try { client.webhookAuto?.clearChannelCache?.(channel.id); } catch {}
     return { hook, message: null };
   }
 }
@@ -292,16 +289,20 @@ async function isReplyToMBella(message, client) {
   if (!ref?.messageId) return false;
   try {
     const referenced = await message.channel.messages.fetch(ref.messageId);
+
+    // Webhook path: if referenced was a webhook message, verify it “looks like” MBella
     if (referenced.webhookId) {
-      let hook = channelWebhookCache.get(message.channel.id);
-      if (!hook) {
-        const hooks = await message.channel.fetchWebhooks().catch(() => null);
-        hook = hooks?.find(h => h.owner?.id === client.user.id);
-        if (hook) channelWebhookCache.set(message.channel.id, hook);
+      // If MBella posted via webhook with username MBELLA_NAME, the author.username will be MBELLA_NAME
+      if (referenced.author?.username && referenced.author.username.toLowerCase() === MBELLA_NAME.toLowerCase()) {
+        return true;
       }
-      if (hook && referenced.webhookId === hook.id) return true;
-      if (referenced.author?.username && referenced.author.username.toLowerCase() === MBELLA_NAME.toLowerCase()) return true;
+      // Also accept webhook name matching (some clients display as webhook username)
+      if (referenced.author?.username && referenced.author.username.toLowerCase() === MB_RELAY_WEBHOOK_NAME.toLowerCase()) {
+        return true;
+      }
     }
+
+    // Fallback path: bot-authored embed with author.name = MBella
     if (referenced.author?.id === client.user.id) {
       const embedAuthor = referenced.embeds?.[0]?.author?.name || '';
       if (embedAuthor.toLowerCase() === MBELLA_NAME.toLowerCase()) return true;
@@ -344,60 +345,61 @@ function buildMBellaSystemPrompt({ isRoast, isRoastingBot, roastTargets, current
 
 /** ================== EXPORT LISTENER ================== */
 module.exports = (client) => {
-  // (Periodic 4h quotes removed)
-
   client.on('messageCreate', async (message) => {
     let typingTimer = null;      // debounce timer
-    let placeholder = null;      // the temporary "..." webhook msg
+    let placeholder = null;      // the temporary "…" webhook msg
     let placeholderHook = null;  // the webhook used to send it
     let typingStartMs = 0;       // when we sent main-bot sendTyping()
 
     const clearPlaceholderTimer = () => { if (typingTimer) { clearTimeout(typingTimer); typingTimer = null; } };
 
     async function ensurePlaceholder(channel) {
-      const { hook, message: ph } = await sendViaWebhook(channel, {
+      const { hook, message: ph } = await sendViaBellaWebhook(client, channel, {
         username: MBELLA_NAME,
         avatarURL: MBELLA_AVATAR_URL,
-        content: '…' // typing dots
+        content: '…'
       });
       placeholderHook = hook || null;
       placeholder = ph || null;
     }
 
     async function editPlaceholderToEmbed(embed, channel) {
-      if (placeholder && placeholderHook) {
+      // Always prefer webhook output so it shows as MBella
+      if (placeholder && placeholderHook && typeof placeholderHook.editMessage === 'function') {
         try {
-          await placeholderHook.editMessage(placeholder.id, { content: null, embeds: [embed] });
+          await placeholderHook.editMessage(placeholder.id, { content: null, embeds: [embed], allowedMentions: { parse: [] } });
           return true;
         } catch (e) {
-          try {
-            const { message: fresh } = await sendViaWebhook(channel, {
-              username: MBELLA_NAME,
-              avatarURL: MBELLA_AVATAR_URL,
-              embeds: [embed]
-            });
-            if (fresh) {
-              try { await placeholderHook.deleteMessage(placeholder.id); } catch {}
-              return true;
-            }
-          } catch {}
-        }
-      } else {
-        try {
-          const { message: finalMsg } = await sendViaWebhook(channel, {
+          if (DEBUG) console.log('[MBella] editMessage failed, will resend:', e?.message || e);
+          // If edit fails, send fresh and try to delete placeholder
+          const { hook, message: fresh } = await sendViaBellaWebhook(client, channel, {
             username: MBELLA_NAME,
             avatarURL: MBELLA_AVATAR_URL,
             embeds: [embed]
           });
-          if (finalMsg) return true;
-        } catch {}
+          if (fresh) {
+            try { await placeholderHook.deleteMessage?.(placeholder.id); } catch {}
+            placeholderHook = hook || placeholderHook;
+            return true;
+          }
+        }
       }
-      return false;
+
+      // If no placeholder, send a fresh webhook message
+      const { message: finalMsg } = await sendViaBellaWebhook(client, channel, {
+        username: MBELLA_NAME,
+        avatarURL: MBELLA_AVATAR_URL,
+        embeds: [embed]
+      });
+      return Boolean(finalMsg);
     }
 
     try {
       if (message.author.bot || !message.guild) return;
       if (alreadyHandled(client, message.id)) return;
+
+      // If we can't send in this channel, do nothing
+      if (!canSendInChannel(message.guild, message.channel)) return;
 
       const lowered = (message.content || '').toLowerCase();
       const hasFemaleTrigger = FEMALE_TRIGGERS.some(t => lowered.includes(t));
@@ -439,17 +441,22 @@ module.exports = (client) => {
       // Roast detection
       const mentionedUsers = message.mentions.users.filter(u => u.id !== client.user.id);
       const shouldRoast = (hasFemaleTrigger || (botMentioned && hintedBella) || replyAllowed) && mentionedUsers.size > 0;
-      const isRoastingBot = shouldRoast && message.mentions.has(client.user) && mentionedUsers.size === 1 && message.mentions.has(client.user);
+      const isRoastingBot = shouldRoast && message.mentions.has(client.user) && mentionedUsers.size === 1 && mentionedUsers.has(client.user.id);
 
       // Mode from DB (reuse mb_modes)
       let currentMode = 'default';
       try {
         const modeRes = await client.pg.query(`SELECT mode FROM mb_modes WHERE server_id = $1 LIMIT 1`, [message.guild.id]);
         currentMode = modeRes.rows[0]?.mode || 'default';
-      } catch { console.warn('⚠️ (MBella) failed to fetch mb_mode, using default.'); }
+      } catch {
+        console.warn('⚠️ (MBella) failed to fetch mb_mode, using default.');
+      }
 
       // Awareness
-      const [recentContext, referenceSnippet] = await Promise.all([ getRecentContext(message), getReferenceSnippet(message) ]);
+      const [recentContext, referenceSnippet] = await Promise.all([
+        getRecentContext(message),
+        getReferenceSnippet(message)
+      ]);
       const awarenessContext = [recentContext, referenceSnippet].filter(Boolean).join('\n');
 
       // Clean input: remove triggers & mentions
@@ -494,11 +501,15 @@ module.exports = (client) => {
           .setColor('#e84393')
           .setAuthor({ name: MBELLA_NAME, iconURL: MBELLA_AVATAR_URL || undefined })
           .setDescription('⚠️ MBella lag spike. One breath, one rep. ⏱️');
-        if (!(await editPlaceholderToEmbed(embedErr, message.channel))) {
+
+        // Prefer webhook output
+        const ok = await editPlaceholderToEmbed(embedErr, message.channel);
+        if (!ok) {
           try { await message.reply({ embeds: [embedErr] }); } catch {}
         }
         return;
       }
+
       if (!groqTry.res.ok) {
         console.error(`❌ (MBella) HTTP ${groqTry.res.status} on "${groqTry.model}": ${groqTry.bodyText?.slice(0, 400)}`);
         let hint = '⚠️ MBella jammed the rep rack (API). Try again shortly. 🏋️‍♀️';
@@ -515,11 +526,14 @@ module.exports = (client) => {
         } else if (groqTry.res.status >= 500) {
           hint = '⚠️ Cloud cramps (server error). Try again soon. ☁️';
         }
+
         const embedErr = new EmbedBuilder()
           .setColor('#e84393')
           .setAuthor({ name: MBELLA_NAME, iconURL: MBELLA_AVATAR_URL || undefined })
           .setDescription(hint);
-        if (!(await editPlaceholderToEmbed(embedErr, message.channel))) {
+
+        const ok = await editPlaceholderToEmbed(embedErr, message.channel);
+        if (!ok) {
           try { await message.reply({ embeds: [embedErr] }); } catch {}
         }
         return;
@@ -532,7 +546,9 @@ module.exports = (client) => {
           .setColor('#e84393')
           .setAuthor({ name: MBELLA_NAME, iconURL: MBELLA_AVATAR_URL || undefined })
           .setDescription('⚠️ MBella static noise… say it simpler. 📻');
-        if (!(await editPlaceholderToEmbed(embedErr, message.channel))) {
+
+        const ok = await editPlaceholderToEmbed(embedErr, message.channel);
+        if (!ok) {
           try { await message.reply({ embeds: [embedErr] }); } catch {}
         }
         return;
@@ -557,6 +573,7 @@ module.exports = (client) => {
       // If placeholder exists, edit it to final embed; else send fresh embed now
       const edited = await editPlaceholderToEmbed(embed, message.channel);
       if (!edited) {
+        // Last-resort fallback: normal reply (will show as bot user)
         try { await message.reply({ embeds: [embed] }); } catch (err) {
           console.warn('❌ (MBella) send fallback error:', err.message);
           if (aiReply) { try { await message.reply(aiReply); } catch {} }
@@ -573,13 +590,30 @@ module.exports = (client) => {
           .setColor('#e84393')
           .setAuthor({ name: MBELLA_NAME, iconURL: MBELLA_AVATAR_URL || undefined })
           .setDescription('⚠️ MBella pulled a hammy. BRB. 🦵');
-        if (placeholder && placeholderHook) {
-          try { await placeholderHook.editMessage(placeholder.id, { content: null, embeds: [embedErr] }); } catch {}
-        } else {
+
+        // Prefer webhook output
+        const ok = await (async () => {
+          try {
+            // If we had a placeholder, try to edit it
+            // (placeholder variables are scoped inside handler; we can't access them here if thrown early)
+            // So just send a new webhook message
+            const { message: sent } = await sendViaBellaWebhook(client, message.channel, {
+              username: MBELLA_NAME,
+              avatarURL: MBELLA_AVATAR_URL,
+              embeds: [embedErr]
+            });
+            return Boolean(sent);
+          } catch {
+            return false;
+          }
+        })();
+
+        if (!ok) {
           await message.reply({ embeds: [embedErr] });
         }
       } catch {}
     }
   });
 };
+
 
