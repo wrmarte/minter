@@ -37,48 +37,31 @@ const NICE_ACTIVE_WINDOW_MS = 45 * 60 * 1000;  // “active” = last 45 minutes
 const NICE_ANALYZE_LIMIT = Number(process.env.NICE_ANALYZE_LIMIT || 40); // messages to scan for mood
 
 /** ===== NEW: Sweep reader config ===== */
-const SWEEP_TRIGGERS = ['sweeppower', 'engine sweep', 'enginesweep', 'sweep-power', 'sweep power'];
+const SWEEP_TRIGGERS = ['sweeppower', 'enginesweep', 'sweep-power'];
 const SWEEP_COOLDOWN_MS = Number(process.env.SWEEP_READER_COOLDOWN_MS || 8000);
 const sweepCooldownByUser = new Map(); // `${guildId}:${userId}` -> ts
 
-/** ===== NEW: $ADRIAN chart trigger config ===== */
-const ADRIAN_CHART_DEBUG = String(process.env.ADRIAN_CHART_DEBUG || '').trim() === '1';
-
-// Expanded triggers (supports hyphen, space, and “$adrian” variants)
+/** ===== NEW: $ADRIAN chart trigger config =====
+ * FIX: include space variants "adrian chart" and "chart adrian"
+ */
 const ADRIAN_CHART_TRIGGERS = [
-  'adrian-chart',
-  'chart-adrian',
-  'adrian chart',
-  'chart adrian',
-  'adrianchart',
-  'chart$adrian',
-  'chart $adrian',
-  '$adrian chart',
-  'price adrian',
-  'adrian price'
+  'adrian-chart', 'chart-adrian',
+  'adrian chart', 'chart adrian',
+  'adrianchart', 'chartadrian'
 ];
-
-// Stronger regex (catches common variations)
-const ADRIAN_CHART_REGEX = /\b(chart|price)\s*[- ]?\s*\$?adrian\b|\b\$?adrian\s*[- ]?\s*(chart|price)\b/i;
-
 const ADRIAN_CHART_COOLDOWN_MS = Number(process.env.ADRIAN_CHART_COOLDOWN_MS || 8000);
 const adrianChartCooldownByUser = new Map(); // `${guildId}:${userId}` -> ts
+const ADRIAN_CHART_DEBUG = String(process.env.ADRIAN_CHART_DEBUG || '').trim() === '1';
 
 // GeckoTerminal mapping for $ADRIAN pool (defaults to the pool you gave)
 const ADRIAN_GT_NETWORK = (process.env.ADRIAN_GT_NETWORK || 'base').trim().toLowerCase();
 const ADRIAN_GT_POOL_ID = (process.env.ADRIAN_GT_POOL_ID ||
   '0x79cdf2d48abd42872a26d1b1c92ece4245327a4837b427dc9cff5f1acc40e379'
 ).trim().toLowerCase();
+
+// points for OHLCV fetch
 const ADRIAN_CHART_POINTS = Math.max(20, Math.min(240, Number(process.env.ADRIAN_CHART_POINTS || 96))); // 96 ≈ last day @ 15m
 const ADRIAN_CHART_CACHE_MS = Math.max(10_000, Number(process.env.ADRIAN_CHART_CACHE_MS || 60_000));
-
-/** ===== Optional: use your existing services/adrianchart if present ===== */
-let _adrianChartService = null;
-try {
-  _adrianChartService = require('../services/adrianchart');
-} catch {
-  _adrianChartService = null;
-}
 
 /** ===== Categorized NICE_LINES with extra nutty/thoughtful/degen/chaotic/funny ===== */
 const NICE_LINES = {
@@ -234,6 +217,31 @@ async function fetchWithTimeout(url, opts = {}, timeoutMs = 25000) {
         const res = await fetch(url, opts);
         const bodyText = await res.text();
         return { res, bodyText };
+      })(),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('Timeout')), timeoutMs))
+    ]);
+  }
+}
+
+// NEW: binary fetch (for chart image POST -> buffer attachment)
+async function fetchBufferWithTimeout(url, opts = {}, timeoutMs = 25000) {
+  const hasAbort = typeof globalThis.AbortController === 'function';
+  if (hasAbort) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { ...opts, signal: controller.signal });
+      const ab = await res.arrayBuffer();
+      return { res, buffer: Buffer.from(ab) };
+    } finally {
+      clearTimeout(timer);
+    }
+  } else {
+    return await Promise.race([
+      (async () => {
+        const res = await fetch(url, opts);
+        const ab = await res.arrayBuffer();
+        return { res, buffer: Buffer.from(ab) };
       })(),
       new Promise((_, rej) => setTimeout(() => rej(new Error('Timeout')), timeoutMs))
     ]);
@@ -690,6 +698,7 @@ async function sendViaWebhookAuto(client, channel, payload) {
   const base = {
     content: payload?.content || undefined,
     embeds: payload?.embeds || undefined,
+    files: payload?.files || undefined, // IMPORTANT: allow attachments
     username: payload?.username || MUSCLEMB_WEBHOOK_NAME,
     avatarURL: payload?.avatarURL || (MUSCLEMB_WEBHOOK_AVATAR || undefined),
     allowedMentions: payload?.allowedMentions || { parse: [] },
@@ -697,7 +706,7 @@ async function sendViaWebhookAuto(client, channel, payload) {
 
   for (const fn of candidates) {
     try {
-      // Different implementations may accept (channel, payload) or (channelId, payload) or (channel, content, embeds)
+      // Different implementations may accept (channel, payload) or (channelId, payload)
       const r = await fn.call(wa, channel, base);
       if (r) return true;
 
@@ -710,7 +719,6 @@ async function sendViaWebhookAuto(client, channel, payload) {
         if (r3) return true;
       }
     } catch (e) {
-      // try next signature/method
       continue;
     }
   }
@@ -729,7 +737,8 @@ async function safeSendChannel(client, channel, payload) {
   try {
     await channel.send(payload);
     return true;
-  } catch {
+  } catch (e) {
+    console.warn('❌ safeSendChannel failed:', e?.message || String(e));
     return false;
   }
 }
@@ -761,56 +770,30 @@ async function safeReplyMessage(client, message, payload) {
   try {
     await message.reply(payload);
     return true;
-  } catch {
+  } catch (e) {
     try {
       await message.channel.send(payload);
       return true;
-    } catch {
+    } catch (e2) {
+      console.warn('❌ safeReplyMessage failed:', e2?.message || String(e2));
       return false;
     }
   }
 }
 
-/** ---------- $ADRIAN chart helpers (service-first, fallback inline) ---------- */
-let _adrianChartCache = { ts: 0, url: null, meta: null };
+/** ---------- NEW: $ADRIAN chart helpers (inline, no extra files needed) ----------
+ * FIX: Use QuickChart POST -> image buffer attachment (Discord-safe)
+ */
+let _adrianChartCache = { ts: 0, buffer: null, meta: null };
 
 function isAdrianChartTriggered(lowered) {
   const t = (lowered || '').toLowerCase();
-  if (ADRIAN_CHART_TRIGGERS.some(x => t.includes(x))) return true;
-  return ADRIAN_CHART_REGEX.test(t);
-}
 
-async function tryServiceAdrianChartEmbed(message) {
-  if (!_adrianChartService) return false;
+  // also catch punctuation variants with a regex
+  const rx = /\b(adrian\s*chart|chart\s*adrian|adrian[-_ ]?chart|chart[-_ ]?adrian|adrianchart|chartadrian)\b/i;
+  if (rx.test(t)) return true;
 
-  try {
-    // If service exports a function, call it
-    if (typeof _adrianChartService === 'function') {
-      const out = await _adrianChartService(message);
-      return Boolean(out);
-    }
-
-    // Common method names
-    const candidates = [
-      _adrianChartService.sendAdrianChartEmbed,
-      _adrianChartService.sendChart,
-      _adrianChartService.handle,
-      _adrianChartService.run,
-      _adrianChartService.post,
-      _adrianChartService.buildEmbed,
-      _adrianChartService.getEmbed,
-    ].filter(fn => typeof fn === 'function');
-
-    for (const fn of candidates) {
-      try {
-        const out = await fn(message);
-        if (out) return true;
-      } catch {}
-    }
-  } catch (e) {
-    if (ADRIAN_CHART_DEBUG) console.warn('ADRIAN chart service error:', e?.message || String(e));
-  }
-  return false;
+  return ADRIAN_CHART_TRIGGERS.some(x => t.includes(String(x).toLowerCase()));
 }
 
 function _findArrayOfArrays(obj) {
@@ -828,41 +811,6 @@ function _findArrayOfArrays(obj) {
     for (const k of Object.keys(v)) stack.push({ v: v[k], d: d + 1 });
   }
   return null;
-}
-
-function _buildQuickChartUrl(points, subtitle = 'GeckoTerminal') {
-  const labels = points.map(p => new Date(p.t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
-  const data = points.map(p => Number(p.c));
-
-  const cfg = {
-    type: 'line',
-    data: {
-      labels,
-      datasets: [{
-        label: '$ADRIAN',
-        data,
-        fill: false,
-        pointRadius: 0,
-        borderWidth: 2,
-        tension: 0.25
-      }]
-    },
-    options: {
-      responsive: true,
-      plugins: {
-        legend: { display: false },
-        title: { display: true, text: '$ADRIAN price (USD)' },
-        subtitle: { display: true, text: subtitle }
-      },
-      scales: {
-        x: { ticks: { maxTicksLimit: 6 } },
-        y: { ticks: { maxTicksLimit: 6 } }
-      }
-    }
-  };
-
-  const encoded = encodeURIComponent(JSON.stringify(cfg));
-  return `https://quickchart.io/chart?width=900&height=450&format=png&c=${encoded}`;
 }
 
 async function _fetchAdrianOhlcvList() {
@@ -910,9 +858,47 @@ async function _fetchAdrianOhlcvList() {
   throw lastErr || new Error('Unable to fetch OHLCV list from GeckoTerminal');
 }
 
-async function getAdrianChartUrlCached() {
+function _buildChartConfig(points, subtitle = 'GeckoTerminal') {
+  // Keep labels light (not required for attachment mode, but still nice)
+  // Using fewer tick labels reduces payload size, but POST mode is safe regardless.
+  const labels = points.map(p =>
+    new Date(p.t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  );
+  const data = points.map(p => Number(p.c));
+
+  return {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        label: '$ADRIAN',
+        data,
+        fill: false,
+        pointRadius: 0,
+        borderWidth: 2,
+        tension: 0.25
+      }]
+    },
+    options: {
+      responsive: true,
+      plugins: {
+        legend: { display: false },
+        title: { display: true, text: '$ADRIAN price (USD)' },
+        subtitle: { display: true, text: subtitle }
+      },
+      scales: {
+        x: { ticks: { maxTicksLimit: 6 } },
+        y: { ticks: { maxTicksLimit: 6 } }
+      }
+    }
+  };
+}
+
+async function getAdrianChartImageCached() {
   const now = Date.now();
-  if (_adrianChartCache.url && (now - _adrianChartCache.ts) < ADRIAN_CHART_CACHE_MS) return _adrianChartCache;
+  if (_adrianChartCache.buffer && (now - _adrianChartCache.ts) < ADRIAN_CHART_CACHE_MS) {
+    return _adrianChartCache;
+  }
 
   const list = await _fetchAdrianOhlcvList();
 
@@ -936,20 +922,42 @@ async function getAdrianChartUrlCached() {
   const deltaPct = ((last.c - first.c) / (first.c || 1)) * 100;
 
   const subtitle = `${ADRIAN_GT_NETWORK} pool • ${pts.length} pts • Δ ${deltaPct >= 0 ? '+' : ''}${deltaPct.toFixed(2)}%`;
-  const url = _buildQuickChartUrl(pts, subtitle);
+  const chart = _buildChartConfig(pts, subtitle);
 
-  _adrianChartCache = { ts: now, url, meta: { lastPrice: last.c, deltaPct } };
+  // QuickChart POST -> PNG buffer
+  const payload = {
+    width: 900,
+    height: 450,
+    format: 'png',
+    backgroundColor: 'transparent',
+    chart
+  };
+
+  const { res, buffer } = await fetchBufferWithTimeout(
+    'https://quickchart.io/chart',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    },
+    20000
+  );
+
+  if (!res.ok) {
+    throw new Error(`QuickChart HTTP ${res.status} (png render)`);
+  }
+  if (!buffer || buffer.length < 1000) {
+    throw new Error('QuickChart returned empty image buffer');
+  }
+
+  _adrianChartCache = { ts: now, buffer, meta: { lastPrice: last.c, deltaPct } };
   return _adrianChartCache;
 }
 
 async function sendAdrianChartEmbed(message) {
-  // Service-first (if you already have /services/adrianchart)
-  const usedService = await tryServiceAdrianChartEmbed(message);
-  if (usedService) return;
-
-  // Fallback inline
   try {
-    const { url, meta } = await getAdrianChartUrlCached();
+    const { buffer, meta } = await getAdrianChartImageCached();
+
     const lastPrice = meta?.lastPrice;
     const deltaPct = meta?.deltaPct;
 
@@ -961,21 +969,31 @@ async function sendAdrianChartEmbed(message) {
       .setColor('#f1c40f')
       .setTitle('📈 $ADRIAN Chart')
       .setDescription(descBits.join(' • ') || 'Live chart from GeckoTerminal.')
-      .setImage(url)
+      .setImage('attachment://adrian_chart.png')
       .setFooter({ text: 'Source: GeckoTerminal → QuickChart' })
       .setTimestamp();
 
-    await safeReplyMessage(message.client, message, { embeds: [embed], allowedMentions: { parse: [] } });
+    const ok = await safeReplyMessage(message.client, message, {
+      embeds: [embed],
+      files: [{ attachment: buffer, name: 'adrian_chart.png' }],
+      allowedMentions: { parse: [] }
+    });
+
+    if (ADRIAN_CHART_DEBUG) {
+      console.log(`[ADRIAN_CHART] send result ok=${Boolean(ok)} guild=${message.guild?.id} channel=${message.channel?.id}`);
+    }
   } catch (e) {
     console.warn('⚠️ adrian chart failed:', e?.message || String(e));
-    await safeReplyMessage(message.client, message, {
-      content: '⚠️ Couldn’t pull $ADRIAN chart right now. Try again in a sec.',
-      allowedMentions: { parse: [] }
-    }).catch(() => {});
+    try {
+      await safeReplyMessage(message.client, message, {
+        content: '⚠️ Couldn’t pull $ADRIAN chart right now. Try again in a sec.',
+        allowedMentions: { parse: [] }
+      });
+    } catch {}
   }
 }
 
-/** ---------- Sweep reader helpers ---------- */
+/** ---------- NEW: Sweep reader helpers ---------- */
 function isSweepReaderTriggered(lowered) {
   const t = (lowered || '').toLowerCase();
   return SWEEP_TRIGGERS.some(x => t.includes(x));
@@ -1241,31 +1259,22 @@ module.exports = (client) => {
 
     const lowered = (message.content || '').toLowerCase();
 
-    // Precompute utility triggers EARLY (so they can bypass suppression)
-    const wantsAdrianChart = isAdrianChartTriggered(lowered);
-    const wantsSweepRead = isSweepReaderTriggered(lowered);
+    // If MBella recently posted/claimed the channel, suppress MuscleMB here
+    if (isTypingSuppressed(client, message.channel.id)) return;
 
-    if (ADRIAN_CHART_DEBUG && wantsAdrianChart) {
-      console.log(`[ADRIAN_CHART] triggered by "${message.content}" in guild=${message.guild.id} channel=${message.channel.id}`);
-    }
-
-    /**
-     * ✅ PATCH: Utility triggers must run BEFORE suppression-return.
-     * Otherwise “typing suppressed” blocks chart/sweep completely.
-     */
-
-    /** ===== $ADRIAN chart trigger (runs FIRST, even if suppressed) ===== */
+    /** ===== NEW: $ADRIAN chart trigger (runs BEFORE MBella-avoid + AI) ===== */
     try {
-      if (wantsAdrianChart) {
+      if (isAdrianChartTriggered(lowered)) {
         const key = `${message.guild.id}:${message.author.id}`;
         const lastTs = adrianChartCooldownByUser.get(key) || 0;
         const now = Date.now();
         const isOwner = message.author.id === process.env.BOT_OWNER_ID;
 
-        if (!isOwner && now - lastTs < ADRIAN_CHART_COOLDOWN_MS) {
-          if (ADRIAN_CHART_DEBUG) console.log('[ADRIAN_CHART] cooldown hit');
-          return;
+        if (ADRIAN_CHART_DEBUG) {
+          console.log(`[ADRIAN_CHART] triggered by "${message.content}" in guild=${message.guild.id} channel=${message.channel.id}`);
         }
+
+        if (!isOwner && now - lastTs < ADRIAN_CHART_COOLDOWN_MS) return;
         adrianChartCooldownByUser.set(key, now);
 
         await sendAdrianChartEmbed(message);
@@ -1273,12 +1282,15 @@ module.exports = (client) => {
       }
     } catch (e) {
       console.warn('⚠️ adrian chart trigger failed:', e?.message || String(e));
-      // continue
+      // if this fails, continue to normal logic
     }
 
-    /** ===== Sweep reader (runs EARLY, even if suppressed) ===== */
+    // Don’t compete directly with MBella triggers
+    if (FEMALE_TRIGGERS.some(t => lowered.includes(t))) return;
+
+    /** ===== NEW: Sweep reader (non-invasive; runs BEFORE AI trigger logic) ===== */
     try {
-      if (wantsSweepRead) {
+      if (isSweepReaderTriggered(lowered)) {
         const key = `${message.guild.id}:${message.author.id}`;
         const lastTs = sweepCooldownByUser.get(key) || 0;
         const now = Date.now();
@@ -1302,14 +1314,8 @@ module.exports = (client) => {
       }
     } catch (e) {
       console.warn('⚠️ sweep reader failed:', e?.message || String(e));
-      // continue
+      // If sweep reader fails, we continue to normal MB flow.
     }
-
-    // If MBella recently posted/claimed the channel, suppress MuscleMB here
-    if (isTypingSuppressed(client, message.channel.id)) return;
-
-    // Don’t compete directly with MBella triggers
-    if (FEMALE_TRIGGERS.some(t => lowered.includes(t))) return;
 
     const botMentioned = message.mentions.has(client.user);
     const hasTriggerWord = TRIGGERS.some(trigger => lowered.includes(trigger));
