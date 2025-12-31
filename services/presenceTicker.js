@@ -4,14 +4,17 @@ const fetch = require('node-fetch');
 /**
  * Presence Price Ticker
  * - Shows BTC/ETH/SOL (or any listed) prices in the member list presence.
- * - Sources: Coingecko (primary) -> CoinCap (fallback) -> GeckoTerminal (pools) -> Dexscreener (pairs)
+ * - Sources (per-asset fallback now): Coingecko (primary) -> CoinCap (fallback) -> GeckoTerminal (pools) -> Dexscreener (pairs)
  * - Modes: rotate (one asset) | pair (N assets together)
  * - Up/down style: 24h change (API) or tick-to-tick since the last poll
  *
  * Extra env for DEX sources:
- *   TICKER_GT_MAP="btc=ethereum:0xPOOL;eth=ethereum:0xPOOL;sol=solana:PO0LID"
- *   TICKER_DS_MAP="btc=ethereum:0xPAIR;eth=ethereum:0xPAIR;sol=solana:0xPAIR"
- * These map each symbol to a network & pool/pair id.
+ *   TICKER_GT_MAP="btc=ethereum:0xPOOL;eth=ethereum:0xPOOL;sol=solana:POOLID;adrian=base:POOLID"
+ *   TICKER_DS_MAP="btc=ethereum:0xPAIR;eth=ethereum:0xPAIR;sol=solana:0xPAIR;adrian=base:0xPAIR"
+ *
+ * Optional custom ID maps for centralized sources (so you can add custom tickers if listed there):
+ *   TICKER_CG_IDS="ape=apecoin;adrian=some-coingecko-id"
+ *   TICKER_CC_IDS="ape=apecoin;adrian=some-coincap-id"
  */
 
 let timer = null;
@@ -35,14 +38,33 @@ const SOURCE_LIST = (process.env.TICKER_SOURCES || process.env.TICKER_SOURCE || 
 const ACTIVITY_TYPES = { Playing: 0, Streaming: 1, Listening: 2, Watching: 3, Competing: 5 };
 const ACTIVITY_TYPE  = ACTIVITY_TYPES[process.env.TICKER_ACTIVITY_TYPE || 'Watching'] ?? 3;
 
-const RAW_ASSETS = (process.env.TICKER_ASSETS || 'btc,eth,sol,ape')
+// ✅ Added adrian to default list
+const RAW_ASSETS = (process.env.TICKER_ASSETS || 'btc,eth,sol,ape,adrian')
   .split(',')
   .map(s => s.trim().toLowerCase())
   .filter(Boolean);
 
-// Maps for centralized sources
-const CG_IDS = { btc: 'bitcoin', eth: 'ethereum', sol: 'solana', doge: 'dogecoin', link: 'chainlink', ape: 'apecoin' };
-const CC_IDS = { btc: 'bitcoin', eth: 'ethereum', sol: 'solana', doge: 'dogecoin', link: 'chainlink', ape: 'apecoin' };
+// ---------- ID maps (centralized sources) ----------
+function parseIdMapEnv(envVal) {
+  // "btc=bitcoin;eth=ethereum;adrian=some-id"
+  const map = Object.create(null);
+  if (!envVal) return map;
+  for (const part of envVal.split(';')) {
+    const p = part.trim();
+    if (!p) continue;
+    const [sym, id] = p.split('=');
+    if (!sym || !id) continue;
+    map[sym.trim().toLowerCase()] = id.trim();
+  }
+  return map;
+}
+
+const CG_IDS_BASE = { btc: 'bitcoin', eth: 'ethereum', sol: 'solana', doge: 'dogecoin', link: 'chainlink', ape: 'apecoin' };
+const CC_IDS_BASE = { btc: 'bitcoin', eth: 'ethereum', sol: 'solana', doge: 'dogecoin', link: 'chainlink', ape: 'apecoin' };
+
+// Optional overrides/additions via env
+const CG_IDS = { ...CG_IDS_BASE, ...parseIdMapEnv(process.env.TICKER_CG_IDS || '') };
+const CC_IDS = { ...CC_IDS_BASE, ...parseIdMapEnv(process.env.TICKER_CC_IDS || '') };
 
 // ----------- helpers -----------
 function pickSourceIds(source, assets) {
@@ -125,7 +147,7 @@ function warnDebounced(key, msg) {
 // ----------- fetching -----------
 async function fetchCoingecko(assets) {
   const ids = pickSourceIds('coingecko', assets);
-  if (!ids.length) throw new Error('No supported assets for Coingecko');
+  if (!ids.length) return {}; // ✅ don’t throw; just means “not supported here”
   const url = `https://api.coingecko.com/api/v3/simple/price?ids=${encodeURIComponent(ids.join(','))}&vs_currencies=usd&include_24hr_change=true`;
   const res = await fetch(url, { timeout: 10000 });
   if (!res.ok) throw new Error(`Coingecko HTTP ${res.status}`);
@@ -143,7 +165,7 @@ async function fetchCoingecko(assets) {
 
 async function fetchCoincap(assets) {
   const ids = pickSourceIds('coincap', assets);
-  if (!ids.length) throw new Error('No supported assets for CoinCap');
+  if (!ids.length) return {}; // ✅ don’t throw; just means “not supported here”
   const url = `https://api.coincap.io/v2/assets?ids=${encodeURIComponent(ids.join(','))}`;
   const res = await fetch(url, { timeout: 10000 });
   if (!res.ok) throw new Error(`CoinCap HTTP ${res.status}`);
@@ -160,30 +182,28 @@ async function fetchCoincap(assets) {
 /**
  * GeckoTerminal pool fetch (per asset).
  * Requires TICKER_GT_MAP entry for each symbol: sym=network:poolId
- * Example: "eth=ethereum:0x...;sol=solana:SOLANA_POOL_ID"
  */
 async function fetchGeckoTerminal(assets) {
   const out = {};
-  for (const sym of assets) {
+  // Only attempt mapped assets (avoid useless calls)
+  const mapped = assets.filter(sym => GT_MAP[sym]);
+  if (!mapped.length) return {}; // ✅ no mappings => no data
+  for (const sym of mapped) {
     const cfg = GT_MAP[sym];
-    if (!cfg) continue; // skip if not mapped
     const url = `https://api.geckoterminal.com/api/v2/networks/${encodeURIComponent(cfg.network)}/pools/${encodeURIComponent(cfg.id)}`;
     const res = await fetch(url, { timeout: 10000 });
     if (!res.ok) continue;
     const json = await res.json();
     const attr = json?.data?.attributes;
-    // Try several common fields. GT pool schemas can vary.
     const price =
       Number(attr?.price_in_usd) ||
       Number(attr?.base_token_price_usd) ||
       Number(attr?.quote_token_price_usd) ||
       NaN;
     if (isFinite(price)) {
-      // GT doesn’t expose %24h cheaply here; let tick-mode handle deltas
-      out[sym] = { price, change24h: null };
+      out[sym] = { price, change24h: null }; // tick-mode will handle Δ if enabled
     }
   }
-  if (!Object.keys(out).length) throw new Error('GeckoTerminal: no mapped pools/prices');
   return out;
 }
 
@@ -193,9 +213,10 @@ async function fetchGeckoTerminal(assets) {
  */
 async function fetchDexScreener(assets) {
   const out = {};
-  for (const sym of assets) {
+  const mapped = assets.filter(sym => DS_MAP[sym]);
+  if (!mapped.length) return {}; // ✅ no mappings => no data
+  for (const sym of mapped) {
     const cfg = DS_MAP[sym];
-    if (!cfg) continue;
     const url = `https://api.dexscreener.com/latest/dex/pairs/${encodeURIComponent(cfg.network)}/${encodeURIComponent(cfg.id)}`;
     const res = await fetch(url, { timeout: 10000 });
     if (!res.ok) continue;
@@ -203,34 +224,53 @@ async function fetchDexScreener(assets) {
     const pair = json?.pair || (json?.pairs && json.pairs[0]);
     const price = Number(pair?.priceUsd);
     if (isFinite(price)) {
-      // Dexscreener returns 24h info in some endpoints, but not consistently here
       out[sym] = { price, change24h: null };
     }
   }
-  if (!Object.keys(out).length) throw new Error('Dexscreener: no mapped pairs/prices');
   return out;
 }
 
+/**
+ * ✅ NEW: per-asset fallback (merge sources)
+ * This is what makes it possible to show BTC/ETH from Coingecko while also showing $ADRIAN from GeckoTerminal/Dexscreener.
+ */
 async function getPrices(assets) {
-  // Build cascade: respect SOURCE_LIST order, then try the rest as safety net
   const cascade = [...SOURCE_LIST];
   for (const s of ['coingecko', 'coincap', 'geckoterminal', 'dexscreener']) {
     if (!cascade.includes(s)) cascade.push(s);
   }
 
+  const out = {};
+  const remaining = new Set(assets);
   let lastErr = null;
+
   for (const src of cascade) {
+    const missing = [...remaining];
+    if (!missing.length) break;
+
     try {
-      if (src === 'coingecko')     return await fetchCoingecko(assets);
-      if (src === 'coincap')       return await fetchCoincap(assets);
-      if (src === 'geckoterminal') return await fetchGeckoTerminal(assets);
-      if (src === 'dexscreener')   return await fetchDexScreener(assets);
+      let part = {};
+      if (src === 'coingecko')     part = await fetchCoingecko(missing);
+      if (src === 'coincap')       part = await fetchCoincap(missing);
+      if (src === 'geckoterminal') part = await fetchGeckoTerminal(missing);
+      if (src === 'dexscreener')   part = await fetchDexScreener(missing);
+
+      if (part && typeof part === 'object') {
+        for (const [sym, row] of Object.entries(part)) {
+          if (row && typeof row.price === 'number' && isFinite(row.price)) {
+            out[sym] = row;
+            remaining.delete(sym);
+          }
+        }
+      }
     } catch (e) {
       lastErr = e;
       // continue to next source
     }
   }
-  throw lastErr || new Error('No price sources succeeded');
+
+  if (!Object.keys(out).length) throw (lastErr || new Error('No price sources succeeded'));
+  return out;
 }
 
 // Build label for one symbol
@@ -238,7 +278,6 @@ function labelFor(sym, row) {
   const price = row?.price;
   const pct24 = row?.change24h;
 
-  // choose source of %: 24h API vs tick-to-tick
   let pct;
   if (UPDOWN_MODE === 'tick' && typeof lastTick[sym] === 'number' && lastTick[sym] > 0) {
     pct = ((price - lastTick[sym]) / lastTick[sym]) * 100;
@@ -291,7 +330,6 @@ function startPresenceTicker(client) {
   setTimeout(async () => {
     try { await tickOnce(client); }
     catch (e) {
-      // Debounce identical warnings so we don't spam logs (e.g., "Dexscreener: no mapped pairs/prices")
       const key = `ticker-initial:${String(e?.message || e)}`;
       warnDebounced(key, `⚠️ Price ticker error (initial): ${e?.message || e}`);
     }
@@ -305,7 +343,9 @@ function startPresenceTicker(client) {
     }
   }, INTERVAL);
 
-  console.log(`📈 Presence ticker started (mode=${MODE}, every ${INTERVAL}ms, Δ=${UPDOWN_MODE}, sources=${SOURCE_LIST.join('>')}, assets=${RAW_ASSETS.join(',')}, pair=${PAIR_COUNT})`);
+  console.log(
+    `📈 Presence ticker started (mode=${MODE}, every ${INTERVAL}ms, Δ=${UPDOWN_MODE}, sources=${SOURCE_LIST.join('>')}, assets=${RAW_ASSETS.join(',')}, pair=${PAIR_COUNT})`
+  );
 }
 
 function stopPresenceTicker() {
