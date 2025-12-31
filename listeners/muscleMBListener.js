@@ -15,6 +15,14 @@ const MBELLA_NAME = (process.env.MBELLA_NAME || 'MBella').trim();
 // NEW: Quote display style for periodic pings: vibe | clean | tag
 const MB_NICE_STYLE = (process.env.MB_NICE_STYLE || 'vibe').trim().toLowerCase();
 
+// NEW: Use webhookAuto (if available) for sending (you said you're using webhookauto)
+const MB_USE_WEBHOOKAUTO = String(process.env.MB_USE_WEBHOOKAUTO || '1').trim() === '1';
+const MUSCLEMB_WEBHOOK_NAME = (process.env.MUSCLEMB_WEBHOOK_NAME || 'MuscleMB').trim();
+const MUSCLEMB_WEBHOOK_AVATAR = (process.env.MUSCLEMB_WEBHOOK_AVATAR || '').trim();
+
+// Optional: if true, webhook messages will prefix a non-pinging mention-like label
+const MB_WEBHOOK_PREFIX_AUTHOR = String(process.env.MB_WEBHOOK_PREFIX_AUTHOR || '1').trim() === '1';
+
 const cooldown = new Set();
 const TRIGGERS = ['musclemb', 'muscle mb', 'yo mb', 'mbbot', 'mb bro'];
 const FEMALE_TRIGGERS = ['mbella', 'mb ella', 'lady mb', 'queen mb', 'bella'];
@@ -565,7 +573,7 @@ function optimizeQuoteText(input) {
   // Normalize whitespace
   t = t.replace(/\s+/g, ' ').trim();
 
-  // Remove duplicate trailing punctuation (e.g., "!!", "??!" -> "!")
+  // Remove duplicate trailing punctuation (e.g., "!!", "??!" -> "!") -> keep first char
   t = t.replace(/[!?.,;:]+$/g, (m) => m[0]);
 
   // Trim leading punctuation/emojis/spaces only if there are many; keep a single emoji prefix
@@ -616,6 +624,112 @@ function markTypingSuppressed(client, channelId, ms = 11000) {
     const exp = client.__mbTypingSuppress.get(channelId);
     if (exp && exp <= Date.now()) client.__mbTypingSuppress.delete(channelId);
   }, ms + 500);
+}
+
+/** ---------- NEW: webhookAuto sender (best-effort; falls back safely) ---------- */
+function getWebhookAuto(client) {
+  return client?.webhookAuto || client?.webhookauto || client?.webhooksAuto || null;
+}
+
+async function sendViaWebhookAuto(client, channel, payload) {
+  if (!MB_USE_WEBHOOKAUTO) return false;
+  const wa = getWebhookAuto(client);
+  if (!wa) return false;
+
+  // Try common method names without assuming your exact implementation.
+  const candidates = [
+    wa.send,
+    wa.sendMessage,
+    wa.post,
+    wa.sendToChannel,
+    wa.sendWebhook,
+    wa.sendWebhookMessage,
+  ].filter(fn => typeof fn === 'function');
+
+  if (!candidates.length) return false;
+
+  const base = {
+    content: payload?.content || undefined,
+    embeds: payload?.embeds || undefined,
+    username: payload?.username || MUSCLEMB_WEBHOOK_NAME,
+    avatarURL: payload?.avatarURL || (MUSCLEMB_WEBHOOK_AVATAR || undefined),
+    allowedMentions: payload?.allowedMentions || { parse: [] },
+  };
+
+  for (const fn of candidates) {
+    try {
+      // Different implementations may accept (channel, payload) or (channelId, payload) or (channel, content, embeds)
+      const r = await fn.call(wa, channel, base);
+      if (r) return true;
+
+      const r2 = await fn.call(wa, channel.id, base);
+      if (r2) return true;
+
+      // last ditch: content only
+      if (typeof base.content === 'string' && base.content.length) {
+        const r3 = await fn.call(wa, channel, base.content);
+        if (r3) return true;
+      }
+    } catch (e) {
+      // try next signature/method
+      continue;
+    }
+  }
+  return false;
+}
+
+async function safeSendChannel(client, channel, payload) {
+  // If we send via webhook, suppress typing/competing in this channel for a bit
+  const ok = await sendViaWebhookAuto(client, channel, payload);
+  if (ok) {
+    try { markTypingSuppressed(client, channel.id, 9000); } catch {}
+    return true;
+  }
+
+  // Fallback: normal bot send
+  try {
+    await channel.send(payload);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function safeReplyMessage(client, message, payload) {
+  // Prefer true reply when not using webhookAuto
+  // If webhookAuto is enabled and available, we send into channel instead (webhooks can’t reliably “reply”)
+  const wa = getWebhookAuto(client);
+  if (MB_USE_WEBHOOKAUTO && wa) {
+    const prefix = (MB_WEBHOOK_PREFIX_AUTHOR && message?.author?.username)
+      ? `↪️ **${message.author.username}**: `
+      : '';
+    const asChannelPayload = { ...payload };
+    if (typeof asChannelPayload.content === 'string' && asChannelPayload.content.length) {
+      asChannelPayload.content = prefix + asChannelPayload.content;
+    } else if (!asChannelPayload.content && payload?.embeds?.length) {
+      asChannelPayload.content = prefix.trim() || undefined;
+    } else if (!asChannelPayload.content) {
+      asChannelPayload.content = prefix.trim() || undefined;
+    }
+    return await safeSendChannel(client, message.channel, {
+      ...asChannelPayload,
+      allowedMentions: { parse: [] }, // never mass ping
+      username: MUSCLEMB_WEBHOOK_NAME,
+      avatarURL: MUSCLEMB_WEBHOOK_AVATAR || undefined,
+    });
+  }
+
+  try {
+    await message.reply(payload);
+    return true;
+  } catch {
+    try {
+      await message.channel.send(payload);
+      return true;
+    } catch {
+      return false;
+    }
+  }
 }
 
 /** ---------- NEW: Sweep reader helpers ---------- */
@@ -745,7 +859,7 @@ function normalizeSweepSnapshot(raw) {
 async function sendSweepEmbed(message, snapshot, sourceLabel = '') {
   const norm = normalizeSweepSnapshot(snapshot);
   if (!norm) {
-    try { await message.reply('⚠️ Sweep reader: no snapshot available yet.'); } catch {}
+    try { await safeReplyMessage(message.client, message, { content: '⚠️ Sweep reader: no snapshot available yet.' }); } catch {}
     return;
   }
 
@@ -776,10 +890,13 @@ async function sendSweepEmbed(message, snapshot, sourceLabel = '') {
   }
 
   try {
-    await message.reply({ embeds: [embed] });
+    await safeReplyMessage(message.client, message, { embeds: [embed], allowedMentions: { parse: [] } });
   } catch (e) {
     try {
-      await message.reply(`🧹 Sweep Power: ${fmtNum(norm.power, 2)} | Δ ${fmtSigned(norm.delta, 2)} | Updated: ${updatedStr}`);
+      await safeReplyMessage(message.client, message, {
+        content: `🧹 Sweep Power: ${fmtNum(norm.power, 2)} | Δ ${fmtSigned(norm.delta, 2)} | Updated: ${updatedStr}`,
+        allowedMentions: { parse: [] }
+      });
     } catch {}
   }
 }
@@ -831,6 +948,9 @@ module.exports = (client) => {
       const channel = findSpeakableChannel(guild, preferredChannel);
       if (!channel) continue;
 
+      // If MBella recently posted/claimed the channel, skip nice ping here
+      if (isTypingSuppressed(client, channel.id)) continue;
+
       // Analyze channel mood for dynamic multipliers
       let mood = { multipliers: {}, tags: [] };
       try {
@@ -847,15 +967,22 @@ module.exports = (client) => {
         moodMultipliers: mood.multipliers
       });
 
-      // NEW: format according to MB_NICE_STYLE, with optimized text
+      // Format according to MB_NICE_STYLE, with optimized text
       const outLine = formatNiceLine(MB_NICE_STYLE, { category, meta, moodTags: mood.tags }, text);
 
       try {
-        await channel.send(outLine);
-        lastNicePingByGuild.set(guildId, now);
-        // store optimized text for de-dupe fairness
-        const stored = optimizeQuoteText(text);
-        lastQuoteByGuild.set(guildId, { text: stored, category, ts: now });
+        const ok = await safeSendChannel(client, channel, {
+          content: outLine,
+          allowedMentions: { parse: [] },
+          username: MUSCLEMB_WEBHOOK_NAME,
+          avatarURL: MUSCLEMB_WEBHOOK_AVATAR || undefined,
+        });
+        if (ok) {
+          lastNicePingByGuild.set(guildId, now);
+          // store optimized text for de-dupe fairness
+          const stored = optimizeQuoteText(text);
+          lastQuoteByGuild.set(guildId, { text: stored, category, ts: now });
+        }
       } catch {}
     }
   }, NICE_SCAN_EVERY_MS);
@@ -890,7 +1017,12 @@ module.exports = (client) => {
 
         const { source, snap } = await getSweepSnapshot(client, message.guild.id);
         if (!snap) {
-          try { await message.reply('🧹 Sweep reader: no sweep-power stored yet. (Run the sweep tracker first.)'); } catch {}
+          try {
+            await safeReplyMessage(client, message, {
+              content: '🧹 Sweep reader: no sweep-power stored yet. (Run the sweep tracker first.)',
+              allowedMentions: { parse: [] }
+            });
+          } catch {}
           return;
         }
         await sendSweepEmbed(message, snap, source);
@@ -907,49 +1039,68 @@ module.exports = (client) => {
     if (!hasTriggerWord && !botMentioned) return;
     if (message.mentions.everyone || message.mentions.roles.size > 0) return;
 
-    const mentionedUsers = message.mentions.users.filter(u => u.id !== client.user.id);
-    const shouldRoast = (hasTriggerWord || botMentioned) && mentionedUsers.size > 0;
-    const isRoastingBot = shouldRoast && message.mentions.has(client.user) && mentionedUsers.size === 1 && mentionedUsers.has(client.user.id);
+    // PATCH: correct mention handling + “roast the bot” detection
+    const mentionedUsersAll = message.mentions.users || new Map();
+    const mentionedOthers = mentionedUsersAll.filter(u => u.id !== client.user.id);
+    const shouldRoastOthers = (hasTriggerWord || botMentioned) && mentionedOthers.size > 0;
+
+    // If they only ping MB (no other users), decide if it's a “clap back” moment
+    const roastKeywords = /\b(roast|trash|garbage|suck|weak|clown|noob|dumb|stupid|lame)\b|😂|🤣|💀/i;
+    const isRoastingBot = botMentioned && mentionedOthers.size === 0 && roastKeywords.test(lowered);
 
     const isOwner = message.author.id === process.env.BOT_OWNER_ID;
     if (cooldown.has(message.author.id) && !isOwner) return;
     cooldown.add(message.author.id);
     setTimeout(() => cooldown.delete(message.author.id), 10000);
 
-    let cleanedInput = lowered;
-    TRIGGERS.forEach(trigger => {
-      cleanedInput = cleanedInput.replaceAll(trigger, '');
-    });
-    message.mentions.users.forEach(user => {
-      cleanedInput = cleanedInput.replaceAll(`<@${user.id}>`, '');
-      cleanedInput = cleanedInput.replaceAll(`<@!${user.id}>`, '');
-    });
+    // Use original content for cleaning (keeps names/case)
+    let cleanedInput = (message.content || '').trim();
+
+    // Strip trigger words
+    for (const trigger of TRIGGERS) {
+      try { cleanedInput = cleanedInput.replaceAll(new RegExp(trigger, 'ig'), ''); } catch {}
+      try { cleanedInput = cleanedInput.replaceAll(trigger, ''); } catch {}
+    }
+
+    // Strip mentions
+    try {
+      message.mentions.users.forEach(user => {
+        cleanedInput = cleanedInput.replaceAll(`<@${user.id}>`, '');
+        cleanedInput = cleanedInput.replaceAll(`<@!${user.id}>`, '');
+      });
+    } catch {}
+
     cleanedInput = cleanedInput.replaceAll(`<@${client.user.id}>`, '').trim();
 
     let introLine = '';
     if (hasTriggerWord) {
-      introLine = `Detected trigger word: "${TRIGGERS.find(trigger => lowered.includes(trigger))}". `;
+      const found = TRIGGERS.find(trigger => lowered.includes(trigger));
+      introLine = found ? `Detected trigger word: "${found}". ` : '';
     } else if (botMentioned) {
       introLine = `You mentioned MuscleMB directly. `;
     }
-    if (!cleanedInput) cleanedInput = shouldRoast ? 'Roast these fools.' : 'Speak your alpha.';
-    cleanedInput = `${introLine}${cleanedInput}`;
+
+    if (!cleanedInput) cleanedInput = shouldRoastOthers ? 'Roast these fools.' : 'Speak your alpha.';
+    cleanedInput = `${introLine}${cleanedInput}`.trim();
 
     try {
-      // show typing as main bot while thinking
-      await message.channel.sendTyping();
+      // show typing as main bot while thinking (skip if suppressed)
+      if (!isTypingSuppressed(client, message.channel.id)) {
+        try { await message.channel.sendTyping(); } catch {}
+      }
 
-      const isRoast = shouldRoast && !isRoastingBot;
-      const roastTargets = [...mentionedUsers.values()].map(u => u.username).join(', ');
+      const roastTargets = [...mentionedOthers.values()].map(u => u.username).join(', ');
 
       // ------ Mode from DB (no random override if DB has one) ------
       let currentMode = 'default';
       try {
-        const modeRes = await client.pg.query(
-          `SELECT mode FROM mb_modes WHERE server_id = $1 LIMIT 1`,
-          [message.guild.id]
-        );
-        currentMode = modeRes.rows[0]?.mode || 'default';
+        if (client?.pg?.query) {
+          const modeRes = await client.pg.query(
+            `SELECT mode FROM mb_modes WHERE server_id = $1 LIMIT 1`,
+            [message.guild.id]
+          );
+          currentMode = modeRes.rows[0]?.mode || 'default';
+        }
       } catch {
         console.warn('⚠️ Failed to fetch mb_mode, using default.');
       }
@@ -959,7 +1110,7 @@ module.exports = (client) => {
 
       // Persona overlays kept minimal; nicer tone by default in non-roast modes
       let systemPrompt = '';
-      if (isRoast) {
+      if (shouldRoastOthers) {
         systemPrompt =
           `You are MuscleMB — a savage roastmaster. Ruthlessly roast these tagged degens: ${roastTargets}. ` +
           `Keep it short, witty, and funny. Avoid slurs or harassment; punch up with humor. Use spicy emojis. 💀🔥`;
@@ -990,6 +1141,8 @@ module.exports = (client) => {
       let temperature = 0.7;
       if (currentMode === 'villain') temperature = 0.5;
       if (currentMode === 'motivator') temperature = 0.9;
+      if (shouldRoastOthers) temperature = 0.85;
+      if (isRoastingBot) temperature = 0.75;
 
       // ---- Groq with dynamic model discovery & clear diagnostics ----
       const groqTry = await groqWithDiscovery(fullSystemPrompt, cleanedInput, temperature);
@@ -997,7 +1150,12 @@ module.exports = (client) => {
       // Network/timeout error path
       if (!groqTry || groqTry.error) {
         console.error('❌ Groq fetch/network error (all models):', groqTry?.error?.message || 'unknown');
-        try { await message.reply('⚠️ MB lag spike. One rep at a time—try again in a sec. ⏱️'); } catch {}
+        try {
+          await safeReplyMessage(client, message, {
+            content: '⚠️ MB lag spike. One rep at a time—try again in a sec. ⏱️',
+            allowedMentions: { parse: [] }
+          });
+        } catch {}
         return;
       }
 
@@ -1020,14 +1178,21 @@ module.exports = (client) => {
           hint = '⚠️ MB cloud cramps (server error). One more try soon. ☁️';
         }
         console.error(`❌ Groq HTTP ${groqTry.res.status} on "${groqTry.model}": ${groqTry.bodyText?.slice(0, 400)}`);
-        try { await message.reply(hint); } catch {}
+        try {
+          await safeReplyMessage(client, message, { content: hint, allowedMentions: { parse: [] } });
+        } catch {}
         return;
       }
 
       const groqData = safeJsonParse(groqTry.bodyText);
       if (!groqData) {
         console.error('❌ Groq returned non-JSON/empty:', groqTry.bodyText?.slice(0, 300));
-        try { await message.reply('⚠️ MB static noise… say that again or keep it simple. 📻'); } catch {}
+        try {
+          await safeReplyMessage(client, message, {
+            content: '⚠️ MB static noise… say that again or keep it simple. 📻',
+            allowedMentions: { parse: [] }
+          });
+        } catch {}
         return;
       }
       if (groqData.error) {
@@ -1035,11 +1200,14 @@ module.exports = (client) => {
         const hint = (message.author.id === process.env.BOT_OWNER_ID)
           ? `⚠️ Groq error: ${groqData.error?.message || 'unknown'}. Check model access & payload size.`
           : '⚠️ MB slipped on a banana peel (API error). One sec. 🍌';
-        try { await message.reply(hint); } catch {}
+        try {
+          await safeReplyMessage(client, message, { content: hint, allowedMentions: { parse: [] } });
+        } catch {}
         return;
       }
 
-      const aiReply = groqData.choices?.[0]?.message?.content?.trim();
+      const aiReplyRaw = groqData.choices?.[0]?.message?.content?.trim();
+      const aiReply = (aiReplyRaw || '').slice(0, 1800).trim(); // guard for huge replies
 
       if (aiReply?.length) {
         let embedColor = '#9b59b6';
@@ -1068,27 +1236,32 @@ module.exports = (client) => {
         await new Promise(resolve => setTimeout(resolve, delayMs));
 
         try {
-          await message.reply({ embeds: [embed] });
+          await safeReplyMessage(client, message, { embeds: [embed], allowedMentions: { parse: [] } });
         } catch (err) {
           console.warn('❌ MuscleMB embed reply error:', err.message);
-          try { await message.reply(aiReply); } catch {}
+          try {
+            await safeReplyMessage(client, message, { content: aiReply, allowedMentions: { parse: [] } });
+          } catch {}
         }
       } else {
         try {
-          await message.reply('💬 (silent set) MB heard you but returned no sauce. Try again with fewer words.');
+          await safeReplyMessage(client, message, {
+            content: '💬 (silent set) MB heard you but returned no sauce. Try again with fewer words.',
+            allowedMentions: { parse: [] }
+          });
         } catch {}
       }
 
     } catch (err) {
       console.error('❌ MuscleMB error:', err?.stack || err?.message || String(err));
       try {
-        await message.reply('⚠️ MuscleMB pulled a hammy 🦵. Try again soon.');
+        await safeReplyMessage(client, message, {
+          content: '⚠️ MuscleMB pulled a hammy 🦵. Try again soon.',
+          allowedMentions: { parse: [] }
+        });
       } catch (fallbackErr) {
         console.warn('❌ Fallback send error:', fallbackErr.message);
       }
     }
   });
 };
-
-
-
