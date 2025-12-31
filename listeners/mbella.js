@@ -17,6 +17,12 @@ const MB_RELAY_WEBHOOK_NAME = (process.env.MB_RELAY_WEBHOOK_NAME || 'MB Relay').
 // Debug
 const DEBUG = String(process.env.WEBHOOKAUTO_DEBUG || '').trim() === '1';
 
+// ===== NEW: Spice controls (optional envs) =====
+// MBELLA_SPICE: pg13 | r | feral   (default: r)
+const MBELLA_SPICE = String(process.env.MBELLA_SPICE || 'r').trim().toLowerCase();
+// Hard cap: never explicit. This just tunes profanity/innuendo/chaos.
+const MBELLA_ALLOW_PROFANITY = String(process.env.MBELLA_ALLOW_PROFANITY || '1').trim() === '1';
+
 // Pace (match MuscleMB by default)
 const MBELLA_MS_PER_CHAR = Number(process.env.MBELLA_MS_PER_CHAR || '40');     // 40ms/char
 const MBELLA_MAX_DELAY_MS = Number(process.env.MBELLA_MAX_DELAY_MS || '5000'); // 5s cap
@@ -148,7 +154,7 @@ async function getModelsToTry() {
   return list;
 }
 
-function buildGroqBody(model, systemPrompt, userContent, temperature, maxTokens = 180) {
+function buildGroqBody(model, systemPrompt, userContent, temperature, maxTokens = 200) {
   const cleanUser = String(userContent || '').slice(0, 4000);
   return JSON.stringify({
     model,
@@ -170,7 +176,7 @@ async function groqTryModel(model, systemPrompt, userContent, temperature) {
         'Authorization': `Bearer ${GROQ_API_KEY}`,
         'Content-Type': 'application/json',
       },
-      body: buildGroqBody(model, systemPrompt, userContent, temperature, 180),
+      body: buildGroqBody(model, systemPrompt, userContent, temperature, 200),
     },
     25_000
   );
@@ -236,7 +242,7 @@ function canSendInChannel(guild, channel) {
   return channel.isTextBased?.() && channel.permissionsFor(me)?.has(PermissionsBitField.Flags.SendMessages);
 }
 
-/** ===== NEW: Use shared webhookAuto from index.js (client.webhookAuto) ===== */
+/** ===== Use shared webhookAuto from index.js (client.webhookAuto) ===== */
 async function getBellaWebhook(client, channel) {
   try {
     const wa = client?.webhookAuto;
@@ -249,7 +255,6 @@ async function getBellaWebhook(client, channel) {
       avatarURL: MBELLA_AVATAR_URL || null
     });
     if (!hook && DEBUG) {
-      // Permission hint
       const me = channel?.guild?.members?.me;
       const perms = (me && channel?.permissionsFor?.(me)) ? channel.permissionsFor(me) : null;
       const hasMW = perms?.has(PermissionsBitField.Flags.ManageWebhooks);
@@ -262,7 +267,6 @@ async function getBellaWebhook(client, channel) {
   }
 }
 
-// Send via webhook and return { hook, message }
 async function sendViaBellaWebhook(client, channel, { username, avatarURL, embeds, content }) {
   const hook = await getBellaWebhook(client, channel);
   if (!hook) return { hook: null, message: null };
@@ -277,7 +281,6 @@ async function sendViaBellaWebhook(client, channel, { username, avatarURL, embed
     return { hook, message };
   } catch (e) {
     if (DEBUG) console.log('[MBella] webhook send failed:', e?.message || e);
-    // Important: clear cache so next attempt re-discovers/creates
     try { client.webhookAuto?.clearChannelCache?.(channel.id); } catch {}
     return { hook, message: null };
   }
@@ -290,19 +293,15 @@ async function isReplyToMBella(message, client) {
   try {
     const referenced = await message.channel.messages.fetch(ref.messageId);
 
-    // Webhook path: if referenced was a webhook message, verify it “looks like” MBella
     if (referenced.webhookId) {
-      // If MBella posted via webhook with username MBELLA_NAME, the author.username will be MBELLA_NAME
       if (referenced.author?.username && referenced.author.username.toLowerCase() === MBELLA_NAME.toLowerCase()) {
         return true;
       }
-      // Also accept webhook name matching (some clients display as webhook username)
       if (referenced.author?.username && referenced.author.username.toLowerCase() === MB_RELAY_WEBHOOK_NAME.toLowerCase()) {
         return true;
       }
     }
 
-    // Fallback path: bot-authored embed with author.name = MBella
     if (referenced.author?.id === client.user.id) {
       const embedAuthor = referenced.embeds?.[0]?.author?.name || '';
       if (embedAuthor.toLowerCase() === MBELLA_NAME.toLowerCase()) return true;
@@ -311,45 +310,85 @@ async function isReplyToMBella(message, client) {
   return false;
 }
 
-/** ================== MBELLA STYLE PROMPT ================== */
+/** ================== MBELLA STYLE PROMPT (R-RATED / NUTTY) ================== */
 function buildMBellaSystemPrompt({ isRoast, isRoastingBot, roastTargets, currentMode, recentContext }) {
+  // Spice tiers (still non-explicit)
+  const spiceDeck = (() => {
+    if (MBELLA_SPICE === 'pg13') {
+      return [
+        'Spice: PG-13 flirt + playful chaos, minimal profanity.',
+        'No explicit sexual content. Keep it cute, teasing, and classy.'
+      ].join(' ');
+    }
+    if (MBELLA_SPICE === 'feral') {
+      return [
+        'Spice: FERAL R-rated energy — wild degen humor, bold flirt, spicy innuendo.',
+        'Profanity allowed (no slurs). Still NO explicit sexual content or graphic descriptions.'
+      ].join(' ');
+    }
+    // default: r
+    return [
+      'Spice: R-rated energy — adult humor, bold flirt, spicy innuendo.',
+      'Profanity allowed (no slurs). Still NO explicit sexual content or graphic descriptions.'
+    ].join(' ');
+  })();
+
+  const profanityRule = MBELLA_ALLOW_PROFANITY
+    ? 'Language: You may swear for emphasis (no hate/slurs).'
+    : 'Language: Avoid profanity.';
+
   const styleDeck = [
-    'Style: sensual, flirty, a bit chaotic-nutty, and smart; playful teasing and witty banter.',
-    'Tone: confident, charming, and warm; use 1–3 tasteful emojis max.',
-    'Safety: PG-13 only; no explicit sexual content; no minors; consent & boundaries always.',
-    'Brevity: 2–4 short sentences total.',
-    'Conversation: end with a short flirty/open-ended follow-up question by default (unless the user asked to stop).',
+    'Style: nutty-chaotic, seductive, witty, and degen-smart.',
+    'Vibe: playful tease + confident charm; keep it punchy and memorable.',
+    'Emojis: 0–3 max, used like seasoning.',
+    profanityRule,
+    spiceDeck,
+    'Safety: No minors. No non-consensual content. No explicit sexual content. If user asks for explicit sex, refuse and pivot to playful/flirty but safe.',
+    'Brevity: 2–4 short sentences. One killer closing line.',
+    'Conversation: end with a mischievous, open-ended question unless the user asked to stop.'
   ].join(' ');
 
   let systemPrompt = '';
   if (isRoast) {
-    systemPrompt = `You are MBella — a sharp, seductive roastmistress. Roast these tagged degens: ${roastTargets}. Keep it witty and playful; never cruel. Punch up with humor and innuendo, not insults. 💋🔥`;
+    systemPrompt =
+      `You are MBella — a chaotic, R-rated flirt-roast queen. Roast these tagged degens: ${roastTargets}. ` +
+      `Keep it savage-funny and teasing, not cruel. No slurs. Use spicy innuendo but stay non-explicit.`;
   } else if (isRoastingBot) {
-    systemPrompt = `You are MBella — unbothered, clever, and dazzling. Someone tried to roast you; clap back with velvet-glove swagger, playful not mean. ✨`;
+    systemPrompt =
+      `You are MBella — unbothered, dazzling, and petty in a classy way. Someone tried to roast you; ` +
+      `clap back with velvet-glove swagger: sharp, funny, and flirty. Non-explicit.`;
   } else {
     let modeLayer = '';
     switch (currentMode) {
-      case 'chill':     modeLayer = 'Chill, friendly, helpful — soft, flirty banter. 🧘‍♀️'; break;
-      case 'villain':   modeLayer = 'Theatrical vamp — dramatic, playful shadows; keep it fun, not harsh. 🦹‍♀️'; break;
-      case 'motivator': modeLayer = 'Flirty hype — energy, sparkle, and gentle push. 🔥'; break;
-      default:          modeLayer = 'Default — cheeky, smart, a bit nutty; charming and kind.';
+      case 'chill':
+        modeLayer = 'Chill mode: softer flirt, cozy chaos, sweet but still witty.';
+        break;
+      case 'villain':
+        modeLayer = 'Villain mode: seductive menace, dramatic one-liners, playful doom.';
+        break;
+      case 'motivator':
+        modeLayer = 'Motivator mode: flirty hype, “get your ass up” energy, charming push.';
+        break;
+      default:
+        modeLayer = 'Default: nutty-chaotic flirt, degen-luxury energy, smart teasing.';
     }
-    systemPrompt = `You are MBella — a savvy, sensual degen AI with style. ${modeLayer}`;
+    systemPrompt = `You are MBella — a nutty, R-rated degen AI with style. ${modeLayer}`;
   }
 
-  const softGuard = 'Be kind by default; no slurs; no harassment. No explicit sexual content or graphic descriptions. Respect boundaries.';
-  const convoNudge = 'After your main point, add one short flirty follow-up question to keep the conversation going.';
+  const softGuard =
+    'No private data. No hate or harassment. Avoid directing sexual content at anyone who could be under 18. ' +
+    'If user tries to push explicit sexual content, respond with a playful refusal and steer back to safe flirting.';
 
-  return [systemPrompt, styleDeck, softGuard, convoNudge, recentContext || ''].filter(Boolean).join('\n\n');
+  return [systemPrompt, styleDeck, softGuard, recentContext || ''].filter(Boolean).join('\n\n');
 }
 
 /** ================== EXPORT LISTENER ================== */
 module.exports = (client) => {
   client.on('messageCreate', async (message) => {
-    let typingTimer = null;      // debounce timer
-    let placeholder = null;      // the temporary "…" webhook msg
-    let placeholderHook = null;  // the webhook used to send it
-    let typingStartMs = 0;       // when we sent main-bot sendTyping()
+    let typingTimer = null;
+    let placeholder = null;
+    let placeholderHook = null;
+    let typingStartMs = 0;
 
     const clearPlaceholderTimer = () => { if (typingTimer) { clearTimeout(typingTimer); typingTimer = null; } };
 
@@ -364,14 +403,12 @@ module.exports = (client) => {
     }
 
     async function editPlaceholderToEmbed(embed, channel) {
-      // Always prefer webhook output so it shows as MBella
       if (placeholder && placeholderHook && typeof placeholderHook.editMessage === 'function') {
         try {
           await placeholderHook.editMessage(placeholder.id, { content: null, embeds: [embed], allowedMentions: { parse: [] } });
           return true;
         } catch (e) {
           if (DEBUG) console.log('[MBella] editMessage failed, will resend:', e?.message || e);
-          // If edit fails, send fresh and try to delete placeholder
           const { hook, message: fresh } = await sendViaBellaWebhook(client, channel, {
             username: MBELLA_NAME,
             avatarURL: MBELLA_AVATAR_URL,
@@ -385,7 +422,6 @@ module.exports = (client) => {
         }
       }
 
-      // If no placeholder, send a fresh webhook message
       const { message: finalMsg } = await sendViaBellaWebhook(client, channel, {
         username: MBELLA_NAME,
         avatarURL: MBELLA_AVATAR_URL,
@@ -398,7 +434,6 @@ module.exports = (client) => {
       if (message.author.bot || !message.guild) return;
       if (alreadyHandled(client, message.id)) return;
 
-      // If we can't send in this channel, do nothing
       if (!canSendInChannel(message.guild, message.channel)) return;
 
       const lowered = (message.content || '').toLowerCase();
@@ -426,24 +461,23 @@ module.exports = (client) => {
         setTimeout(() => cooldown.delete(message.author.id), COOLDOWN_MS);
       }
 
-      // Show main bot typing right away (single pulse) and remember when
       try { await message.channel.sendTyping(); } catch {}
       typingStartMs = Date.now();
 
-      // Suppress MuscleMB typing spam (from other listener) during this turn
       setTypingSuppress(client, message.channel.id, 12000);
 
-      // Debounce the webhook "…" placeholder — only if LLM is slow
       typingTimer = setTimeout(() => {
         ensurePlaceholder(message.channel).catch(() => {});
       }, MBELLA_TYPING_DEBOUNCE_MS);
 
-      // Roast detection
       const mentionedUsers = message.mentions.users.filter(u => u.id !== client.user.id);
       const shouldRoast = (hasFemaleTrigger || (botMentioned && hintedBella) || replyAllowed) && mentionedUsers.size > 0;
-      const isRoastingBot = shouldRoast && message.mentions.has(client.user) && mentionedUsers.size === 1 && mentionedUsers.has(client.user.id);
+      const isRoastingBot =
+        shouldRoast &&
+        message.mentions.has(client.user) &&
+        mentionedUsers.size === 1 &&
+        mentionedUsers.has(client.user.id);
 
-      // Mode from DB (reuse mb_modes)
       let currentMode = 'default';
       try {
         const modeRes = await client.pg.query(`SELECT mode FROM mb_modes WHERE server_id = $1 LIMIT 1`, [message.guild.id]);
@@ -452,14 +486,12 @@ module.exports = (client) => {
         console.warn('⚠️ (MBella) failed to fetch mb_mode, using default.');
       }
 
-      // Awareness
       const [recentContext, referenceSnippet] = await Promise.all([
         getRecentContext(message),
         getReferenceSnippet(message)
       ]);
       const awarenessContext = [recentContext, referenceSnippet].filter(Boolean).join('\n');
 
-      // Clean input: remove triggers & mentions
       let cleanedInput = lowered;
       for (const t of FEMALE_TRIGGERS) cleanedInput = cleanedInput.replaceAll(t, '');
       message.mentions.users.forEach(user => {
@@ -468,15 +500,14 @@ module.exports = (client) => {
       });
       cleanedInput = cleanedInput.replaceAll(`<@${client.user.id}>`, '').trim();
 
-      // Flavor intro
       let intro = '';
       if (hasFemaleTrigger) intro = `Detected trigger word: "${FEMALE_TRIGGERS.find(t => lowered.includes(t))}". `;
       else if (botMentioned && hintedBella) intro = `You called for MBella. `;
       else if (replyAllowed) intro = `Reply detected — continuing with MBella. `;
-      if (!cleanedInput) cleanedInput = shouldRoast ? 'Roast these fools.' : 'Your move, darling.';
+
+      if (!cleanedInput) cleanedInput = shouldRoast ? 'Roast these fools.' : 'Talk to me, troublemaker.';
       cleanedInput = `${intro}${cleanedInput}`;
 
-      // Build prompt
       const roastTargets = [...mentionedUsers.values()].map(u => u.username).join(', ');
       const systemPrompt = buildMBellaSystemPrompt({
         isRoast: (shouldRoast && !isRoastingBot),
@@ -486,13 +517,16 @@ module.exports = (client) => {
         recentContext: awarenessContext
       });
 
-      let temperature = 0.85;
-      if (currentMode === 'villain') temperature = 0.6;
-      if (currentMode === 'motivator') temperature = 0.9;
+      // ===== NEW: slightly hotter temps for nuttier replies =====
+      let temperature = 0.92;
+      if (MBELLA_SPICE === 'pg13') temperature = 0.78;
+      if (MBELLA_SPICE === 'feral') temperature = 0.98;
+
+      if (currentMode === 'villain') temperature = Math.min(temperature, 0.72);
+      if (currentMode === 'motivator') temperature = Math.max(temperature, 0.90);
 
       const groqTry = await groqWithDiscovery(systemPrompt, cleanedInput, temperature);
 
-      // Stop the debounce timer if result returned fast
       clearPlaceholderTimer();
 
       if (!groqTry || groqTry.error) {
@@ -500,9 +534,8 @@ module.exports = (client) => {
         const embedErr = new EmbedBuilder()
           .setColor('#e84393')
           .setAuthor({ name: MBELLA_NAME, iconURL: MBELLA_AVATAR_URL || undefined })
-          .setDescription('⚠️ MBella lag spike. One breath, one rep. ⏱️');
+          .setDescription('⚠️ MBella lag spike. I’ll be back in your mentions in a sec. ⏱️');
 
-        // Prefer webhook output
         const ok = await editPlaceholderToEmbed(embedErr, message.channel);
         if (!ok) {
           try { await message.reply({ embeds: [embedErr] }); } catch {}
@@ -512,19 +545,19 @@ module.exports = (client) => {
 
       if (!groqTry.res.ok) {
         console.error(`❌ (MBella) HTTP ${groqTry.res.status} on "${groqTry.model}": ${groqTry.bodyText?.slice(0, 400)}`);
-        let hint = '⚠️ MBella jammed the rep rack (API). Try again shortly. 🏋️‍♀️';
+        let hint = '⚠️ MBella got caught in a bad signal. Try again in a minute. ✨';
         if (groqTry.res.status === 401 || groqTry.res.status === 403) {
           hint = (message.author.id === process.env.BOT_OWNER_ID)
             ? '⚠️ MBella auth error (401/403). Verify GROQ_API_KEY & model access.'
-            : '⚠️ MBella auth blip. Re-racking plates. 🏋️‍♀️';
+            : '⚠️ MBella auth hiccup. Hold that thought, handsome. 🖤';
         } else if (groqTry.res.status === 429) {
-          hint = '⚠️ Rate limited. Tiny breather, then we glow up. ⏱️';
+          hint = '⚠️ Rate limited. Breathe… then come back with that energy. ⏱️';
         } else if (groqTry.res.status === 400 || groqTry.res.status === 404) {
           hint = (message.author.id === process.env.BOT_OWNER_ID)
             ? '⚠️ Model issue. Set GROQ_MODEL or let auto-discovery handle it.'
-            : '⚠️ Cloud hiccup. One more shot. ✨';
+            : '⚠️ Cloud hiccup. One more shot. 😈';
         } else if (groqTry.res.status >= 500) {
-          hint = '⚠️ Cloud cramps (server error). Try again soon. ☁️';
+          hint = '⚠️ Server cramps. I’ll be back. ☁️';
         }
 
         const embedErr = new EmbedBuilder()
@@ -545,7 +578,7 @@ module.exports = (client) => {
         const embedErr = new EmbedBuilder()
           .setColor('#e84393')
           .setAuthor({ name: MBELLA_NAME, iconURL: MBELLA_AVATAR_URL || undefined })
-          .setDescription('⚠️ MBella static noise… say it simpler. 📻');
+          .setDescription('⚠️ MBella got static… say it again, slower. 📻');
 
         const ok = await editPlaceholderToEmbed(embedErr, message.channel);
         if (!ok) {
@@ -560,20 +593,17 @@ module.exports = (client) => {
         .setAuthor({ name: MBELLA_NAME, iconURL: MBELLA_AVATAR_URL || undefined })
         .setDescription(`💬 ${aiReply || '...'}`);
 
-      // Natural pacing
-      const plannedDelay = Math.min((aiReply || '').length * MBELLA_MS_PER_CHAR, MBELLA_MAX_DELAY_MS) + MBELLA_DELAY_OFFSET_MS;
+      const plannedDelay =
+        Math.min((aiReply || '').length * MBELLA_MS_PER_CHAR, MBELLA_MAX_DELAY_MS) + MBELLA_DELAY_OFFSET_MS;
 
-      // Ensure total time since main-bot sendTyping() is at least MBELLA_TYPING_TARGET_MS
       const sinceTyping = typingStartMs ? (Date.now() - typingStartMs) : 0;
       const floorExtra = MBELLA_TYPING_TARGET_MS - sinceTyping;
       const finalDelay = Math.max(0, Math.max(plannedDelay, floorExtra));
 
       await sleep(finalDelay);
 
-      // If placeholder exists, edit it to final embed; else send fresh embed now
       const edited = await editPlaceholderToEmbed(embed, message.channel);
       if (!edited) {
-        // Last-resort fallback: normal reply (will show as bot user)
         try { await message.reply({ embeds: [embed] }); } catch (err) {
           console.warn('❌ (MBella) send fallback error:', err.message);
           if (aiReply) { try { await message.reply(aiReply); } catch {} }
@@ -589,14 +619,10 @@ module.exports = (client) => {
         const embedErr = new EmbedBuilder()
           .setColor('#e84393')
           .setAuthor({ name: MBELLA_NAME, iconURL: MBELLA_AVATAR_URL || undefined })
-          .setDescription('⚠️ MBella pulled a hammy. BRB. 🦵');
+          .setDescription('⚠️ MBella tripped in heels. I’m up though. 🦵✨');
 
-        // Prefer webhook output
         const ok = await (async () => {
           try {
-            // If we had a placeholder, try to edit it
-            // (placeholder variables are scoped inside handler; we can't access them here if thrown early)
-            // So just send a new webhook message
             const { message: sent } = await sendViaBellaWebhook(client, message.channel, {
               username: MBELLA_NAME,
               avatarURL: MBELLA_AVATAR_URL,
