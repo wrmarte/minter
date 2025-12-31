@@ -228,6 +228,47 @@ async function fetchWithTimeout(url, opts = {}, timeoutMs = 25000) {
   }
 }
 
+/**
+ * PATCH: binary fetch helper (for chart image attachment).
+ * Fixes “trigger logs but no display” caused by overly-long embed image URLs.
+ */
+async function fetchBinaryWithTimeout(url, opts = {}, timeoutMs = 25000) {
+  const hasAbort = typeof globalThis.AbortController === 'function';
+  if (hasAbort) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { ...opts, signal: controller.signal });
+      // node-fetch v2 supports res.buffer(); v3 supports arrayBuffer()
+      let buf;
+      if (typeof res.buffer === 'function') {
+        buf = await res.buffer();
+      } else {
+        const ab = await res.arrayBuffer();
+        buf = Buffer.from(ab);
+      }
+      return { res, buf };
+    } finally {
+      clearTimeout(timer);
+    }
+  } else {
+    return await Promise.race([
+      (async () => {
+        const res = await fetch(url, opts);
+        let buf;
+        if (typeof res.buffer === 'function') {
+          buf = await res.buffer();
+        } else {
+          const ab = await res.arrayBuffer();
+          buf = Buffer.from(ab);
+        }
+        return { res, buf };
+      })(),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('Timeout')), timeoutMs))
+    ]);
+  }
+}
+
 // Warn once if key looks wrong/missing
 if (!GROQ_API_KEY || GROQ_API_KEY.trim().length < 10) {
   console.warn('⚠️ GROQ_API_KEY is missing or too short. Verify Railway env.');
@@ -660,6 +701,10 @@ function getWebhookAuto(client) {
 
 async function sendViaWebhookAuto(client, channel, payload) {
   if (!MB_USE_WEBHOOKAUTO) return false;
+
+  // PATCH: if files are present, skip webhookAuto (most webhook wrappers don’t support attachments consistently)
+  if (payload?.files && Array.isArray(payload.files) && payload.files.length) return false;
+
   const wa = getWebhookAuto(client);
   if (!wa) return false;
 
@@ -706,6 +751,17 @@ async function sendViaWebhookAuto(client, channel, payload) {
 }
 
 async function safeSendChannel(client, channel, payload) {
+  // PATCH: if payload has files, use normal bot send (reliable attachments)
+  if (payload?.files && Array.isArray(payload.files) && payload.files.length) {
+    try {
+      await channel.send(payload);
+      return true;
+    } catch (e) {
+      console.warn('❌ channel.send (files) failed:', e?.message || String(e));
+      return false;
+    }
+  }
+
   // If we send via webhook, suppress typing/competing in this channel for a bit
   const ok = await sendViaWebhookAuto(client, channel, payload);
   if (ok) {
@@ -717,12 +773,29 @@ async function safeSendChannel(client, channel, payload) {
   try {
     await channel.send(payload);
     return true;
-  } catch {
+  } catch (e) {
+    console.warn('❌ channel.send failed:', e?.message || String(e));
     return false;
   }
 }
 
 async function safeReplyMessage(client, message, payload) {
+  // PATCH: if payload has files, force normal reply/channel send (attachments are reliable)
+  if (payload?.files && Array.isArray(payload.files) && payload.files.length) {
+    try {
+      await message.reply(payload);
+      return true;
+    } catch (e) {
+      try {
+        await message.channel.send(payload);
+        return true;
+      } catch (e2) {
+        console.warn('❌ reply/channel send (files) failed:', e2?.message || String(e2));
+        return false;
+      }
+    }
+  }
+
   // Prefer true reply when not using webhookAuto
   // If webhookAuto is enabled and available, we send into channel instead (webhooks can’t reliably “reply”)
   const wa = getWebhookAuto(client);
@@ -749,11 +822,12 @@ async function safeReplyMessage(client, message, payload) {
   try {
     await message.reply(payload);
     return true;
-  } catch {
+  } catch (e) {
     try {
       await message.channel.send(payload);
       return true;
-    } catch {
+    } catch (e2) {
+      console.warn('❌ reply/channel send failed:', e2?.message || String(e2));
       return false;
     }
   }
@@ -797,7 +871,7 @@ function _findArrayOfArrays(obj) {
 }
 
 /**
- * PATCH: 3D-glasses theme chart
+ * 3D-glasses theme chart
  * - Blue = true series
  * - Red  = tiny offset series
  * - Dark background + soft grid
@@ -853,7 +927,6 @@ function _buildQuickChartUrl(points, subtitle = 'GeckoTerminal') {
   };
 
   const encoded = encodeURIComponent(JSON.stringify(cfg));
-  // PATCH: dark background + crisper render
   return `https://quickchart.io/chart?width=1000&height=500&format=png&devicePixelRatio=2&backgroundColor=rgba(12,12,12,1)&c=${encoded}`;
 }
 
@@ -1008,15 +1081,29 @@ async function sendAdrianChartEmbed(message) {
       ? `Range: <t:${Math.floor(startTs)}:R> → <t:${Math.floor(endTs)}:R>`
       : null;
 
-    // PATCH: hide pool addy (no raw poolApi printed), keep masked clickable text only
+    // Hide pool addy (no raw address/link addy printed)
     const poolWeb = `https://www.geckoterminal.com/${encodeURIComponent(ADRIAN_GT_NETWORK)}/pools/${encodeURIComponent(ADRIAN_GT_POOL_ID)}`;
 
+    // PATCH: download chart PNG and attach it (fixes URL-length & “nothing shows”)
+    let chartFile = null;
+    let imageRef = null;
+    try {
+      const { res, buf } = await fetchBinaryWithTimeout(url, {}, 20000);
+      if (res?.ok && buf && buf.length > 2000) {
+        chartFile = { attachment: buf, name: 'adrian_chart.png' };
+        imageRef = 'attachment://adrian_chart.png';
+      } else {
+        console.warn('⚠️ chart image fetch not ok, fallback to URL', res?.status);
+      }
+    } catch (e) {
+      console.warn('⚠️ chart image fetch failed, fallback to URL:', e?.message || String(e));
+    }
+
     const embed = new EmbedBuilder()
-      // PATCH: blue/red theme (embed border is blue; emojis add the red)
       .setColor('#1e90ff')
       .setTitle('🟥🟦 $ADRIAN Chart (3D Mode)')
       .setDescription([descBits.join(' • '), rangeLine, '_3D-glasses theme: red/blue overlay._'].filter(Boolean).join('\n') || 'Live chart from GeckoTerminal.')
-      .setImage(url)
+      .setImage(imageRef || url)
       .addFields(
         { name: 'High', value: Number.isFinite(hi) ? `**${_fmtMoney(hi, 6)}**` : 'N/A', inline: true },
         { name: 'Low', value: Number.isFinite(lo) ? `**${_fmtMoney(lo, 6)}**` : 'N/A', inline: true },
@@ -1026,9 +1113,16 @@ async function sendAdrianChartEmbed(message) {
       .setFooter({ text: '🟥🟦 Source: GeckoTerminal → QuickChart (3D Mode)' })
       .setTimestamp();
 
-    await safeReplyMessage(message.client, message, { embeds: [embed], allowedMentions: { parse: [] } });
+    const payload = chartFile
+      ? { embeds: [embed], files: [chartFile], allowedMentions: { parse: [] } }
+      : { embeds: [embed], allowedMentions: { parse: [] } };
+
+    const ok = await safeReplyMessage(message.client, message, payload);
+    if (!ok) {
+      console.warn('❌ sendAdrianChartEmbed: safeReplyMessage returned false');
+    }
   } catch (e) {
-    console.warn('⚠️ adrian chart failed:', e?.message || String(e));
+    console.warn('⚠️ adrian chart failed:', e?.stack || e?.message || String(e));
     await safeReplyMessage(message.client, message, {
       content: '⚠️ Couldn’t pull $ADRIAN chart right now. Try again in a sec.',
       allowedMentions: { parse: [] }
@@ -1334,7 +1428,7 @@ module.exports = (client) => {
         return; // IMPORTANT: don't fall through
       }
     } catch (e) {
-      console.warn('⚠️ adrian chart trigger failed:', e?.message || String(e));
+      console.warn('⚠️ adrian chart trigger failed:', e?.stack || e?.message || String(e));
       // if this fails, continue to normal logic
     }
 
@@ -1605,3 +1699,4 @@ module.exports = (client) => {
     }
   });
 };
+
