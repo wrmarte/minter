@@ -339,7 +339,7 @@ async function fetchAndValidateChannel(client, id) {
   return ch;
 }
 
-// ======= ANALYZE SWAP (LOGIC UNCHANGED) =======
+// ======= ANALYZE SWAP (PATCHED FOR SELL) =======
 async function analyzeSwap(provider, txHash) {
   const tx = await provider.getTransaction(txHash).catch(() => null);
   const receipt = await provider.getTransactionReceipt(txHash).catch(() => null);
@@ -350,32 +350,68 @@ async function analyzeSwap(provider, txHash) {
 
   for (const lg of receipt.logs) {
     if (lg.topics?.[0] !== TRANSFER_TOPIC) continue;
-    const token = lg.address.toLowerCase();
+    const token = (lg.address || '').toLowerCase();
     if (token !== ADRIAN && token !== WETH) continue;
-    const p = ERC20_IFACE.parseLog(lg);
-    if (addrEq(p.args.to, wallet)) token === ADRIAN ? adrianIn += p.args.value : wethIn += p.args.value;
-    if (addrEq(p.args.from, wallet)) token === ADRIAN ? adrianOut += p.args.value : wethOut += p.args.value;
+
+    let p;
+    try { p = ERC20_IFACE.parseLog(lg); } catch { continue; }
+
+    if (addrEq(p.args.to, wallet)) {
+      if (token === ADRIAN) adrianIn += p.args.value;
+      else wethIn += p.args.value;
+    }
+    if (addrEq(p.args.from, wallet)) {
+      if (token === ADRIAN) adrianOut += p.args.value;
+      else wethOut += p.args.value;
+    }
   }
 
   const adrianDec = await getDecimals(provider, ADRIAN);
   const wethDec   = await getDecimals(provider, WETH);
 
-  const netAdrian = Number(ethers.formatUnits(adrianIn - adrianOut, adrianDec));
-  let ethValue = Number(ethers.formatUnits(wethOut || tx.value || 0n, wethDec));
-  if (!netAdrian || !ethValue) return null;
+  const netAdrianNum = Number(ethers.formatUnits(adrianIn - adrianOut, adrianDec));
+  if (!Number.isFinite(netAdrianNum) || netAdrianNum === 0) return null;
 
+  const isBuy = netAdrianNum > 0;
+  const tokenAmount = Math.abs(netAdrianNum);
+
+  // ✅ KEY FIX:
+  // Use NET WETH directionally. Buys = WETH OUT (or tx.value). Sells = WETH IN (net positive).
+  const netWeth = (wethIn - wethOut); // positive means wallet received WETH, negative means wallet spent WETH
+  let ethValue = 0;
+
+  if (netWeth !== 0n) {
+    ethValue = Math.abs(Number(ethers.formatUnits(netWeth, wethDec)));
+  } else {
+    // ETH direct value only makes sense on buys (wallet sending ETH to router)
+    const v = Number(ethers.formatUnits(tx.value || 0n, wethDec));
+    ethValue = (isBuy && v > 0) ? v : 0;
+  }
+
+  // We still notify even if ethValue is 0 (some routes won't touch WETH directly).
   const ethUsd = await getEthUsdPriceCached();
+  const usdValue = (ethUsd > 0 && ethValue > 0) ? (ethValue * ethUsd) : 0;
+
+  if (DEBUG) {
+    console.log(
+      `[SWAP][ANALYZE] tx=${txHash.toLowerCase()} ` +
+      `isBuy=${isBuy} netAdrian=${netAdrianNum.toFixed(4)} ` +
+      `wethIn=${ethers.formatUnits(wethIn, wethDec)} wethOut=${ethers.formatUnits(wethOut, wethDec)} ` +
+      `ethValue=${ethValue.toFixed(6)} usd=${usdValue.toFixed(2)}`
+    );
+  }
+
   return {
     wallet,
     txHash: txHash.toLowerCase(),
-    isBuy: netAdrian > 0,
-    tokenAmount: Math.abs(netAdrian),
+    isBuy,
+    tokenAmount,
     ethValue,
-    usdValue: ethUsd > 0 ? (ethValue * ethUsd) : 0
+    usdValue
   };
 }
 
-// ======= SEND EMBED (PATCH: PRICE shows USD only) =======
+// ======= SEND EMBED (PRICE shows USD only) =======
 async function sendSwapEmbed(client, swap, provider) {
   const { wallet, isBuy, ethValue, usdValue, tokenAmount, txHash } = swap;
 
@@ -412,6 +448,9 @@ async function sendSwapEmbed(client, swap, provider) {
   // ✅ Price: USD only (no ETH line)
   const priceText = (priceUsd > 0) ? `$${priceUsd.toFixed(6)}` : `N/A`;
 
+  const spentReceivedUsd = (usdValue > 0) ? `$${usdValue.toFixed(2)}` : 'N/A';
+  const spentReceivedEth = (ethValue > 0) ? `${ethValue.toFixed(4)} ETH` : 'N/A';
+
   const embed = {
     title: isBuy ? '🅰️ ADRIAN SWAP BUY!' : '🅰️ ADRIAN SWAP SELL!',
     description: `${emojiLine}`,
@@ -421,7 +460,7 @@ async function sendSwapEmbed(client, swap, provider) {
     fields: [
       {
         name: isBuy ? '💸 Spent' : '💰 Received',
-        value: `${usdValue > 0 ? `$${usdValue.toFixed(2)}` : 'N/A'}\n${ethValue.toFixed(4)} ETH`,
+        value: `${spentReceivedUsd}\n${spentReceivedEth}`,
         inline: true
       },
       {
@@ -446,11 +485,10 @@ async function sendSwapEmbed(client, swap, provider) {
       }
     ],
 
-url: `https://basescan.org/tx/${txHash}`,
-color: isBuy ? 0x2ecc71 : 0xe74c3c,
-footer: { text: 'AdrianSWAP • Powered by PimpsDev' },
-timestamp: new Date().toISOString()
-
+    url: `https://basescan.org/tx/${txHash}`,
+    color: isBuy ? 0x2ecc71 : 0xe74c3c,
+    footer: { text: 'AdrianSWAP • Powered by PimpsDev' },
+    timestamp: new Date().toISOString()
   };
 
   const chans = await resolveChannels(client);
@@ -528,4 +566,5 @@ function startThirdPartySwapNotifierBase(client) {
 }
 
 module.exports = { startThirdPartySwapNotifierBase };
+
 
