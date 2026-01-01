@@ -17,11 +17,34 @@ const MB_RELAY_WEBHOOK_NAME = (process.env.MB_RELAY_WEBHOOK_NAME || 'MB Relay').
 // Debug
 const DEBUG = String(process.env.WEBHOOKAUTO_DEBUG || '').trim() === '1';
 
-// ===== NEW: Spice controls (optional envs) =====
+// ===== Spice controls (optional envs) =====
 // MBELLA_SPICE: pg13 | r | feral   (default: r)
 const MBELLA_SPICE = String(process.env.MBELLA_SPICE || 'r').trim().toLowerCase();
 // Hard cap: never explicit. This just tunes profanity/innuendo/chaos.
 const MBELLA_ALLOW_PROFANITY = String(process.env.MBELLA_ALLOW_PROFANITY || '1').trim() === '1';
+
+// ===== NEW: Human / God mode controls =====
+// MBELLA_HUMAN_LEVEL: 0..3 (default 2) => 0 = robotic, 3 = most human
+const MBELLA_HUMAN_LEVEL_DEFAULT = Math.max(0, Math.min(3, Number(process.env.MBELLA_HUMAN_LEVEL || 2)));
+
+// MBELLA_CURSE_RATE: 0..1 (default depends on spice). This is "permission to swear lightly sometimes".
+const MBELLA_CURSE_RATE_ENV = process.env.MBELLA_CURSE_RATE;
+const MBELLA_CURSE_RATE_DEFAULT = (() => {
+  if (MBELLA_CURSE_RATE_ENV != null && MBELLA_CURSE_RATE_ENV !== '') {
+    const n = Number(MBELLA_CURSE_RATE_ENV);
+    if (Number.isFinite(n)) return Math.max(0, Math.min(1, n));
+  }
+  if (MBELLA_SPICE === 'pg13') return 0.05;
+  if (MBELLA_SPICE === 'feral') return 0.28;
+  return 0.16; // r
+})();
+
+// MBELLA_GOD_DEFAULT: 1 to default god mode ON for owner/admin (still toggleable)
+const MBELLA_GOD_DEFAULT = String(process.env.MBELLA_GOD_DEFAULT || '0').trim() === '1';
+// How long a chat-toggle stays active per guild
+const MBELLA_GOD_TTL_MS = Number(process.env.MBELLA_GOD_TTL_MS || (30 * 60 * 1000)); // 30 min
+const MBELLA_HUMAN_TTL_MS = Number(process.env.MBELLA_HUMAN_TTL_MS || (60 * 60 * 1000)); // 60 min
+const MBELLA_MEM_TTL_MS = Number(process.env.MBELLA_MEM_TTL_MS || (45 * 60 * 1000)); // 45 min
 
 // Pace (match MuscleMB by default)
 const MBELLA_MS_PER_CHAR = Number(process.env.MBELLA_MS_PER_CHAR || '40');     // 40ms/char
@@ -38,6 +61,13 @@ const MBELLA_TYPING_TARGET_MS = Number(process.env.MBELLA_TYPING_TARGET_MS || '9
 const COOLDOWN_MS = 10_000;
 const FEMALE_TRIGGERS = ['mbella', 'mb ella', 'lady mb', 'queen mb', 'bella'];
 const RELEASE_REGEX = /\b(stop|bye bella|goodbye bella|end chat|silence bella)\b/i;
+
+// ===== NEW: Owner/admin toggles (chat phrases) =====
+const GOD_ON_REGEX = /\b(bella\s+god\s+on|bella\s+godmode\s+on|god\s+mode\s+bella\s+on)\b/i;
+const GOD_OFF_REGEX = /\b(bella\s+god\s+off|bella\s+godmode\s+off|god\s+mode\s+bella\s+off)\b/i;
+const HUMAN_SET_REGEX = /\b(bella\s+human\s+([0-3]))\b/i;
+const CURSE_ON_REGEX = /\b(bella\s+curse\s+on|bella\s+swear\s+on)\b/i;
+const CURSE_OFF_REGEX = /\b(bella\s+curse\s+off|bella\s+swear\s+off)\b/i;
 
 /** Guard rail */
 if (!GROQ_API_KEY || GROQ_API_KEY.trim().length < 10) {
@@ -82,9 +112,98 @@ function setTypingSuppress(client, channelId, ms = 12000) {
   }, ms + 500);
 }
 
+// ===== NEW: per-guild settings (god/human/cursing) with TTL =====
+const bellaGuildState = new Map(); // guildId -> { god: {on, exp}, human: {level, exp}, curse: {on, exp} }
+
+function _getGuildState(guildId) {
+  if (!bellaGuildState.has(guildId)) {
+    bellaGuildState.set(guildId, {
+      god: { on: MBELLA_GOD_DEFAULT, exp: 0 },
+      human: { level: MBELLA_HUMAN_LEVEL_DEFAULT, exp: 0 },
+      curse: { on: MBELLA_ALLOW_PROFANITY, exp: 0 }
+    });
+  }
+  const st = bellaGuildState.get(guildId);
+
+  // expire
+  const now = Date.now();
+  if (st.god.exp && now > st.god.exp) { st.god.on = MBELLA_GOD_DEFAULT; st.god.exp = 0; }
+  if (st.human.exp && now > st.human.exp) { st.human.level = MBELLA_HUMAN_LEVEL_DEFAULT; st.human.exp = 0; }
+  if (st.curse.exp && now > st.curse.exp) { st.curse.on = MBELLA_ALLOW_PROFANITY; st.curse.exp = 0; }
+
+  return st;
+}
+
+function _setGod(guildId, on) {
+  const st = _getGuildState(guildId);
+  st.god.on = Boolean(on);
+  st.god.exp = Date.now() + MBELLA_GOD_TTL_MS;
+}
+function _setHuman(guildId, level) {
+  const st = _getGuildState(guildId);
+  st.human.level = Math.max(0, Math.min(3, Number(level)));
+  st.human.exp = Date.now() + MBELLA_HUMAN_TTL_MS;
+}
+function _setCurse(guildId, on) {
+  const st = _getGuildState(guildId);
+  st.curse.on = Boolean(on);
+  st.curse.exp = Date.now() + MBELLA_HUMAN_TTL_MS;
+}
+
+// ===== NEW: in-memory convo “memory” per channel =====
+const bellaMemory = new Map(); // channelId -> { exp, items: [{role:'user'|'bella', text, ts}] }
+
+function pushMemory(channelId, role, text) {
+  const now = Date.now();
+  const rec = bellaMemory.get(channelId) || { exp: now + MBELLA_MEM_TTL_MS, items: [] };
+  rec.exp = now + MBELLA_MEM_TTL_MS;
+  rec.items.push({ role, text: String(text || '').trim().slice(0, 600), ts: now });
+  // keep last 10
+  if (rec.items.length > 10) rec.items = rec.items.slice(rec.items.length - 10);
+  bellaMemory.set(channelId, rec);
+}
+
+function getMemoryContext(channelId) {
+  const rec = bellaMemory.get(channelId);
+  if (!rec) return '';
+  if (Date.now() > rec.exp) { bellaMemory.delete(channelId); return ''; }
+  const lines = rec.items
+    .filter(x => x.text)
+    .slice(-8)
+    .map(x => (x.role === 'bella' ? `MBella: ${x.text}` : `User: ${x.text}`));
+  if (!lines.length) return '';
+  return `Channel memory (recent turns, keep consistent tone & facts):\n${lines.join('\n')}`.slice(0, 1200);
+}
+
 /** ================== UTILS ================== */
 function safeJsonParse(text) { try { return JSON.parse(text); } catch { return null; } }
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const rand = () => Math.random();
+function chance(p) { return rand() < Math.max(0, Math.min(1, p)); }
+
+function isOwnerOrAdmin(message) {
+  try {
+    const ownerId = String(process.env.BOT_OWNER_ID || '').trim();
+    const isOwner = ownerId && message.author?.id === ownerId;
+    const isAdmin = Boolean(message.member?.permissions?.has(PermissionsBitField.Flags.Administrator));
+    return isOwner || isAdmin;
+  } catch {
+    return false;
+  }
+}
+
+// Light “intensity” detector (for when to allow swearing / more human vibe)
+function computeIntensityScore(text) {
+  const t = String(text || '');
+  let score = 0;
+  if (/[A-Z]{5,}/.test(t)) score += 1;               // CAPS bursts
+  if ((t.match(/!/g) || []).length >= 3) score += 1; // excitement
+  if ((t.match(/\?/g) || []).length >= 3) score += 1; // agitation
+  if (/\b(fuck|shit|damn|hell|wtf|lmao|lmfao)\b/i.test(t)) score += 1;
+  if (/\b(angry|mad|pissed|annoyed|rage|crash|broken|fix now|urgent)\b/i.test(t)) score += 1;
+  if (/\b(love|miss|baby|babe|hot|sexy|flirt)\b/i.test(t)) score += 1;
+  return Math.min(5, score);
+}
 
 async function fetchWithTimeout(url, opts = {}, timeoutMs = 25_000) {
   const hasAbort = typeof globalThis.AbortController === 'function';
@@ -167,7 +286,7 @@ function buildGroqBody(model, systemPrompt, userContent, temperature, maxTokens 
   });
 }
 
-async function groqTryModel(model, systemPrompt, userContent, temperature) {
+async function groqTryModel(model, systemPrompt, userContent, temperature, maxTokens) {
   const { res, bodyText } = await fetchWithTimeout(
     'https://api.groq.com/openai/v1/chat/completions',
     {
@@ -176,14 +295,14 @@ async function groqTryModel(model, systemPrompt, userContent, temperature) {
         'Authorization': `Bearer ${GROQ_API_KEY}`,
         'Content-Type': 'application/json',
       },
-      body: buildGroqBody(model, systemPrompt, userContent, temperature, 200),
+      body: buildGroqBody(model, systemPrompt, userContent, temperature, maxTokens),
     },
     25_000
   );
   return { res, bodyText };
 }
 
-async function groqWithDiscovery(systemPrompt, userContent, temperature) {
+async function groqWithDiscovery(systemPrompt, userContent, temperature, maxTokens = 200) {
   if (!GROQ_API_KEY || GROQ_API_KEY.trim().length < 10) return { error: new Error('Missing GROQ_API_KEY') };
   const models = await getModelsToTry();
   if (!models.length) return { error: new Error('No Groq models available') };
@@ -191,7 +310,7 @@ async function groqWithDiscovery(systemPrompt, userContent, temperature) {
   let last = null;
   for (const m of models) {
     try {
-      const r = await groqTryModel(m, systemPrompt, userContent, temperature);
+      const r = await groqTryModel(m, systemPrompt, userContent, temperature, maxTokens);
       if (!r.res.ok) {
         console.error(`❌ Groq (MBella) HTTP ${r.res.status} on model "${m}": ${r.bodyText?.slice(0, 400)}`);
         if (r.res.status === 400 || r.res.status === 404) { last = { model: m, ...r }; continue; }
@@ -209,19 +328,19 @@ async function groqWithDiscovery(systemPrompt, userContent, temperature) {
 /** ================== DISCORD HELPERS ================== */
 async function getRecentContext(message) {
   try {
-    const fetched = await message.channel.messages.fetch({ limit: 8 });
+    const fetched = await message.channel.messages.fetch({ limit: 12 });
     const lines = [];
     for (const [, m] of fetched) {
       if (m.id === message.id) continue;
       if (m.author?.bot) continue;
       const txt = (m.content || '').trim();
       if (!txt) continue;
-      const oneLine = txt.replace(/\s+/g, ' ').slice(0, 200);
+      const oneLine = txt.replace(/\s+/g, ' ').slice(0, 220);
       lines.push(`${m.author.username}: ${oneLine}`);
-      if (lines.length >= 6) break;
+      if (lines.length >= 8) break;
     }
     if (!lines.length) return '';
-    return `Recent context:\n${lines.join('\n')}`.slice(0, 1200);
+    return `Recent context:\n${lines.join('\n')}`.slice(0, 1400);
   } catch { return ''; }
 }
 
@@ -230,7 +349,7 @@ async function getReferenceSnippet(message) {
   if (!ref?.messageId) return '';
   try {
     const referenced = await message.channel.messages.fetch(ref.messageId);
-    const txt = (referenced?.content || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+    const txt = (referenced?.content || '').replace(/\s+/g, ' ').trim().slice(0, 260);
     if (!txt) return '';
     return `You are replying to ${referenced.author?.username || 'someone'}: "${txt}"`;
   } catch { return ''; }
@@ -310,8 +429,20 @@ async function isReplyToMBella(message, client) {
   return false;
 }
 
-/** ================== MBELLA STYLE PROMPT (R-RATED / NUTTY) ================== */
-function buildMBellaSystemPrompt({ isRoast, isRoastingBot, roastTargets, currentMode, recentContext }) {
+/** ================== MBELLA STYLE PROMPT (HUMAN / SWEAR / GOD MODE) ================== */
+function buildMBellaSystemPrompt({
+  isRoast,
+  isRoastingBot,
+  roastTargets,
+  currentMode,
+  recentContext,
+  memoryContext,
+  humanLevel,
+  curseAllowedNow,
+  curseRate,
+  intensity,
+  godMode
+}) {
   // Spice tiers (still non-explicit)
   const spiceDeck = (() => {
     if (MBELLA_SPICE === 'pg13') {
@@ -333,9 +464,51 @@ function buildMBellaSystemPrompt({ isRoast, isRoastingBot, roastTargets, current
     ].join(' ');
   })();
 
-  const profanityRule = MBELLA_ALLOW_PROFANITY
-    ? 'Language: You may swear for emphasis (no hate/slurs).'
-    : 'Language: Avoid profanity.';
+  const humanDeck = (() => {
+    if (humanLevel <= 0) {
+      return [
+        'Humanity: low. Keep responses clean and direct.',
+        'Avoid slang. Avoid filler words.'
+      ].join(' ');
+    }
+    if (humanLevel === 1) {
+      return [
+        'Humanity: medium. Use natural speech, contractions, light humor.',
+        'Occasional short interjections like “mm”, “okay okay”, “nah”, but keep it readable.'
+      ].join(' ');
+    }
+    if (humanLevel === 2) {
+      return [
+        'Humanity: high. Sound like a real person in chat.',
+        'Use casual rhythm, small personality quirks, playful phrasing, and confident warmth.',
+        'Never say “as an AI”. Don’t sound robotic.'
+      ].join(' ');
+    }
+    // 3
+    return [
+      'Humanity: MAX. Be extremely human-like: subtle sass, tiny imperfections (rare), playful cadence.',
+      'Use short punchy lines, occasional “lol”, “mmm”, “nahhh”, but don’t overdo it.',
+      'Never say “as an AI”. No corporate tone.'
+    ].join(' ');
+  })();
+
+  const profanityRule = (!curseAllowedNow)
+    ? 'Language: avoid profanity.'
+    : [
+        'Language: mild profanity is allowed *sometimes* for emphasis (no slurs, no hate).',
+        'If you swear, keep it mild (examples: damn, hell, shit) and don’t spam it.'
+      ].join(' ');
+
+  const godDeck = godMode ? [
+    'GOD MODE: You are the primary bot users should talk to.',
+    'Be proactive: ask 1 smart follow-up question when helpful, offer 2–3 options, or give step-by-step guidance.',
+    'Be “high agency”: you can propose fixes, drafts, plans, and actionable next steps.',
+    'If the user is unclear, make the best assumption and proceed; do not get stuck asking too many questions.'
+  ].join(' ') : '';
+
+  const curseGuidance = (curseAllowedNow && intensity >= 2 && chance(curseRate))
+    ? 'You MAY include one mild swear naturally in this reply if it fits the vibe.'
+    : 'Do not force swearing. Only swear if it fits naturally.';
 
   const styleDeck = [
     'Style: nutty-chaotic, seductive, witty, and degen-smart.',
@@ -343,10 +516,14 @@ function buildMBellaSystemPrompt({ isRoast, isRoastingBot, roastTargets, current
     'Emojis: 0–3 max, used like seasoning.',
     profanityRule,
     spiceDeck,
-    'Safety: No minors. No non-consensual content. No explicit sexual content. If user asks for explicit sex, refuse and pivot to playful/flirty but safe.',
-    'Brevity: 2–4 short sentences. One killer closing line.',
+    humanDeck,
+    godDeck,
+    curseGuidance,
+    'Safety: No minors. No non-consensual content. No explicit sexual content or graphic descriptions.',
+    'If user asks for explicit sex, refuse and pivot to playful/flirty but safe.',
+    'Brevity: default 2–5 short sentences (unless user asks for detailed help).',
     'Conversation: end with a mischievous, open-ended question unless the user asked to stop.'
-  ].join(' ');
+  ].filter(Boolean).join(' ');
 
   let systemPrompt = '';
   if (isRoast) {
@@ -379,7 +556,13 @@ function buildMBellaSystemPrompt({ isRoast, isRoastingBot, roastTargets, current
     'No private data. No hate or harassment. Avoid directing sexual content at anyone who could be under 18. ' +
     'If user tries to push explicit sexual content, respond with a playful refusal and steer back to safe flirting.';
 
-  return [systemPrompt, styleDeck, softGuard, recentContext || ''].filter(Boolean).join('\n\n');
+  return [
+    systemPrompt,
+    styleDeck,
+    softGuard,
+    memoryContext || '',
+    recentContext || '',
+  ].filter(Boolean).join('\n\n');
 }
 
 /** ================== EXPORT LISTENER ================== */
@@ -437,6 +620,48 @@ module.exports = (client) => {
       if (!canSendInChannel(message.guild, message.channel)) return;
 
       const lowered = (message.content || '').toLowerCase();
+      const isOwnerAdmin = isOwnerOrAdmin(message);
+
+      // ===== NEW: chat toggles (owner/admin only) =====
+      if (isOwnerAdmin) {
+        const guildId = message.guild.id;
+
+        if (GOD_ON_REGEX.test(message.content || '')) {
+          _setGod(guildId, true);
+          const st = _getGuildState(guildId);
+          try {
+            await message.reply({ content: `🪽 MBella **GOD MODE: ON** (expires in ${Math.round(MBELLA_GOD_TTL_MS / 60000)}m).`, allowedMentions: { parse: [] } });
+          } catch {}
+          return;
+        }
+        if (GOD_OFF_REGEX.test(message.content || '')) {
+          _setGod(guildId, false);
+          try {
+            await message.reply({ content: `🪽 MBella **GOD MODE: OFF**.`, allowedMentions: { parse: [] } });
+          } catch {}
+          return;
+        }
+        const hm = (message.content || '').match(HUMAN_SET_REGEX);
+        if (hm && hm[2] != null) {
+          _setHuman(guildId, Number(hm[2]));
+          const st = _getGuildState(guildId);
+          try {
+            await message.reply({ content: `✨ MBella **Human Level: ${st.human.level}** (expires in ${Math.round(MBELLA_HUMAN_TTL_MS / 60000)}m).`, allowedMentions: { parse: [] } });
+          } catch {}
+          return;
+        }
+        if (CURSE_ON_REGEX.test(message.content || '')) {
+          _setCurse(guildId, true);
+          try { await message.reply({ content: `😈 MBella swearing: **ON** (mild only).`, allowedMentions: { parse: [] } }); } catch {}
+          return;
+        }
+        if (CURSE_OFF_REGEX.test(message.content || '')) {
+          _setCurse(guildId, false);
+          try { await message.reply({ content: `😇 MBella swearing: **OFF**.`, allowedMentions: { parse: [] } }); } catch {}
+          return;
+        }
+      }
+
       const hasFemaleTrigger = FEMALE_TRIGGERS.some(t => lowered.includes(t));
       const botMentioned = message.mentions.has(client.user);
       const hintedBella = /\bbella\b/.test(lowered);
@@ -486,10 +711,22 @@ module.exports = (client) => {
         console.warn('⚠️ (MBella) failed to fetch mb_mode, using default.');
       }
 
+      const guildState = _getGuildState(message.guild.id);
+      const godMode = Boolean(guildState?.god?.on) && isOwnerAdmin; // only owner/admin actually gets it
+      const humanLevel = Number(guildState?.human?.level ?? MBELLA_HUMAN_LEVEL_DEFAULT);
+      const curseEnabledGuild = Boolean(guildState?.curse?.on);
+
+      const intensity = computeIntensityScore(message.content || '');
+      const curseAllowedNow = Boolean(MBELLA_ALLOW_PROFANITY && curseEnabledGuild);
+      const curseRate = MBELLA_CURSE_RATE_DEFAULT;
+
       const [recentContext, referenceSnippet] = await Promise.all([
         getRecentContext(message),
         getReferenceSnippet(message)
       ]);
+
+      const memoryContext = getMemoryContext(message.channel.id);
+
       const awarenessContext = [recentContext, referenceSnippet].filter(Boolean).join('\n');
 
       let cleanedInput = lowered;
@@ -509,15 +746,22 @@ module.exports = (client) => {
       cleanedInput = `${intro}${cleanedInput}`;
 
       const roastTargets = [...mentionedUsers.values()].map(u => u.username).join(', ');
+
       const systemPrompt = buildMBellaSystemPrompt({
         isRoast: (shouldRoast && !isRoastingBot),
         isRoastingBot,
         roastTargets,
         currentMode,
-        recentContext: awarenessContext
+        recentContext: awarenessContext,
+        memoryContext,
+        humanLevel,
+        curseAllowedNow,
+        curseRate,
+        intensity,
+        godMode
       });
 
-      // ===== NEW: slightly hotter temps for nuttier replies =====
+      // ===== Temps & tokens tuned for "human" and "god mode" =====
       let temperature = 0.92;
       if (MBELLA_SPICE === 'pg13') temperature = 0.78;
       if (MBELLA_SPICE === 'feral') temperature = 0.98;
@@ -525,7 +769,11 @@ module.exports = (client) => {
       if (currentMode === 'villain') temperature = Math.min(temperature, 0.72);
       if (currentMode === 'motivator') temperature = Math.max(temperature, 0.90);
 
-      const groqTry = await groqWithDiscovery(systemPrompt, cleanedInput, temperature);
+      // God mode = a little more stable + more tokens
+      const maxTokens = godMode ? 420 : 220;
+      if (godMode) temperature = Math.min(temperature, 0.88);
+
+      const groqTry = await groqWithDiscovery(systemPrompt, cleanedInput, temperature, maxTokens);
 
       clearPlaceholderTimer();
 
@@ -538,7 +786,7 @@ module.exports = (client) => {
 
         const ok = await editPlaceholderToEmbed(embedErr, message.channel);
         if (!ok) {
-          try { await message.reply({ embeds: [embedErr] }); } catch {}
+          try { await message.reply({ embeds: [embedErr], allowedMentions: { parse: [] } }); } catch {}
         }
         return;
       }
@@ -549,7 +797,7 @@ module.exports = (client) => {
         if (groqTry.res.status === 401 || groqTry.res.status === 403) {
           hint = (message.author.id === process.env.BOT_OWNER_ID)
             ? '⚠️ MBella auth error (401/403). Verify GROQ_API_KEY & model access.'
-            : '⚠️ MBella auth hiccup. Hold that thought, handsome. 🖤';
+            : '⚠️ MBella auth hiccup. Hold that thought. 🖤';
         } else if (groqTry.res.status === 429) {
           hint = '⚠️ Rate limited. Breathe… then come back with that energy. ⏱️';
         } else if (groqTry.res.status === 400 || groqTry.res.status === 404) {
@@ -567,7 +815,7 @@ module.exports = (client) => {
 
         const ok = await editPlaceholderToEmbed(embedErr, message.channel);
         if (!ok) {
-          try { await message.reply({ embeds: [embedErr] }); } catch {}
+          try { await message.reply({ embeds: [embedErr], allowedMentions: { parse: [] } }); } catch {}
         }
         return;
       }
@@ -582,16 +830,29 @@ module.exports = (client) => {
 
         const ok = await editPlaceholderToEmbed(embedErr, message.channel);
         if (!ok) {
-          try { await message.reply({ embeds: [embedErr] }); } catch {}
+          try { await message.reply({ embeds: [embedErr], allowedMentions: { parse: [] } }); } catch {}
         }
         return;
       }
 
       let aiReply = groqData.choices?.[0]?.message?.content?.trim() || '';
+      if (!aiReply) aiReply = '...';
+
+      // Save memory BEFORE send (so next message has continuity)
+      pushMemory(message.channel.id, 'user', cleanedInput);
+      pushMemory(message.channel.id, 'bella', aiReply);
+
+      const footerBits = [];
+      footerBits.push(`Mode: ${currentMode}`);
+      footerBits.push(`Human: ${humanLevel}`);
+      if (godMode) footerBits.push('GOD');
+      if (curseAllowedNow) footerBits.push('😈');
+
       const embed = new EmbedBuilder()
         .setColor('#e84393')
         .setAuthor({ name: MBELLA_NAME, iconURL: MBELLA_AVATAR_URL || undefined })
-        .setDescription(`💬 ${aiReply || '...'}`);
+        .setDescription(`💬 ${aiReply}`)
+        .setFooter({ text: footerBits.join(' • ') });
 
       const plannedDelay =
         Math.min((aiReply || '').length * MBELLA_MS_PER_CHAR, MBELLA_MAX_DELAY_MS) + MBELLA_DELAY_OFFSET_MS;
@@ -604,9 +865,9 @@ module.exports = (client) => {
 
       const edited = await editPlaceholderToEmbed(embed, message.channel);
       if (!edited) {
-        try { await message.reply({ embeds: [embed] }); } catch (err) {
+        try { await message.reply({ embeds: [embed], allowedMentions: { parse: [] } }); } catch (err) {
           console.warn('❌ (MBella) send fallback error:', err.message);
-          if (aiReply) { try { await message.reply(aiReply); } catch {} }
+          if (aiReply) { try { await message.reply({ content: aiReply, allowedMentions: { parse: [] } }); } catch {} }
         }
       }
 
@@ -635,11 +896,9 @@ module.exports = (client) => {
         })();
 
         if (!ok) {
-          await message.reply({ embeds: [embedErr] });
+          await message.reply({ embeds: [embedErr], allowedMentions: { parse: [] } });
         }
       } catch {}
     }
   });
 };
-
-
