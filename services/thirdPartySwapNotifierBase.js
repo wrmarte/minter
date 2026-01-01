@@ -452,7 +452,7 @@ async function sendSwapEmbed(client, swap, provider) {
   const spentReceivedEth = (ethValue > 0) ? `${ethValue.toFixed(4)} ETH` : 'N/A';
 
   const embed = {
-    title: isBuy ? '🅰️ ADRIAN SWAP BUY!' : '🅰️ ADRIAN SWAP SELL!',
+    title: isBuy ? '🅰️DRIAN SWAP BUY!' : '🅰️DRIAN SWAP SELL!',
     description: `${emojiLine}`,
     image: { url: isBuy ? BUY_IMG : SELL_IMG },
 
