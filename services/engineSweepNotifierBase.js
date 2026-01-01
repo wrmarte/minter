@@ -2,9 +2,6 @@ const { Interface, ethers } = require("ethers");
 const { safeRpcCall } = require("./providerM");
 const { shortWalletLink } = require("../utils/helpers");
 
-// ✅ MB RELAY AUTO-WEBHOOK
-const { sendViaWebhook } = require("./webhookAuto");
-
 /* ======================================================
    CONFIG
 ====================================================== */
@@ -148,6 +145,7 @@ async function buildTokenAmountString(provider, tokenAddr, amountBN) {
     const amt = ethers.formatUnits(amountBN, info.decimals);
     return `${fmtNumber(amt)} ${info.symbol}`;
   }
+  // fallback
   return `${fmtNumber(ethers.formatUnits(amountBN, 18))} TOKEN`;
 }
 
@@ -176,6 +174,8 @@ async function resolveChannels(client) {
 
 /* ======================================================
    ANALYZE TX (USER LIST + USER BUY ONLY)
+   - LIST: approval to engine (and possibly escrow transfer to engine)
+   - BUY: buyer != engine
 ====================================================== */
 async function analyzeTx(provider, hash) {
   const tx = await provider.getTransaction(hash);
@@ -184,14 +184,22 @@ async function analyzeTx(provider, hash) {
 
   let nft = null;
   let tokenId = null;
+
   let buyer = null;
   let seller = null;
+
   let approvedToEngine = false;
+
   let ethPaid = tx.value && tx.value > 0n ? tx.value : 0n;
 
+  // payments:
+  // - tokenPayment: token transfer to seller (for BUY)
+  // - listPayment: token transfer seller -> engine (heuristic list price)
   let tokenPayment = null;
   let listPayment = null;
 
+  /* ---------- PASS 1: Find any ERC721 transfers (source of truth for tokenId) ---------- */
+  // Prefer the transfer that goes TO engine (escrow) OR any transfer that indicates sale.
   for (const log of rc.logs) {
     if (log.topics?.[0] !== T_ERC721_TRANSFER || log.topics.length < 4) continue;
 
@@ -200,6 +208,7 @@ async function analyzeTx(provider, hash) {
     const id = BigInt(log.topics[3]).toString();
     const addr = log.address.toLowerCase();
 
+    // Keep first seen; override if it’s the escrow transfer to engine (best for listing)
     if (!nft) {
       nft = addr;
       tokenId = id;
@@ -213,6 +222,7 @@ async function analyzeTx(provider, hash) {
     }
   }
 
+  /* ---------- PASS 2: approvals (LIST signal) ---------- */
   for (const log of rc.logs) {
     const t0 = log.topics?.[0];
 
@@ -221,6 +231,8 @@ async function analyzeTx(provider, hash) {
       if (approved === ENGINE_CONTRACT) {
         approvedToEngine = true;
         nft = nft || log.address.toLowerCase();
+
+        // approval includes tokenId, use as fallback if we still don’t have one
         if (!tokenId) {
           try { tokenId = BigInt(log.topics[3]).toString(); } catch {}
         }
@@ -231,6 +243,7 @@ async function analyzeTx(provider, hash) {
     if (t0 === T_ERC721_APPROVAL_ALL && log.topics.length >= 3) {
       const operator = ("0x" + log.topics[2].slice(26)).toLowerCase();
       if (operator === ENGINE_CONTRACT) {
+        // only true approvals
         let ok = false;
         try {
           ok = ethers.AbiCoder.defaultAbiCoder().decode(["bool"], log.data)?.[0];
@@ -240,9 +253,11 @@ async function analyzeTx(provider, hash) {
           nft = nft || log.address.toLowerCase();
         }
       }
+      continue;
     }
   }
 
+  /* ---------- PASS 3: ERC20 transfers (price heuristics) ---------- */
   for (const log of rc.logs) {
     if (log.topics?.[0] !== T_ERC20_TRANSFER || log.topics.length < 3) continue;
 
@@ -252,25 +267,52 @@ async function analyzeTx(provider, hash) {
     let parsed;
     try { parsed = ERC20.parseLog(log); } catch { continue; }
 
+    // BUY price heuristic: token -> seller
     if (seller && to === seller) {
       tokenPayment = { token: log.address.toLowerCase(), amount: parsed.args.value };
     }
 
+    // LIST price heuristic: seller -> engine (if approval happened)
     if (approvedToEngine && seller && from === seller && to === ENGINE_CONTRACT) {
       listPayment = { token: log.address.toLowerCase(), amount: parsed.args.value };
     }
   }
 
+  /* ---------- CLASSIFICATION ---------- */
+
+  // If we have approval AND buyer is engine OR no transfer buyer known -> LIST
+  // (this catches: approval only, and approval+escrow transfer)
   if (approvedToEngine && (!buyer || buyer === ENGINE_CONTRACT)) {
+    // treat seller as tx.from if missing
     const listSeller = (seller || tx.from || "").toLowerCase();
+
+    // Must have tokenId to post a good embed (else skip)
     if (!tokenId) return null;
 
-    return { type: "LIST", nft, tokenId, seller: listSeller, listPayment, tx };
+    return {
+      type: "LIST",
+      nft,
+      tokenId,
+      seller: listSeller,
+      listPayment,
+      tx
+    };
   }
 
+  // USER BUY ONLY: buyer exists and is NOT engine
   if (buyer && buyer !== ENGINE_CONTRACT) {
     if (!tokenId) return null;
-    return { type: "BUY", nft, tokenId, buyer, seller: (seller || "").toLowerCase(), ethPaid, tokenPayment, tx };
+
+    return {
+      type: "BUY",
+      nft,
+      tokenId,
+      buyer,
+      seller: (seller || "").toLowerCase(),
+      ethPaid,
+      tokenPayment,
+      tx
+    };
   }
 
   return null;
@@ -328,23 +370,16 @@ async function sendEmbed(client, provider, data, chans) {
     timestamp: new Date().toISOString()
   };
 
+  // ✅ top-right thumbnail only
   if (thumb) embed.thumbnail = { url: thumb };
 
   for (const c of chans) {
-    const sent = await sendViaWebhook(
-      c,
-      { embeds: [embed] },
-      { name: "MB Relay" }
-    );
-
-    if (!sent) {
-      await c.send({ embeds: [embed] }).catch(() => {});
-    }
+    await c.send({ embeds: [embed] }).catch(() => {});
   }
 }
 
 /* ======================================================
-   MAIN LOOP
+   MAIN LOOP (WORKING SCAN: engine + approvals)
 ====================================================== */
 async function tick(client) {
   const provider = await safeRpcCall("base", (p) => p);
@@ -402,6 +437,7 @@ async function tick(client) {
     const res = await analyzeTx(provider, h);
     if (!res) continue;
 
+    // ✅ only user LIST + user BUY already enforced in analyzeTx
     await sendEmbed(client, provider, res, chans);
   }
 
@@ -417,6 +453,7 @@ function startEngineSweepNotifierBase(client) {
 
   console.log("🧹 Engine Sweep notifier started (TEST SERVER ONLY)");
 
+  // ✅ run immediately
   tick(client).catch(() => {});
   setInterval(() => tick(client).catch(() => {}), POLL_MS);
 }
