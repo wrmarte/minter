@@ -201,10 +201,13 @@ function renderCandlesPng(candles, meta) {
   const canvas = createCanvas(CHART_W, CHART_H);
   const ctx = canvas.getContext('2d');
 
-  const padL = 72;
-  const padR = 24;
+  // ✅ PATCH: more room on right for Y-axis labels
+  const padL = 74;
+  const padR = 74; // was 24
   const padT = 56;
-  const padB = SHOW_VOLUME ? 92 : 64;
+
+  // ✅ PATCH: slightly more bottom padding so time labels never clip
+  const padB = SHOW_VOLUME ? 104 : 78;
 
   const plotW = CHART_W - padL - padR;
   const plotH = CHART_H - padT - padB;
@@ -238,7 +241,7 @@ function renderCandlesPng(candles, meta) {
   ctx.fillStyle = RED;
   ctx.fillText('🟥 down / sold', padL + 540, 46);
   ctx.fillStyle = MUTED;
-  ctx.fillText('• overlay lines: 🟥 offset + 🟦 main', padL + 690, 46);
+  ctx.fillText('• overlay: 🟥 offset + 🟦 main', padL + 690, 46);
 
   // Price scale padding
   const hi = Number(meta.hi);
@@ -266,15 +269,24 @@ function renderCandlesPng(candles, meta) {
     ctx.stroke();
   }
 
-  // Y labels
+  // ✅ PATCH: Left + Right Y labels
   ctx.fillStyle = MUTED;
   ctx.font = '500 12px sans-serif';
   for (let i = 0; i <= yTicks; i++) {
     const p = yMax - ((yMax - yMin) * i) / yTicks;
     const yy = priceTop + (priceH * i) / yTicks;
+
     const label = p >= 1 ? p.toFixed(4) : p.toFixed(8);
+
+    // Left
+    ctx.textAlign = 'left';
     ctx.fillText(`$${label}`, 10, yy + 4);
+
+    // Right
+    ctx.textAlign = 'right';
+    ctx.fillText(`$${label}`, CHART_W - 10, yy + 4);
   }
+  ctx.textAlign = 'left';
 
   const n = candles.length;
   const stepX = plotW / Math.max(1, n);
@@ -282,10 +294,9 @@ function renderCandlesPng(candles, meta) {
 
   const xFor = (idx) => padL + idx * stepX + stepX / 2;
 
-  // X ticks
+  // ✅ PATCH: X axis ticks + time labels (stronger + anchored under plot)
   const xTicks = 6;
-  ctx.fillStyle = MUTED;
-  ctx.font = '500 12px sans-serif';
+  ctx.font = '600 12px sans-serif';
   for (let i = 0; i <= xTicks; i++) {
     const idx = Math.round((n - 1) * (i / xTicks));
     const c = candles[idx];
@@ -295,15 +306,27 @@ function renderCandlesPng(candles, meta) {
     const label = `${hh}:${mm}`;
     const xx = xFor(idx);
 
+    // vertical grid
     ctx.strokeStyle = GRID;
     ctx.beginPath();
     ctx.moveTo(xx, priceTop);
     ctx.lineTo(xx, priceBot);
     ctx.stroke();
 
+    // tick mark at bottom of price panel
+    ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+    ctx.beginPath();
+    ctx.moveTo(xx, priceBot);
+    ctx.lineTo(xx, priceBot + 6);
+    ctx.stroke();
+
+    // label under the plot (always visible)
+    const labelY = (SHOW_VOLUME ? (volBot + 22) : (priceBot + 26));
     ctx.fillStyle = MUTED;
-    ctx.fillText(label, xx - 18, padT + plotH + 18);
+    ctx.textAlign = 'center';
+    ctx.fillText(label, xx, labelY);
   }
+  ctx.textAlign = 'left';
 
   // Candles
   for (let i = 0; i < n; i++) {
@@ -369,6 +392,13 @@ function renderCandlesPng(candles, meta) {
       ctx.fillStyle = up ? 'rgba(0,140,255,0.35)' : 'rgba(255,0,0,0.25)';
       ctx.fillRect(xx - candleW / 2, yy, candleW, volBot - yy);
     }
+
+    // ✅ Optional right-side volume max label
+    ctx.fillStyle = MUTED;
+    ctx.font = '500 12px sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText(fmtVol(maxV), CHART_W - 10, volTop + 12);
+    ctx.textAlign = 'left';
   }
 
   // 3D Overlay Lines (close series): red offset then blue main
@@ -396,7 +426,14 @@ function renderCandlesPng(candles, meta) {
   const loStr = fmtUsd(meta.lo, meta.lo >= 1 ? 4 : 8);
   const volStr = fmtVol(meta.volSum);
   const dStr = `${meta.deltaPct >= 0 ? '+' : ''}${meta.deltaPct.toFixed(2)}%`;
-  ctx.fillText(`Last ${lastStr} • Δ ${dStr} • Hi ${hiStr} • Lo ${loStr} • Vol ${volStr}`, padL, CHART_H - 18);
+
+  // ✅ keep footer safely inside canvas
+  ctx.textAlign = 'left';
+  ctx.fillText(
+    `Last ${lastStr} • Δ ${dStr} • Hi ${hiStr} • Lo ${loStr} • Vol ${volStr}`,
+    padL,
+    CHART_H - 18
+  );
 
   return canvas.toBuffer('image/png');
 }
@@ -421,4 +458,3 @@ async function getAdrianChartUrl(opts = {}) {
 }
 
 module.exports = { getAdrianChartUrl };
-
