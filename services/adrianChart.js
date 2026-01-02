@@ -15,27 +15,70 @@ const GlobalFonts = CanvasLib?.GlobalFonts;
 
 // ---- FONT REGISTRATION (CRITICAL FOR RAILWAY) ----
 const FONT_FAMILY = (process.env.ADRIAN_CHART_FONT_FAMILY || 'DejaVu Sans').trim();
-const FONT_PATH =
-  (process.env.ADRIAN_CHART_FONT_PATH || '').trim() ||
-  path.join(__dirname, '..', 'assets', 'fonts', 'DejaVuSans.ttf');
+
+// User can set ADRIAN_CHART_FONT_PATH to something like: "fonts/DejaVuSans.ttf"
+const FONT_PATH_ENV = (process.env.ADRIAN_CHART_FONT_PATH || '').trim();
+
+function resolveFontPath(p) {
+  if (!p) return null;
+
+  // absolute
+  if (path.isAbsolute(p)) return p;
+
+  // relative to project root (/app on Railway)
+  // process.cwd() in Railway typically is /app
+  return path.join(process.cwd(), p);
+}
+
+function firstExistingPath(paths) {
+  for (const p of paths) {
+    try {
+      if (!p) continue;
+      if (fs.existsSync(p)) return p;
+    } catch {}
+  }
+  return null;
+}
 
 function tryRegisterFontOnce() {
   try {
-    if (!GlobalFonts) return false;
-    if (!FONT_PATH) return false;
-
-    if (!fs.existsSync(FONT_PATH)) {
-      console.warn(`⚠️ adrianChart: font file missing at ${FONT_PATH}. Text may not render on Railway.`);
+    if (!GlobalFonts) {
+      console.warn('⚠️ adrianChart: Canvas GlobalFonts not available. Text may not render if no system fonts exist.');
       return false;
     }
 
-    // napi-rs/canvas: GlobalFonts.registerFromPath(path, family)
-    const ok = GlobalFonts.registerFromPath(FONT_PATH, FONT_FAMILY);
+    const candidates = [];
+
+    // 1) env override (supports "fonts/..." or absolute)
+    const envResolved = resolveFontPath(FONT_PATH_ENV);
+    if (envResolved) candidates.push(envResolved);
+
+    // 2) common repo layouts
+    candidates.push(path.join(process.cwd(), 'fonts', 'DejaVuSans.ttf'));          // /app/fonts/DejaVuSans.ttf
+    candidates.push(path.join(process.cwd(), 'assets', 'fonts', 'DejaVuSans.ttf'));// /app/assets/fonts/DejaVuSans.ttf
+    candidates.push(path.join(__dirname, '..', 'fonts', 'DejaVuSans.ttf'));        // relative from /services
+    candidates.push(path.join(__dirname, '..', 'assets', 'fonts', 'DejaVuSans.ttf'));
+
+    // 3) common Linux system paths (in case you don't bundle)
+    candidates.push('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf');
+    candidates.push('/usr/share/fonts/dejavu/DejaVuSans.ttf');
+    candidates.push('/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf');
+    candidates.push('/usr/share/fonts/noto/NotoSans-Regular.ttf');
+
+    const picked = firstExistingPath(candidates);
+
+    if (!picked) {
+      console.warn(`⚠️ adrianChart: font file missing. Tried:\n - ${candidates.join('\n - ')}\nText may not render on Railway.`);
+      return false;
+    }
+
+    const ok = GlobalFonts.registerFromPath(picked, FONT_FAMILY);
     if (ok) {
-      console.log(`✅ adrianChart: registered font "${FONT_FAMILY}" from ${FONT_PATH}`);
+      console.log(`✅ adrianChart: registered font "${FONT_FAMILY}" from ${picked}`);
       return true;
     }
-    console.warn(`⚠️ adrianChart: GlobalFonts.registerFromPath returned false for ${FONT_PATH}`);
+
+    console.warn(`⚠️ adrianChart: GlobalFonts.registerFromPath returned false for ${picked}`);
     return false;
   } catch (e) {
     console.warn(`⚠️ adrianChart: font register failed: ${e?.message || e}`);
@@ -59,14 +102,14 @@ const SHOW_VOLUME = String(process.env.ADRIAN_CANDLE_SHOW_VOLUME || '1').trim() 
 const CHART_W = Math.max(800, Math.min(2000, Number(process.env.ADRIAN_CANDLE_W || 1200)));
 const CHART_H = Math.max(450, Math.min(1200, Number(process.env.ADRIAN_CANDLE_H || 650)));
 
-// Theme (solid colors to ensure visibility)
+// Theme
 const BG = '#0c0c0c';
 const GRID = 'rgba(255,255,255,0.10)';
 const TEXT = '#f2f2f2';
 const MUTED = '#d0d0d0';
-const BLUE = 'rgba(0,140,255,0.95)';    // up / main line
+const BLUE = 'rgba(0,140,255,0.95)';
 const BLUE_FILL = 'rgba(0,140,255,0.55)';
-const RED = 'rgba(255,0,0,0.78)';       // down / offset line
+const RED = 'rgba(255,0,0,0.78)';
 const RED_FILL = 'rgba(255,0,0,0.45)';
 
 // ----------------- Helpers -----------------
@@ -126,7 +169,6 @@ function _findArrayOfArrays(obj) {
   return null;
 }
 
-// GeckoTerminal endpoints: try a few formats
 async function fetchOhlcvList({ points, aggMin }) {
   const base = `https://api.geckoterminal.com/api/v2/networks/${encodeURIComponent(ADRIAN_GT_NETWORK)}/pools/${encodeURIComponent(ADRIAN_GT_POOL_ID)}`;
 
@@ -169,7 +211,6 @@ async function fetchOhlcvList({ points, aggMin }) {
   throw lastErr || new Error('Unable to fetch OHLCV list from GeckoTerminal');
 }
 
-// Convert raw list -> normalized candles [{t,o,h,l,c,v}]
 function normalizeOhlcv(list, limit) {
   const out = [];
   for (const row of (list || []).slice(0, limit)) {
@@ -182,7 +223,7 @@ function normalizeOhlcv(list, limit) {
     const v = row.length >= 6 ? Number(row[5]) : null;
 
     if (!Number.isFinite(ts) || !Number.isFinite(o) || !Number.isFinite(h) || !Number.isFinite(l) || !Number.isFinite(c)) continue;
-    ts = ts > 2_000_000_000_000 ? Math.floor(ts / 1000) : ts; // ms->sec
+    ts = ts > 2_000_000_000_000 ? Math.floor(ts / 1000) : ts;
 
     out.push({ t: ts, o, h, l, c, v: Number.isFinite(v) ? v : null });
   }
@@ -231,18 +272,15 @@ function computeMeta(candles) {
 }
 
 function setFont(ctx, weight, sizePx) {
-  // Use registered font if available; fallback to sans-serif
   ctx.font = `${weight} ${sizePx}px "${FONT_FAMILY}", sans-serif`;
 }
 
-// Draw candles + 3D overlay lines
 function renderCandlesPng(candles, meta) {
   if (!createCanvas) throw new Error('Canvas library not available (install @napi-rs/canvas)');
 
   const canvas = createCanvas(CHART_W, CHART_H);
   const ctx = canvas.getContext('2d');
 
-  // More room for labels
   const padL = 78;
   const padR = 78;
   const padT = 58;
@@ -260,13 +298,13 @@ function renderCandlesPng(candles, meta) {
   const volTop = SHOW_VOLUME ? (priceBot + 16) : 0;
   const volBot = SHOW_VOLUME ? (padT + plotH) : 0;
 
-  // Background
   ctx.fillStyle = BG;
   ctx.fillRect(0, 0, CHART_W, CHART_H);
 
-  // Title + subtitle (if fonts missing these were invisible before)
+  // Title + subtitle
   ctx.fillStyle = TEXT;
   setFont(ctx, '700', 20);
+  ctx.textAlign = 'left';
   ctx.fillText('🕶️ $ADRIAN Candles — 3D Mode', padL, 30);
 
   const subtitle = `${ADRIAN_GT_NETWORK} • ${candles.length} candles • Δ ${meta.deltaPct >= 0 ? '+' : ''}${meta.deltaPct.toFixed(2)}%`;
@@ -297,7 +335,7 @@ function renderCandlesPng(candles, meta) {
     return priceBot - t * (priceH || 1);
   };
 
-  // Grid + Y labels
+  // Grid + Y labels (left + right)
   ctx.strokeStyle = GRID;
   ctx.lineWidth = 1;
 
@@ -316,11 +354,9 @@ function renderCandlesPng(candles, meta) {
     ctx.fillStyle = MUTED;
     setFont(ctx, '700', 12);
 
-    // left
     ctx.textAlign = 'left';
     ctx.fillText(`$${label}`, 10, yy + 4);
 
-    // right
     ctx.textAlign = 'right';
     ctx.fillText(`$${label}`, CHART_W - 10, yy + 4);
   }
@@ -337,6 +373,7 @@ function renderCandlesPng(candles, meta) {
   const xTicks = 6;
   setFont(ctx, '700', 12);
   ctx.fillStyle = MUTED;
+
   for (let i = 0; i <= xTicks; i++) {
     const idx = Math.round((n - 1) * (i / xTicks));
     const c = candles[idx];
@@ -352,7 +389,6 @@ function renderCandlesPng(candles, meta) {
     ctx.lineTo(xx, priceBot);
     ctx.stroke();
 
-    // tick
     ctx.strokeStyle = 'rgba(255,255,255,0.18)';
     ctx.beginPath();
     ctx.moveTo(xx, priceBot);
@@ -427,7 +463,6 @@ function renderCandlesPng(candles, meta) {
       ctx.fillRect(xx - candleW / 2, yy, candleW, volBot - yy);
     }
 
-    // right-side volume max label
     ctx.fillStyle = MUTED;
     setFont(ctx, '700', 12);
     ctx.textAlign = 'right';
@@ -455,6 +490,7 @@ function renderCandlesPng(candles, meta) {
   ctx.fillStyle = MUTED;
   setFont(ctx, '700', 12);
   ctx.textAlign = 'left';
+
   const lastStr = fmtUsd(meta.last, meta.last >= 1 ? 4 : 8);
   const hiStr = fmtUsd(meta.hi, meta.hi >= 1 ? 4 : 8);
   const loStr = fmtUsd(meta.lo, meta.lo >= 1 ? 4 : 8);
@@ -490,4 +526,3 @@ async function getAdrianChartUrl(opts = {}) {
 }
 
 module.exports = { getAdrianChartUrl };
-
