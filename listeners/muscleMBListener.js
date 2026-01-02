@@ -1,6 +1,9 @@
 // listeners/musclemb.js
 const fetch = require('node-fetch');
-const { EmbedBuilder, PermissionsBitField } = require('discord.js');
+const { EmbedBuilder, PermissionsBitField, AttachmentBuilder } = require('discord.js');
+
+// ✅ NEW: Canvas candles chart service (attachment:// image)
+const { getAdrianChartUrl: getAdrianCandleChartUrl } = require('../services/adrianChart');
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const GROQ_MODEL_ENV = (process.env.GROQ_MODEL || '').trim();
@@ -871,7 +874,7 @@ function _findArrayOfArrays(obj) {
 }
 
 /**
- * 3D-glasses theme chart
+ * 3D-glasses theme chart (LEGACY QuickChart path kept intact)
  * - Blue = true series
  * - Red  = tiny offset series
  * - Dark background + soft grid
@@ -1063,6 +1066,57 @@ function _fmtVol(n) {
 
 async function sendAdrianChartEmbed(message) {
   try {
+    // ✅ NEW PRIMARY PATH: Canvas Candles (attachment) via services/adrianChart.js
+    // This avoids Discord caching + URL-length + “nothing shows” issues.
+    let chart = null;
+    try {
+      chart = await getAdrianCandleChartUrl({
+        points: ADRIAN_CHART_POINTS,
+        // timeframe/aggregate/showVolume are controlled by env in services/adrianChart.js
+      });
+    } catch (e) {
+      console.warn('⚠️ Canvas candle chart failed, falling back to legacy QuickChart:', e?.message || String(e));
+    }
+
+    // Build pool web link (no raw address printed, only pool URL)
+    const poolWeb = `https://www.geckoterminal.com/${encodeURIComponent(ADRIAN_GT_NETWORK)}/pools/${encodeURIComponent(ADRIAN_GT_POOL_ID)}`;
+
+    // If candle chart succeeded, send as attachment-based embed
+    if (chart && chart.file && chart.url && chart.meta) {
+      const meta = chart.meta || {};
+      const lastPrice = meta?.last ?? meta?.lastPrice;
+      const deltaPct = meta?.deltaPct;
+      const hi = meta?.hi ?? meta?.high;
+      const lo = meta?.lo ?? meta?.low;
+      const vol = meta?.volSum ?? meta?.volumeSum;
+
+      const descBits = [];
+      if (Number.isFinite(lastPrice)) descBits.push(`Last: **${_fmtMoney(lastPrice, lastPrice >= 1 ? 4 : 8)}**`);
+      if (Number.isFinite(deltaPct)) descBits.push(`Δ: **${deltaPct >= 0 ? '+' : ''}${Number(deltaPct).toFixed(2)}%**`);
+
+      const file = new AttachmentBuilder(chart.file.attachment, { name: chart.file.name });
+
+      const embed = new EmbedBuilder()
+        .setColor('#1e90ff')
+        .setTitle('🕶️ $ADRIAN Candles (3D Glasses)')
+        .setDescription([descBits.join(' • '), '_Blue up / Red down • Canvas candles._'].filter(Boolean).join('\n') || 'Live candles from GeckoTerminal.')
+        .setImage(chart.url) // attachment://adrian_candles.png
+        .addFields(
+          { name: 'High', value: Number.isFinite(hi) ? `**${_fmtMoney(hi, hi >= 1 ? 4 : 8)}**` : 'N/A', inline: true },
+          { name: 'Low', value: Number.isFinite(lo) ? `**${_fmtMoney(lo, lo >= 1 ? 4 : 8)}**` : 'N/A', inline: true },
+          { name: 'Vol (sum)', value: Number.isFinite(vol) ? `**${_fmtVol(vol)}**` : 'N/A', inline: true },
+          { name: 'Pool', value: poolWeb ? `[View Pool](${poolWeb})` : 'N/A', inline: false },
+        )
+        .setFooter({ text: '🕶️ Source: GeckoTerminal → Canvas Candles' })
+        .setTimestamp();
+
+      const payload = { embeds: [embed], files: [file], allowedMentions: { parse: [] } };
+      const ok = await safeReplyMessage(message.client, message, payload);
+      if (!ok) console.warn('❌ sendAdrianChartEmbed (candles): safeReplyMessage returned false');
+      return;
+    }
+
+    // ---- LEGACY FALLBACK PATH: QuickChart overlay (kept intact) ----
     const { url, meta } = await getAdrianChartUrlCached();
 
     const lastPrice = meta?.lastPrice;
@@ -1080,9 +1134,6 @@ async function sendAdrianChartEmbed(message) {
     const rangeLine = (Number.isFinite(startTs) && Number.isFinite(endTs))
       ? `Range: <t:${Math.floor(startTs)}:R> → <t:${Math.floor(endTs)}:R>`
       : null;
-
-    // Hide pool addy (no raw address/link addy printed)
-    const poolWeb = `https://www.geckoterminal.com/${encodeURIComponent(ADRIAN_GT_NETWORK)}/pools/${encodeURIComponent(ADRIAN_GT_POOL_ID)}`;
 
     // PATCH: download chart PNG and attach it (fixes URL-length & “nothing shows”)
     let chartFile = null;
@@ -1699,4 +1750,3 @@ module.exports = (client) => {
     }
   });
 };
-
