@@ -5,7 +5,7 @@ require('dotenv').config();
    ------------------------------------------------------
    Run only when:
    RUN_DEPLOY=true
-   Then REMOVE the env var after success.
+   Then REMOVE the env var after success..
 ====================================================== */
 if (process.env.RUN_DEPLOY === 'true') {
   console.log('🚀 Running slash command deploy...');
