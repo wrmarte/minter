@@ -1,92 +1,77 @@
 // services/adrianChart.js
+// Canvas Candles chart for $ADRIAN using GeckoTerminal OHLCV.
+// Returns: { url: 'attachment://...', file: { attachment: Buffer, name }, meta: {...} }
+// Includes:
+//  - Candles: 🟦 up / 🟥 down
+//  - 3D overlay lines: 🟥 offset + 🟦 main (close series)
+//  - Meta: last, deltaPct, hi, lo, volSum, startTs, endTs, points
+
 const fetch = require('node-fetch');
 
-let canvasMod = null;
-function getCanvas() {
-  if (canvasMod) return canvasMod;
-  // @napi-rs/canvas is what you already use in your bot
-  canvasMod = require('@napi-rs/canvas');
-  return canvasMod;
+let CanvasLib = null;
+try {
+  CanvasLib = require('@napi-rs/canvas');
+} catch (e) {
+  // fallback (if you ever switch)
+  try { CanvasLib = require('canvas'); } catch {}
 }
 
-// ===================== ENV =====================
-const GT_NETWORK = (process.env.ADRIAN_GT_NETWORK || 'base').trim().toLowerCase();
-const GT_POOL_ID_RAW =
-  (process.env.ADRIAN_GT_POOL_ID ||
-    '0x79cdf2d48abd42872a26d1b1c92ece4245327a4837b427dc9cff5f1acc40e379'
-  ).trim();
+const {
+  createCanvas,
+} = CanvasLib || {};
 
-const CHART_POINTS = Math.max(20, Math.min(240, Number(process.env.ADRIAN_CHART_POINTS || 96)));
-const CACHE_MS = Math.max(10_000, Number(process.env.ADRIAN_CHART_CACHE_MS || 60_000));
+// ---- ENV DEFAULTS ----
+const ADRIAN_GT_NETWORK = (process.env.ADRIAN_GT_NETWORK || 'base').trim().toLowerCase();
+const ADRIAN_GT_POOL_ID = (process.env.ADRIAN_GT_POOL_ID ||
+  '0x79cdf2d48abd42872a26d1b1c92ece4245327a4837b427dc9cff5f1acc40e379'
+).trim().toLowerCase();
 
-const TIMEFRAME = String(process.env.ADRIAN_CHART_TIMEFRAME || 'minute').trim().toLowerCase(); // minute|hour|day
-const AGGREGATE_ENV = Number(process.env.ADRIAN_CHART_AGGREGATE || '') || null; // null => default per timeframe
+const DEFAULT_POINTS = Math.max(20, Math.min(240, Number(process.env.ADRIAN_CHART_POINTS || 96)));
+const CANDLE_AGG_MIN = Math.max(1, Math.min(240, Number(process.env.ADRIAN_CANDLE_AGG_MIN || 15)));
+const SHOW_VOLUME = String(process.env.ADRIAN_CANDLE_SHOW_VOLUME || '1').trim() === '1';
+const CHART_W = Math.max(800, Math.min(2000, Number(process.env.ADRIAN_CANDLE_W || 1200)));
+const CHART_H = Math.max(450, Math.min(1200, Number(process.env.ADRIAN_CANDLE_H || 650)));
 
-const SHOW_VOLUME = String(process.env.ADRIAN_CHART_SHOW_VOLUME || '1').trim() !== '0';
-const DEBUG = String(process.env.ADRIAN_CHART_DEBUG || '').trim() === '1';
+// Theme
+const BG = 'rgba(12,12,12,1)';
+const GRID = 'rgba(255,255,255,0.08)';
+const TEXT = 'rgba(235,235,235,0.92)';
+const MUTED = 'rgba(200,200,200,0.85)';
+const BLUE = 'rgba(0,140,255,0.95)';    // up / main line
+const BLUE_FILL = 'rgba(0,140,255,0.55)';
+const RED = 'rgba(255,0,0,0.78)';       // down / offset line
+const RED_FILL = 'rgba(255,0,0,0.45)';
 
-// Canvas sizing
-const W = Math.max(640, Number(process.env.ADRIAN_CHART_W || 960));
-const H = Math.max(360, Number(process.env.ADRIAN_CHART_H || 520));
-
-// Trend threshold for “flat-ish” candles (purely aesthetic)
-const FLAT_THRESHOLD_PCT = Math.max(0, Number(process.env.ADRIAN_CHART_FLAT_THRESHOLD_PCT || '0.02')); // 0.02%
-
-// ===================== CACHE =====================
-let _cache = Object.create(null); // key -> { ts, buffer, filename, meta }
-
-// ===================== HELPERS =====================
-function safeJsonParse(t) { try { return JSON.parse(t); } catch { return null; } }
-
-async function fetchText(url) {
-  const res = await fetch(url, { timeout: 12_000 });
-  const txt = await res.text();
-  return { res, txt };
+// ----------------- Helpers -----------------
+function safeJsonParse(t) {
+  try { return JSON.parse(t); } catch { return null; }
 }
 
-function poolIdCandidates(raw) {
-  const s = String(raw || '').trim();
-  if (!s) return [];
-  const has0x = s.toLowerCase().startsWith('0x');
-  const with0x = has0x ? s : `0x${s}`;
-  const without0x = has0x ? s.slice(2) : s;
-  return Array.from(new Set([with0x, without0x].filter(Boolean)));
+async function fetchWithTimeout(url, opts = {}, timeoutMs = 15000) {
+  const hasAbort = typeof globalThis.AbortController === 'function';
+  if (hasAbort) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { ...opts, signal: controller.signal });
+      const bodyText = await res.text();
+      return { res, bodyText };
+    } finally {
+      clearTimeout(timer);
+    }
+  } else {
+    return await Promise.race([
+      (async () => {
+        const res = await fetch(url, opts);
+        const bodyText = await res.text();
+        return { res, bodyText };
+      })(),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('Timeout')), timeoutMs))
+    ]);
+  }
 }
 
-function normalizeTimeframe(tf) {
-  const t = String(tf || '').trim().toLowerCase();
-  if (t === 'min' || t === 'mins' || t === 'minute' || t === 'minutes') return 'minute';
-  if (t === 'hr' || t === 'hrs' || t === 'hour' || t === 'hours') return 'hour';
-  if (t === 'day' || t === 'days') return 'day';
-  return 'minute';
-}
-
-function pickDefaultAggregate(tf) {
-  if (tf === 'hour') return 1;
-  if (tf === 'day') return 1;
-  return 15;
-}
-
-function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
-
-function fmtUSD(x) {
-  const n = Number(x);
-  if (!isFinite(n)) return '?';
-  if (n >= 1) return n.toFixed(4);
-  return n.toFixed(8);
-}
-
-function fmtNum(x) {
-  const n = Number(x);
-  if (!isFinite(n)) return '?';
-  if (n >= 1_000_000) return (n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1) + 'M';
-  if (n >= 1_000) return (n / 1_000).toFixed(n >= 10_000 ? 0 : 1) + 'k';
-  if (n >= 100) return n.toFixed(0);
-  if (n >= 10) return n.toFixed(1);
-  return n.toFixed(2);
-}
-
-function findArrayOfArrays(obj) {
+function _findArrayOfArrays(obj) {
   const seen = new Set();
   const stack = [{ v: obj, d: 0 }];
   while (stack.length) {
@@ -94,467 +79,377 @@ function findArrayOfArrays(obj) {
     if (!v || typeof v !== 'object') continue;
     if (seen.has(v)) continue;
     seen.add(v);
-    if (d > 6) continue;
+    if (d > 7) continue;
 
-    if (Array.isArray(v) && v.length && Array.isArray(v[0]) && v[0].length >= 5) {
-      return v;
-    }
+    if (Array.isArray(v) && v.length && Array.isArray(v[0]) && v[0].length >= 5) return v;
+
     for (const k of Object.keys(v)) stack.push({ v: v[k], d: d + 1 });
   }
   return null;
 }
 
-// ===================== GECKOTERMINAL OHLCV =====================
-async function fetchOhlcvList({ timeframe, aggregate, limit }) {
-  const tf = normalizeTimeframe(timeframe);
-  const agg = Number(aggregate) || pickDefaultAggregate(tf);
-  const lim = clamp(Number(limit) || CHART_POINTS, 20, 240);
+function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
 
-  const pools = poolIdCandidates(GT_POOL_ID_RAW);
+function fmtUsd(n, d = 6) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return 'N/A';
+  return `$${x.toFixed(d)}`;
+}
+
+function fmtVol(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return 'N/A';
+  if (x >= 1e9) return `${(x / 1e9).toFixed(2)}B`;
+  if (x >= 1e6) return `${(x / 1e6).toFixed(2)}M`;
+  if (x >= 1e3) return `${(x / 1e3).toFixed(2)}K`;
+  return x.toFixed(2);
+}
+
+// GeckoTerminal endpoints: try a few formats
+async function fetchOhlcvList({ points, aggMin }) {
+  const base = `https://api.geckoterminal.com/api/v2/networks/${encodeURIComponent(ADRIAN_GT_NETWORK)}/pools/${encodeURIComponent(ADRIAN_GT_POOL_ID)}`;
+
+  const candidates = [
+    // newer style
+    `${base}/ohlcv/minute?aggregate=${aggMin}&limit=${points}`,
+    `${base}/ohlcv/day?aggregate=${aggMin}&limit=${points}`,
+    `${base}/ohlcv/hour?aggregate=1&limit=${Math.min(points, 168)}`,
+    // older style
+    `${base}/ohlcv?timeframe=minute&aggregate=${aggMin}&limit=${points}`,
+    `${base}/ohlcv?timeframe=day&aggregate=${aggMin}&limit=${points}`,
+    `${base}/ohlcv?timeframe=hour&aggregate=1&limit=${Math.min(points, 168)}`
+  ];
+
   let lastErr = null;
 
-  for (const poolId of pools) {
-    const base = `https://api.geckoterminal.com/api/v2/networks/${encodeURIComponent(GT_NETWORK)}/pools/${encodeURIComponent(poolId)}`;
-
-    const candidates = [
-      `${base}/ohlcv/${tf}?aggregate=${encodeURIComponent(String(agg))}&limit=${encodeURIComponent(String(lim))}`,
-      `${base}/ohlcv?timeframe=${encodeURIComponent(tf)}&aggregate=${encodeURIComponent(String(agg))}&limit=${encodeURIComponent(String(lim))}`,
-
-      tf === 'minute' ? `${base}/ohlcv/minute?aggregate=${encodeURIComponent(String(agg))}&limit=${encodeURIComponent(String(lim))}` : null,
-      tf === 'hour' ? `${base}/ohlcv/hour?aggregate=1&limit=${encodeURIComponent(String(Math.min(lim, 168)))}` : null,
-      tf === 'day' ? `${base}/ohlcv/day?aggregate=1&limit=${encodeURIComponent(String(Math.min(lim, 365)))}` : null
-    ].filter(Boolean);
-
-    for (const url of candidates) {
-      try {
-        const { res, txt } = await fetchText(url);
-        if (!res.ok) {
-          lastErr = new Error(`GT HTTP ${res.status} for ${url}: ${txt.slice(0, 120)}`);
-          continue;
-        }
-        const json = safeJsonParse(txt);
-        if (!json) { lastErr = new Error(`GT non-json for ${url}`); continue; }
-
-        const list =
-          json?.data?.attributes?.ohlcv_list ||
-          json?.data?.attributes?.ohlcvList ||
-          json?.data?.ohlcv_list ||
-          json?.ohlcv_list ||
-          null;
-
-        if (Array.isArray(list) && list.length) return { list, used: { poolId, url, tf, agg } };
-
-        const maybe = findArrayOfArrays(json);
-        if (maybe?.length) return { list: maybe, used: { poolId, url, tf, agg } };
-
-        lastErr = new Error(`GT response had no ohlcv_list for ${url}`);
-      } catch (e) {
-        lastErr = e;
+  for (const url of candidates) {
+    try {
+      const { res, bodyText } = await fetchWithTimeout(url, {}, 14000);
+      if (!res.ok) {
+        lastErr = new Error(`GT HTTP ${res.status}: ${bodyText?.slice(0, 120)}`);
+        continue;
       }
+      const json = safeJsonParse(bodyText);
+      if (!json) { lastErr = new Error('GT non-json response'); continue; }
+
+      const list =
+        json?.data?.attributes?.ohlcv_list ||
+        json?.data?.attributes?.ohlcvList ||
+        json?.data?.ohlcv_list ||
+        json?.ohlcv_list ||
+        null;
+
+      if (Array.isArray(list) && list.length) return list;
+
+      const maybe = _findArrayOfArrays(json);
+      if (maybe?.length) return maybe;
+
+      lastErr = new Error('GT response had no ohlcv_list');
+    } catch (e) {
+      lastErr = e;
     }
   }
 
   throw lastErr || new Error('Unable to fetch OHLCV list from GeckoTerminal');
 }
 
-function cacheKey({ tf, agg, pts, vol, w, h }) {
-  return [
-    `net=${GT_NETWORK}`,
-    `pool=${String(GT_POOL_ID_RAW).toLowerCase()}`,
-    `tf=${tf}`,
-    `agg=${agg}`,
-    `pts=${pts}`,
-    `vol=${vol ? 1 : 0}`,
-    `w=${w}`,
-    `h=${h}`
-  ].join('|');
-}
-
-// ===================== CANVAS RENDER =====================
-function drawGlowBorder(ctx, w, h) {
-  // 3D glasses border: cyan + red offset
-  ctx.save();
-  ctx.lineWidth = 3;
-
-  ctx.strokeStyle = 'rgba(0,255,255,0.35)';
-  ctx.shadowColor = 'rgba(0,255,255,0.35)';
-  ctx.shadowBlur = 12;
-  ctx.strokeRect(10, 10, w - 20, h - 20);
-
-  ctx.shadowBlur = 0;
-  ctx.strokeStyle = 'rgba(255,60,90,0.30)';
-  ctx.strokeRect(13, 13, w - 26, h - 26);
-
-  ctx.restore();
-}
-
-function drawText3D(ctx, text, x, y, size = 22, align = 'left') {
-  ctx.save();
-  ctx.font = `700 ${size}px sans-serif`;
-  ctx.textAlign = align;
-  ctx.textBaseline = 'top';
-
-  // red shadow
-  ctx.fillStyle = 'rgba(255,60,90,0.80)';
-  ctx.fillText(text, x + 2, y + 1);
-
-  // cyan main
-  ctx.fillStyle = 'rgba(0,255,255,0.95)';
-  ctx.fillText(text, x, y);
-
-  ctx.restore();
-}
-
-function drawSubtitle(ctx, text, x, y, w) {
-  ctx.save();
-  ctx.font = `500 12px sans-serif`;
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'top';
-  ctx.fillStyle = 'rgba(200,210,255,0.85)';
-
-  // wrap-ish (simple)
-  const maxW = Math.max(200, w);
-  let line = '';
-  const words = String(text || '').split(' ');
-  let yy = y;
-
-  for (const word of words) {
-    const test = line ? (line + ' ' + word) : word;
-    if (ctx.measureText(test).width > maxW) {
-      ctx.fillText(line, x, yy);
-      yy += 14;
-      line = word;
-    } else {
-      line = test;
-    }
-  }
-  if (line) ctx.fillText(line, x, yy);
-
-  ctx.restore();
-}
-
-function renderCandles({ candles, meta }) {
-  const { createCanvas } = getCanvas();
-  const canvas = createCanvas(W, H);
-  const ctx = canvas.getContext('2d');
-
-  // Background (cinema dark)
-  ctx.fillStyle = '#0b0d12';
-  ctx.fillRect(0, 0, W, H);
-
-  // Subtle vignette
-  ctx.save();
-  const grad = ctx.createRadialGradient(W * 0.5, H * 0.45, 50, W * 0.5, H * 0.45, Math.max(W, H) * 0.65);
-  grad.addColorStop(0, 'rgba(255,255,255,0.06)');
-  grad.addColorStop(1, 'rgba(0,0,0,0.55)');
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, W, H);
-  ctx.restore();
-
-  drawGlowBorder(ctx, W, H);
-
-  // Layout
-  const padL = 70;
-  const padR = 22;
-  const padT = 58;
-  const padB = 24;
-
-  const volH = SHOW_VOLUME ? Math.floor(H * 0.18) : 0;
-  const gap = SHOW_VOLUME ? 12 : 0;
-
-  const chartX = padL;
-  const chartY = padT;
-  const chartW = W - padL - padR;
-  const chartH = H - padT - padB - volH - gap;
-
-  const volY = chartY + chartH + gap;
-
-  // Price range
-  let minP = Infinity;
-  let maxP = -Infinity;
-  for (const c of candles) {
-    if (isFinite(c.l)) minP = Math.min(minP, c.l);
-    if (isFinite(c.h)) maxP = Math.max(maxP, c.h);
-  }
-  if (!isFinite(minP) || !isFinite(maxP) || maxP <= 0) {
-    throw new Error('Invalid candle range');
-  }
-  // padding
-  const padPct = 0.04;
-  const pad = (maxP - minP) * padPct;
-  minP = Math.max(0, minP - pad);
-  maxP = maxP + pad;
-
-  const priceToY = (p) => chartY + ((maxP - p) / (maxP - minP)) * chartH;
-
-  // Volume range
-  let maxV = 0;
-  if (SHOW_VOLUME) {
-    for (const c of candles) maxV = Math.max(maxV, Number(c.v || 0));
-    if (!isFinite(maxV) || maxV <= 0) maxV = 1;
-  }
-
-  // Grid
-  ctx.save();
-  ctx.strokeStyle = 'rgba(255,255,255,0.08)';
-  ctx.lineWidth = 1;
-
-  const yTicks = 5;
-  for (let i = 0; i <= yTicks; i++) {
-    const yy = chartY + (chartH * i) / yTicks;
-    ctx.beginPath();
-    ctx.moveTo(chartX, yy);
-    ctx.lineTo(chartX + chartW, yy);
-    ctx.stroke();
-  }
-
-  const xTicks = 6;
-  for (let i = 0; i <= xTicks; i++) {
-    const xx = chartX + (chartW * i) / xTicks;
-    ctx.beginPath();
-    ctx.moveTo(xx, chartY);
-    ctx.lineTo(xx, chartY + chartH);
-    ctx.stroke();
-  }
-
-  // Volume grid
-  if (SHOW_VOLUME) {
-    ctx.strokeStyle = 'rgba(255,255,255,0.06)';
-    ctx.beginPath();
-    ctx.moveTo(chartX, volY);
-    ctx.lineTo(chartX + chartW, volY);
-    ctx.stroke();
-
-    ctx.beginPath();
-    ctx.moveTo(chartX, volY + volH);
-    ctx.lineTo(chartX + chartW, volY + volH);
-    ctx.stroke();
-  }
-
-  ctx.restore();
-
-  // Axes labels
-  ctx.save();
-  ctx.fillStyle = 'rgba(210,220,255,0.78)';
-  ctx.font = '500 11px sans-serif';
-  ctx.textAlign = 'right';
-  ctx.textBaseline = 'middle';
-
-  for (let i = 0; i <= yTicks; i++) {
-    const p = maxP - ((maxP - minP) * i) / yTicks;
-    const yy = chartY + (chartH * i) / yTicks;
-    ctx.fillText(`$${fmtUSD(p)}`, chartX - 10, yy);
-  }
-
-  // X labels (time)
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'top';
-  const n = candles.length;
-  for (let i = 0; i <= xTicks; i++) {
-    const idx = Math.round((n - 1) * (i / xTicks));
-    const c = candles[idx];
-    if (!c) continue;
-    const xx = chartX + (chartW * i) / xTicks;
-    ctx.fillText(c.label, xx, chartY + chartH + 4);
-  }
-  ctx.restore();
-
-  // Candles
-  const nC = candles.length;
-  const slot = chartW / nC;
-  const bodyW = Math.max(3, Math.min(14, slot * 0.62));
-
-  const BLUE = 'rgba(60, 140, 255, 0.95)';
-  const RED = 'rgba(255, 60, 90, 0.92)';
-  const WICK_BLUE = 'rgba(120, 190, 255, 0.95)';
-  const WICK_RED = 'rgba(255, 140, 170, 0.95)';
-
-  // volume colors (subtle)
-  const VOL_BLUE = 'rgba(60, 140, 255, 0.22)';
-  const VOL_RED = 'rgba(255, 60, 90, 0.18)';
-
-  // Draw volume first (behind)
-  if (SHOW_VOLUME) {
-    for (let i = 0; i < nC; i++) {
-      const c = candles[i];
-      const xx = chartX + i * slot + slot * 0.5;
-      const v = Number(c.v || 0);
-      const hV = (v / maxV) * volH;
-      const y0 = volY + volH - hV;
-
-      const isUp = c.c >= c.o;
-      ctx.fillStyle = isUp ? VOL_BLUE : VOL_RED;
-      ctx.fillRect(xx - bodyW / 2, y0, bodyW, Math.max(1, hV));
-    }
-  }
-
-  // Candles + wicks
-  for (let i = 0; i < nC; i++) {
-    const c = candles[i];
-    const xx = chartX + i * slot + slot * 0.5;
-
-    const yo = priceToY(c.o);
-    const yc = priceToY(c.c);
-    const yh = priceToY(c.h);
-    const yl = priceToY(c.l);
-
-    const isUpRaw = c.c >= c.o;
-    const pctMove = c.o ? ((c.c - c.o) / c.o) * 100 : 0;
-
-    // treat tiny moves as “flat” visually (still chooses a color)
-    const isUp = Math.abs(pctMove) < FLAT_THRESHOLD_PCT ? true : isUpRaw;
-
-    const bodyTop = Math.min(yo, yc);
-    const bodyBot = Math.max(yo, yc);
-    const bodyH = Math.max(2, bodyBot - bodyTop);
-
-    // wick
-    ctx.save();
-    ctx.strokeStyle = isUp ? WICK_BLUE : WICK_RED;
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(xx, yh);
-    ctx.lineTo(xx, yl);
-    ctx.stroke();
-    ctx.restore();
-
-    // 3D glow around body
-    ctx.save();
-    ctx.shadowColor = isUp ? 'rgba(0,255,255,0.22)' : 'rgba(255,60,90,0.18)';
-    ctx.shadowBlur = 10;
-    ctx.fillStyle = isUp ? BLUE : RED;
-    ctx.fillRect(xx - bodyW / 2, bodyTop, bodyW, bodyH);
-    ctx.restore();
-
-    // subtle outline
-    ctx.save();
-    ctx.strokeStyle = 'rgba(255,255,255,0.10)';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(xx - bodyW / 2, bodyTop, bodyW, bodyH);
-    ctx.restore();
-  }
-
-  // Title + meta
-  drawText3D(ctx, '$ADRIAN — Candles', 22, 16, 22, 'left');
-
-  const sub = [
-    `${meta.tfLabel} • ${meta.points} candles`,
-    `Last $${fmtUSD(meta.last)}`,
-    `Hi $${fmtUSD(meta.hi)} / Lo $${fmtUSD(meta.lo)}`,
-    `Δ ${meta.deltaPct >= 0 ? '+' : ''}${meta.deltaPct.toFixed(2)}%`,
-    SHOW_VOLUME ? `Vol ${fmtNum(meta.volSum)}` : null
-  ].filter(Boolean).join('   |   ');
-
-  drawSubtitle(ctx, sub, 22, 40, W - 44);
-
-  // tiny watermark
-  ctx.save();
-  ctx.font = '500 11px sans-serif';
-  ctx.fillStyle = 'rgba(200,210,255,0.22)';
-  ctx.textAlign = 'right';
-  ctx.textBaseline = 'bottom';
-  ctx.fillText(`🕶️ ${GT_NETWORK} / GeckoTerminal`, W - 16, H - 12);
-  ctx.restore();
-
-  return canvas.toBuffer('image/png');
-}
-
-// ===================== PUBLIC API =====================
-async function getAdrianChartImage(opts = {}) {
-  const tf = normalizeTimeframe(opts.timeframe || TIMEFRAME);
-  const agg = Number(opts.aggregate) || AGGREGATE_ENV || pickDefaultAggregate(tf);
-  const pts = clamp(Number(opts.points) || CHART_POINTS, 20, 240);
-  const vol = typeof opts.showVolume === 'boolean' ? opts.showVolume : SHOW_VOLUME;
-
-  const key = cacheKey({ tf, agg, pts, vol, w: W, h: H });
-  const now = Date.now();
-  const cached = _cache[key];
-  if (cached?.buffer && (now - cached.ts) < CACHE_MS) return cached;
-
-  if (DEBUG) console.log(`[ADRIAN_CHART] fetching OHLCV tf=${tf} agg=${agg} pts=${pts}`);
-
-  const { list, used } = await fetchOhlcvList({ timeframe: tf, aggregate: agg, limit: pts });
-
-  // Normalize: expect [ts, o, h, l, c, v]
-  const candles = [];
-  for (const row of list.slice(0, pts)) {
+// Convert raw list -> normalized candles [{t,o,h,l,c,v}]
+function normalizeOhlcv(list, limit) {
+  const out = [];
+  for (const row of (list || []).slice(0, limit)) {
     if (!Array.isArray(row) || row.length < 5) continue;
-
-    const ts = Number(row[0]);
+    let ts = Number(row[0]);
     const o = Number(row[1]);
     const h = Number(row[2]);
     const l = Number(row[3]);
     const c = Number(row[4]);
-    const v = Number(row[5] ?? 0);
+    const v = row.length >= 6 ? Number(row[5]) : null;
 
-    if (![ts, o, h, l, c].every(Number.isFinite)) continue;
+    if (!Number.isFinite(ts) || !Number.isFinite(o) || !Number.isFinite(h) || !Number.isFinite(l) || !Number.isFinite(c)) continue;
+    // GT sometimes returns ms
+    ts = ts > 2_000_000_000_000 ? Math.floor(ts / 1000) : ts;
 
-    const tSec = ts > 2_000_000_000_000 ? Math.floor(ts / 1000) : ts;
-    const label = new Date(tSec * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-
-    candles.push({ t: tSec, o, h, l, c, v: Number.isFinite(v) ? v : 0, label });
+    out.push({ t: ts, o, h, l, c, v: Number.isFinite(v) ? v : null });
   }
 
-  candles.sort((a, b) => a.t - b.t);
-  if (candles.length < 10) throw new Error('Not enough candle points');
-
-  const first = candles[0];
-  const last = candles[candles.length - 1];
-
-  let hi = -Infinity, lo = Infinity, volSum = 0;
-  for (const c of candles) {
-    hi = Math.max(hi, c.h);
-    lo = Math.min(lo, c.l);
-    volSum += Number(c.v || 0);
-  }
-
-  const deltaPct = first.o ? ((last.c - first.o) / first.o) * 100 : 0;
-
-  const tfLabel =
-    tf === 'minute' ? `${agg}m` :
-    tf === 'hour' ? `${agg}h` :
-    `${agg}d`;
-
-  const meta = {
-    network: GT_NETWORK,
-    poolIdUsed: used?.poolId || null,
-    tf,
-    agg,
-    tfLabel,
-    points: candles.length,
-    last: last.c,
-    hi,
-    lo,
-    deltaPct,
-    volSum: vol ? volSum : null
-  };
-
-  const buffer = renderCandles({ candles, meta });
-
-  const filename = 'adrian_candles.png';
-  const out = { ts: now, buffer, filename, meta };
-
-  _cache[key] = out;
-
-  if (DEBUG) console.log(`[ADRIAN_CHART] rendered ${filename} candles=${candles.length} url=${used?.url || ''}`);
-
+  out.sort((a, b) => a.t - b.t);
   return out;
 }
 
-/**
- * Back-compat: returns an attachment URL + the file buffer.
- * You must send `files: [{ attachment: buffer, name: filename }]` with your message,
- * and set embed image to `attachment://filename`.
- */
-async function getAdrianChartUrl(opts = {}) {
-  const img = await getAdrianChartImage(opts);
+function computeMeta(candles) {
+  const n = candles.length;
+  if (n < 5) throw new Error('Not enough candle points');
+
+  const first = candles[0];
+  const last = candles[n - 1];
+  const lastPrice = last.c;
+  const deltaPct = ((last.c - first.c) / (first.c || 1)) * 100;
+
+  let hi = -Infinity;
+  let lo = Infinity;
+  let volSum = 0;
+
+  for (const c of candles) {
+    hi = Math.max(hi, c.h);
+    lo = Math.min(lo, c.l);
+    if (Number.isFinite(c.v)) volSum += c.v;
+  }
+
+  if (!Number.isFinite(hi)) hi = lastPrice;
+  if (!Number.isFinite(lo)) lo = lastPrice;
+
   return {
-    ts: img.ts,
-    url: `attachment://${img.filename}`,
-    file: { attachment: img.buffer, name: img.filename },
-    meta: img.meta
+    last: lastPrice,
+    lastPrice,
+    deltaPct,
+    hi,
+    high: hi,
+    lo,
+    low: lo,
+    volSum,
+    volumeSum: volSum,
+    startTs: first.t,
+    endTs: last.t,
+    points: n,
+    poolWeb: `https://www.geckoterminal.com/${encodeURIComponent(ADRIAN_GT_NETWORK)}/pools/${encodeURIComponent(ADRIAN_GT_POOL_ID)}`,
+    poolApi: `https://api.geckoterminal.com/api/v2/networks/${encodeURIComponent(ADRIAN_GT_NETWORK)}/pools/${encodeURIComponent(ADRIAN_GT_POOL_ID)}`
   };
 }
 
-module.exports = { getAdrianChartImage, getAdrianChartUrl };
+// Draw candles + 3D overlay lines
+function renderCandlesPng(candles, meta) {
+  if (!createCanvas) throw new Error('Canvas library not available (install @napi-rs/canvas)');
 
+  const canvas = createCanvas(CHART_W, CHART_H);
+  const ctx = canvas.getContext('2d');
+
+  // Layout
+  const padL = 72;
+  const padR = 24;
+  const padT = 56;
+  const padB = SHOW_VOLUME ? 92 : 64;
+
+  const plotW = CHART_W - padL - padR;
+  const plotH = CHART_H - padT - padB;
+
+  const volH = SHOW_VOLUME ? Math.floor(plotH * 0.22) : 0;
+  const priceH = plotH - volH - (SHOW_VOLUME ? 16 : 0);
+
+  const priceTop = padT;
+  const priceBot = padT + priceH;
+
+  const volTop = SHOW_VOLUME ? (priceBot + 16) : 0;
+  const volBot = SHOW_VOLUME ? (padT + plotH) : 0;
+
+  // Background
+  ctx.fillStyle = BG;
+  ctx.fillRect(0, 0, CHART_W, CHART_H);
+
+  // Title
+  ctx.fillStyle = TEXT;
+  ctx.font = '700 20px sans-serif';
+  ctx.fillText('🕶️ $ADRIAN Candles — 3D Mode', padL, 28);
+
+  // Subtitle
+  const subtitle = `${ADRIAN_GT_NETWORK} • ${candles.length} candles • Δ ${meta.deltaPct >= 0 ? '+' : ''}${meta.deltaPct.toFixed(2)}%`;
+  ctx.fillStyle = MUTED;
+  ctx.font = '500 13px sans-serif';
+  ctx.fillText(subtitle, padL, 46);
+
+  // Legend
+  ctx.font = '600 13px sans-serif';
+  ctx.fillStyle = BLUE;
+  ctx.fillText('🟦 up / bought', padL + 420, 46);
+  ctx.fillStyle = RED;
+  ctx.fillText('🟥 down / sold', padL + 540, 46);
+  ctx.fillStyle = MUTED;
+  ctx.fillText('• overlay lines: 🟥 offset + 🟦 main', padL + 690, 46);
+
+  // Price scale with padding
+  const hi = Number(meta.hi);
+  const lo = Number(meta.lo);
+  const pad = (hi - lo) * 0.04 || (hi * 0.02) || 0.0000001;
+  const yMax = hi + pad;
+  const yMin = Math.max(0, lo - pad);
+
+  const yFor = (price) => {
+    const p = Number(price);
+    const t = (p - yMin) / (yMax - yMin || 1);
+    return priceBot - t * (priceH || 1);
+  };
+
+  // Grid (price)
+  ctx.strokeStyle = GRID;
+  ctx.lineWidth = 1;
+
+  const yTicks = 6;
+  for (let i = 0; i <= yTicks; i++) {
+    const yy = priceTop + (priceH * i) / yTicks;
+    ctx.beginPath();
+    ctx.moveTo(padL, yy);
+    ctx.lineTo(padL + plotW, yy);
+    ctx.stroke();
+  }
+
+  // Y labels
+  ctx.fillStyle = MUTED;
+  ctx.font = '500 12px sans-serif';
+  for (let i = 0; i <= yTicks; i++) {
+    const p = yMax - ((yMax - yMin) * i) / yTicks;
+    const yy = priceTop + (priceH * i) / yTicks;
+    const label = p >= 1 ? p.toFixed(4) : p.toFixed(8);
+    ctx.fillText(`$${label}`, 10, yy + 4);
+  }
+
+  // X ticks
+  const n = candles.length;
+  const stepX = plotW / Math.max(1, n);
+  const candleW = clamp(stepX * 0.7, 3, 16);
+
+  const xFor = (idx) => padL + idx * stepX + stepX / 2;
+
+  // X labels (6 ticks)
+  const xTicks = 6;
+  ctx.fillStyle = MUTED;
+  ctx.font = '500 12px sans-serif';
+  for (let i = 0; i <= xTicks; i++) {
+    const idx = Math.round((n - 1) * (i / xTicks));
+    const c = candles[idx];
+    const d = new Date(c.t * 1000);
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    const label = `${hh}:${mm}`;
+    const xx = xFor(idx);
+    // vertical grid
+    ctx.strokeStyle = GRID;
+    ctx.beginPath();
+    ctx.moveTo(xx, priceTop);
+    ctx.lineTo(xx, priceBot);
+    ctx.stroke();
+    ctx.fillStyle = MUTED;
+    ctx.fillText(label, xx - 18, padT + plotH + 18);
+  }
+
+  // Candles
+  for (let i = 0; i < n; i++) {
+    const c = candles[i];
+    const xx = xFor(i);
+    const yO = yFor(c.o);
+    const yC = yFor(c.c);
+    const yH = yFor(c.h);
+    const yL = yFor(c.l);
+
+    const up = c.c >= c.o;
+    const wickColor = up ? BLUE : RED;
+    const bodyColor = up ? BLUE_FILL : RED_FILL;
+    const bodyStroke = up ? BLUE : RED;
+
+    // wick
+    ctx.strokeStyle = wickColor;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(xx, yH);
+    ctx.lineTo(xx, yL);
+    ctx.stroke();
+
+    // body
+    const top = Math.min(yO, yC);
+    const bot = Math.max(yO, yC);
+    const hBody = Math.max(2, bot - top);
+
+    ctx.fillStyle = bodyColor;
+    ctx.fillRect(xx - candleW / 2, top, candleW, hBody);
+
+    ctx.strokeStyle = bodyStroke;
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(xx - candleW / 2, top, candleW, hBody);
+  }
+
+  // Volume bars
+  if (SHOW_VOLUME) {
+    // grid
+    ctx.strokeStyle = GRID;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(padL, volTop);
+    ctx.lineTo(padL + plotW, volTop);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(padL, volBot);
+    ctx.lineTo(padL + plotW, volBot);
+    ctx.stroke();
+
+    const maxV = candles.reduce((m, c) => Math.max(m, Number.isFinite(c.v) ? c.v : 0), 0) || 1;
+    const vFor = (v) => {
+      const t = (v || 0) / maxV;
+      return volBot - t * volH;
+    };
+
+    ctx.fillStyle = MUTED;
+    ctx.font = '600 12px sans-serif';
+    ctx.fillText('Volume', padL, volTop - 6);
+
+    for (let i = 0; i < n; i++) {
+      const c = candles[i];
+      const v = Number.isFinite(c.v) ? c.v : 0;
+      const xx = xFor(i);
+      const yy = vFor(v);
+      const up = c.c >= c.o;
+      ctx.fillStyle = up ? 'rgba(0,140,255,0.35)' : 'rgba(255,0,0,0.25)';
+      ctx.fillRect(xx - candleW / 2, yy, candleW, volBot - yy);
+    }
+  }
+
+  // 3D Overlay Lines (close series)
+  // draw red offset first, then blue main line
+  const drawLine = (offsetX, offsetY, stroke, width) => {
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = width;
+    ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const c = candles[i];
+      const xx = xFor(i) + offsetX;
+      const yy = yFor(c.c) + offsetY;
+      if (i === 0) ctx.moveTo(xx, yy);
+      else ctx.lineTo(xx, yy);
+    }
+    ctx.stroke();
+  };
+
+  drawLine(2, 2, 'rgba(255,0,0,0.55)', 3.5); // red offset
+  drawLine(0, 0, 'rgba(0,140,255,0.95)', 3.5); // blue main
+
+  // Footer info in-image (small)
+  ctx.fillStyle = MUTED;
+  ctx.font = '600 12px sans-serif';
+  const lastStr = fmtUsd(meta.last, meta.last >= 1 ? 4 : 8);
+  const hiStr = fmtUsd(meta.hi, meta.hi >= 1 ? 4 : 8);
+  const loStr = fmtUsd(meta.lo, meta.lo >= 1 ? 4 : 8);
+  const volStr = fmtVol(meta.volSum);
+  const dStr = `${meta.deltaPct >= 0 ? '+' : ''}${meta.deltaPct.toFixed(2)}%`;
+  ctx.fillText(`Last ${lastStr} • Δ ${dStr} • Hi ${hiStr} • Lo ${loStr} • Vol ${volStr}`, padL, CHART_H - 18);
+
+  const buf = canvas.toBuffer('image/png');
+  return buf;
+}
+
+// ----------------- Public API -----------------
+async function getAdrianChartUrl(opts = {}) {
+  const points = Math.max(20, Math.min(240, Number(opts.points || DEFAULT_POINTS)));
+  const aggMin = Math.max(1, Math.min(240, Number(opts.aggMin || CANDLE_AGG_MIN)));
+
+  const list = await fetchOhlcvList({ points, aggMin });
+  const candles = normalizeOhlcv(list, points);
+
+  const meta = computeMeta(candles);
+  const png = renderCandlesPng(candles, meta);
+
+  const name = (opts.name || 'adrian_candles.png').trim();
+  return {
+    url: `attachment://${name}`,
+    file: { attachment: png, name },
+    meta
+  };
+}
+
+module.exports = { getAdrianChartUrl };
