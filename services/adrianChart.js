@@ -1,16 +1,45 @@
 // services/adrianChart.js
 const fetch = require('node-fetch');
 
+/**
+ * ADRIAN Chart URL builder (GeckoTerminal OHLCV -> QuickChart image)
+ * ✅ Enhancements (keeps your “3D glasses” vibe):
+ * - Dark “cinema” background + neon grid
+ * - 3D glasses effect: TWO lines (cyan + red) with a tiny offset (visual pop)
+ * - Optional volume bars (on by default)
+ * - Better subtitle/meta: last price, hi/lo, range %, points, timeframe
+ * - Stronger GT OHLCV probing + pool-id fallback (with/without 0x)
+ * - Cache per timeframe config (not just one global url)
+ *
+ * Optional envs:
+ *   ADRIAN_GT_NETWORK=base
+ *   ADRIAN_GT_POOL_ID=0x...
+ *   ADRIAN_CHART_POINTS=96
+ *   ADRIAN_CHART_CACHE_MS=60000
+ *
+ * NEW (optional):
+ *   ADRIAN_CHART_TIMEFRAME=minute|hour|day      (default minute)
+ *   ADRIAN_CHART_AGGREGATE=15                  (default 15 for minute, 1 for hour, 1 for day)
+ *   ADRIAN_CHART_SHOW_VOLUME=1|0               (default 1)
+ *   ADRIAN_CHART_THEME=3d                      (default 3d)  // future-proof
+ */
+
 const GT_NETWORK = (process.env.ADRIAN_GT_NETWORK || 'base').trim().toLowerCase();
-const GT_POOL_ID =
+
+// NOTE: GeckoTerminal pool id can be either 0x.. or without. We’ll probe both.
+const GT_POOL_ID_RAW =
   (process.env.ADRIAN_GT_POOL_ID ||
     '0x79cdf2d48abd42872a26d1b1c92ece4245327a4837b427dc9cff5f1acc40e379'
-  ).trim().toLowerCase();
+  ).trim();
 
 const CHART_POINTS = Math.max(20, Math.min(240, Number(process.env.ADRIAN_CHART_POINTS || 96))); // 96 = last day @ 15m
 const CACHE_MS = Math.max(10_000, Number(process.env.ADRIAN_CHART_CACHE_MS || 60_000));
 
-let _cache = { ts: 0, url: null, meta: null };
+const DEFAULT_TIMEFRAME = (process.env.ADRIAN_CHART_TIMEFRAME || 'minute').trim().toLowerCase(); // minute|hour|day
+const DEFAULT_AGGREGATE = Number(process.env.ADRIAN_CHART_AGGREGATE || '') || null; // if null => pick sensible default
+const SHOW_VOLUME = String(process.env.ADRIAN_CHART_SHOW_VOLUME || '1').trim() !== '0';
+
+let _cache = Object.create(null); // key -> { ts, url, meta }
 
 function safeJsonParse(t) { try { return JSON.parse(t); } catch { return null; } }
 
@@ -20,53 +49,107 @@ async function fetchText(url) {
   return { res, txt };
 }
 
+// Pool id candidates: with/without 0x
+function poolIdCandidates(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return [];
+  const has0x = s.toLowerCase().startsWith('0x');
+  const a = has0x ? s : `0x${s}`;
+  const b = has0x ? s.slice(2) : s; // without 0x
+  // preserve original casing for URL encoding doesn't matter
+  return Array.from(new Set([a, b].filter(Boolean)));
+}
+
+function normalizeTimeframe(tf) {
+  const t = String(tf || '').trim().toLowerCase();
+  if (t === 'min' || t === 'mins' || t === 'minute' || t === 'minutes') return 'minute';
+  if (t === 'hr' || t === 'hrs' || t === 'hour' || t === 'hours') return 'hour';
+  if (t === 'day' || t === 'days') return 'day';
+  return 'minute';
+}
+
+function pickDefaultAggregate(tf) {
+  if (tf === 'hour') return 1;
+  if (tf === 'day') return 1;
+  return 15; // minute
+}
+
+function fmtUSD(x) {
+  const n = Number(x);
+  if (!isFinite(n)) return '?';
+  if (n >= 1) return n.toFixed(4);
+  return n.toFixed(8);
+}
+
+function fmtNum(x) {
+  const n = Number(x);
+  if (!isFinite(n)) return '?';
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1) + 'M';
+  if (n >= 1_000) return (n / 1_000).toFixed(n >= 10_000 ? 0 : 1) + 'k';
+  return String(Math.round(n));
+}
+
+function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
+
 // GeckoTerminal API has had a couple different OHLCV URL shapes historically.
 // We probe a few common ones and parse whatever matches.
-async function fetchOhlcvList() {
-  const base = `https://api.geckoterminal.com/api/v2/networks/${encodeURIComponent(GT_NETWORK)}/pools/${encodeURIComponent(GT_POOL_ID)}`;
+async function fetchOhlcvList({ timeframe, aggregate, limit }) {
+  const tf = normalizeTimeframe(timeframe);
+  const agg = Number(aggregate) || pickDefaultAggregate(tf);
+  const lim = clamp(Number(limit) || CHART_POINTS, 20, 240);
 
-  const candidates = [
-    // Common pattern A
-    `${base}/ohlcv/day?aggregate=15&limit=${CHART_POINTS}`,
-    `${base}/ohlcv/minute?aggregate=15&limit=${CHART_POINTS}`,
-    `${base}/ohlcv/hour?aggregate=1&limit=${Math.min(CHART_POINTS, 168)}`,
-
-    // Common pattern B (some deployments)
-    `${base}/ohlcv?timeframe=day&aggregate=15&limit=${CHART_POINTS}`,
-    `${base}/ohlcv?timeframe=minute&aggregate=15&limit=${CHART_POINTS}`,
-    `${base}/ohlcv?timeframe=hour&aggregate=1&limit=${Math.min(CHART_POINTS, 168)}`
-  ];
+  const pools = poolIdCandidates(GT_POOL_ID_RAW);
 
   let lastErr = null;
 
-  for (const url of candidates) {
-    try {
-      const { res, txt } = await fetchText(url);
-      if (!res.ok) {
-        lastErr = new Error(`GT HTTP ${res.status} for ${url}: ${txt.slice(0, 120)}`);
-        continue;
+  for (const poolId of pools) {
+    const base = `https://api.geckoterminal.com/api/v2/networks/${encodeURIComponent(GT_NETWORK)}/pools/${encodeURIComponent(poolId)}`;
+
+    const candidates = [
+      // Pattern A (common)
+      `${base}/ohlcv/${tf}?aggregate=${encodeURIComponent(String(agg))}&limit=${encodeURIComponent(String(lim))}`,
+      // Some old endpoints used "minute/hour/day" pluralizations - try common variants
+      tf === 'minute' ? `${base}/ohlcv/minute?aggregate=${encodeURIComponent(String(agg))}&limit=${encodeURIComponent(String(lim))}` : null,
+      tf === 'hour' ? `${base}/ohlcv/hour?aggregate=${encodeURIComponent(String(agg))}&limit=${encodeURIComponent(String(Math.min(lim, 168)))}` : null,
+      tf === 'day' ? `${base}/ohlcv/day?aggregate=${encodeURIComponent(String(agg))}&limit=${encodeURIComponent(String(Math.min(lim, 365)))}` : null,
+
+      // Pattern B (some deployments)
+      `${base}/ohlcv?timeframe=${encodeURIComponent(tf)}&aggregate=${encodeURIComponent(String(agg))}&limit=${encodeURIComponent(String(lim))}`,
+
+      // Extra fallbacks: if minute fails, try hour; if hour fails, try day
+      tf === 'minute' ? `${base}/ohlcv/hour?aggregate=1&limit=${encodeURIComponent(String(Math.min(lim, 168)))}` : null,
+      tf === 'hour' ? `${base}/ohlcv/day?aggregate=1&limit=${encodeURIComponent(String(Math.min(lim, 180)))}` : null
+    ].filter(Boolean);
+
+    for (const url of candidates) {
+      try {
+        const { res, txt } = await fetchText(url);
+        if (!res.ok) {
+          lastErr = new Error(`GT HTTP ${res.status} for ${url}: ${txt.slice(0, 120)}`);
+          continue;
+        }
+
+        const json = safeJsonParse(txt);
+        if (!json) { lastErr = new Error(`GT non-json for ${url}`); continue; }
+
+        // Typical: json.data.attributes.ohlcv_list = [[ts, o, h, l, c, v], ...]
+        const list =
+          json?.data?.attributes?.ohlcv_list ||
+          json?.data?.attributes?.ohlcvList ||
+          json?.data?.ohlcv_list ||
+          json?.ohlcv_list ||
+          null;
+
+        if (Array.isArray(list) && list.length) return { list, used: { poolId, url, tf, agg } };
+
+        // Fallback: discover any array-of-arrays shaped like OHLCV
+        const maybe = findArrayOfArrays(json);
+        if (maybe?.length) return { list: maybe, used: { poolId, url, tf, agg } };
+
+        lastErr = new Error(`GT response had no ohlcv_list for ${url}`);
+      } catch (e) {
+        lastErr = e;
       }
-
-      const json = safeJsonParse(txt);
-      if (!json) { lastErr = new Error(`GT non-json for ${url}`); continue; }
-
-      // Typical: json.data.attributes.ohlcv_list = [[ts, o, h, l, c, v], ...]
-      const list =
-        json?.data?.attributes?.ohlcv_list ||
-        json?.data?.attributes?.ohlcvList ||
-        json?.data?.ohlcv_list ||
-        json?.ohlcv_list ||
-        null;
-
-      if (Array.isArray(list) && list.length) return list;
-
-      // Fallback: try to discover any array-of-arrays shaped like OHLCV
-      const maybe = findArrayOfArrays(json);
-      if (maybe?.length) return maybe;
-
-      lastErr = new Error(`GT response had no ohlcv_list for ${url}`);
-    } catch (e) {
-      lastErr = e;
     }
   }
 
@@ -74,9 +157,10 @@ async function fetchOhlcvList() {
 }
 
 function findArrayOfArrays(obj) {
-  // very small, safe, depth-limited search for an array-of-arrays where inner length >= 5
+  // small, safe, depth-limited search for an array-of-arrays where inner length >= 5
   const seen = new Set();
   const stack = [{ v: obj, d: 0 }];
+
   while (stack.length) {
     const { v, d } = stack.pop();
     if (!v || typeof v !== 'object') continue;
@@ -88,67 +172,164 @@ function findArrayOfArrays(obj) {
       return v;
     }
 
-    for (const k of Object.keys(v)) {
-      stack.push({ v: v[k], d: d + 1 });
-    }
+    for (const k of Object.keys(v)) stack.push({ v: v[k], d: d + 1 });
   }
   return null;
 }
 
-function buildQuickChartUrl(points, { title = '$ADRIAN', subtitle = 'GeckoTerminal' } = {}) {
-  // points: [{ t: unixSeconds, c: close }]
+function buildQuickChartUrl(points, { subtitle, theme = '3d', showVolume = true } = {}) {
+  // points: [{ t: unixSeconds, c: close, v?: volume }]
   const labels = points.map(p => new Date(p.t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
-  const data = points.map(p => Number(p.c));
+  const closes = points.map(p => Number(p.c));
+  const volumes = points.map(p => Number(p.v || 0));
+
+  // 3D-glasses vibe: cyan + red “ghost” line with a tiny offset
+  const offsetFactor = 1.0005; // tiny bump so the red line sits “off” the cyan (visual pop)
+  const closesRed = closes.map(v => (Number.isFinite(v) ? v * offsetFactor : v));
 
   const cfg = {
     type: 'line',
     data: {
       labels,
-      datasets: [{
-        label: title,
-        data,
-        fill: false,
-        pointRadius: 0,
-        borderWidth: 2,
-        tension: 0.25
-      }]
+      datasets: [
+        ...(showVolume ? [{
+          type: 'bar',
+          label: 'Volume',
+          data: volumes,
+          yAxisID: 'yVol',
+          borderWidth: 0,
+          // keep bars subtle; voice channel “3D” style stays on the price line
+          backgroundColor: 'rgba(255,255,255,0.06)',
+          order: 0
+        }] : []),
+
+        // Cyan main line (right lens)
+        {
+          label: '$ADRIAN',
+          data: closes,
+          fill: false,
+          pointRadius: 0,
+          borderWidth: 2,
+          tension: 0.28,
+          borderColor: 'rgba(0, 255, 255, 0.95)',
+          order: 2
+        },
+        // Red ghost line (left lens)
+        {
+          label: '$ADRIAN (3D)',
+          data: closesRed,
+          fill: false,
+          pointRadius: 0,
+          borderWidth: 2,
+          tension: 0.28,
+          borderColor: 'rgba(255, 60, 90, 0.75)',
+          order: 1
+        }
+      ]
     },
     options: {
       responsive: true,
+      maintainAspectRatio: false,
+      layout: { padding: { top: 16, right: 18, bottom: 10, left: 12 } },
       plugins: {
         legend: { display: false },
-        title: { display: true, text: `${title} price (USD)` },
-        subtitle: { display: true, text: subtitle }
+        title: {
+          display: true,
+          text: '$ADRIAN (USD)',
+          color: 'rgba(255,255,255,0.92)',
+          font: { size: 20, weight: 'bold' }
+        },
+        subtitle: {
+          display: true,
+          text: subtitle || '',
+          color: 'rgba(180,200,255,0.85)',
+          font: { size: 12 }
+        }
       },
       scales: {
-        x: { ticks: { maxTicksLimit: 6 } },
-        y: { ticks: { maxTicksLimit: 6 } }
+        x: {
+          ticks: {
+            maxTicksLimit: 7,
+            color: 'rgba(210,220,255,0.72)',
+            font: { size: 10 }
+          },
+          grid: { color: 'rgba(255,255,255,0.06)' }
+        },
+        y: {
+          ticks: {
+            maxTicksLimit: 7,
+            color: 'rgba(210,220,255,0.72)',
+            font: { size: 10 },
+            callback: (v) => '$' + v
+          },
+          grid: { color: 'rgba(255,255,255,0.07)' }
+        },
+        ...(showVolume ? {
+          yVol: {
+            position: 'right',
+            ticks: {
+              maxTicksLimit: 5,
+              color: 'rgba(210,220,255,0.35)',
+              font: { size: 9 },
+              callback: (v) => fmtNum(v)
+            },
+            grid: { drawOnChartArea: false }
+          }
+        } : {})
+      },
+      elements: {
+        line: { borderJoinStyle: 'round' }
       }
     }
   };
 
-  // QuickChart renders chart from encoded config
   const encoded = encodeURIComponent(JSON.stringify(cfg));
-  return `https://quickchart.io/chart?width=900&height=450&format=png&c=${encoded}`;
+  // backgroundColor param is supported by QuickChart; use deep dark for “3D glasses”
+  return `https://quickchart.io/chart?width=960&height=500&format=png&backgroundColor=${encodeURIComponent(
+    '0b0d12'
+  )}&c=${encoded}`;
 }
 
-async function getAdrianChartUrl() {
-  const now = Date.now();
-  if (_cache.url && (now - _cache.ts) < CACHE_MS) return _cache;
+function makeCacheKey({ timeframe, aggregate, points, showVolume }) {
+  return [
+    'net=' + GT_NETWORK,
+    'pool=' + String(GT_POOL_ID_RAW || '').toLowerCase(),
+    'tf=' + normalizeTimeframe(timeframe),
+    'agg=' + String(Number(aggregate) || pickDefaultAggregate(normalizeTimeframe(timeframe))),
+    'pts=' + String(points),
+    'vol=' + (showVolume ? '1' : '0')
+  ].join('|');
+}
 
-  const list = await fetchOhlcvList();
+async function getAdrianChartUrl(opts = {}) {
+  const timeframe = normalizeTimeframe(opts.timeframe || DEFAULT_TIMEFRAME);
+  const aggregate = Number(opts.aggregate) || DEFAULT_AGGREGATE || pickDefaultAggregate(timeframe);
+  const points = clamp(Number(opts.points) || CHART_POINTS, 20, 240);
+  const showVolume = typeof opts.showVolume === 'boolean' ? opts.showVolume : SHOW_VOLUME;
+
+  const key = makeCacheKey({ timeframe, aggregate, points, showVolume });
+
+  const now = Date.now();
+  const cached = _cache[key];
+  if (cached?.url && (now - cached.ts) < CACHE_MS) return cached;
+
+  const { list, used } = await fetchOhlcvList({ timeframe, aggregate, limit: points });
 
   // Normalize to points. Expect [ts, o, h, l, c, v] but we’ll be flexible.
   const pts = [];
-  for (const row of list.slice(0, CHART_POINTS)) {
+  for (const row of list.slice(0, points)) {
     if (!Array.isArray(row) || row.length < 5) continue;
+
     const ts = Number(row[0]);
-    const c  = Number(row[4]); // close
+    const c = Number(row[4]); // close
+    const v = Number(row[5] ?? 0); // volume (if present)
+
     if (!Number.isFinite(ts) || !Number.isFinite(c)) continue;
 
     // GT timestamps are usually seconds; if ms, convert
     const tSec = ts > 2_000_000_000_000 ? Math.floor(ts / 1000) : ts;
-    pts.push({ t: tSec, c });
+
+    pts.push({ t: tSec, c, v: Number.isFinite(v) ? v : 0 });
   }
 
   // Ensure ascending by time
@@ -156,15 +337,56 @@ async function getAdrianChartUrl() {
 
   if (pts.length < 5) throw new Error('Not enough chart points');
 
-  const last = pts[pts.length - 1];
   const first = pts[0];
-  const deltaPct = ((last.c - first.c) / first.c) * 100;
-  const subtitle = `${GT_NETWORK} pool • ${pts.length} pts • Δ ${deltaPct >= 0 ? '+' : ''}${deltaPct.toFixed(2)}%`;
+  const last = pts[pts.length - 1];
 
-  const url = buildQuickChartUrl(pts, { title: '$ADRIAN', subtitle });
+  let hi = -Infinity, lo = Infinity, volSum = 0;
+  for (const p of pts) {
+    if (Number.isFinite(p.c)) {
+      if (p.c > hi) hi = p.c;
+      if (p.c < lo) lo = p.c;
+    }
+    if (Number.isFinite(p.v)) volSum += p.v;
+  }
 
-  _cache = { ts: now, url, meta: { lastPrice: last.c, deltaPct } };
-  return _cache;
+  const deltaPct = first.c ? ((last.c - first.c) / first.c) * 100 : 0;
+  const rangePct = lo ? ((hi - lo) / lo) * 100 : 0;
+
+  const tfLabel =
+    timeframe === 'minute' ? `${aggregate}m` :
+    timeframe === 'hour' ? `${aggregate}h` :
+    `${aggregate}d`;
+
+  const subtitle = [
+    `${GT_NETWORK} • ${tfLabel} • ${pts.length} pts`,
+    `Last $${fmtUSD(last.c)}`,
+    `Hi $${fmtUSD(hi)} / Lo $${fmtUSD(lo)} (R ${rangePct >= 0 ? '+' : ''}${rangePct.toFixed(2)}%)`,
+    `Δ ${deltaPct >= 0 ? '+' : ''}${deltaPct.toFixed(2)}%`,
+    showVolume ? `Vol ${fmtNum(volSum)}` : null
+  ].filter(Boolean).join('  |  ');
+
+  const url = buildQuickChartUrl(pts, { subtitle, theme: '3d', showVolume });
+
+  const out = {
+    ts: now,
+    url,
+    meta: {
+      network: GT_NETWORK,
+      poolIdUsed: used?.poolId || null,
+      timeframe,
+      aggregate,
+      points: pts.length,
+      lastPrice: last.c,
+      deltaPct,
+      hi,
+      lo,
+      rangePct,
+      volSum: showVolume ? volSum : null
+    }
+  };
+
+  _cache[key] = out;
+  return out;
 }
 
 module.exports = { getAdrianChartUrl };
