@@ -16,7 +16,7 @@ const fetch = require("node-fetch");
  *
  *   CHANNEL_TICKER_FORMAT=auto|pretty|safe
  *     - auto   (default): pretty for voice, safe for text
- *     - pretty: force pretty everywhere (text channels will still get sanitized by Discord)
+ *     - pretty: force pretty everywhere (text channels will still get sanitized by Discord).
  *     - safe  : force text-safe everywhere
  *
  *   CHANNEL_TICKER_BASE_NAME=ticker      (optional override, keeps channel name clean)
