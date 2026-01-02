@@ -3,26 +3,27 @@ const fetch = require("node-fetch");
 
 /**
  * Channel Name Price Ticker
- * - Updates one or more channel NAMES to include a live price (ex: ADRIAN).
- * - This is the only real way to show a “ticker” in the left channel list.
  *
- * Uses same source strategy style as presenceTicker:
- *   Coingecko -> CoinCap -> GeckoTerminal (mapped) -> Dexscreener (mapped)
+ * Key reality:
+ * - TEXT channel names are sanitized by Discord (no $, %, . and spaces become hyphens)
+ * - VOICE channel names support richer characters and look much better
  *
  * ENV:
  *   CHANNEL_TICKER_ENABLED=true|false
  *   CHANNEL_TICKER_CHANNEL_IDS=123,456
  *   CHANNEL_TICKER_ASSET=adrian
  *   CHANNEL_TICKER_INTERVAL_MS=300000   (min 2m; recommend 5m+)
- *   CHANNEL_TICKER_SEPARATOR=" • "      (default " • ")
- *   CHANNEL_TICKER_PREFIX="📈 "         (default "📈 ")
  *
- * Reuse your existing maps if you already have them:
- *   TICKER_GT_MAP="adrian=base:POOLID"
- *   TICKER_DS_MAP="adrian=base:PAIRADDR"
- * Optional centralized IDs:
- *   TICKER_CG_IDS="adrian=coingecko-id"
- *   TICKER_CC_IDS="adrian=coincap-id"
+ *   CHANNEL_TICKER_FORMAT=auto|pretty|safe
+ *     - auto   (default): pretty for voice, safe for text
+ *     - pretty: force pretty everywhere (text channels will still get sanitized by Discord)
+ *     - safe  : force text-safe everywhere
+ *
+ *   CHANNEL_TICKER_BASE_NAME=ticker      (optional override, keeps channel name clean)
+ *   CHANNEL_TICKER_PREFIX=📈             (default 📈)
+ *
+ * Maps:
+ *   TICKER_GT_MAP=adrian=base:POOLID;btc=ethereum:0xPOOL
  */
 
 let timer = null;
@@ -33,17 +34,18 @@ const CHANNEL_IDS = (process.env.CHANNEL_TICKER_CHANNEL_IDS || "")
   .map((s) => s.trim())
   .filter(Boolean);
 
-const ASSET = String(process.env.CHANNEL_TICKER_ASSET || "adrian")
-  .trim()
-  .toLowerCase();
+const ASSET = String(process.env.CHANNEL_TICKER_ASSET || "adrian").trim().toLowerCase();
 
 const INTERVAL = Math.max(
-  120000, // hard minimum 2 minutes
-  Number(process.env.CHANNEL_TICKER_INTERVAL_MS || "300000") // default 5m
+  120000,
+  Number(process.env.CHANNEL_TICKER_INTERVAL_MS || "300000")
 );
 
-const SEPARATOR = String(process.env.CHANNEL_TICKER_SEPARATOR || " • ");
-const PREFIX = String(process.env.CHANNEL_TICKER_PREFIX || "📈 ");
+const FORMAT = String(process.env.CHANNEL_TICKER_FORMAT || "auto").trim().toLowerCase(); // auto|pretty|safe
+const BASE_OVERRIDE = String(process.env.CHANNEL_TICKER_BASE_NAME || "").trim(); // optional
+const PREFIX = String(process.env.CHANNEL_TICKER_PREFIX || "📈").trim();
+
+const DEBUG = String(process.env.CHANNEL_TICKER_DEBUG || "").trim() === "1";
 
 const SOURCE_LIST = (
   process.env.TICKER_SOURCES ||
@@ -56,9 +58,9 @@ const SOURCE_LIST = (
 
 const WARN_DEBOUNCE_MS = Math.max(
   30000,
-  Number(process.env.CHANNEL_TICKER_WARN_DEBOUNCE_MS || 900000) // 15m
+  Number(process.env.CHANNEL_TICKER_WARN_DEBOUNCE_MS || 900000)
 );
-const _warnMemo = new Map(); // key -> ts
+const _warnMemo = new Map();
 
 function warnDebounced(key, msg) {
   const t = Date.now();
@@ -69,16 +71,16 @@ function warnDebounced(key, msg) {
   }
 }
 
-// --- helpers (format) ---
+// ---------------- format helpers ----------------
 function shortUSD(n) {
   const x = Number(n);
   if (!isFinite(x)) return "?";
   if (x >= 1_000_000) return (x / 1_000_000).toFixed(x >= 10_000_000 ? 0 : 1) + "M";
   if (x >= 1_000) return (x / 1_000).toFixed(x >= 10_000 ? 0 : 1) + "k";
   if (x >= 100) return x.toFixed(2);
-  if (x >= 1) return x.toFixed(2);
-  if (x >= 0.01) return x.toFixed(4);
-  return x.toFixed(6);
+  if (x >= 1) return x.toFixed(4);      // a bit more precision for small caps
+  if (x >= 0.01) return x.toFixed(6);
+  return x.toFixed(8);
 }
 
 function fmtPct(n) {
@@ -96,21 +98,49 @@ function trendArrow(pct) {
   return "↔";
 }
 
-// --- map env parsing (reuse your existing TICKER_GT_MAP / TICKER_DS_MAP) ---
-function parseIdMapEnv(envVal) {
-  // "adrian=some-id;btc=bitcoin"
-  const map = Object.create(null);
-  if (!envVal) return map;
-  for (const part of envVal.split(";")) {
-    const p = part.trim();
-    if (!p) continue;
-    const [sym, id] = p.split("=");
-    if (!sym || !id) continue;
-    map[sym.trim().toLowerCase()] = id.trim();
+/**
+ * TEXT channels get sanitized. Build a “safe” string that survives:
+ * - remove $, %, .
+ * - use hyphen as decimal separator
+ * - keep it short
+ */
+function toTextSafe(sym, price, pct) {
+  const symL = String(sym || "").toLowerCase();
+  const p = Number(price);
+  const pctN = Number(pct);
+
+  // represent price as fixed 8 decimals but with "-" instead of "."
+  let priceSafe = "?";
+  if (isFinite(p)) {
+    // keep leading 0-000038 style (good for tiny tokens)
+    const fixed = p < 1 ? p.toFixed(8) : p.toFixed(4);
+    // "0.00003800" -> "0-00003800"
+    priceSafe = fixed.replace(".", "-").replace(/0+$/g, ""); // trim trailing zeros
+    if (priceSafe.endsWith("-")) priceSafe = priceSafe.slice(0, -1);
   }
-  return map;
+
+  let pctSafe = "";
+  if (isFinite(pctN)) {
+    const sign = pctN > 0 ? "p" : pctN < 0 ? "m" : "";
+    const abs = Math.abs(pctN);
+    const fixed = abs.toFixed(abs >= 1 ? 1 : 2).replace(".", "-");
+    pctSafe = `${sign}${fixed}`; // p1-2 = +1.2, m0-33 = -0.33
+  }
+
+  const arrow = trendArrow(pctN);
+  return pctSafe ? `${symL}-${priceSafe}-${arrow}-${pctSafe}` : `${symL}-${priceSafe}-${arrow}`;
 }
 
+function buildPretty(sym, row) {
+  const symU = String(sym || "").toUpperCase();
+  const price = row?.price;
+  const pct = row?.change24h;
+  const arrow = trendArrow(pct);
+  const pctS = fmtPct(pct);
+  return `${symU} $${shortUSD(price)} ${arrow}${pctS ? " " + pctS : ""}`.trim();
+}
+
+// ---------------- env map parsing ----------------
 function parseMapEnv(envVal) {
   // "adrian=base:POOLID;eth=ethereum:0xPOOL"
   const map = Object.create(null);
@@ -127,133 +157,110 @@ function parseMapEnv(envVal) {
   return map;
 }
 
-const CG_IDS_BASE = { btc: "bitcoin", eth: "ethereum", sol: "solana", ape: "apecoin" };
-const CC_IDS_BASE = { btc: "bitcoin", eth: "ethereum", sol: "solana", ape: "apecoin" };
-
-const CG_IDS = { ...CG_IDS_BASE, ...parseIdMapEnv(process.env.TICKER_CG_IDS || "") };
-const CC_IDS = { ...CC_IDS_BASE, ...parseIdMapEnv(process.env.TICKER_CC_IDS || "") };
-
 const GT_MAP = parseMapEnv(process.env.TICKER_GT_MAP || "");
-const DS_MAP = parseMapEnv(process.env.TICKER_DS_MAP || "");
 
-// --- sources ---
-async function fetchCoingecko(sym) {
-  const id = CG_IDS[sym];
-  if (!id) return null;
-  const url = `https://api.coingecko.com/api/v3/simple/price?ids=${encodeURIComponent(
-    id
-  )}&vs_currencies=usd&include_24hr_change=true`;
-  const res = await fetch(url, { timeout: 10000 });
-  if (!res.ok) throw new Error(`Coingecko HTTP ${res.status}`);
-  const data = await res.json();
-  const row = data?.[id];
-  if (row && typeof row.usd === "number") {
-    return { price: row.usd, change24h: Number(row.usd_24h_change) };
-  }
-  return null;
-}
-
-async function fetchCoincap(sym) {
-  const id = CC_IDS[sym];
-  if (!id) return null;
-  const url = `https://api.coincap.io/v2/assets?ids=${encodeURIComponent(id)}`;
-  const res = await fetch(url, { timeout: 10000 });
-  if (!res.ok) throw new Error(`CoinCap HTTP ${res.status}`);
-  const data = await res.json();
-  const row = (data?.data || [])[0];
-  if (row && row.priceUsd) {
-    return { price: Number(row.priceUsd), change24h: Number(row.changePercent24Hr) };
-  }
-  return null;
-}
-
+// ---------------- GeckoTerminal fetch ----------------
 async function fetchGeckoTerminal(sym) {
   const cfg = GT_MAP[sym];
   if (!cfg) return null;
-  const url = `https://api.geckoterminal.com/api/v2/networks/${encodeURIComponent(
-    cfg.network
-  )}/pools/${encodeURIComponent(cfg.id)}`;
-  const res = await fetch(url, { timeout: 10000 });
-  if (!res.ok) return null;
-  const json = await res.json();
-  const attr = json?.data?.attributes;
-  const price =
-    Number(attr?.price_in_usd) ||
-    Number(attr?.base_token_price_usd) ||
-    Number(attr?.quote_token_price_usd) ||
-    NaN;
-  if (isFinite(price)) return { price, change24h: null };
-  return null;
-}
 
-async function fetchDexScreener(sym) {
-  const cfg = DS_MAP[sym];
-  if (!cfg) return null;
-  const url = `https://api.dexscreener.com/latest/dex/pairs/${encodeURIComponent(
-    cfg.network
-  )}/${encodeURIComponent(cfg.id)}`;
-  const res = await fetch(url, { timeout: 10000 });
-  if (!res.ok) return null;
-  const json = await res.json();
-  const pair = json?.pair || (json?.pairs && json.pairs[0]);
-  const price = Number(pair?.priceUsd);
-  if (isFinite(price)) return { price, change24h: null };
+  const candidates = [];
+  if (cfg.id) candidates.push(cfg.id);
+  if (cfg.id && cfg.id.startsWith("0x")) candidates.push(cfg.id.slice(2));
+
+  for (const id of candidates) {
+    const url = `https://api.geckoterminal.com/api/v2/networks/${encodeURIComponent(
+      cfg.network
+    )}/pools/${encodeURIComponent(id)}`;
+
+    let res;
+    try {
+      res = await fetch(url, { timeout: 10000 });
+    } catch (e) {
+      if (DEBUG) console.log(`[CHANNEL_TICKER][GT] fetch error url=${url} err=${e?.message || e}`);
+      continue;
+    }
+
+    if (!res?.ok) {
+      if (DEBUG) console.log(`[CHANNEL_TICKER][GT] HTTP ${res?.status} url=${url}`);
+      continue;
+    }
+
+    let json;
+    try {
+      json = await res.json();
+    } catch {
+      if (DEBUG) console.log(`[CHANNEL_TICKER][GT] bad json url=${url}`);
+      continue;
+    }
+
+    const attr = json?.data?.attributes;
+    const price =
+      Number(attr?.price_in_usd) ||
+      Number(attr?.base_token_price_usd) ||
+      Number(attr?.quote_token_price_usd) ||
+      NaN;
+
+    // GeckoTerminal often provides 24h change under various fields depending on endpoint,
+    // but we keep null so arrow becomes "•" unless you wire a change source.
+    if (isFinite(price)) {
+      if (DEBUG) console.log(`[CHANNEL_TICKER][GT] ok sym=${sym} price=${price} url=${url}`);
+      return { price, change24h: Number(attr?.price_change_percentage_h24) || null };
+    }
+
+    if (DEBUG) console.log(`[CHANNEL_TICKER][GT] no price fields sym=${sym} url=${url}`);
+  }
+
   return null;
 }
 
 async function getPrice(sym) {
-  const cascade = [...SOURCE_LIST];
-  for (const s of ["coingecko", "coincap", "geckoterminal", "dexscreener"]) {
-    if (!cascade.includes(s)) cascade.push(s);
+  // You said you only have GeckoTerminal, so this module uses GT for channel ticker.
+  // (Your presenceTicker handles multi-source; channel ticker kept lean & reliable.)
+  const row = await fetchGeckoTerminal(sym);
+  if (row && typeof row.price === "number" && isFinite(row.price)) return row;
+  throw new Error(`No price sources succeeded for "${sym}". Check TICKER_GT_MAP formatting.`);
+}
+
+// ---------------- channel name logic ----------------
+const baseNames = new Map();  // channelId -> baseName
+const lastApplied = new Map();
+
+function isVoiceish(ch) {
+  // djs v14: voice channels are voice-based
+  try {
+    if (typeof ch.isVoiceBased === "function") return ch.isVoiceBased();
+  } catch {}
+  // fallback: type 2 is GuildVoice (covers most common)
+  return Number(ch?.type) === 2;
+}
+
+function normalizeBaseName(name) {
+  let s = String(name || "").trim();
+
+  // Remove repeated PREFIX emojis from front (prevents 📈📈📈)
+  if (PREFIX) {
+    const escaped = PREFIX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`^(?:${escaped})+`, "u");
+    s = s.replace(re, "").trim();
   }
 
-  let lastErr = null;
-  for (const src of cascade) {
-    try {
-      let row = null;
-      if (src === "coingecko") row = await fetchCoingecko(sym);
-      if (src === "coincap") row = await fetchCoincap(sym);
-      if (src === "geckoterminal") row = await fetchGeckoTerminal(sym);
-      if (src === "dexscreener") row = await fetchDexScreener(sym);
+  // Remove common separators people use
+  s = s.replace(/^[-•|]+/, "").trim();
+  s = s.replace(/[-•|]+$/, "").trim();
 
-      if (row && typeof row.price === "number" && isFinite(row.price)) return row;
-    } catch (e) {
-      lastErr = e;
-    }
-  }
-
-  throw lastErr || new Error("No price sources succeeded");
+  // If it’s a text channel, Discord may have auto-hyphenated. Keep it simple.
+  return s || "ticker";
 }
 
-// --- channel name logic ---
-const baseNames = new Map(); // channelId -> baseName (without ticker suffix)
-const lastApplied = new Map(); // channelId -> last full name applied
-
-function stripOldTicker(name) {
-  // If we previously added: "something • ADRIAN $0.0123 ..."
-  // We try to remove suffix after our SEPARATOR if present.
-  if (!name) return "";
-  const idx = name.indexOf(SEPARATOR);
-  if (idx > -1) return name.slice(0, idx).trim();
-  return name.trim();
+function cropName(name, voiceMode) {
+  // Keep under limit with margin
+  const limit = voiceMode ? 95 : 90; // text channels get hyphenated -> can grow visually
+  if (name.length <= limit) return name;
+  return name.slice(0, limit - 1) + "…";
 }
 
-function buildSuffix(sym, row) {
-  const symU = sym.toUpperCase();
-  const price = row?.price;
-  const pct = row?.change24h;
-  const arrow = trendArrow(pct);
-  const pctS = fmtPct(pct);
-  return `${symU} $${shortUSD(price)} ${arrow}${pctS ? " " + pctS : ""}`.trim();
-}
-
-function cropName(name) {
-  // Discord channel name limit is ~100 chars. Keep a cushion.
-  if (name.length <= 98) return name;
-  return name.slice(0, 97) + "…";
-}
-
-async function updateOneChannel(client, channelId, suffix) {
+async function updateOneChannel(client, channelId, row) {
   let ch = client.channels.cache.get(channelId);
   if (!ch) {
     try {
@@ -263,27 +270,48 @@ async function updateOneChannel(client, channelId, suffix) {
       return;
     }
   }
-  if (!ch) return;
+  if (!ch || typeof ch.setName !== "function") return;
 
-  // must be a guild channel with setName
-  if (typeof ch.setName !== "function") return;
+  const voiceMode = isVoiceish(ch);
 
-  // figure out stable base name
-  if (!baseNames.has(channelId)) {
-    const base = stripOldTicker(ch.name || "");
-    baseNames.set(channelId, base || ch.name || "ticker");
+  // Base name selection
+  if (BASE_OVERRIDE) {
+    baseNames.set(channelId, normalizeBaseName(BASE_OVERRIDE));
+  } else if (!baseNames.has(channelId)) {
+    baseNames.set(channelId, normalizeBaseName(ch.name || "ticker"));
   }
 
   const base = baseNames.get(channelId) || "ticker";
-  const nextName = cropName(`${PREFIX}${base}${SEPARATOR}${suffix}`);
 
-  // avoid useless updates
+  // Build suffix
+  const pretty = buildPretty(ASSET, row);
+  const safe = toTextSafe(ASSET, row?.price, row?.change24h);
+
+  let nextName;
+  const mode = FORMAT;
+
+  if (mode === "safe") {
+    // Safe for text channels
+    nextName = `${PREFIX}${base}-${safe}`;
+  } else if (mode === "pretty") {
+    // Pretty (best for voice)
+    nextName = `${PREFIX} ${base} • ${pretty}`;
+  } else {
+    // auto
+    nextName = voiceMode
+      ? `${PREFIX} ${base} • ${pretty}`
+      : `${PREFIX}${base}-${safe}`;
+  }
+
+  nextName = cropName(nextName, voiceMode);
+
   const prev = lastApplied.get(channelId);
   if (prev === nextName) return;
 
   try {
     await ch.setName(nextName, "Channel price ticker update");
     lastApplied.set(channelId, nextName);
+    if (DEBUG) console.log(`[CHANNEL_TICKER] setName ok channel=${channelId} name="${nextName}"`);
   } catch (e) {
     const msg = String(e?.message || e);
     warnDebounced(`setName:${channelId}:${msg}`, `⚠️ Channel ticker: setName failed for ${channelId}: ${msg}`);
@@ -292,12 +320,8 @@ async function updateOneChannel(client, channelId, suffix) {
 
 async function tickOnce(client) {
   if (!CHANNEL_IDS.length) return;
-
   const row = await getPrice(ASSET);
-  const suffix = buildSuffix(ASSET, row);
-
-  // update all configured channels
-  await Promise.all(CHANNEL_IDS.map((id) => updateOneChannel(client, id, suffix)));
+  await Promise.all(CHANNEL_IDS.map((id) => updateOneChannel(client, id, row)));
 }
 
 function startChannelTicker(client) {
@@ -308,13 +332,13 @@ function startChannelTicker(client) {
   if (!client?.user) return;
   if (timer) return;
 
-  // initial tick
   setTimeout(async () => {
     try {
       await tickOnce(client);
-      console.log(`📌 Channel ticker started (asset=${ASSET}, every ${INTERVAL}ms, channels=${CHANNEL_IDS.join(",")})`);
+      console.log(`📌 Channel ticker started (asset=${ASSET}, every ${INTERVAL}ms, channels=${CHANNEL_IDS.join(",")}, format=${FORMAT})`);
     } catch (e) {
       warnDebounced(`channelTicker:init:${String(e?.message || e)}`, `⚠️ Channel ticker error (initial): ${e?.message || e}`);
+      if (DEBUG) console.log(`[CHANNEL_TICKER][DEBUG] GT_MAP raw="${process.env.TICKER_GT_MAP || ""}" keys=${Object.keys(GT_MAP).join(",") || "(none)"}`);
     }
   }, 1500);
 
@@ -336,3 +360,4 @@ function stopChannelTicker() {
 }
 
 module.exports = { startChannelTicker, stopChannelTicker };
+
