@@ -1,5 +1,7 @@
 // services/adrianChart.js
 const fetch = require('node-fetch');
+const path = require('path');
+const fs = require('fs');
 
 let CanvasLib = null;
 try {
@@ -9,6 +11,40 @@ try {
 }
 
 const { createCanvas } = CanvasLib || {};
+const GlobalFonts = CanvasLib?.GlobalFonts;
+
+// ---- FONT REGISTRATION (CRITICAL FOR RAILWAY) ----
+const FONT_FAMILY = (process.env.ADRIAN_CHART_FONT_FAMILY || 'DejaVu Sans').trim();
+const FONT_PATH =
+  (process.env.ADRIAN_CHART_FONT_PATH || '').trim() ||
+  path.join(__dirname, '..', 'assets', 'fonts', 'DejaVuSans.ttf');
+
+function tryRegisterFontOnce() {
+  try {
+    if (!GlobalFonts) return false;
+    if (!FONT_PATH) return false;
+
+    if (!fs.existsSync(FONT_PATH)) {
+      console.warn(`⚠️ adrianChart: font file missing at ${FONT_PATH}. Text may not render on Railway.`);
+      return false;
+    }
+
+    // napi-rs/canvas: GlobalFonts.registerFromPath(path, family)
+    const ok = GlobalFonts.registerFromPath(FONT_PATH, FONT_FAMILY);
+    if (ok) {
+      console.log(`✅ adrianChart: registered font "${FONT_FAMILY}" from ${FONT_PATH}`);
+      return true;
+    }
+    console.warn(`⚠️ adrianChart: GlobalFonts.registerFromPath returned false for ${FONT_PATH}`);
+    return false;
+  } catch (e) {
+    console.warn(`⚠️ adrianChart: font register failed: ${e?.message || e}`);
+    return false;
+  }
+}
+
+// register once at load
+tryRegisterFontOnce();
 
 // ---- ENV DEFAULTS ----
 const ADRIAN_GT_NETWORK = (process.env.ADRIAN_GT_NETWORK || 'base').trim().toLowerCase();
@@ -23,11 +59,11 @@ const SHOW_VOLUME = String(process.env.ADRIAN_CANDLE_SHOW_VOLUME || '1').trim() 
 const CHART_W = Math.max(800, Math.min(2000, Number(process.env.ADRIAN_CANDLE_W || 1200)));
 const CHART_H = Math.max(450, Math.min(1200, Number(process.env.ADRIAN_CANDLE_H || 650)));
 
-// Theme
-const BG = 'rgba(12,12,12,1)';
-const GRID = 'rgba(255,255,255,0.08)';
-const TEXT = 'rgba(235,235,235,0.92)';
-const MUTED = 'rgba(200,200,200,0.85)';
+// Theme (solid colors to ensure visibility)
+const BG = '#0c0c0c';
+const GRID = 'rgba(255,255,255,0.10)';
+const TEXT = '#f2f2f2';
+const MUTED = '#d0d0d0';
 const BLUE = 'rgba(0,140,255,0.95)';    // up / main line
 const BLUE_FILL = 'rgba(0,140,255,0.55)';
 const RED = 'rgba(255,0,0,0.78)';       // down / offset line
@@ -194,6 +230,11 @@ function computeMeta(candles) {
   };
 }
 
+function setFont(ctx, weight, sizePx) {
+  // Use registered font if available; fallback to sans-serif
+  ctx.font = `${weight} ${sizePx}px "${FONT_FAMILY}", sans-serif`;
+}
+
 // Draw candles + 3D overlay lines
 function renderCandlesPng(candles, meta) {
   if (!createCanvas) throw new Error('Canvas library not available (install @napi-rs/canvas)');
@@ -201,13 +242,11 @@ function renderCandlesPng(candles, meta) {
   const canvas = createCanvas(CHART_W, CHART_H);
   const ctx = canvas.getContext('2d');
 
-  // ✅ PATCH: more room on right for Y-axis labels
-  const padL = 74;
-  const padR = 74; // was 24
-  const padT = 56;
-
-  // ✅ PATCH: slightly more bottom padding so time labels never clip
-  const padB = SHOW_VOLUME ? 104 : 78;
+  // More room for labels
+  const padL = 78;
+  const padR = 78;
+  const padT = 58;
+  const padB = SHOW_VOLUME ? 110 : 82;
 
   const plotW = CHART_W - padL - padR;
   const plotH = CHART_H - padT - padB;
@@ -221,29 +260,31 @@ function renderCandlesPng(candles, meta) {
   const volTop = SHOW_VOLUME ? (priceBot + 16) : 0;
   const volBot = SHOW_VOLUME ? (padT + plotH) : 0;
 
+  // Background
   ctx.fillStyle = BG;
   ctx.fillRect(0, 0, CHART_W, CHART_H);
 
-  // Title
+  // Title + subtitle (if fonts missing these were invisible before)
   ctx.fillStyle = TEXT;
-  ctx.font = '700 20px sans-serif';
-  ctx.fillText('🕶️ $ADRIAN Candles — 3D Mode', padL, 28);
+  setFont(ctx, '700', 20);
+  ctx.fillText('🕶️ $ADRIAN Candles — 3D Mode', padL, 30);
 
-  // Subtitle + legend
   const subtitle = `${ADRIAN_GT_NETWORK} • ${candles.length} candles • Δ ${meta.deltaPct >= 0 ? '+' : ''}${meta.deltaPct.toFixed(2)}%`;
   ctx.fillStyle = MUTED;
-  ctx.font = '500 13px sans-serif';
-  ctx.fillText(subtitle, padL, 46);
+  setFont(ctx, '600', 13);
+  ctx.fillText(subtitle, padL, 50);
 
-  ctx.font = '600 13px sans-serif';
+  // Legend
+  setFont(ctx, '700', 13);
   ctx.fillStyle = BLUE;
-  ctx.fillText('🟦 up / bought', padL + 420, 46);
+  ctx.fillText('🟦 up / bought', padL + 430, 50);
   ctx.fillStyle = RED;
-  ctx.fillText('🟥 down / sold', padL + 540, 46);
+  ctx.fillText('🟥 down / sold', padL + 560, 50);
   ctx.fillStyle = MUTED;
-  ctx.fillText('• overlay: 🟥 offset + 🟦 main', padL + 690, 46);
+  setFont(ctx, '600', 13);
+  ctx.fillText('• overlay: 🟥 offset + 🟦 main', padL + 700, 50);
 
-  // Price scale padding
+  // Price scale
   const hi = Number(meta.hi);
   const lo = Number(meta.lo);
   const pad = (hi - lo) * 0.04 || (hi * 0.02) || 0.0000001;
@@ -256,47 +297,46 @@ function renderCandlesPng(candles, meta) {
     return priceBot - t * (priceH || 1);
   };
 
-  // Grid
+  // Grid + Y labels
   ctx.strokeStyle = GRID;
   ctx.lineWidth = 1;
 
   const yTicks = 6;
   for (let i = 0; i <= yTicks; i++) {
     const yy = priceTop + (priceH * i) / yTicks;
+
     ctx.beginPath();
     ctx.moveTo(padL, yy);
     ctx.lineTo(padL + plotW, yy);
     ctx.stroke();
-  }
 
-  // ✅ PATCH: Left + Right Y labels
-  ctx.fillStyle = MUTED;
-  ctx.font = '500 12px sans-serif';
-  for (let i = 0; i <= yTicks; i++) {
     const p = yMax - ((yMax - yMin) * i) / yTicks;
-    const yy = priceTop + (priceH * i) / yTicks;
-
     const label = p >= 1 ? p.toFixed(4) : p.toFixed(8);
 
-    // Left
+    ctx.fillStyle = MUTED;
+    setFont(ctx, '700', 12);
+
+    // left
     ctx.textAlign = 'left';
     ctx.fillText(`$${label}`, 10, yy + 4);
 
-    // Right
+    // right
     ctx.textAlign = 'right';
     ctx.fillText(`$${label}`, CHART_W - 10, yy + 4);
   }
   ctx.textAlign = 'left';
 
+  // X axis + candles geometry
   const n = candles.length;
   const stepX = plotW / Math.max(1, n);
   const candleW = clamp(stepX * 0.7, 3, 16);
 
   const xFor = (idx) => padL + idx * stepX + stepX / 2;
 
-  // ✅ PATCH: X axis ticks + time labels (stronger + anchored under plot)
+  // Vertical grid + time labels
   const xTicks = 6;
-  ctx.font = '600 12px sans-serif';
+  setFont(ctx, '700', 12);
+  ctx.fillStyle = MUTED;
   for (let i = 0; i <= xTicks; i++) {
     const idx = Math.round((n - 1) * (i / xTicks));
     const c = candles[idx];
@@ -306,23 +346,20 @@ function renderCandlesPng(candles, meta) {
     const label = `${hh}:${mm}`;
     const xx = xFor(idx);
 
-    // vertical grid
     ctx.strokeStyle = GRID;
     ctx.beginPath();
     ctx.moveTo(xx, priceTop);
     ctx.lineTo(xx, priceBot);
     ctx.stroke();
 
-    // tick mark at bottom of price panel
-    ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+    // tick
+    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
     ctx.beginPath();
     ctx.moveTo(xx, priceBot);
     ctx.lineTo(xx, priceBot + 6);
     ctx.stroke();
 
-    // label under the plot (always visible)
-    const labelY = (SHOW_VOLUME ? (volBot + 22) : (priceBot + 26));
-    ctx.fillStyle = MUTED;
+    const labelY = SHOW_VOLUME ? (volBot + 24) : (priceBot + 28);
     ctx.textAlign = 'center';
     ctx.fillText(label, xx, labelY);
   }
@@ -371,16 +408,13 @@ function renderCandlesPng(candles, meta) {
     ctx.moveTo(padL, volTop);
     ctx.lineTo(padL + plotW, volTop);
     ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(padL, volBot);
-    ctx.lineTo(padL + plotW, volBot);
-    ctx.stroke();
 
     const maxV = candles.reduce((m, c) => Math.max(m, Number.isFinite(c.v) ? c.v : 0), 0) || 1;
     const vFor = (v) => volBot - ((v || 0) / maxV) * volH;
 
     ctx.fillStyle = MUTED;
-    ctx.font = '600 12px sans-serif';
+    setFont(ctx, '700', 12);
+    ctx.textAlign = 'left';
     ctx.fillText('Volume', padL, volTop - 6);
 
     for (let i = 0; i < n; i++) {
@@ -393,15 +427,15 @@ function renderCandlesPng(candles, meta) {
       ctx.fillRect(xx - candleW / 2, yy, candleW, volBot - yy);
     }
 
-    // ✅ Optional right-side volume max label
+    // right-side volume max label
     ctx.fillStyle = MUTED;
-    ctx.font = '500 12px sans-serif';
+    setFont(ctx, '700', 12);
     ctx.textAlign = 'right';
     ctx.fillText(fmtVol(maxV), CHART_W - 10, volTop + 12);
     ctx.textAlign = 'left';
   }
 
-  // 3D Overlay Lines (close series): red offset then blue main
+  // 3D overlay close line
   const drawLine = (offX, offY, stroke, width) => {
     ctx.strokeStyle = stroke;
     ctx.lineWidth = width;
@@ -414,21 +448,19 @@ function renderCandlesPng(candles, meta) {
     }
     ctx.stroke();
   };
-
   drawLine(2, 2, 'rgba(255,0,0,0.55)', 3.5);
   drawLine(0, 0, 'rgba(0,140,255,0.95)', 3.5);
 
-  // Footer in-image
+  // Footer
   ctx.fillStyle = MUTED;
-  ctx.font = '600 12px sans-serif';
+  setFont(ctx, '700', 12);
+  ctx.textAlign = 'left';
   const lastStr = fmtUsd(meta.last, meta.last >= 1 ? 4 : 8);
   const hiStr = fmtUsd(meta.hi, meta.hi >= 1 ? 4 : 8);
   const loStr = fmtUsd(meta.lo, meta.lo >= 1 ? 4 : 8);
   const volStr = fmtVol(meta.volSum);
   const dStr = `${meta.deltaPct >= 0 ? '+' : ''}${meta.deltaPct.toFixed(2)}%`;
 
-  // ✅ keep footer safely inside canvas
-  ctx.textAlign = 'left';
   ctx.fillText(
     `Last ${lastStr} • Δ ${dStr} • Hi ${hiStr} • Lo ${loStr} • Vol ${volStr}`,
     padL,
@@ -458,3 +490,4 @@ async function getAdrianChartUrl(opts = {}) {
 }
 
 module.exports = { getAdrianChartUrl };
+
