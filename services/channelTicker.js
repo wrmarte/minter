@@ -2,9 +2,13 @@
 const fetch = require("node-fetch");
 
 /**
- * Voice Channel Ticker (MINIMAL)
- * Format:
- *   📈 $ADRIAN $0.00003800 ↔
+ * Voice Channel Ticker (TREND POP)
+ * Format examples:
+ *   🟢📈 $ADRIAN $0.00003800 ▲
+ *   🔴📉 $ADRIAN $0.00003800 ▼
+ *   ⚪📈 $ADRIAN $0.00003800 ↔
+ *
+ * Trend is computed tick-to-tick (always works).
  *
  * ENV (required):
  *   CHANNEL_TICKER_ENABLED=true
@@ -16,8 +20,10 @@ const fetch = require("node-fetch");
  *   TICKER_GT_MAP=adrian=base:POOLID
  *
  * Optional:
- *   CHANNEL_TICKER_PREFIX=📈
  *   CHANNEL_TICKER_DEBUG=1
+ *   CHANNEL_TICKER_TREND_THRESHOLD_PCT=0.10   (default 0.10%) avoids flicker
+ *   CHANNEL_TICKER_DECIMALS_SMALL=8           (default 8 when price < 1)
+ *   CHANNEL_TICKER_DECIMALS_BIG=4             (default 4 when price >= 1)
  */
 
 let timer = null;
@@ -35,8 +41,14 @@ const INTERVAL = Math.max(
   Number(process.env.CHANNEL_TICKER_INTERVAL_MS || "300000") // default 5m
 );
 
-const PREFIX = String(process.env.CHANNEL_TICKER_PREFIX || "📈").trim();
 const DEBUG = String(process.env.CHANNEL_TICKER_DEBUG || "").trim() === "1";
+const TREND_THRESHOLD_PCT = Math.max(
+  0,
+  Number(process.env.CHANNEL_TICKER_TREND_THRESHOLD_PCT || "0.10") // 0.10% default
+);
+
+const DECIMALS_SMALL = Math.max(0, Number(process.env.CHANNEL_TICKER_DECIMALS_SMALL || "8"));
+const DECIMALS_BIG = Math.max(0, Number(process.env.CHANNEL_TICKER_DECIMALS_BIG || "4"));
 
 // Debounced warnings
 const WARN_DEBOUNCE_MS = Math.max(
@@ -53,24 +65,14 @@ function warnDebounced(key, msg) {
   }
 }
 
-// -------- format helpers --------
-function shortUSD(n) {
+// ---------- helpers ----------
+function fmtPriceUSD(n) {
   const x = Number(n);
   if (!isFinite(x)) return "?";
-  // Force 8 decimals for tiny tokens, else 4.
-  if (x < 1) return x.toFixed(8);
-  return x.toFixed(4);
+  if (x < 1) return x.toFixed(DECIMALS_SMALL);
+  return x.toFixed(DECIMALS_BIG);
 }
 
-function trendArrow(pct) {
-  const x = Number(pct);
-  if (!isFinite(x)) return "•";
-  if (x > 0.2) return "▲";
-  if (x < -0.2) return "▼";
-  return "↔";
-}
-
-// -------- env map parsing --------
 function parseMapEnv(envVal) {
   // "adrian=base:POOLID;eth=ethereum:0xPOOL"
   const map = Object.create(null);
@@ -89,7 +91,32 @@ function parseMapEnv(envVal) {
 
 const GT_MAP = parseMapEnv(process.env.TICKER_GT_MAP || "");
 
-// -------- GeckoTerminal fetch --------
+// Keep last price per symbol for tick-to-tick trend
+const lastPrice = Object.create(null);
+
+function classifyTrend(sym, priceNow) {
+  const prev = lastPrice[sym];
+  lastPrice[sym] = priceNow;
+
+  // first tick (no history) => flat
+  if (!isFinite(prev) || prev <= 0) {
+    return { trend: "flat", pct: null };
+  }
+
+  const pct = ((priceNow - prev) / prev) * 100;
+
+  if (pct > TREND_THRESHOLD_PCT) return { trend: "up", pct };
+  if (pct < -TREND_THRESHOLD_PCT) return { trend: "down", pct };
+  return { trend: "flat", pct };
+}
+
+function trendStyle(trend) {
+  if (trend === "up") return { lead: "🟢📈", arrow: "▲" };
+  if (trend === "down") return { lead: "🔴📉", arrow: "▼" };
+  return { lead: "⚪📈", arrow: "↔" };
+}
+
+// ---------- GeckoTerminal fetch ----------
 async function fetchGeckoTerminal(sym) {
   const cfg = GT_MAP[sym];
   if (!cfg) return null;
@@ -132,15 +159,9 @@ async function fetchGeckoTerminal(sym) {
       Number(attr?.quote_token_price_usd) ||
       NaN;
 
-    // 24h change field varies; if missing we still show arrow as •
-    const pct24 =
-      Number(attr?.price_change_percentage_h24) ||
-      Number(attr?.price_change_percentage_24h) ||
-      NaN;
-
     if (isFinite(price)) {
-      if (DEBUG) console.log(`[CHANNEL_TICKER][GT] ok sym=${sym} price=${price} pct24=${pct24} url=${url}`);
-      return { price, change24h: isFinite(pct24) ? pct24 : null };
+      if (DEBUG) console.log(`[CHANNEL_TICKER][GT] ok sym=${sym} price=${price} url=${url}`);
+      return { price };
     }
 
     if (DEBUG) console.log(`[CHANNEL_TICKER][GT] no price fields sym=${sym} url=${url}`);
@@ -153,11 +174,11 @@ async function getPrice(sym) {
   const row = await fetchGeckoTerminal(sym);
   if (row && typeof row.price === "number" && isFinite(row.price)) return row;
   throw new Error(
-    `No price sources succeeded for "${sym}". Check TICKER_GT_MAP formatting (NO quotes, ';' separator).`
+    `No price sources succeeded for "${sym}". Check TICKER_GT_MAP (NO quotes, ';' separator).`
   );
 }
 
-// -------- channel update --------
+// ---------- channel update ----------
 function cropName(name) {
   // Voice channel name limit ~100 chars; keep margin
   const limit = 95;
@@ -167,7 +188,7 @@ function cropName(name) {
 
 const lastApplied = new Map();
 
-async function updateOneChannel(client, channelId, row) {
+async function updateOneChannel(client, channelId, sym, row) {
   let ch = client.channels.cache.get(channelId);
   if (!ch) {
     try {
@@ -182,17 +203,20 @@ async function updateOneChannel(client, channelId, row) {
   }
   if (!ch || typeof ch.setName !== "function") return;
 
-  const symU = ASSET.toUpperCase();
-  const priceStr = shortUSD(row?.price);
-  const arrow = trendArrow(row?.change24h);
+  const priceNow = Number(row?.price);
+  const { trend } = classifyTrend(sym, priceNow);
+  const { lead, arrow } = trendStyle(trend);
 
-  const nextName = cropName(`${PREFIX} $${symU} $${priceStr} ${arrow}`.trim());
+  const symU = sym.toUpperCase();
+  const priceStr = fmtPriceUSD(priceNow);
+
+  const nextName = cropName(`${lead} $${symU} $${priceStr} ${arrow}`);
 
   const prev = lastApplied.get(channelId);
   if (prev === nextName) return;
 
   try {
-    await ch.setName(nextName, "Voice channel ticker update");
+    await ch.setName(nextName, "Voice channel ticker update (trend pop)");
     lastApplied.set(channelId, nextName);
     if (DEBUG) console.log(`[CHANNEL_TICKER] setName ok channel=${channelId} name="${nextName}"`);
   } catch (e) {
@@ -204,7 +228,7 @@ async function updateOneChannel(client, channelId, row) {
 async function tickOnce(client) {
   if (!CHANNEL_IDS.length) return;
   const row = await getPrice(ASSET);
-  await Promise.all(CHANNEL_IDS.map((id) => updateOneChannel(client, id, row)));
+  await Promise.all(CHANNEL_IDS.map((id) => updateOneChannel(client, id, ASSET, row)));
 }
 
 function startChannelTicker(client) {
@@ -218,7 +242,7 @@ function startChannelTicker(client) {
   setTimeout(async () => {
     try {
       await tickOnce(client);
-      console.log(`📌 Channel ticker started (asset=${ASSET}, every ${INTERVAL}ms, channels=${CHANNEL_IDS.join(",")})`);
+      console.log(`📌 Channel ticker started (trend pop) asset=${ASSET}, every ${INTERVAL}ms, channels=${CHANNEL_IDS.join(",")}, threshold=${TREND_THRESHOLD_PCT}%`);
     } catch (e) {
       warnDebounced(
         `channelTicker:init:${String(e?.message || e)}`,
