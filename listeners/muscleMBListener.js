@@ -63,6 +63,11 @@ const ADRIAN_CHART_DENY_REPLY = String(process.env.ADRIAN_CHART_DENY_REPLY || '0
 const ADRIAN_CHART_DEBUG = String(process.env.ADRIAN_CHART_DEBUG || '1').trim() === '1';
 const adrianChartCooldownByUser = new Map(); // `${guildId}:${userId}` -> ts
 
+// ✅ NEW: Chart mode switch (default candles)
+//  - "candles" = canvas attachment from services/adrianChart.js
+//  - "line"    = your existing QuickChart 3D line chart logic (kept intact)
+const ADRIAN_CHART_MODE = String(process.env.ADRIAN_CHART_MODE || 'candles').trim().toLowerCase();
+
 // GeckoTerminal mapping for $ADRIAN pool (defaults to the pool you gave)
 const ADRIAN_GT_NETWORK = (process.env.ADRIAN_GT_NETWORK || 'base').trim().toLowerCase();
 const ADRIAN_GT_POOL_ID = (process.env.ADRIAN_GT_POOL_ID ||
@@ -874,7 +879,7 @@ function _findArrayOfArrays(obj) {
 }
 
 /**
- * 3D-glasses theme chart (LEGACY QuickChart path kept intact)
+ * 3D-glasses theme chart
  * - Blue = true series
  * - Red  = tiny offset series
  * - Dark background + soft grid
@@ -1064,59 +1069,83 @@ function _fmtVol(n) {
   return _fmtNum(x, 2);
 }
 
+// ✅ PATCH: normalize candle meta (so fields/footers always show)
+function _numOrNull(x) {
+  const n = Number(x);
+  return Number.isFinite(n) ? n : null;
+}
+function normalizeCandleMeta(meta) {
+  const m = meta && typeof meta === 'object' ? meta : {};
+  return {
+    last: _numOrNull(m.last ?? m.lastPrice ?? m.price ?? m.close),
+    deltaPct: _numOrNull(m.deltaPct ?? m.changePct ?? m.pct),
+    high: _numOrNull(m.hi ?? m.high ?? m.max),
+    low: _numOrNull(m.lo ?? m.low ?? m.min),
+    volumeSum: _numOrNull(m.volSum ?? m.volumeSum ?? m.vol ?? m.volume),
+    startTs: _numOrNull(m.startTs ?? m.start ?? m.from),
+    endTs: _numOrNull(m.endTs ?? m.end ?? m.to),
+    points: _numOrNull(m.points ?? m.n ?? m.count),
+    poolWeb: typeof m.poolWeb === 'string' ? m.poolWeb : null,
+  };
+}
+
 async function sendAdrianChartEmbed(message) {
   try {
-    // ✅ NEW PRIMARY PATH: Canvas Candles (attachment) via services/adrianChart.js
-    // This avoids Discord caching + URL-length + “nothing shows” issues.
-    let chart = null;
-    try {
-      chart = await getAdrianCandleChartUrl({
-        points: ADRIAN_CHART_POINTS,
-        // timeframe/aggregate/showVolume are controlled by env in services/adrianChart.js
-      });
-    } catch (e) {
-      console.warn('⚠️ Canvas candle chart failed, falling back to legacy QuickChart:', e?.message || String(e));
-    }
-
-    // Build pool web link (no raw address printed, only pool URL)
-    const poolWeb = `https://www.geckoterminal.com/${encodeURIComponent(ADRIAN_GT_NETWORK)}/pools/${encodeURIComponent(ADRIAN_GT_POOL_ID)}`;
-
-    // If candle chart succeeded, send as attachment-based embed
-    if (chart && chart.file && chart.url && chart.meta) {
-      const meta = chart.meta || {};
-      const lastPrice = meta?.last ?? meta?.lastPrice;
-      const deltaPct = meta?.deltaPct;
-      const hi = meta?.hi ?? meta?.high;
-      const lo = meta?.lo ?? meta?.low;
-      const vol = meta?.volSum ?? meta?.volumeSum;
-
-      const descBits = [];
-      if (Number.isFinite(lastPrice)) descBits.push(`Last: **${_fmtMoney(lastPrice, lastPrice >= 1 ? 4 : 8)}**`);
-      if (Number.isFinite(deltaPct)) descBits.push(`Δ: **${deltaPct >= 0 ? '+' : ''}${Number(deltaPct).toFixed(2)}%**`);
-
+    // ✅ Default path: CANVAS CANDLES (attachment://)
+    if (ADRIAN_CHART_MODE !== 'line') {
+      const chart = await getAdrianCandleChartUrl({ points: ADRIAN_CHART_POINTS, name: 'adrian_candles.png' });
       const file = new AttachmentBuilder(chart.file.attachment, { name: chart.file.name });
+
+      const metaN = normalizeCandleMeta(chart.meta);
+
+      const lastDec = (metaN.last != null && metaN.last >= 1) ? 4 : 8;
+      const hiDec = (metaN.high != null && metaN.high >= 1) ? 4 : 8;
+      const loDec = (metaN.low != null && metaN.low >= 1) ? 4 : 8;
+
+      const lastStr = metaN.last != null ? _fmtMoney(metaN.last, lastDec) : 'N/A';
+      const deltaStr = metaN.deltaPct != null ? `${metaN.deltaPct >= 0 ? '+' : ''}${metaN.deltaPct.toFixed(2)}%` : 'N/A';
+      const hiStr = metaN.high != null ? _fmtMoney(metaN.high, hiDec) : 'N/A';
+      const loStr = metaN.low != null ? _fmtMoney(metaN.low, loDec) : 'N/A';
+      const volStr = metaN.volumeSum != null ? _fmtVol(metaN.volumeSum) : 'N/A';
+
+      const rangeLine = (metaN.startTs != null && metaN.endTs != null)
+        ? `Range: <t:${Math.floor(metaN.startTs)}:R> → <t:${Math.floor(metaN.endTs)}:R>`
+        : null;
+
+      const poolWeb = metaN.poolWeb ||
+        `https://www.geckoterminal.com/${encodeURIComponent(ADRIAN_GT_NETWORK)}/pools/${encodeURIComponent(ADRIAN_GT_POOL_ID)}`;
 
       const embed = new EmbedBuilder()
         .setColor('#1e90ff')
-        .setTitle('🕶️ $ADRIAN Candles (3D Glasses)')
-        .setDescription([descBits.join(' • '), '_Blue up / Red down • Canvas candles._'].filter(Boolean).join('\n') || 'Live candles from GeckoTerminal.')
+        .setTitle('🕶️ $ADRIAN Candles (3D Mode)')
+        .setDescription(
+          [
+            `Last: **${lastStr}** • Δ: **${deltaStr}**`,
+            `🟦 up / bought • 🟥 down / sold`,
+            `🟥 offset + 🟦 main overlay line (3D glasses theme)`,
+            rangeLine
+          ].filter(Boolean).join('\n')
+        )
         .setImage(chart.url) // attachment://adrian_candles.png
         .addFields(
-          { name: 'High', value: Number.isFinite(hi) ? `**${_fmtMoney(hi, hi >= 1 ? 4 : 8)}**` : 'N/A', inline: true },
-          { name: 'Low', value: Number.isFinite(lo) ? `**${_fmtMoney(lo, lo >= 1 ? 4 : 8)}**` : 'N/A', inline: true },
-          { name: 'Vol (sum)', value: Number.isFinite(vol) ? `**${_fmtVol(vol)}**` : 'N/A', inline: true },
+          { name: 'High', value: `**${hiStr}**`, inline: true },
+          { name: 'Low', value: `**${loStr}**`, inline: true },
+          { name: 'Vol (sum)', value: `**${volStr}**`, inline: true },
           { name: 'Pool', value: poolWeb ? `[View Pool](${poolWeb})` : 'N/A', inline: false },
         )
-        .setFooter({ text: '🕶️ Source: GeckoTerminal → Canvas Candles' })
+        .setFooter({ text: `Last ${lastStr} • Δ ${deltaStr} • Source: GeckoTerminal → Canvas` })
         .setTimestamp();
 
-      const payload = { embeds: [embed], files: [file], allowedMentions: { parse: [] } };
-      const ok = await safeReplyMessage(message.client, message, payload);
-      if (!ok) console.warn('❌ sendAdrianChartEmbed (candles): safeReplyMessage returned false');
+      const ok = await safeReplyMessage(message.client, message, {
+        embeds: [embed],
+        files: [file],
+        allowedMentions: { parse: [] }
+      });
+      if (!ok) console.warn('❌ sendAdrianChartEmbed(candles): safeReplyMessage returned false');
       return;
     }
 
-    // ---- LEGACY FALLBACK PATH: QuickChart overlay (kept intact) ----
+    // ✅ FALLBACK PATH: your original QuickChart 3D line chart (kept intact)
     const { url, meta } = await getAdrianChartUrlCached();
 
     const lastPrice = meta?.lastPrice;
@@ -1134,6 +1163,8 @@ async function sendAdrianChartEmbed(message) {
     const rangeLine = (Number.isFinite(startTs) && Number.isFinite(endTs))
       ? `Range: <t:${Math.floor(startTs)}:R> → <t:${Math.floor(endTs)}:R>`
       : null;
+
+    const poolWeb = `https://www.geckoterminal.com/${encodeURIComponent(ADRIAN_GT_NETWORK)}/pools/${encodeURIComponent(ADRIAN_GT_POOL_ID)}`;
 
     // PATCH: download chart PNG and attach it (fixes URL-length & “nothing shows”)
     let chartFile = null;
