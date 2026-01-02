@@ -1,26 +1,41 @@
 // services/adrianChart.js
 const fetch = require('node-fetch');
 
-const CHART_BUILD_TAG = '3D2'; // bump this when you want to confirm deploys
+let canvasMod = null;
+function getCanvas() {
+  if (canvasMod) return canvasMod;
+  // @napi-rs/canvas is what you already use in your bot
+  canvasMod = require('@napi-rs/canvas');
+  return canvasMod;
+}
 
+// ===================== ENV =====================
 const GT_NETWORK = (process.env.ADRIAN_GT_NETWORK || 'base').trim().toLowerCase();
 const GT_POOL_ID_RAW =
   (process.env.ADRIAN_GT_POOL_ID ||
     '0x79cdf2d48abd42872a26d1b1c92ece4245327a4837b427dc9cff5f1acc40e379'
   ).trim();
 
-const CHART_POINTS = Math.max(20, Math.min(240, Number(process.env.ADRIAN_CHART_POINTS || 96))); // 96 = last day @ 15m
+const CHART_POINTS = Math.max(20, Math.min(240, Number(process.env.ADRIAN_CHART_POINTS || 96)));
 const CACHE_MS = Math.max(10_000, Number(process.env.ADRIAN_CHART_CACHE_MS || 60_000));
 
-const DEFAULT_TIMEFRAME = (process.env.ADRIAN_CHART_TIMEFRAME || 'minute').trim().toLowerCase(); // minute|hour|day
-const DEFAULT_AGGREGATE = Number(process.env.ADRIAN_CHART_AGGREGATE || '') || null; // if null => pick sensible default
+const TIMEFRAME = String(process.env.ADRIAN_CHART_TIMEFRAME || 'minute').trim().toLowerCase(); // minute|hour|day
+const AGGREGATE_ENV = Number(process.env.ADRIAN_CHART_AGGREGATE || '') || null; // null => default per timeframe
+
 const SHOW_VOLUME = String(process.env.ADRIAN_CHART_SHOW_VOLUME || '1').trim() !== '0';
+const DEBUG = String(process.env.ADRIAN_CHART_DEBUG || '').trim() === '1';
 
-// Keyed cache so timeframe/aggregate can vary later
-let _cache = Object.create(null); // key -> { ts, urlBase, meta }
+// Canvas sizing
+const W = Math.max(640, Number(process.env.ADRIAN_CHART_W || 960));
+const H = Math.max(360, Number(process.env.ADRIAN_CHART_H || 520));
 
-let _bootLogged = false;
+// Trend threshold for “flat-ish” candles (purely aesthetic)
+const FLAT_THRESHOLD_PCT = Math.max(0, Number(process.env.ADRIAN_CHART_FLAT_THRESHOLD_PCT || '0.02')); // 0.02%
 
+// ===================== CACHE =====================
+let _cache = Object.create(null); // key -> { ts, buffer, filename, meta }
+
+// ===================== HELPERS =====================
 function safeJsonParse(t) { try { return JSON.parse(t); } catch { return null; } }
 
 async function fetchText(url) {
@@ -49,7 +64,7 @@ function normalizeTimeframe(tf) {
 function pickDefaultAggregate(tf) {
   if (tf === 'hour') return 1;
   if (tf === 'day') return 1;
-  return 15; // minute
+  return 15;
 }
 
 function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
@@ -66,10 +81,11 @@ function fmtNum(x) {
   if (!isFinite(n)) return '?';
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1) + 'M';
   if (n >= 1_000) return (n / 1_000).toFixed(n >= 10_000 ? 0 : 1) + 'k';
-  return String(Math.round(n));
+  if (n >= 100) return n.toFixed(0);
+  if (n >= 10) return n.toFixed(1);
+  return n.toFixed(2);
 }
 
-// Depth-limited search for an array-of-arrays where inner length >= 5
 function findArrayOfArrays(obj) {
   const seen = new Set();
   const stack = [{ v: obj, d: 0 }];
@@ -83,15 +99,12 @@ function findArrayOfArrays(obj) {
     if (Array.isArray(v) && v.length && Array.isArray(v[0]) && v[0].length >= 5) {
       return v;
     }
-
-    for (const k of Object.keys(v)) {
-      stack.push({ v: v[k], d: d + 1 });
-    }
+    for (const k of Object.keys(v)) stack.push({ v: v[k], d: d + 1 });
   }
   return null;
 }
 
-// Probe GT OHLCV endpoints
+// ===================== GECKOTERMINAL OHLCV =====================
 async function fetchOhlcvList({ timeframe, aggregate, limit }) {
   const tf = normalizeTimeframe(timeframe);
   const agg = Number(aggregate) || pickDefaultAggregate(tf);
@@ -107,14 +120,9 @@ async function fetchOhlcvList({ timeframe, aggregate, limit }) {
       `${base}/ohlcv/${tf}?aggregate=${encodeURIComponent(String(agg))}&limit=${encodeURIComponent(String(lim))}`,
       `${base}/ohlcv?timeframe=${encodeURIComponent(tf)}&aggregate=${encodeURIComponent(String(agg))}&limit=${encodeURIComponent(String(lim))}`,
 
-      // common historical paths
       tf === 'minute' ? `${base}/ohlcv/minute?aggregate=${encodeURIComponent(String(agg))}&limit=${encodeURIComponent(String(lim))}` : null,
       tf === 'hour' ? `${base}/ohlcv/hour?aggregate=1&limit=${encodeURIComponent(String(Math.min(lim, 168)))}` : null,
-      tf === 'day' ? `${base}/ohlcv/day?aggregate=1&limit=${encodeURIComponent(String(Math.min(lim, 365)))}` : null,
-
-      // extra fallback ladders
-      tf === 'minute' ? `${base}/ohlcv/hour?aggregate=1&limit=${encodeURIComponent(String(Math.min(lim, 168)))}` : null,
-      tf === 'hour' ? `${base}/ohlcv/day?aggregate=1&limit=${encodeURIComponent(String(Math.min(lim, 180)))}` : null
+      tf === 'day' ? `${base}/ohlcv/day?aggregate=1&limit=${encodeURIComponent(String(Math.min(lim, 365)))}` : null
     ].filter(Boolean);
 
     for (const url of candidates) {
@@ -124,7 +132,6 @@ async function fetchOhlcvList({ timeframe, aggregate, limit }) {
           lastErr = new Error(`GT HTTP ${res.status} for ${url}: ${txt.slice(0, 120)}`);
           continue;
         }
-
         const json = safeJsonParse(txt);
         if (!json) { lastErr = new Error(`GT non-json for ${url}`); continue; }
 
@@ -150,248 +157,404 @@ async function fetchOhlcvList({ timeframe, aggregate, limit }) {
   throw lastErr || new Error('Unable to fetch OHLCV list from GeckoTerminal');
 }
 
-function makeCacheKey({ timeframe, aggregate, points, showVolume }) {
+function cacheKey({ tf, agg, pts, vol, w, h }) {
   return [
-    'tag=' + CHART_BUILD_TAG,
-    'net=' + GT_NETWORK,
-    'pool=' + String(GT_POOL_ID_RAW || '').toLowerCase(),
-    'tf=' + normalizeTimeframe(timeframe),
-    'agg=' + String(Number(aggregate) || pickDefaultAggregate(normalizeTimeframe(timeframe))),
-    'pts=' + String(points),
-    'vol=' + (showVolume ? '1' : '0')
+    `net=${GT_NETWORK}`,
+    `pool=${String(GT_POOL_ID_RAW).toLowerCase()}`,
+    `tf=${tf}`,
+    `agg=${agg}`,
+    `pts=${pts}`,
+    `vol=${vol ? 1 : 0}`,
+    `w=${w}`,
+    `h=${h}`
   ].join('|');
 }
 
-function buildQuickChartUrlBase(points, { subtitle, showVolume = true } = {}) {
-  // points: [{ t: unixSeconds, c: close, v?: volume }]
-  const labels = points.map(p =>
-    new Date(p.t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-  );
+// ===================== CANVAS RENDER =====================
+function drawGlowBorder(ctx, w, h) {
+  // 3D glasses border: cyan + red offset
+  ctx.save();
+  ctx.lineWidth = 3;
 
-  const closes = points.map(p => Number(p.c));
-  const volumes = points.map(p => Number(p.v || 0));
+  ctx.strokeStyle = 'rgba(0,255,255,0.35)';
+  ctx.shadowColor = 'rgba(0,255,255,0.35)';
+  ctx.shadowBlur = 12;
+  ctx.strokeRect(10, 10, w - 20, h - 20);
 
-  // 3D glasses effect:
-  // - cyan main + glow
-  // - red ghost + glow
-  // - small offset to separate the lenses visually
-  const offsetFactor = 1.0007;
-  const closesRed = closes.map(v => (Number.isFinite(v) ? v * offsetFactor : v));
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = 'rgba(255,60,90,0.30)';
+  ctx.strokeRect(13, 13, w - 26, h - 26);
 
-  const cfg = {
-    type: 'line',
-    data: {
-      labels,
-      datasets: [
-        ...(showVolume ? [{
-          type: 'bar',
-          data: volumes,
-          yAxisID: 'yVol',
-          borderWidth: 0,
-          backgroundColor: 'rgba(255,255,255,0.07)',
-          order: 0
-        }] : []),
-
-        // Cyan glow
-        {
-          data: closes,
-          pointRadius: 0,
-          borderWidth: 6,
-          tension: 0.28,
-          borderColor: 'rgba(0,255,255,0.20)',
-          order: 1
-        },
-        // Red glow
-        {
-          data: closesRed,
-          pointRadius: 0,
-          borderWidth: 6,
-          tension: 0.28,
-          borderColor: 'rgba(255,60,90,0.16)',
-          order: 2
-        },
-
-        // Cyan main
-        {
-          data: closes,
-          pointRadius: 0,
-          borderWidth: 2,
-          tension: 0.28,
-          borderColor: 'rgba(0,255,255,0.95)',
-          order: 3
-        },
-        // Red ghost
-        {
-          data: closesRed,
-          pointRadius: 0,
-          borderWidth: 2,
-          tension: 0.28,
-          borderColor: 'rgba(255,60,90,0.78)',
-          order: 4
-        }
-      ]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      layout: { padding: { top: 16, right: 18, bottom: 10, left: 12 } },
-      plugins: {
-        legend: { display: false },
-        title: {
-          display: true,
-          text: '$ADRIAN (USD) — 3D Glasses',
-          color: 'rgba(255,255,255,0.93)',
-          font: { size: 20, weight: 'bold' }
-        },
-        subtitle: {
-          display: true,
-          text: subtitle || '',
-          color: 'rgba(180,200,255,0.85)',
-          font: { size: 12 }
-        }
-      },
-      scales: {
-        x: {
-          ticks: {
-            maxTicksLimit: 7,
-            color: 'rgba(210,220,255,0.72)',
-            font: { size: 10 }
-          },
-          grid: { color: 'rgba(255,255,255,0.07)' }
-        },
-        y: {
-          ticks: {
-            maxTicksLimit: 7,
-            color: 'rgba(210,220,255,0.72)',
-            font: { size: 10 },
-            callback: (v) => '$' + v
-          },
-          grid: { color: 'rgba(255,255,255,0.08)' }
-        },
-        ...(showVolume ? {
-          yVol: {
-            position: 'right',
-            ticks: {
-              maxTicksLimit: 5,
-              color: 'rgba(210,220,255,0.35)',
-              font: { size: 9 },
-              callback: (v) => fmtNum(v)
-            },
-            grid: { drawOnChartArea: false }
-          }
-        } : {})
-      }
-    }
-  };
-
-  const encoded = encodeURIComponent(JSON.stringify(cfg));
-
-  // IMPORTANT:
-  // - backgroundColor makes it “cinema dark”
-  // - We return a BASE url (no cb), so we can attach cb per request to beat Discord caching
-  return `https://quickchart.io/chart?width=960&height=500&format=png&backgroundColor=${encodeURIComponent(
-    '0b0d12'
-  )}&c=${encoded}`;
+  ctx.restore();
 }
 
-async function getAdrianChartUrl(opts = {}) {
-  if (!_bootLogged) {
-    _bootLogged = true;
-    console.log(`🕶️ ADRIAN Chart module loaded (build=${CHART_BUILD_TAG})`);
+function drawText3D(ctx, text, x, y, size = 22, align = 'left') {
+  ctx.save();
+  ctx.font = `700 ${size}px sans-serif`;
+  ctx.textAlign = align;
+  ctx.textBaseline = 'top';
+
+  // red shadow
+  ctx.fillStyle = 'rgba(255,60,90,0.80)';
+  ctx.fillText(text, x + 2, y + 1);
+
+  // cyan main
+  ctx.fillStyle = 'rgba(0,255,255,0.95)';
+  ctx.fillText(text, x, y);
+
+  ctx.restore();
+}
+
+function drawSubtitle(ctx, text, x, y, w) {
+  ctx.save();
+  ctx.font = `500 12px sans-serif`;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = 'rgba(200,210,255,0.85)';
+
+  // wrap-ish (simple)
+  const maxW = Math.max(200, w);
+  let line = '';
+  const words = String(text || '').split(' ');
+  let yy = y;
+
+  for (const word of words) {
+    const test = line ? (line + ' ' + word) : word;
+    if (ctx.measureText(test).width > maxW) {
+      ctx.fillText(line, x, yy);
+      yy += 14;
+      line = word;
+    } else {
+      line = test;
+    }
+  }
+  if (line) ctx.fillText(line, x, yy);
+
+  ctx.restore();
+}
+
+function renderCandles({ candles, meta }) {
+  const { createCanvas } = getCanvas();
+  const canvas = createCanvas(W, H);
+  const ctx = canvas.getContext('2d');
+
+  // Background (cinema dark)
+  ctx.fillStyle = '#0b0d12';
+  ctx.fillRect(0, 0, W, H);
+
+  // Subtle vignette
+  ctx.save();
+  const grad = ctx.createRadialGradient(W * 0.5, H * 0.45, 50, W * 0.5, H * 0.45, Math.max(W, H) * 0.65);
+  grad.addColorStop(0, 'rgba(255,255,255,0.06)');
+  grad.addColorStop(1, 'rgba(0,0,0,0.55)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+  ctx.restore();
+
+  drawGlowBorder(ctx, W, H);
+
+  // Layout
+  const padL = 70;
+  const padR = 22;
+  const padT = 58;
+  const padB = 24;
+
+  const volH = SHOW_VOLUME ? Math.floor(H * 0.18) : 0;
+  const gap = SHOW_VOLUME ? 12 : 0;
+
+  const chartX = padL;
+  const chartY = padT;
+  const chartW = W - padL - padR;
+  const chartH = H - padT - padB - volH - gap;
+
+  const volY = chartY + chartH + gap;
+
+  // Price range
+  let minP = Infinity;
+  let maxP = -Infinity;
+  for (const c of candles) {
+    if (isFinite(c.l)) minP = Math.min(minP, c.l);
+    if (isFinite(c.h)) maxP = Math.max(maxP, c.h);
+  }
+  if (!isFinite(minP) || !isFinite(maxP) || maxP <= 0) {
+    throw new Error('Invalid candle range');
+  }
+  // padding
+  const padPct = 0.04;
+  const pad = (maxP - minP) * padPct;
+  minP = Math.max(0, minP - pad);
+  maxP = maxP + pad;
+
+  const priceToY = (p) => chartY + ((maxP - p) / (maxP - minP)) * chartH;
+
+  // Volume range
+  let maxV = 0;
+  if (SHOW_VOLUME) {
+    for (const c of candles) maxV = Math.max(maxV, Number(c.v || 0));
+    if (!isFinite(maxV) || maxV <= 0) maxV = 1;
   }
 
-  const timeframe = normalizeTimeframe(opts.timeframe || DEFAULT_TIMEFRAME);
-  const aggregate = Number(opts.aggregate) || DEFAULT_AGGREGATE || pickDefaultAggregate(timeframe);
-  const points = clamp(Number(opts.points) || CHART_POINTS, 20, 240);
-  const showVolume = typeof opts.showVolume === 'boolean' ? opts.showVolume : SHOW_VOLUME;
+  // Grid
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+  ctx.lineWidth = 1;
 
-  const key = makeCacheKey({ timeframe, aggregate, points, showVolume });
+  const yTicks = 5;
+  for (let i = 0; i <= yTicks; i++) {
+    const yy = chartY + (chartH * i) / yTicks;
+    ctx.beginPath();
+    ctx.moveTo(chartX, yy);
+    ctx.lineTo(chartX + chartW, yy);
+    ctx.stroke();
+  }
 
+  const xTicks = 6;
+  for (let i = 0; i <= xTicks; i++) {
+    const xx = chartX + (chartW * i) / xTicks;
+    ctx.beginPath();
+    ctx.moveTo(xx, chartY);
+    ctx.lineTo(xx, chartY + chartH);
+    ctx.stroke();
+  }
+
+  // Volume grid
+  if (SHOW_VOLUME) {
+    ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+    ctx.beginPath();
+    ctx.moveTo(chartX, volY);
+    ctx.lineTo(chartX + chartW, volY);
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(chartX, volY + volH);
+    ctx.lineTo(chartX + chartW, volY + volH);
+    ctx.stroke();
+  }
+
+  ctx.restore();
+
+  // Axes labels
+  ctx.save();
+  ctx.fillStyle = 'rgba(210,220,255,0.78)';
+  ctx.font = '500 11px sans-serif';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+
+  for (let i = 0; i <= yTicks; i++) {
+    const p = maxP - ((maxP - minP) * i) / yTicks;
+    const yy = chartY + (chartH * i) / yTicks;
+    ctx.fillText(`$${fmtUSD(p)}`, chartX - 10, yy);
+  }
+
+  // X labels (time)
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  const n = candles.length;
+  for (let i = 0; i <= xTicks; i++) {
+    const idx = Math.round((n - 1) * (i / xTicks));
+    const c = candles[idx];
+    if (!c) continue;
+    const xx = chartX + (chartW * i) / xTicks;
+    ctx.fillText(c.label, xx, chartY + chartH + 4);
+  }
+  ctx.restore();
+
+  // Candles
+  const nC = candles.length;
+  const slot = chartW / nC;
+  const bodyW = Math.max(3, Math.min(14, slot * 0.62));
+
+  const BLUE = 'rgba(60, 140, 255, 0.95)';
+  const RED = 'rgba(255, 60, 90, 0.92)';
+  const WICK_BLUE = 'rgba(120, 190, 255, 0.95)';
+  const WICK_RED = 'rgba(255, 140, 170, 0.95)';
+
+  // volume colors (subtle)
+  const VOL_BLUE = 'rgba(60, 140, 255, 0.22)';
+  const VOL_RED = 'rgba(255, 60, 90, 0.18)';
+
+  // Draw volume first (behind)
+  if (SHOW_VOLUME) {
+    for (let i = 0; i < nC; i++) {
+      const c = candles[i];
+      const xx = chartX + i * slot + slot * 0.5;
+      const v = Number(c.v || 0);
+      const hV = (v / maxV) * volH;
+      const y0 = volY + volH - hV;
+
+      const isUp = c.c >= c.o;
+      ctx.fillStyle = isUp ? VOL_BLUE : VOL_RED;
+      ctx.fillRect(xx - bodyW / 2, y0, bodyW, Math.max(1, hV));
+    }
+  }
+
+  // Candles + wicks
+  for (let i = 0; i < nC; i++) {
+    const c = candles[i];
+    const xx = chartX + i * slot + slot * 0.5;
+
+    const yo = priceToY(c.o);
+    const yc = priceToY(c.c);
+    const yh = priceToY(c.h);
+    const yl = priceToY(c.l);
+
+    const isUpRaw = c.c >= c.o;
+    const pctMove = c.o ? ((c.c - c.o) / c.o) * 100 : 0;
+
+    // treat tiny moves as “flat” visually (still chooses a color)
+    const isUp = Math.abs(pctMove) < FLAT_THRESHOLD_PCT ? true : isUpRaw;
+
+    const bodyTop = Math.min(yo, yc);
+    const bodyBot = Math.max(yo, yc);
+    const bodyH = Math.max(2, bodyBot - bodyTop);
+
+    // wick
+    ctx.save();
+    ctx.strokeStyle = isUp ? WICK_BLUE : WICK_RED;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(xx, yh);
+    ctx.lineTo(xx, yl);
+    ctx.stroke();
+    ctx.restore();
+
+    // 3D glow around body
+    ctx.save();
+    ctx.shadowColor = isUp ? 'rgba(0,255,255,0.22)' : 'rgba(255,60,90,0.18)';
+    ctx.shadowBlur = 10;
+    ctx.fillStyle = isUp ? BLUE : RED;
+    ctx.fillRect(xx - bodyW / 2, bodyTop, bodyW, bodyH);
+    ctx.restore();
+
+    // subtle outline
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,255,255,0.10)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(xx - bodyW / 2, bodyTop, bodyW, bodyH);
+    ctx.restore();
+  }
+
+  // Title + meta
+  drawText3D(ctx, '$ADRIAN — Candles', 22, 16, 22, 'left');
+
+  const sub = [
+    `${meta.tfLabel} • ${meta.points} candles`,
+    `Last $${fmtUSD(meta.last)}`,
+    `Hi $${fmtUSD(meta.hi)} / Lo $${fmtUSD(meta.lo)}`,
+    `Δ ${meta.deltaPct >= 0 ? '+' : ''}${meta.deltaPct.toFixed(2)}%`,
+    SHOW_VOLUME ? `Vol ${fmtNum(meta.volSum)}` : null
+  ].filter(Boolean).join('   |   ');
+
+  drawSubtitle(ctx, sub, 22, 40, W - 44);
+
+  // tiny watermark
+  ctx.save();
+  ctx.font = '500 11px sans-serif';
+  ctx.fillStyle = 'rgba(200,210,255,0.22)';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'bottom';
+  ctx.fillText(`🕶️ ${GT_NETWORK} / GeckoTerminal`, W - 16, H - 12);
+  ctx.restore();
+
+  return canvas.toBuffer('image/png');
+}
+
+// ===================== PUBLIC API =====================
+async function getAdrianChartImage(opts = {}) {
+  const tf = normalizeTimeframe(opts.timeframe || TIMEFRAME);
+  const agg = Number(opts.aggregate) || AGGREGATE_ENV || pickDefaultAggregate(tf);
+  const pts = clamp(Number(opts.points) || CHART_POINTS, 20, 240);
+  const vol = typeof opts.showVolume === 'boolean' ? opts.showVolume : SHOW_VOLUME;
+
+  const key = cacheKey({ tf, agg, pts, vol, w: W, h: H });
   const now = Date.now();
   const cached = _cache[key];
+  if (cached?.buffer && (now - cached.ts) < CACHE_MS) return cached;
 
-  // Use cached data/urlBase, but ALWAYS return a unique URL to beat Discord image caching
-  if (cached?.urlBase && (now - cached.ts) < CACHE_MS) {
-    return {
-      ts: cached.ts,
-      url: `${cached.urlBase}&cb=${now}`,
-      meta: cached.meta
-    };
-  }
+  if (DEBUG) console.log(`[ADRIAN_CHART] fetching OHLCV tf=${tf} agg=${agg} pts=${pts}`);
 
-  const { list, used } = await fetchOhlcvList({ timeframe, aggregate, limit: points });
+  const { list, used } = await fetchOhlcvList({ timeframe: tf, aggregate: agg, limit: pts });
 
-  const pts = [];
-  for (const row of list.slice(0, points)) {
+  // Normalize: expect [ts, o, h, l, c, v]
+  const candles = [];
+  for (const row of list.slice(0, pts)) {
     if (!Array.isArray(row) || row.length < 5) continue;
 
     const ts = Number(row[0]);
-    const c = Number(row[4]); // close
-    const v = Number(row[5] ?? 0); // volume
+    const o = Number(row[1]);
+    const h = Number(row[2]);
+    const l = Number(row[3]);
+    const c = Number(row[4]);
+    const v = Number(row[5] ?? 0);
 
-    if (!Number.isFinite(ts) || !Number.isFinite(c)) continue;
+    if (![ts, o, h, l, c].every(Number.isFinite)) continue;
 
     const tSec = ts > 2_000_000_000_000 ? Math.floor(ts / 1000) : ts;
-    pts.push({ t: tSec, c, v: Number.isFinite(v) ? v : 0 });
+    const label = new Date(tSec * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+    candles.push({ t: tSec, o, h, l, c, v: Number.isFinite(v) ? v : 0, label });
   }
 
-  pts.sort((a, b) => a.t - b.t);
-  if (pts.length < 5) throw new Error('Not enough chart points');
+  candles.sort((a, b) => a.t - b.t);
+  if (candles.length < 10) throw new Error('Not enough candle points');
 
-  const first = pts[0];
-  const last = pts[pts.length - 1];
+  const first = candles[0];
+  const last = candles[candles.length - 1];
 
   let hi = -Infinity, lo = Infinity, volSum = 0;
-  for (const p of pts) {
-    if (Number.isFinite(p.c)) {
-      if (p.c > hi) hi = p.c;
-      if (p.c < lo) lo = p.c;
-    }
-    if (Number.isFinite(p.v)) volSum += p.v;
+  for (const c of candles) {
+    hi = Math.max(hi, c.h);
+    lo = Math.min(lo, c.l);
+    volSum += Number(c.v || 0);
   }
 
-  const deltaPct = first.c ? ((last.c - first.c) / first.c) * 100 : 0;
-  const rangePct = lo ? ((hi - lo) / lo) * 100 : 0;
+  const deltaPct = first.o ? ((last.c - first.o) / first.o) * 100 : 0;
 
   const tfLabel =
-    timeframe === 'minute' ? `${aggregate}m` :
-    timeframe === 'hour' ? `${aggregate}h` :
-    `${aggregate}d`;
+    tf === 'minute' ? `${agg}m` :
+    tf === 'hour' ? `${agg}h` :
+    `${agg}d`;
 
-  const subtitle = [
-    `${GT_NETWORK} • ${tfLabel} • ${pts.length} pts`,
-    `Last $${fmtUSD(last.c)}`,
-    `Hi $${fmtUSD(hi)} / Lo $${fmtUSD(lo)} (R ${rangePct >= 0 ? '+' : ''}${rangePct.toFixed(2)}%)`,
-    `Δ ${deltaPct >= 0 ? '+' : ''}${deltaPct.toFixed(2)}%`,
-    showVolume ? `Vol ${fmtNum(volSum)}` : null,
-    `build ${CHART_BUILD_TAG}`
-  ].filter(Boolean).join('  |  ');
-
-  const urlBase = buildQuickChartUrlBase(pts, { subtitle, showVolume });
-
-  const out = {
-    ts: now,
-    urlBase,
-    meta: {
-      build: CHART_BUILD_TAG,
-      network: GT_NETWORK,
-      poolIdUsed: used?.poolId || null,
-      timeframe,
-      aggregate,
-      points: pts.length,
-      lastPrice: last.c,
-      deltaPct,
-      hi,
-      lo,
-      rangePct,
-      volSum: showVolume ? volSum : null
-    }
+  const meta = {
+    network: GT_NETWORK,
+    poolIdUsed: used?.poolId || null,
+    tf,
+    agg,
+    tfLabel,
+    points: candles.length,
+    last: last.c,
+    hi,
+    lo,
+    deltaPct,
+    volSum: vol ? volSum : null
   };
+
+  const buffer = renderCandles({ candles, meta });
+
+  const filename = 'adrian_candles.png';
+  const out = { ts: now, buffer, filename, meta };
 
   _cache[key] = out;
 
-  // return unique URL for Discord
-  return { ts: out.ts, url: `${out.urlBase}&cb=${now}`, meta: out.meta };
+  if (DEBUG) console.log(`[ADRIAN_CHART] rendered ${filename} candles=${candles.length} url=${used?.url || ''}`);
+
+  return out;
 }
 
-module.exports = { getAdrianChartUrl };
+/**
+ * Back-compat: returns an attachment URL + the file buffer.
+ * You must send `files: [{ attachment: buffer, name: filename }]` with your message,
+ * and set embed image to `attachment://filename`.
+ */
+async function getAdrianChartUrl(opts = {}) {
+  const img = await getAdrianChartImage(opts);
+  return {
+    ts: img.ts,
+    url: `attachment://${img.filename}`,
+    file: { attachment: img.buffer, name: img.filename },
+    meta: img.meta
+  };
+}
+
+module.exports = { getAdrianChartImage, getAdrianChartUrl };
+
