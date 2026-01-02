@@ -37,6 +37,7 @@ require('./services/providerM');
 require('./services/logScanner');
 
 const { startPresenceTicker, stopPresenceTicker } = require('./services/presenceTicker');
+const { startChannelTicker, stopChannelTicker } = require('./services/channelTicker'); // ✅ NEW: channel list ticker (renames channel)
 const { startThirdPartySwapNotifierBase } = require('./services/thirdPartySwapNotifierBase');
 const { startEngineSweepNotifierBase } = require('./services/engineSweepNotifierBase');
 
@@ -287,6 +288,14 @@ async function onClientReady() {
   } catch (e) {
     console.warn('⚠️ presence ticker:', e?.message || e);
   }
+
+  // 4️⃣ ✅ Channel-list ticker (renames configured channel(s))
+  try {
+    startChannelTicker(client);
+    console.log('✅ Channel ticker started');
+  } catch (e) {
+    console.warn('⚠️ channel ticker:', e?.message || e);
+  }
 }
 
 client.once('clientReady', onClientReady);
@@ -310,6 +319,7 @@ async function gracefulShutdown(sig) {
   try { if (timers.globalScan) clearTimeout(timers.globalScan); } catch {}
   try { if (timers.rewardPayout) clearInterval(timers.rewardPayout); } catch {}
   try { stopPresenceTicker(); } catch {}
+  try { stopChannelTicker(); } catch {} // ✅ NEW
   try { await client.destroy(); } catch {}
   try { await pool.end(); } catch {}
 
