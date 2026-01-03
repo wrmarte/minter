@@ -23,6 +23,12 @@ const { analyzeChannelMood, smartPick, optimizeQuoteText, formatNiceLine } = req
 const AdrianChart = require('./musclemb/adrianChart');
 const SweepReader = require('./musclemb/sweepReader');
 
+// ===== Optional Groq "awareness" context (Discord message history) =====
+const MB_GROQ_HISTORY_LIMIT = Math.max(0, Math.min(25, Number(process.env.MB_GROQ_HISTORY_LIMIT || '12'))); // fetch this many
+const MB_GROQ_HISTORY_TURNS = Math.max(0, Math.min(16, Number(process.env.MB_GROQ_HISTORY_TURNS || '8'))); // keep this many (after filtering)
+const MB_GROQ_HISTORY_MAX_CHARS = Math.max(120, Math.min(1200, Number(process.env.MB_GROQ_HISTORY_MAX_CHARS || '650'))); // per message
+const MB_GROQ_DEBUG_CONTEXT = String(process.env.MB_GROQ_DEBUG_CONTEXT || '').trim() === '1';
+
 module.exports = (client) => {
   /** 🔎 MBella-post detector: suppress MuscleMB in that channel for ~11s */
   client.on('messageCreate', (m) => {
@@ -287,7 +293,72 @@ module.exports = (client) => {
       if (shouldRoastOthers) temperature = 0.85;
       if (isRoastingBot) temperature = 0.75;
 
-      const groqTry = await groqWithDiscovery(fullSystemPrompt, cleanedInput, temperature);
+      // ======================================================
+      // ✅ NEW: Pass real Discord chat context via extraMessages
+      // This is what makes Groq feel "aware" of the last messages.
+      // - Excludes MBella posts + other bots
+      // - Includes MuscleMB bot replies (client.user) as assistant
+      // ======================================================
+      let extraMessages = [];
+      try {
+        if (MB_GROQ_HISTORY_LIMIT > 0 && message.channel?.messages?.fetch) {
+          const fetched = await message.channel.messages.fetch({ limit: MB_GROQ_HISTORY_LIMIT }).catch(() => null);
+          const arr = fetched ? Array.from(fetched.values()) : [];
+
+          const cleaned = arr
+            .filter(m => m && m.id !== message.id)
+            .filter(m => typeof m.content === 'string' && m.content.trim().length > 0)
+            // drop other bots (but keep our own bot messages)
+            .filter(m => (!m.author?.bot) || (m.author.id === client.user.id))
+            // drop MBella webhook posts
+            .filter(m => {
+              const isWebhookBella = Boolean(m.webhookId) &&
+                typeof m.author?.username === 'string' &&
+                m.author.username.toLowerCase() === Config.MBELLA_NAME.toLowerCase();
+
+              const isEmbedBella = (m.author?.id === client.user.id) &&
+                (m.embeds?.[0]?.author?.name || '').toLowerCase() === Config.MBELLA_NAME.toLowerCase();
+
+              return !(isWebhookBella || isEmbedBella);
+            })
+            // order oldest -> newest for chat history
+            .sort((a, b) => (a.createdTimestamp || 0) - (b.createdTimestamp || 0))
+            // map to OpenAI-style messages
+            .map(m => {
+              const isAssistant = (m.author?.id === client.user.id);
+              const role = isAssistant ? 'assistant' : 'user';
+
+              // Include username prefix for multi-user channel context (helps the model)
+              const prefix = isAssistant ? '' : `${m.author?.username || 'User'}: `;
+              const text = `${prefix}${m.content || ''}`.trim().slice(0, MB_GROQ_HISTORY_MAX_CHARS);
+
+              return { role, content: text };
+            });
+
+          extraMessages = cleaned.slice(-MB_GROQ_HISTORY_TURNS);
+
+          if (MB_GROQ_DEBUG_CONTEXT) {
+            console.log(`[MB_GROQ_CONTEXT] guild=${message.guild.id} channel=${message.channel.id} extraMessages=${extraMessages.length}`);
+          }
+        }
+      } catch (ctxErr) {
+        if (MB_GROQ_DEBUG_CONTEXT) {
+          console.warn('⚠️ MB_GROQ_CONTEXT build failed:', ctxErr?.message || String(ctxErr));
+        }
+        extraMessages = [];
+      }
+
+      // Optional cacheKey (safe even if your groq.js ignores it)
+      const cacheKey = `${message.guild.id}:${message.channel.id}:${message.author.id}`;
+
+      // ✅ IMPORTANT: call groqWithDiscovery with an options object (prevents max_tokens legacy issues)
+      const groqTry = await groqWithDiscovery(fullSystemPrompt, cleanedInput, {
+        temperature,
+        extraMessages,
+        cacheKey,
+        // If you want longer "reasoning" replies, set via env MB_GROQ_MAX_TOKENS in groq.js.
+        // maxTokens: 420,
+      });
 
       if (!groqTry || groqTry.error) {
         console.error('❌ Groq fetch/network error (all models):', groqTry?.error?.message || 'unknown');
@@ -399,3 +470,4 @@ module.exports = (client) => {
     }
   });
 };
+
