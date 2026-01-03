@@ -29,6 +29,51 @@ const MB_GROQ_HISTORY_TURNS = Math.max(0, Math.min(16, Number(process.env.MB_GRO
 const MB_GROQ_HISTORY_MAX_CHARS = Math.max(120, Math.min(1200, Number(process.env.MB_GROQ_HISTORY_MAX_CHARS || '650'))); // per message
 const MB_GROQ_DEBUG_CONTEXT = String(process.env.MB_GROQ_DEBUG_CONTEXT || '').trim() === '1';
 
+// ======================================================
+// ✅ Mention humanizer (shows names but prevents pings)
+// Converts <@123> / <@!123> -> @DisplayName
+// Converts <@&roleId> -> @RoleName
+// Converts <#channelId> -> #channel-name
+// Also strips @everyone/@here to prevent accidental pings
+// ======================================================
+function humanizeMentions(text, msg) {
+  let out = String(text || '');
+
+  // prevent mass pings in plain text
+  out = out.replace(/@everyone/g, '@ everyone').replace(/@here/g, '@ here');
+
+  // channel mentions
+  out = out.replace(/<#!?(\d+)>|<#(\d+)>/g, (m, a, b) => {
+    const id = a || b;
+    const ch = msg?.guild?.channels?.cache?.get(id) || msg?.client?.channels?.cache?.get(id);
+    if (ch?.name) return `#${ch.name}`;
+    return '#channel';
+  });
+
+  // role mentions
+  out = out.replace(/<@&(\d+)>/g, (m, id) => {
+    const role = msg?.guild?.roles?.cache?.get(id);
+    if (role?.name) return `@${role.name}`;
+    return '@role';
+  });
+
+  // user mentions
+  out = out.replace(/<@!?(\d+)>/g, (m, id) => {
+    // Try: message mentions -> guild member cache -> user cache
+    const u =
+      msg?.mentions?.users?.get?.(id) ||
+      msg?.client?.users?.cache?.get?.(id) ||
+      null;
+
+    const member = msg?.guild?.members?.cache?.get?.(id) || null;
+
+    const name = member?.displayName || u?.username || (id ? `user-${String(id).slice(-4)}` : 'user');
+    return `@${name}`;
+  });
+
+  return out;
+}
+
 module.exports = (client) => {
   /** 🔎 MBella-post detector: suppress MuscleMB in that channel for ~11s */
   client.on('messageCreate', (m) => {
@@ -295,9 +340,7 @@ module.exports = (client) => {
 
       // ======================================================
       // ✅ NEW: Pass real Discord chat context via extraMessages
-      // This is what makes Groq feel "aware" of the last messages.
-      // - Excludes MBella posts + other bots
-      // - Includes MuscleMB bot replies (client.user) as assistant
+      // Also "humanize" mentions so Groq sees @names (not <@id>)
       // ======================================================
       let extraMessages = [];
       try {
@@ -328,9 +371,11 @@ module.exports = (client) => {
               const isAssistant = (m.author?.id === client.user.id);
               const role = isAssistant ? 'assistant' : 'user';
 
-              // Include username prefix for multi-user channel context (helps the model)
               const prefix = isAssistant ? '' : `${m.author?.username || 'User'}: `;
-              const text = `${prefix}${m.content || ''}`.trim().slice(0, MB_GROQ_HISTORY_MAX_CHARS);
+              const raw = `${prefix}${m.content || ''}`.trim().slice(0, MB_GROQ_HISTORY_MAX_CHARS);
+
+              // ✅ convert <@id> etc into readable @names before sending to Groq
+              const text = humanizeMentions(raw, m);
 
               return { role, content: text };
             });
@@ -351,13 +396,11 @@ module.exports = (client) => {
       // Optional cacheKey (safe even if your groq.js ignores it)
       const cacheKey = `${message.guild.id}:${message.channel.id}:${message.author.id}`;
 
-      // ✅ IMPORTANT: call groqWithDiscovery with an options object (prevents max_tokens legacy issues)
+      // ✅ IMPORTANT: call groqWithDiscovery with an options object
       const groqTry = await groqWithDiscovery(fullSystemPrompt, cleanedInput, {
         temperature,
         extraMessages,
         cacheKey,
-        // If you want longer "reasoning" replies, set via env MB_GROQ_MAX_TOKENS in groq.js.
-        // maxTokens: 420,
       });
 
       if (!groqTry || groqTry.error) {
@@ -416,7 +459,11 @@ module.exports = (client) => {
       }
 
       const aiReplyRaw = groqData.choices?.[0]?.message?.content?.trim();
-      const aiReply = (aiReplyRaw || '').slice(0, 1800).trim();
+
+      // ✅ Convert <@id> to readable @names (no ping), also blocks @everyone/@here
+      const aiReplyHuman = humanizeMentions(aiReplyRaw || '', message);
+
+      const aiReply = (aiReplyHuman || '').slice(0, 1800).trim();
 
       if (aiReply?.length) {
         const modeColorMap = {
