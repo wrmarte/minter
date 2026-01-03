@@ -1,0 +1,78 @@
+// listeners/musclemb/niceLines.js
+module.exports = {
+  focus: [
+    "precision beats intensity — name the next step 🎯",
+    "clear tab, clear mind — ship the smallest next thing 🧹",
+    "silence the noise, chase the signal 📡",
+    "progress hides in plain sight — reread yesterday’s notes 📓",
+    "if it feels stuck, zoom out; the map is bigger than the street 🗺️",
+  ],
+  kindness: [
+    "you’re doing great. send a W to someone else too 🙌",
+    "say thanks today, it compounds louder than code 🙏",
+    "one candle lights another without losing its flame 🕯️",
+    "keep it human: laugh once, share once, breathe once 😌",
+  ],
+  shipping: [
+    "skip the scroll, ship the thing 📦",
+    "today’s goal: one honest message, one shipped change 📤",
+    "a tiny draft beats a perfect idea living in your head 📝",
+    "choose progress over polish; polish comes after 🧽",
+    "done is momentum, momentum is magic ✨",
+    "ship bad, learn fast, ship better 🔄",
+  ],
+  recharge: [
+    "posture check, water sip, breathe deep 🧘‍♂️",
+    "breaks are part of the grind — reset, then rip ⚡️",
+    "drink water, touch grass, send the PR 🌿",
+    "don’t doomscroll; dreamscroll your own roadmap 🗺️",
+    "add five quiet minutes to think; it pays compound interest ⏱️",
+    "step back: sunsets don’t debug themselves 🌅",
+    "touch grass, touch base, touch reality 🌿",
+  ],
+  progress: [
+    "hydrate, hustle, and be kind today 💧💪",
+    "tiny reps compound. keep going, legend ✨",
+    "your pace > perfect. 1% better is a W 📈",
+    "stack small dubs; the big ones follow 🧱",
+    "write it down, knock it out, fist bump later ✍️👊",
+    "mood follows motion — move first 🕺",
+    "future you is watching — give them something to smile about 🔮",
+  ],
+  nutty: [
+    "chaos is just order you haven’t met yet 🌀",
+    "laugh at the bug, it fears confidence 😂",
+    "life is a sandbox — kick it, glitch it, build it 🏖️",
+    "fortune favors the shitposters 🧃",
+    "serious plans die, dumb experiments go viral 🤯",
+  ],
+  thoughtful: [
+    "ask one better question and the work gets lighter ❓✨",
+    "a pause is not wasted; it’s thinking in disguise 🕰️",
+    "every message is a mirror — write what you want reflected 🪞",
+    "your silence can be louder than their noise 🌌",
+    "the smallest word can tip the biggest balance ⚖️",
+  ],
+  degen: [
+    "apes don’t ask, they just swing 🐒",
+    "serenity is for the stakers, chaos is for the traders 🔥",
+    "gm is cheap, conviction is priceless ⛓️",
+    "bag heavy, hands shaky, heart degen 💎🙌",
+    "sleep is the FUD of productivity 😴🚫",
+  ],
+  chaotic_wisdom: [
+    "a rug is just gravity teaching you risk 🪂",
+    "the line goes up, then down, then sideways — so does life 📉📈",
+    "fortune cookies are just oracles with better branding 🥠",
+    "every degen thread hides a philosopher in disguise 🧵🧠",
+    "the deeper the dip, the sweeter the cope 🍯",
+  ],
+  funny: [
+    "debugging: talking to a rubber duck until it cries 🦆",
+    "wifi down = forced meditation retreat 📴",
+    "life’s just alt-tabbing until bedtime ⌨️😴",
+    "gm is free, coffee isn’t ☕",
+    "success is 90% ctrl+c, 10% ctrl+v 🖇️",
+    "meetings: multiplayer procrastination 🎮",
+  ]
+};
