@@ -5,6 +5,8 @@
 // - Logic split into small editable modules
 // ======================================================
 
+const { EmbedBuilder } = require('discord.js'); // ✅ FIX: needed in this file
+
 const Config = require('./musclemb/config');
 const State = require('./musclemb/state');
 
