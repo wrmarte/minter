@@ -6,12 +6,15 @@ let MODEL_CACHE = { ts: 0, models: [] };
 const MODEL_TTL_MS = 6 * 60 * 60 * 1000;
 
 // ========= Tunables (safe defaults, override via env) =========
-// Your current max_tokens=140 is *very* limiting. Bump it.
+// IMPORTANT: Your old "140" cap was killing reasoning. Default higher.
 const DEFAULT_MAX_TOKENS = Number(
   process.env.MB_GROQ_MAX_TOKENS ||
   process.env.GROQ_MAX_TOKENS ||
   '420'
 );
+
+// Default temperature (0.8 can be too “random” for reasoning). Safer default.
+const DEFAULT_TEMPERATURE = Number(process.env.MB_GROQ_TEMPERATURE || '0.65');
 
 // Sampling controls (OpenAI-compatible; Groq generally supports these)
 const DEFAULT_TOP_P = Number(process.env.MB_GROQ_TOP_P || '0.92');
@@ -19,17 +22,32 @@ const DEFAULT_PRESENCE_PENALTY = Number(process.env.MB_GROQ_PRESENCE_PENALTY || 
 const DEFAULT_FREQUENCY_PENALTY = Number(process.env.MB_GROQ_FREQUENCY_PENALTY || '0.05');
 
 // Optional: append a consistent style primer to *every* system prompt
-// (Example: "You are MuscleMB... be witty, confident, but helpful...")
 const STYLE_PRIMER = String(process.env.MB_GROQ_STYLE_PRIMER || '').trim();
+
+// Prefer certain models first (comma-separated). Example:
+// MB_GROQ_MODEL_PREFER=llama-3.3-70b-versatile,llama-3.1-70b-versatile,llama-3.1-8b-instant
+const PREFER_MODELS = String(process.env.MB_GROQ_MODEL_PREFER || process.env.GROQ_MODEL_PREFER || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
 
 // Retry behavior for transient errors (429 / 5xx)
 const MAX_RETRIES_PER_MODEL = Number(process.env.MB_GROQ_MAX_RETRIES || '2');
 const RETRY_BASE_MS = Number(process.env.MB_GROQ_RETRY_BASE_MS || '650');
 const RETRY_MAX_MS = Number(process.env.MB_GROQ_RETRY_MAX_MS || '4000');
 
-// User content clamp (avoid huge payloads)
+// Debug
+const DEBUG = String(process.env.MB_GROQ_DEBUG || '').trim() === '1';
+
+// User/system content clamp (avoid huge payloads)
 const USER_CHAR_LIMIT = Number(process.env.MB_GROQ_USER_CHAR_LIMIT || '8000');
 const SYSTEM_CHAR_LIMIT = Number(process.env.MB_GROQ_SYSTEM_CHAR_LIMIT || '8000');
+
+// Optional tiny in-memory “awareness” (requires caller to pass opts.cacheKey)
+const USE_MEMORY = String(process.env.MB_GROQ_USE_MEMORY || '').trim() === '1';
+const MEMORY_MAX_TURNS = Number(process.env.MB_GROQ_MEMORY_TURNS || '6'); // user+assistant pairs
+const MEMORY_TTL_MS = Number(process.env.MB_GROQ_MEMORY_TTL_MS || String(20 * 60 * 1000)); // 20m default
+const MEMORY = new Map(); // key -> { ts, msgs: [{role,content}] }
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -38,6 +56,24 @@ function sleep(ms) {
 function clamp(n, min, max) {
   const x = Number.isFinite(Number(n)) ? Number(n) : min;
   return Math.min(max, Math.max(min, x));
+}
+
+function nowMs() {
+  return Date.now();
+}
+
+function parsePreferredModelsFirst(models) {
+  if (!Array.isArray(models) || !models.length) return [];
+  const set = new Set(models);
+
+  const ordered = [];
+  for (const p of PREFER_MODELS) {
+    if (set.has(p) && !ordered.includes(p)) ordered.push(p);
+  }
+  for (const m of models) {
+    if (!ordered.includes(m)) ordered.push(m);
+  }
+  return ordered;
 }
 
 /**
@@ -76,7 +112,7 @@ function preferOrder(a, b) {
     if (s.includes('whisper')) score -= 999;
     if (s.includes('embedding')) score -= 999;
     if (s.includes('tts')) score -= 999;
-    if (s.includes('vision')) score -= 120; // not always bad, but usually not needed for MuscleMB
+    if (s.includes('vision')) score -= 120;
     if (s.includes('audio')) score -= 120;
 
     return score;
@@ -121,7 +157,6 @@ async function fetchGroqModels() {
 
     const ids = data.data.map(x => x.id).filter(Boolean);
 
-    // Prefer chat-capable model families; fall back to anything if none match
     const chatLikely = ids.filter(isProbablyChatModel).sort(preferOrder);
     const allSorted = ids.sort(preferOrder);
 
@@ -133,20 +168,65 @@ async function fetchGroqModels() {
 }
 
 async function getModelsToTry() {
-  const list = [];
+  let list = [];
+
+  // 1) Explicit prefer list first (if present)
+  if (PREFER_MODELS.length) list.push(...PREFER_MODELS);
+
+  // 2) Explicit env model next
   if (Config.GROQ_MODEL_ENV) list.push(Config.GROQ_MODEL_ENV);
 
-  const now = Date.now();
+  // 3) Discovery list next
+  const now = nowMs();
   if (!MODEL_CACHE.models.length || (now - MODEL_CACHE.ts) > MODEL_TTL_MS) {
     const models = await fetchGroqModels();
     if (models.length) MODEL_CACHE = { ts: now, models };
   }
+  list.push(...MODEL_CACHE.models);
 
-  for (const id of MODEL_CACHE.models) {
-    if (!list.includes(id)) list.push(id);
+  // De-dupe while preserving order
+  const out = [];
+  for (const id of list) {
+    if (id && !out.includes(id)) out.push(id);
   }
 
-  return list;
+  // Re-apply prefer ordering (ensures prefer list stays first even after cache)
+  return parsePreferredModelsFirst(out);
+}
+
+function shouldRetryStatus(status) {
+  return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+}
+
+function computeBackoffMs(attempt) {
+  const base = RETRY_BASE_MS * Math.pow(1.6, attempt);
+  const jitter = Math.floor(Math.random() * 250);
+  return Math.min(RETRY_MAX_MS, Math.floor(base + jitter));
+}
+
+function extractAssistantText(bodyText) {
+  const data = Utils.safeJsonParse(bodyText);
+  const text =
+    data?.choices?.[0]?.message?.content ??
+    data?.choices?.[0]?.text ??
+    '';
+  return typeof text === 'string' ? text.trim() : '';
+}
+
+function getMemoryMessages(cacheKey) {
+  if (!USE_MEMORY || !cacheKey) return [];
+  const item = MEMORY.get(cacheKey);
+  if (!item) return [];
+  if ((nowMs() - item.ts) > MEMORY_TTL_MS) {
+    MEMORY.delete(cacheKey);
+    return [];
+  }
+  return Array.isArray(item.msgs) ? item.msgs.slice() : [];
+}
+
+function saveMemoryMessages(cacheKey, msgs) {
+  if (!USE_MEMORY || !cacheKey) return;
+  MEMORY.set(cacheKey, { ts: nowMs(), msgs: msgs.slice(-MEMORY_MAX_TURNS * 2) });
 }
 
 /**
@@ -155,18 +235,22 @@ async function getModelsToTry() {
  * - new usage: buildGroqBody(model, systemPrompt, userContent, optsObject)
  */
 function buildGroqBody(model, systemPrompt, userContent, temperatureOrOpts, maxTokensLegacy) {
-  const opts =
-    (temperatureOrOpts && typeof temperatureOrOpts === 'object')
-      ? temperatureOrOpts
-      : { temperature: temperatureOrOpts, maxTokens: maxTokensLegacy };
+  const isObj = temperatureOrOpts && typeof temperatureOrOpts === 'object';
+
+  // Legacy call: temperature is a number, maxTokensLegacy provided
+  // New call: temperatureOrOpts is an object
+  const opts = isObj
+    ? temperatureOrOpts
+    : { temperature: temperatureOrOpts, maxTokens: maxTokensLegacy };
 
   const temperature = clamp(
-    (opts.temperature ?? 0.8),
+    (opts.temperature ?? DEFAULT_TEMPERATURE),
     0,
     2
   );
 
   const maxTokens = clamp(
+    // If maxTokens not explicitly provided, use DEFAULT_MAX_TOKENS
     (opts.maxTokens ?? DEFAULT_MAX_TOKENS),
     32,
     2048
@@ -196,22 +280,23 @@ function buildGroqBody(model, systemPrompt, userContent, temperatureOrOpts, maxT
 
   // Allow a style primer to enforce "MuscleMB vibe" consistently
   let sys = String(systemPrompt || '');
-  if (STYLE_PRIMER) {
-    sys = `${sys}\n\n${STYLE_PRIMER}`;
-  }
+  if (STYLE_PRIMER) sys = `${sys}\n\n${STYLE_PRIMER}`;
   sys = sys.slice(0, SYSTEM_CHAR_LIMIT);
 
-  // Optional "extraMessages" for better context-awareness (history)
-  // Must be: [{role:'user'|'assistant', content:'...'}]
+  // Optional history provided by caller (best practice)
   const extraMessages = Array.isArray(opts.extraMessages)
     ? opts.extraMessages
         .filter(m => m && typeof m === 'object' && typeof m.role === 'string' && typeof m.content === 'string')
         .map(m => ({ role: m.role, content: String(m.content).slice(0, USER_CHAR_LIMIT) }))
-        .slice(-12) // keep it light; don't blow tokens
+        .slice(-12)
     : [];
+
+  // Optional in-module memory (requires opts.cacheKey)
+  const memoryMessages = (opts.cacheKey ? getMemoryMessages(opts.cacheKey) : []);
 
   const messages = [
     { role: 'system', content: sys },
+    ...memoryMessages,
     ...extraMessages,
     { role: 'user', content: cleanUser },
   ];
@@ -230,10 +315,17 @@ function buildGroqBody(model, systemPrompt, userContent, temperatureOrOpts, maxT
   if (stop && stop.length) body.stop = stop;
   if (Number.isFinite(opts.seed)) body.seed = Number(opts.seed);
 
+  if (DEBUG) {
+    console.log(`[MB_GROQ] model=${model} temp=${temperature} top_p=${top_p} max_tokens=${maxTokens} mem=${memoryMessages.length} extra=${extraMessages.length}`);
+  }
+
   return JSON.stringify(body);
 }
 
 async function groqTryModel(model, systemPrompt, userContent, temperatureOrOpts) {
+  // ✅ IMPORTANT FIX:
+  // DO NOT force legacy maxTokens=140 here.
+  // That was overriding your DEFAULT_MAX_TOKENS when caller passes numeric temperature.
   const { res, bodyText } = await Utils.fetchWithTimeout(
     'https://api.groq.com/openai/v1/chat/completions',
     {
@@ -242,7 +334,7 @@ async function groqTryModel(model, systemPrompt, userContent, temperatureOrOpts)
         'Authorization': `Bearer ${Config.GROQ_API_KEY}`,
         'Content-Type': 'application/json',
       },
-      body: buildGroqBody(model, systemPrompt, userContent, temperatureOrOpts, 140),
+      body: buildGroqBody(model, systemPrompt, userContent, temperatureOrOpts),
     },
     25000
   );
@@ -250,22 +342,11 @@ async function groqTryModel(model, systemPrompt, userContent, temperatureOrOpts)
   return { res, bodyText };
 }
 
-function shouldRetryStatus(status) {
-  return status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
-}
-
-function computeBackoffMs(attempt) {
-  // exponential-ish with jitter, capped
-  const base = RETRY_BASE_MS * Math.pow(1.6, attempt);
-  const jitter = Math.floor(Math.random() * 250);
-  return Math.min(RETRY_MAX_MS, Math.floor(base + jitter));
-}
-
 /**
  * Backwards compatible signature:
  *   groqWithDiscovery(systemPrompt, userContent, temperature)
  * New signature:
- *   groqWithDiscovery(systemPrompt, userContent, { temperature, maxTokens, top_p, ... })
+ *   groqWithDiscovery(systemPrompt, userContent, { temperature, maxTokens, top_p, extraMessages, cacheKey, ... })
  */
 async function groqWithDiscovery(systemPrompt, userContent, temperatureOrOpts) {
   const models = await getModelsToTry();
@@ -274,7 +355,6 @@ async function groqWithDiscovery(systemPrompt, userContent, temperatureOrOpts) {
   let last = null;
 
   for (const m of models) {
-    // Per-model retry loop for transient failures
     for (let attempt = 0; attempt <= MAX_RETRIES_PER_MODEL; attempt++) {
       try {
         const r = await groqTryModel(m, systemPrompt, userContent, temperatureOrOpts);
@@ -283,10 +363,10 @@ async function groqWithDiscovery(systemPrompt, userContent, temperatureOrOpts) {
           const preview = (r.bodyText || '').slice(0, 400);
           console.error(`❌ Groq HTTP ${r.res.status} on model "${m}": ${preview}`);
 
-          // If invalid model/request, try next model (no retry unless you want)
+          // If invalid model/request, try next model
           if (r.res.status === 400 || r.res.status === 404) {
             last = { model: m, ...r };
-            break; // next model
+            break;
           }
 
           // Retry transient issues
@@ -296,15 +376,32 @@ async function groqWithDiscovery(systemPrompt, userContent, temperatureOrOpts) {
             continue;
           }
 
-          // Non-retryable or exhausted retries: return this failure
           return { model: m, ...r };
         }
 
-        return { model: m, ...r };
+        // ✅ Optional: extract assistant text and update memory if enabled
+        const text = extractAssistantText(r.bodyText);
+
+        const isObj = temperatureOrOpts && typeof temperatureOrOpts === 'object';
+        const cacheKey = isObj ? temperatureOrOpts.cacheKey : null;
+
+        if (USE_MEMORY && cacheKey && text) {
+          const cleanUser = String(userContent || '').slice(0, USER_CHAR_LIMIT);
+          const prev = getMemoryMessages(cacheKey);
+
+          // store as alternating user/assistant turns
+          const next = [
+            ...prev,
+            { role: 'user', content: cleanUser },
+            { role: 'assistant', content: text },
+          ].slice(-MEMORY_MAX_TURNS * 2);
+
+          saveMemoryMessages(cacheKey, next);
+        }
+
+        return { model: m, ...r, text };
       } catch (e) {
         console.error(`❌ Groq fetch error on model "${m}":`, e.message);
-
-        // Retry fetch/timeouts a bit
         last = { model: m, error: e };
 
         if (attempt < MAX_RETRIES_PER_MODEL) {
@@ -313,7 +410,6 @@ async function groqWithDiscovery(systemPrompt, userContent, temperatureOrOpts) {
           continue;
         }
 
-        // exhausted retries; move to next model
         break;
       }
     }
