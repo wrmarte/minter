@@ -79,7 +79,6 @@ async function ensureDigestEventsTable(pg) {
 /* ===================== FETCH WINDOW ===================== */
 
 async function fetchDigestWindow(pg, guildId, hours = 24) {
-  // ✅ Ensure table exists so scheduler doesn't silently fail
   await ensureDigestEventsTable(pg);
 
   const q = `
@@ -104,9 +103,9 @@ async function fetchDigestWindow(pg, guildId, hours = 24) {
 function computeDigestStats(rows) {
   const mints = rows.filter(r => r.event_type === "mint");
 
-  // ✅ Split:
+  // sale split:
   // - NFT Sales = sale + token_id present
-  // - Swaps (token buys/sells) = sale + token_id NULL (how we logged swaps)
+  // - Swaps = sale + token_id empty (how swaps were logged)
   const salesAll = rows.filter(r => r.event_type === "sale");
   const nftSales = salesAll.filter(r => r.token_id != null && String(r.token_id).trim() !== "");
   const swaps = salesAll.filter(r => r.token_id == null || String(r.token_id).trim() === "");
@@ -126,7 +125,6 @@ function computeDigestStats(rows) {
   const totalVolEth = nftVolEth + swapVolEth;
   const totalVolUsd = nftVolUsd + swapVolUsd;
 
-  // most active contract by count (mints + sales/swaps)
   const byContract = new Map();
   for (const r of rows) {
     const c = (r.contract || "").toLowerCase() || "unknown";
@@ -137,24 +135,21 @@ function computeDigestStats(rows) {
     if (count > mostActive.count) mostActive = { contract, count };
   }
 
-  // top NFT sale by ETH
   let topNftSale = null;
   for (const r of nftSales) {
     const v = num(r.amount_eth, 0);
     if (!topNftSale || v > num(topNftSale.amount_eth, 0)) topNftSale = r;
   }
 
-  // top swap by USD (fallback ETH)
   let topSwap = null;
   for (const r of swaps) {
     const u = num(r.amount_usd, 0);
     const e = num(r.amount_eth, 0);
-    const score = u > 0 ? u : e; // prefer USD if present, else ETH
+    const score = u > 0 ? u : e;
     if (!topSwap) topSwap = { row: r, score };
     else if (score > (topSwap.score || 0)) topSwap = { row: r, score };
   }
 
-  // chains breakdown
   const byChain = new Map();
   for (const r of rows) {
     const ch = (r.chain || "unknown").toLowerCase();
@@ -259,7 +254,6 @@ function buildDigestEmbed({ guildName, hours, stats, rows, settings, hadQueryErr
     .setFooter({ text: hadQueryError ? "MB Digest • (warning: digest query error)" : "MB Digest • powered by your tracker logs" })
     .setTimestamp(new Date());
 
-  // Recent NFT Sales (last 5)
   const recentNftSales = rows
     .filter(r => r.event_type === "sale" && r.token_id != null && String(r.token_id).trim() !== "")
     .slice(0, 5)
@@ -276,7 +270,6 @@ function buildDigestEmbed({ guildName, hours, stats, rows, settings, hadQueryErr
     embed.addFields({ name: "Recent NFT Sales", value: recentNftSales.join("\n").slice(0, 1024) });
   }
 
-  // Recent Swaps (last 5)
   const recentSwaps = rows
     .filter(r => r.event_type === "sale" && (r.token_id == null || String(r.token_id).trim() === ""))
     .slice(0, 5)
@@ -321,6 +314,13 @@ async function generateDailyDigest({ pg, guild, settings, hours = 24 }) {
 }
 
 module.exports = {
+  // main
   generateDailyDigest,
+
+  // exported helpers (for scheduler + debugging)
+  ensureDigestEventsTable,
+  fetchDigestWindow,
+  computeDigestStats,
+  buildDigestEmbed,
 };
 
