@@ -1,6 +1,8 @@
 // commands/refresh.js
-const { SlashCommandBuilder, PermissionsBitField } = require('discord.js');
+const { SlashCommandBuilder } = require('discord.js');
 const { REST, Routes } = require('discord.js');
+
+const EPHEMERAL_FLAG = 1 << 6; // 64
 
 function parseCsvIds(csv, fallback) {
   const list = (csv || '')
@@ -40,9 +42,9 @@ async function fetchGuild(rest, clientId, guildId) {
   }
 }
 
-function diffNames(existingList, desiredList) {
-  const a = new Set((existingList || []).map(x => x?.name).filter(Boolean));
-  const b = new Set((desiredList || []).map(x => x?.name).filter(Boolean));
+function diffNames(before, after) {
+  const a = new Set((before || []).map(x => x?.name).filter(Boolean));
+  const b = new Set((after || []).map(x => x?.name).filter(Boolean));
   const added = [];
   const removed = [];
   for (const name of b) if (!a.has(name)) added.push(name);
@@ -58,7 +60,30 @@ async function putGuild(rest, clientId, guildId, body) {
   return await rest.put(Routes.applicationGuildCommands(clientId, guildId), { body });
 }
 
+async function safeReply(interaction, content) {
+  try {
+    if (interaction.deferred || interaction.replied) {
+      return await interaction.editReply({ content });
+    }
+    return await interaction.reply({ content, flags: EPHEMERAL_FLAG });
+  } catch {
+    try { return await interaction.followUp({ content, flags: EPHEMERAL_FLAG }); } catch {}
+  }
+}
+
+async function safeEdit(interaction, content) {
+  try {
+    if (interaction.deferred || interaction.replied) {
+      return await interaction.editReply({ content });
+    }
+    return await interaction.reply({ content, flags: EPHEMERAL_FLAG });
+  } catch {
+    try { return await interaction.followUp({ content, flags: EPHEMERAL_FLAG }); } catch {}
+  }
+}
+
 module.exports = {
+  // ✅ Command schema (Discord will update to include mode/confirm after you run refresh once)
   data: new SlashCommandBuilder()
     .setName('refresh')
     .setDescription('🔄 Refresh / purge / reinstall slash commands (owner only)')
@@ -75,7 +100,7 @@ module.exports = {
     .addStringOption(option =>
       option.setName('mode')
         .setDescription('What to do')
-        .setRequired(true)
+        .setRequired(false) // ✅ IMPORTANT: allow legacy installed command without this option
         .addChoices(
           { name: 'Deploy (install/update)', value: 'deploy' },
           { name: 'Purge (delete commands)', value: 'purge' },
@@ -89,38 +114,38 @@ module.exports = {
     ),
 
   async execute(interaction) {
-    // ✅ Restrict to owner (hard gate)
+    // ✅ Owner only
     const ownerId = String(process.env.BOT_OWNER_ID || '').trim();
     if (!ownerId || interaction.user.id !== ownerId) {
-      return interaction.reply({ content: '🚫 Owner only.', ephemeral: true });
+      return safeReply(interaction, '🚫 Owner only.');
     }
 
     const client = interaction.client;
     const token = process.env.DISCORD_BOT_TOKEN;
 
-    // CLIENT_ID can be env, else try client.application.id
     const clientIdEnv = String(process.env.CLIENT_ID || '').trim();
     const clientId = clientIdEnv || String(client?.application?.id || '').trim();
 
     if (!token || !clientId) {
-      return interaction.reply({
-        content: '❌ Missing DISCORD_BOT_TOKEN or CLIENT_ID (or client.application.id not ready).',
-        ephemeral: true
-      });
+      return safeReply(interaction, '❌ Missing DISCORD_BOT_TOKEN or CLIENT_ID (or client.application.id not ready).');
     }
 
-    const scope = interaction.options.getString('scope', true);
-    const mode = interaction.options.getString('mode', true);
+    // ✅ Backwards compatible: old installed command might only have "scope"
+    const scope = interaction.options.getString('scope') || 'both';
+
+    // ✅ If "mode" doesn't exist on the installed command, default to deploy
+    const mode = interaction.options.getString('mode') || 'deploy';
     const confirm = Boolean(interaction.options.getBoolean('confirm'));
 
     const isPurge = (mode === 'purge' || mode === 'purge_deploy');
     if (isPurge && !confirm) {
-      return interaction.reply({
-        content:
-          '⚠️ Purge requested. Re-run with `confirm=true` to proceed.\n' +
-          'Tip: To fix “commands show twice”, use **mode = Purge + Deploy** with scope **test** (or purge global if you only want guild).',
-        ephemeral: true
-      });
+      return safeReply(
+        interaction,
+        '⚠️ Purge requested.\nRe-run with `confirm=true`.\n\n' +
+        'Tip: duplicates happen when commands are installed BOTH globally + guild.\n' +
+        '• Want GLOBAL only? purge test guild commands.\n' +
+        '• Want TEST-only? purge global commands.'
+      );
     }
 
     const rest = new REST({ version: '10' }).setToken(token);
@@ -133,28 +158,24 @@ module.exports = {
     const desiredCommands = toSafeArray(raw);
 
     if (!desiredCommands.length && mode !== 'purge') {
-      return interaction.reply({ content: '⚠️ No commands loaded in memory to register.', ephemeral: true });
+      return safeReply(interaction, '⚠️ No commands loaded in memory to register.');
     }
 
-    // Collect test guild IDs
     const testGuildIds = parseCsvIds(process.env.TEST_GUILD_IDS, process.env.TEST_GUILD_ID);
 
-    await interaction.reply({
-      content: `⏳ Running \`${mode}\` for scope \`${scope}\`...\nApp: \`${clientId}\``,
-      ephemeral: true
-    });
+    await safeReply(interaction, `⏳ Running \`${mode}\` for \`${scope}\`…`);
 
     const lines = [];
-    const runScopeGlobal = (scope === 'global' || scope === 'both');
-    const runScopeTest = (scope === 'test' || scope === 'both');
+    const runGlobal = (scope === 'global' || scope === 'both');
+    const runTest = (scope === 'test' || scope === 'both');
 
     try {
       // ---------- GLOBAL ----------
-      if (runScopeGlobal) {
+      if (runGlobal) {
         const before = await fetchGlobal(rest, clientId);
 
         if (mode === 'purge' || mode === 'purge_deploy') {
-          await putGlobal(rest, clientId, []); // delete all global commands
+          await putGlobal(rest, clientId, []);
         }
         if (mode === 'deploy' || mode === 'purge_deploy') {
           await putGlobal(rest, clientId, desiredCommands);
@@ -172,7 +193,7 @@ module.exports = {
       }
 
       // ---------- TEST GUILDS ----------
-      if (runScopeTest) {
+      if (runTest) {
         if (!testGuildIds.length) {
           lines.push('⚠️ No TEST_GUILD_ID(S) configured; skipped test scope.');
         } else {
@@ -180,7 +201,7 @@ module.exports = {
             const before = await fetchGuild(rest, clientId, guildId);
 
             if (mode === 'purge' || mode === 'purge_deploy') {
-              await putGuild(rest, clientId, guildId, []); // delete all guild commands
+              await putGuild(rest, clientId, guildId, []);
             }
             if (mode === 'deploy' || mode === 'purge_deploy') {
               await putGuild(rest, clientId, guildId, desiredCommands);
@@ -199,25 +220,17 @@ module.exports = {
         }
       }
 
-      // Extra guidance for duplicates
-      let tip = '';
-      if (mode !== 'purge') {
-        tip =
-          `\n**Tip (fix duplicates):** If commands show twice, you probably have **Global + Guild** both installed.\n` +
-          `• If you want GLOBAL only: run \`/refresh scope:test mode:purge confirm:true\`\n` +
-          `• If you want TEST-GUILD only: run \`/refresh scope:global mode:purge confirm:true\`\n`;
-      }
+      const tip =
+        `\n**Fix duplicates:** they happen when the same commands exist in BOTH global + guild.\n` +
+        `• Keep GLOBAL only → run: \`/refresh scope:test mode:purge confirm:true\`\n` +
+        `• Keep TEST guild only → run: \`/refresh scope:global mode:purge confirm:true\`\n`;
 
       const summary = lines.join('\n').trim() || 'No output.';
-      await interaction.editReply(`✅ Done: \`${mode}\` on \`${scope}\`\n\n${summary}${tip}`);
+      await safeEdit(interaction, `✅ Done: \`${mode}\` on \`${scope}\`\n\n${summary}${tip}`);
+
     } catch (err) {
       console.error('❌ Slash refresh failed:', err);
-      await interaction.editReply(
-        '❌ Command refresh failed. Check logs.\n' +
-        `Error: ${(err?.message || String(err)).slice(0, 180)}`
-      );
+      await safeEdit(interaction, `❌ Command refresh failed.\nError: ${(err?.message || String(err)).slice(0, 240)}`);
     }
   }
 };
-
-
