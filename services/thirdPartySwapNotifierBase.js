@@ -1,9 +1,10 @@
-const { Interface, Contract, ethers } = require('ethers');
+// services/thirdPartySwapNotifierBase.js
+const { Interface, Contract, ethers, PermissionsBitField } = require('ethers');
 const fetch = require('node-fetch');
 const { safeRpcCall } = require('./providerM');
 const { shortWalletLink } = require('../utils/helpers');
 
-// ✅ NEW: Daily Digest logger (safe optional import)
+// ✅ Daily Digest logger (safe optional import)
 let logDigestEvent = null;
 try {
   ({ logDigestEvent } = require('./digestLogger'));
@@ -329,6 +330,22 @@ async function resolveChannels(client) {
   return out;
 }
 
+function hasSendPerms(ch) {
+  try {
+    const me = ch.guild?.members?.me;
+    const perms = me ? ch.permissionsFor(me) : null;
+    if (!perms) return false;
+
+    // discord.js perms object may accept strings OR flags depending on version
+    if (perms.has?.('SendMessages')) return true;
+    if (perms.has?.(PermissionsBitField?.Flags?.SendMessages)) return true;
+
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 async function fetchAndValidateChannel(client, id) {
   let ch = client.channels.cache.get(id) || null;
   if (!ch) ch = await client.channels.fetch(id).catch(() => null);
@@ -337,11 +354,16 @@ async function fetchAndValidateChannel(client, id) {
   const isText = typeof ch.isTextBased === 'function' ? ch.isTextBased() : false;
   if (!isText) return null;
 
+  if (!hasSendPerms(ch)) return null;
+
   try {
     const me = ch.guild?.members?.me;
     const perms = me ? ch.permissionsFor(me) : null;
-    if (!perms?.has('SendMessages')) return null;
-    if (ch.isThread?.() && !perms?.has('SendMessagesInThreads')) return null;
+    if (ch.isThread?.() && perms) {
+      if (perms.has?.('SendMessagesInThreads')) return ch;
+      if (perms.has?.(PermissionsBitField?.Flags?.SendMessagesInThreads)) return ch;
+      return null;
+    }
   } catch {}
 
   return ch;
@@ -396,7 +418,6 @@ async function analyzeSwap(provider, txHash) {
     ethValue = (isBuy && v > 0) ? v : 0;
   }
 
-  // We still notify even if ethValue is 0 (some routes won't touch WETH directly).
   const ethUsd = await getEthUsdPriceCached();
   const usdValue = (ethUsd > 0 && ethValue > 0) ? (ethValue * ethUsd) : 0;
 
@@ -520,24 +541,20 @@ async function sendSwapEmbed(client, swap, provider) {
     }
   }
 
-  // ✅ NEW: Digest logging (once per guild, only if we successfully sent there)
+  // ✅ Digest logging (once per guild, only if we successfully sent there)
+  // These show up as "Swaps" in digest because tokenId is null/empty.
   if (logDigestEvent && sentGuilds.size) {
     for (const guildId of sentGuilds) {
       try {
         await logDigestEvent(client, {
           guildId,
-          // Keep digest schema stable: count these under "sale" events
-          // (buys and sells both become activity + volume in digest)
           eventType: 'sale',
           chain: 'base',
           contract: ADRIAN,
           tokenId: null,
-
-          // amountNative = ADRIAN token amount (not chain native)
-          amountNative: tokenAmount,
+          amountNative: tokenAmount,     // ADRIAN amount
           amountEth: ethValue,
           amountUsd: usdValue,
-
           buyer: isBuy ? wallet : null,
           seller: isBuy ? null : wallet,
           txHash,
