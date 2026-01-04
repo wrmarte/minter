@@ -82,8 +82,105 @@ async function safeEdit(interaction, content) {
   }
 }
 
+/**
+ * Discord API rule:
+ * At any "options" array level, required=true options must come BEFORE optional ones.
+ * This auto-normalizes options order recursively.
+ */
+function hasRequiredAfterOptional(options) {
+  if (!Array.isArray(options) || !options.length) return false;
+  let seenOptional = false;
+  for (const opt of options) {
+    const req = Boolean(opt?.required);
+    if (!req) seenOptional = true;
+    if (req && seenOptional) return true;
+  }
+  return false;
+}
+
+function reorderOptions(options) {
+  if (!Array.isArray(options) || !options.length) return options;
+
+  const required = [];
+  const optional = [];
+
+  for (const opt of options) {
+    // Normalize nested options first
+    if (opt && Array.isArray(opt.options)) {
+      opt.options = reorderOptions(opt.options);
+    }
+    if (opt && Array.isArray(opt.choices)) {
+      // choices order doesn't matter; leave
+    }
+
+    if (opt?.required === true) required.push(opt);
+    else optional.push(opt);
+  }
+
+  return [...required, ...optional];
+}
+
+function normalizeCommandOptions(cmd) {
+  if (!cmd || typeof cmd !== 'object') return { cmd, changed: false };
+
+  let changed = false;
+
+  // top-level options
+  if (Array.isArray(cmd.options) && cmd.options.length) {
+    // Recurse + reorder at this level
+    const beforeBad = hasRequiredAfterOptional(cmd.options);
+    cmd.options = reorderOptions(cmd.options);
+    const afterBad = hasRequiredAfterOptional(cmd.options);
+
+    if (beforeBad || afterBad === false) {
+      if (beforeBad) changed = true;
+    }
+
+    // Also: ensure subcommand/group children are normalized
+    for (const opt of cmd.options) {
+      if (opt && Array.isArray(opt.options)) {
+        const beforeChildBad = hasRequiredAfterOptional(opt.options);
+        opt.options = reorderOptions(opt.options);
+        if (beforeChildBad) changed = true;
+
+        // deeper nesting
+        for (const opt2 of opt.options || []) {
+          if (opt2 && Array.isArray(opt2.options)) {
+            const beforeDeepBad = hasRequiredAfterOptional(opt2.options);
+            opt2.options = reorderOptions(opt2.options);
+            if (beforeDeepBad) changed = true;
+          }
+        }
+      }
+    }
+  }
+
+  return { cmd, changed };
+}
+
+function normalizeAllCommands(commands) {
+  const fixed = [];
+  const out = [];
+
+  for (let i = 0; i < commands.length; i++) {
+    const original = commands[i];
+    const name = original?.name || `#${i}`;
+    const copy = JSON.parse(JSON.stringify(original)); // safe deep clone
+    const { cmd, changed } = normalizeCommandOptions(copy);
+
+    if (changed) fixed.push(name);
+    out.push(cmd);
+  }
+
+  // Final safety: enforce top-level required ordering again
+  for (const c of out) {
+    if (Array.isArray(c.options)) c.options = reorderOptions(c.options);
+  }
+
+  return { commands: out, fixed };
+}
+
 module.exports = {
-  // ✅ Command schema (Discord will update to include mode/confirm after you run refresh once)
   data: new SlashCommandBuilder()
     .setName('refresh')
     .setDescription('🔄 Refresh / purge / reinstall slash commands (owner only)')
@@ -97,10 +194,11 @@ module.exports = {
           { name: 'Both', value: 'both' }
         )
     )
+    // ✅ optional for legacy schema compatibility
     .addStringOption(option =>
       option.setName('mode')
         .setDescription('What to do')
-        .setRequired(false) // ✅ IMPORTANT: allow legacy installed command without this option
+        .setRequired(false)
         .addChoices(
           { name: 'Deploy (install/update)', value: 'deploy' },
           { name: 'Purge (delete commands)', value: 'purge' },
@@ -114,7 +212,6 @@ module.exports = {
     ),
 
   async execute(interaction) {
-    // ✅ Owner only
     const ownerId = String(process.env.BOT_OWNER_ID || '').trim();
     if (!ownerId || interaction.user.id !== ownerId) {
       return safeReply(interaction, '🚫 Owner only.');
@@ -130,10 +227,8 @@ module.exports = {
       return safeReply(interaction, '❌ Missing DISCORD_BOT_TOKEN or CLIENT_ID (or client.application.id not ready).');
     }
 
-    // ✅ Backwards compatible: old installed command might only have "scope"
+    // backwards compatible: old installed cmd might only have scope
     const scope = interaction.options.getString('scope') || 'both';
-
-    // ✅ If "mode" doesn't exist on the installed command, default to deploy
     const mode = interaction.options.getString('mode') || 'deploy';
     const confirm = Boolean(interaction.options.getBoolean('confirm'));
 
@@ -142,28 +237,33 @@ module.exports = {
       return safeReply(
         interaction,
         '⚠️ Purge requested.\nRe-run with `confirm=true`.\n\n' +
-        'Tip: duplicates happen when commands are installed BOTH globally + guild.\n' +
-        '• Want GLOBAL only? purge test guild commands.\n' +
-        '• Want TEST-only? purge global commands.'
+        'Tip: duplicates happen when commands are installed BOTH globally + guild.'
       );
     }
 
     const rest = new REST({ version: '10' }).setToken(token);
 
-    // Pull commands from memory and dedupe by name
+    // Pull commands from memory
     const raw = client.commands?.map?.(cmd => {
       try { return cmd.data.toJSON(); } catch { return null; }
     }).filter(Boolean) || [];
 
-    const desiredCommands = toSafeArray(raw);
+    const desiredRaw = toSafeArray(raw);
 
-    if (!desiredCommands.length && mode !== 'purge') {
+    if (!desiredRaw.length && mode !== 'purge') {
       return safeReply(interaction, '⚠️ No commands loaded in memory to register.');
     }
 
+    // ✅ Normalize option ordering to satisfy Discord API rule
+    const { commands: desiredCommands, fixed } = normalizeAllCommands(desiredRaw);
+
     const testGuildIds = parseCsvIds(process.env.TEST_GUILD_IDS, process.env.TEST_GUILD_ID);
 
-    await safeReply(interaction, `⏳ Running \`${mode}\` for \`${scope}\`…`);
+    await safeReply(
+      interaction,
+      `⏳ Running \`${mode}\` for \`${scope}\`…\n` +
+      (fixed.length ? `🧼 Auto-fixed option order on: ${fixed.slice(0, 12).join(', ')}${fixed.length > 12 ? '…' : ''}` : '🧼 Option order OK.')
+    );
 
     const lines = [];
     const runGlobal = (scope === 'global' || scope === 'both');
@@ -227,10 +327,14 @@ module.exports = {
 
       const summary = lines.join('\n').trim() || 'No output.';
       await safeEdit(interaction, `✅ Done: \`${mode}\` on \`${scope}\`\n\n${summary}${tip}`);
-
     } catch (err) {
       console.error('❌ Slash refresh failed:', err);
-      await safeEdit(interaction, `❌ Command refresh failed.\nError: ${(err?.message || String(err)).slice(0, 240)}`);
+      await safeEdit(
+        interaction,
+        `❌ Command refresh failed.\n` +
+        `Error: ${(err?.message || String(err)).slice(0, 260)}\n\n` +
+        `If this still happens, tell me the command index mentioned in logs (like "33") and I’ll pinpoint the exact command file.`
+      );
     }
   }
 };
