@@ -8,12 +8,18 @@ function num(n, d = 0) {
 
 function fmtMoney(n, decimals = 2) {
   const x = num(n, 0);
-  return x.toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+  return x.toLocaleString(undefined, {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  });
 }
 
 function fmtEth(n, decimals = 4) {
   const x = num(n, 0);
-  return x.toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+  return x.toLocaleString(undefined, {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  });
 }
 
 function safeStr(s, max = 120) {
@@ -36,13 +42,23 @@ function padWho(who, max = 22) {
   return w.length > max ? w.slice(0, max - 1) + "…" : w;
 }
 
-/* ===================== TABLE ENSURE (FIX) ===================== */
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+
+/* ===================== TABLE ENSURE (SAFE) ===================== */
+/**
+ * NOTE:
+ * - digestLogger.js is the authoritative schema initializer now (with token_id_norm dedupe).
+ * - This ensure is kept as a safe fallback so scheduler won't silently fail.
+ * - It will NOT drop/overwrite newer schema; it only creates missing basics.
+ */
 
 const DIGEST_EVENTS_TABLE_SQL = `
 CREATE TABLE IF NOT EXISTS digest_events (
   id            BIGSERIAL PRIMARY KEY,
   guild_id      TEXT NOT NULL,
-  event_type    TEXT NOT NULL, -- 'mint' | 'sale'
+  event_type    TEXT NOT NULL, -- 'mint' | 'sale' | 'token_buy' | 'token_sell'
   chain         TEXT,
   contract      TEXT,
   token_id      TEXT,
@@ -99,22 +115,43 @@ async function fetchDigestWindow(pg, guildId, hours = 24) {
 }
 
 /* ===================== STATS ===================== */
+/**
+ * Supported event_type values:
+ * - mint
+ * - sale
+ *   - NFT Sales: sale + token_id present
+ *   - Swaps:    sale + token_id empty/null  (your ADRIAN swap notifier uses this)
+ * - token_buy / token_sell (your unified token scanner uses this)
+ */
 
 function computeDigestStats(rows) {
-  const mints = rows.filter(r => r.event_type === "mint");
+  const byType = new Map();
+  const bumpType = (t) => byType.set(t, (byType.get(t) || 0) + 1);
+
+  for (const r of rows) {
+    const t = String(r?.event_type || "").toLowerCase();
+    bumpType(t || "unknown");
+  }
+
+  const mints = rows.filter((r) => String(r.event_type || "").toLowerCase() === "mint");
 
   // sale split:
-  // - NFT Sales = sale + token_id present
-  // - Swaps = sale + token_id empty (how swaps were logged)
-  const salesAll = rows.filter(r => r.event_type === "sale");
-  const nftSales = salesAll.filter(r => r.token_id != null && String(r.token_id).trim() !== "");
-  const swaps = salesAll.filter(r => r.token_id == null || String(r.token_id).trim() === "");
+  const salesAll = rows.filter((r) => String(r.event_type || "").toLowerCase() === "sale");
+  const nftSales = salesAll.filter((r) => r.token_id != null && String(r.token_id).trim() !== "");
+  const swaps = salesAll.filter((r) => r.token_id == null || String(r.token_id).trim() === "");
+
+  // token trades:
+  const tokenBuys = rows.filter((r) => String(r.event_type || "").toLowerCase() === "token_buy");
+  const tokenSells = rows.filter((r) => String(r.event_type || "").toLowerCase() === "token_sell");
+  const tokenTrades = [...tokenBuys, ...tokenSells];
 
   const sum = (arr, key) => arr.reduce((a, r) => a + num(r[key], 0), 0);
 
   const totalMints = mints.length;
   const totalNftSales = nftSales.length;
   const totalSwaps = swaps.length;
+  const totalTokenBuys = tokenBuys.length;
+  const totalTokenSells = tokenSells.length;
 
   const nftVolEth = sum(nftSales, "amount_eth");
   const nftVolUsd = sum(nftSales, "amount_usd");
@@ -122,9 +159,13 @@ function computeDigestStats(rows) {
   const swapVolEth = sum(swaps, "amount_eth");
   const swapVolUsd = sum(swaps, "amount_usd");
 
-  const totalVolEth = nftVolEth + swapVolEth;
-  const totalVolUsd = nftVolUsd + swapVolUsd;
+  const tokenVolEth = sum(tokenTrades, "amount_eth");
+  const tokenVolUsd = sum(tokenTrades, "amount_usd");
 
+  const totalVolEth = nftVolEth + swapVolEth + tokenVolEth;
+  const totalVolUsd = nftVolUsd + swapVolUsd + tokenVolUsd;
+
+  // most active contract by count (includes mints + sales/swaps + token trades)
   const byContract = new Map();
   for (const r of rows) {
     const c = (r.contract || "").toLowerCase() || "unknown";
@@ -135,41 +176,75 @@ function computeDigestStats(rows) {
     if (count > mostActive.count) mostActive = { contract, count };
   }
 
+  // top NFT sale by ETH
   let topNftSale = null;
   for (const r of nftSales) {
     const v = num(r.amount_eth, 0);
     if (!topNftSale || v > num(topNftSale.amount_eth, 0)) topNftSale = r;
   }
 
+  // top swap by USD (fallback ETH)
   let topSwap = null;
   for (const r of swaps) {
     const u = num(r.amount_usd, 0);
     const e = num(r.amount_eth, 0);
-    const score = u > 0 ? u : e;
+    const score = u > 0 ? u : e; // prefer USD if present, else ETH
     if (!topSwap) topSwap = { row: r, score };
     else if (score > (topSwap.score || 0)) topSwap = { row: r, score };
   }
 
+  // top token trade by USD (fallback ETH)
+  let topTokenTrade = null;
+  for (const r of tokenTrades) {
+    const u = num(r.amount_usd, 0);
+    const e = num(r.amount_eth, 0);
+    const score = u > 0 ? u : e;
+    if (!topTokenTrade) topTokenTrade = { row: r, score };
+    else if (score > (topTokenTrade.score || 0)) topTokenTrade = { row: r, score };
+  }
+
+  // chains breakdown
   const byChain = new Map();
   for (const r of rows) {
     const ch = (r.chain || "unknown").toLowerCase();
     byChain.set(ch, (byChain.get(ch) || 0) + 1);
   }
 
+  // window timing
+  const newestTs = rows?.[0]?.ts ? new Date(rows[0].ts) : null;
+  const oldestTs = rows?.length ? new Date(rows[rows.length - 1].ts) : null;
+
   return {
+    // counts
     totalMints,
     totalNftSales,
     totalSwaps,
+    totalTokenBuys,
+    totalTokenSells,
+
+    // volumes
     nftVolEth,
     nftVolUsd,
     swapVolEth,
     swapVolUsd,
+    tokenVolEth,
+    tokenVolUsd,
     totalVolEth,
     totalVolUsd,
+
+    // top/active
     mostActive,
     topNftSale,
     topSwapRow: topSwap?.row || null,
+    topTokenTradeRow: topTokenTrade?.row || null,
+
+    // breakdown
     byChain,
+    byType,
+
+    // debug timing
+    newestTs,
+    oldestTs,
   };
 }
 
@@ -180,16 +255,27 @@ function buildDigestEmbed({ guildName, hours, stats, rows, settings, hadQueryErr
     totalMints,
     totalNftSales,
     totalSwaps,
+    totalTokenBuys,
+    totalTokenSells,
+
     nftVolEth,
     nftVolUsd,
     swapVolEth,
     swapVolUsd,
+    tokenVolEth,
+    tokenVolUsd,
     totalVolEth,
     totalVolUsd,
+
     mostActive,
     topNftSale,
     topSwapRow,
-    byChain
+    topTokenTradeRow,
+
+    byChain,
+    byType,
+    newestTs,
+    oldestTs,
   } = stats;
 
   const chainLine = [...byChain.entries()]
@@ -198,9 +284,10 @@ function buildDigestEmbed({ guildName, hours, stats, rows, settings, hadQueryErr
     .map(([k, v]) => `${k}:${v}`)
     .join(" • ");
 
-  const activeContract = mostActive.contract && mostActive.contract !== "unknown"
-    ? `${padAddr(mostActive.contract)} (${mostActive.count})`
-    : "N/A";
+  const activeContract =
+    mostActive.contract && mostActive.contract !== "unknown"
+      ? `${padAddr(mostActive.contract)} (${mostActive.count})`
+      : "N/A";
 
   const topNftSaleLine = (() => {
     if (!topNftSale) return "N/A";
@@ -210,7 +297,9 @@ function buildDigestEmbed({ guildName, hours, stats, rows, settings, hadQueryErr
     const usd = num(topNftSale.amount_usd, 0) > 0 ? `$${fmtMoney(topNftSale.amount_usd, 2)}` : "";
     const chain = topNftSale.chain ? `(${topNftSale.chain})` : "";
     const who = topNftSale.buyer ? `→ ${padWho(topNftSale.buyer, 20)}` : "";
-    return `${cshort} ${t} ${chain} — ${eth} ETH ${usd ? `(${usd})` : ""} ${who}`.replace(/\s+/g, " ").trim();
+    return `${cshort} ${t} ${chain} — ${eth} ETH ${usd ? `(${usd})` : ""} ${who}`
+      .replace(/\s+/g, " ")
+      .trim();
   })();
 
   const topSwapLine = (() => {
@@ -219,8 +308,32 @@ function buildDigestEmbed({ guildName, hours, stats, rows, settings, hadQueryErr
     const eth = num(topSwapRow.amount_eth, 0) > 0 ? `${fmtEth(topSwapRow.amount_eth, 4)} ETH` : "";
     const usd = num(topSwapRow.amount_usd, 0) > 0 ? `$${fmtMoney(topSwapRow.amount_usd, 2)}` : "";
     const chain = topSwapRow.chain ? `(${topSwapRow.chain})` : "";
-    const who = topSwapRow.buyer ? `buyer:${padWho(topSwapRow.buyer, 14)}` : (topSwapRow.seller ? `seller:${padWho(topSwapRow.seller, 14)}` : "");
-    return `${cshort} ${chain} — ${eth} ${usd ? `(${usd})` : ""} ${who}`.replace(/\s+/g, " ").trim();
+    const who = topSwapRow.buyer
+      ? `buyer:${padWho(topSwapRow.buyer, 14)}`
+      : topSwapRow.seller
+        ? `seller:${padWho(topSwapRow.seller, 14)}`
+        : "";
+    return `${cshort} ${chain} — ${eth} ${usd ? `(${usd})` : ""} ${who}`
+      .replace(/\s+/g, " ")
+      .trim();
+  })();
+
+  const topTokenTradeLine = (() => {
+    if (!topTokenTradeRow) return "N/A";
+    const cshort = padAddr(topTokenTradeRow.contract);
+    const eth = num(topTokenTradeRow.amount_eth, 0) > 0 ? `${fmtEth(topTokenTradeRow.amount_eth, 4)} ETH` : "";
+    const usd = num(topTokenTradeRow.amount_usd, 0) > 0 ? `$${fmtMoney(topTokenTradeRow.amount_usd, 2)}` : "";
+    const chain = topTokenTradeRow.chain ? `(${topTokenTradeRow.chain})` : "";
+    const typ = String(topTokenTradeRow.event_type || "").toLowerCase();
+    const tag = typ === "token_buy" ? "BUY" : typ === "token_sell" ? "SELL" : typ.toUpperCase() || "TOKEN";
+    const who = topTokenTradeRow.buyer
+      ? `buyer:${padWho(topTokenTradeRow.buyer, 14)}`
+      : topTokenTradeRow.seller
+        ? `seller:${padWho(topTokenTradeRow.seller, 14)}`
+        : "";
+    return `${tag} • ${cshort} ${chain} — ${eth} ${usd ? `(${usd})` : ""} ${who}`
+      .replace(/\s+/g, " ")
+      .trim();
   })();
 
   const volumeLine = `**${fmtEth(totalVolEth, 4)} ETH**${
@@ -230,6 +343,7 @@ function buildDigestEmbed({ guildName, hours, stats, rows, settings, hadQueryErr
   const breakdownLine = [
     `NFT: ${fmtEth(nftVolEth, 4)} ETH${nftVolUsd > 0 ? ` (~$${fmtMoney(nftVolUsd, 2)})` : ""}`,
     `Swaps: ${fmtEth(swapVolEth, 4)} ETH${swapVolUsd > 0 ? ` (~$${fmtMoney(swapVolUsd, 2)})` : ""}`,
+    `Tokens: ${fmtEth(tokenVolEth, 4)} ETH${tokenVolUsd > 0 ? ` (~$${fmtMoney(tokenVolUsd, 2)})` : ""}`,
   ].join("\n");
 
   const embed = new EmbedBuilder()
@@ -243,21 +357,30 @@ function buildDigestEmbed({ guildName, hours, stats, rows, settings, hadQueryErr
       { name: "NFT Sales", value: `**${totalNftSales.toLocaleString()}**`, inline: true },
       { name: "Swaps", value: `**${totalSwaps.toLocaleString()}**`, inline: true },
 
-      { name: "Total Volume", value: volumeLine, inline: true },
-      { name: "Breakdown", value: breakdownLine.slice(0, 1024) || "N/A", inline: true },
+      { name: "Token Buys", value: `**${totalTokenBuys.toLocaleString()}**`, inline: true },
+      { name: "Token Sells", value: `**${totalTokenSells.toLocaleString()}**`, inline: true },
       { name: "Chains", value: chainLine || "N/A", inline: true },
 
-      { name: "Most Active", value: activeContract, inline: false },
+      { name: "Total Volume", value: volumeLine, inline: true },
+      { name: "Breakdown", value: breakdownLine.slice(0, 1024) || "N/A", inline: true },
+      { name: "Most Active", value: activeContract, inline: true },
+
       { name: "Top NFT Sale", value: topNftSaleLine || "N/A", inline: false },
       { name: "Top Swap", value: topSwapLine || "N/A", inline: false },
+      { name: "Top Token Trade", value: topTokenTradeLine || "N/A", inline: false }
     )
-    .setFooter({ text: hadQueryError ? "MB Digest • (warning: digest query error)" : "MB Digest • powered by your tracker logs" })
+    .setFooter({
+      text: hadQueryError
+        ? "MB Digest • (warning: digest query error)"
+        : "MB Digest • powered by your tracker logs",
+    })
     .setTimestamp(new Date());
 
+  // Recent NFT Sales (last 5)
   const recentNftSales = rows
-    .filter(r => r.event_type === "sale" && r.token_id != null && String(r.token_id).trim() !== "")
+    .filter((r) => String(r.event_type || "").toLowerCase() === "sale" && r.token_id != null && String(r.token_id).trim() !== "")
     .slice(0, 5)
-    .map(r => {
+    .map((r) => {
       const cshort = padAddr(r.contract);
       const tid = r.token_id != null ? `#${r.token_id}` : "";
       const eth = num(r.amount_eth, 0) > 0 ? `${fmtEth(r.amount_eth, 4)} ETH` : "";
@@ -270,10 +393,11 @@ function buildDigestEmbed({ guildName, hours, stats, rows, settings, hadQueryErr
     embed.addFields({ name: "Recent NFT Sales", value: recentNftSales.join("\n").slice(0, 1024) });
   }
 
+  // Recent Swaps (last 5) — swaps are event_type='sale' with token_id null/empty
   const recentSwaps = rows
-    .filter(r => r.event_type === "sale" && (r.token_id == null || String(r.token_id).trim() === ""))
+    .filter((r) => String(r.event_type || "").toLowerCase() === "sale" && (r.token_id == null || String(r.token_id).trim() === ""))
     .slice(0, 5)
-    .map(r => {
+    .map((r) => {
       const cshort = padAddr(r.contract);
       const eth = num(r.amount_eth, 0) > 0 ? `${fmtEth(r.amount_eth, 4)} ETH` : "";
       const usd = num(r.amount_usd, 0) > 0 ? `$${fmtMoney(r.amount_usd, 2)}` : "";
@@ -283,6 +407,51 @@ function buildDigestEmbed({ guildName, hours, stats, rows, settings, hadQueryErr
 
   if (recentSwaps.length) {
     embed.addFields({ name: "Recent Swaps", value: recentSwaps.join("\n").slice(0, 1024) });
+  }
+
+  // Recent Token Trades (last 5) — token_buy/token_sell
+  const recentTokenTrades = rows
+    .filter((r) => {
+      const t = String(r.event_type || "").toLowerCase();
+      return t === "token_buy" || t === "token_sell";
+    })
+    .slice(0, 5)
+    .map((r) => {
+      const t = String(r.event_type || "").toLowerCase();
+      const tag = t === "token_buy" ? "BUY" : t === "token_sell" ? "SELL" : t.toUpperCase();
+      const cshort = padAddr(r.contract);
+      const eth = num(r.amount_eth, 0) > 0 ? `${fmtEth(r.amount_eth, 4)} ETH` : "";
+      const usd = num(r.amount_usd, 0) > 0 ? `$${fmtMoney(r.amount_usd, 2)}` : "";
+      const chain = r.chain ? `(${r.chain})` : "";
+      return `• ${tag} ${cshort} ${chain} ${eth} ${usd ? `(${usd})` : ""}`.replace(/\s+/g, " ").trim();
+    });
+
+  if (recentTokenTrades.length) {
+    embed.addFields({ name: "Recent Token Trades", value: recentTokenTrades.join("\n").slice(0, 1024) });
+  }
+
+  // Optional debug field (helps you confirm what types are flowing)
+  const DIGEST_DEBUG = String(process.env.DAILY_DIGEST_DEBUG || "").trim() === "1";
+  if (DIGEST_DEBUG) {
+    const typeLine = [...byType.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 12)
+      .map(([k, v]) => `${k}:${v}`)
+      .join(" • ");
+
+    const newestLine = newestTs ? newestTs.toISOString() : "N/A";
+    const oldestLine = oldestTs ? oldestTs.toISOString() : "N/A";
+
+    embed.addFields({
+      name: "Debug",
+      value: [
+        `types: ${typeLine || "N/A"}`,
+        `newest: ${newestLine}`,
+        `oldest: ${oldestLine}`,
+        `rows: ${rows?.length || 0}`
+      ].join("\n").slice(0, 1024),
+      inline: false
+    });
   }
 
   return embed;
@@ -323,4 +492,3 @@ module.exports = {
   computeDigestStats,
   buildDigestEmbed,
 };
-
