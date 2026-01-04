@@ -133,8 +133,28 @@ pool.on('error', err => {
 
 client.pg = pool;
 
+// ✅ Quick boot diagnostic
+try {
+  console.log(`🧠 client.pg attached: ${Boolean(client.pg)} | hasQuery: ${Boolean(client.pg?.query)}`);
+} catch {}
+
 // ================= Init DB =================
 require('./db/initStakingTables')(pool).catch(console.error);
+
+// ✅ NEW: Init Daily Digest tables (safe migration) — does NOT affect Bella/Muscle
+(async () => {
+  try {
+    const { runDailyDigestMigration } = require('./db/migrations/2026_01_03_daily_digest');
+    if (typeof runDailyDigestMigration === 'function') {
+      await runDailyDigestMigration(pool);
+    } else {
+      console.warn('⚠️ Daily Digest migration module found but missing runDailyDigestMigration()');
+    }
+  } catch (e) {
+    // Don’t crash your bot if the file isn’t added yet — just warn.
+    console.warn('⚠️ Daily Digest migration skipped/failed:', e?.message || e);
+  }
+})().catch(() => {});
 
 // ================= Commands =================
 client.commands = new Collection();
@@ -244,6 +264,20 @@ async function onClientReady() {
     console.error('❌ Failed to init guild_webhooks table:', e);
   }
 
+  // ✅ NEW: Start Daily Digest Scheduler (Automation #2)
+  // Requires: jobs/dailyDigestScheduler.js (and digest tables exist; migration runs on boot above)
+  try {
+    const { startDailyDigestScheduler } = require('./jobs/dailyDigestScheduler');
+    if (typeof startDailyDigestScheduler === 'function') {
+      await startDailyDigestScheduler(client);
+      console.log('✅ Daily Digest scheduler started');
+    } else {
+      console.warn('⚠️ dailyDigestScheduler module found but missing startDailyDigestScheduler()');
+    }
+  } catch (e) {
+    console.warn('⚠️ Daily Digest scheduler not started:', e?.message || e);
+  }
+
   // ✅ Quick diagnostic: confirm webhookAuto is attached
   try {
     if (!client.webhookAuto || typeof client.webhookAuto.sendViaWebhook !== 'function') {
@@ -328,4 +362,3 @@ async function gracefulShutdown(sig) {
 
 process.once('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.once('SIGINT', () => gracefulShutdown('SIGINT'));
-
