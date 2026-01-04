@@ -5,6 +5,14 @@ const { shortWalletLink, loadJson, saveJson, seenPath, seenSalesPath } = require
 const { safeRpcCall } = require('./providerM');
 const delay = ms => new Promise(res => setTimeout(res, ms));
 
+/* ✅ Daily Digest logger (optional; won't crash if missing) */
+let logDigestEvent = null;
+try {
+  ({ logDigestEvent } = require('./digestLogger'));
+} catch {
+  logDigestEvent = null;
+}
+
 /* ===================== CONSTANTS / HELPERS ===================== */
 
 const TOKEN_NAME_TO_ADDRESS = {
@@ -122,6 +130,17 @@ async function getErc20NameSymbol(provider, tokenAddr) {
   } catch {
     return { name: null, symbol: null };
   }
+}
+
+/* ===================== DIGEST DEDUPE (in-process) ===================== */
+
+const _digestSeen = new Set();
+function _digestKey({ guildId, type, txHash, tokenId }) {
+  return `${String(guildId || '')}:${String(type || '')}:${String(txHash || '').toLowerCase()}:${String(tokenId || '')}`;
+}
+function _markDigestSeen(key) {
+  _digestSeen.add(key);
+  setTimeout(() => _digestSeen.delete(key), 72 * 60 * 60 * 1000); // 72h TTL
 }
 
 /* ===================== LISTENER BOOTSTRAP ===================== */
@@ -430,6 +449,41 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     }
   } catch {}
 
+  // ✅ DIGEST LOGGING (MINT) — per guild, per tokenId
+  try {
+    if (logDigestEvent && txHash && tokenIds?.length) {
+      const guildIds = new Set();
+
+      // channel_ids here is already filtered by caller for this guildId, but we still fetch safely
+      for (const id of uniq(normalizeChannels(channel_ids))) {
+        const ch = client.channels.cache.get(id) || (await client.channels.fetch(id).catch(() => null));
+        if (ch?.guildId) guildIds.add(ch.guildId);
+      }
+
+      for (const gid of guildIds) {
+        for (const tid of tokenIds) {
+          const key = _digestKey({ guildId: gid, type: 'mint', txHash, tokenId: tid });
+          if (_digestSeen.has(key)) continue;
+          _markDigestSeen(key);
+
+          await logDigestEvent(client, {
+            guildId: gid,
+            eventType: 'mint',
+            chain: 'base',
+            contract: (nftAddress || contract.target || contract.address || '').toLowerCase(),
+            tokenId: String(tid),
+            amountNative: tokenAmount != null ? Number(tokenAmount) : null,
+            amountEth: ethValue != null ? Number(ethValue) : null,
+            amountUsd: usdValue != null ? Number(usdValue) : null,
+            buyer: buyer || payer || null,
+            seller: null,
+            txHash: String(txHash)
+          });
+        }
+      }
+    }
+  } catch {}
+
   const embed = {
     title: isSingle
       ? `✨ NEW ${String(name || '').toUpperCase()} MINT!`
@@ -461,7 +515,7 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
 /* ===================== SALE HANDLER ===================== */
 
 async function handleSale(client, contractRow, contract, tokenId, from, to, txHash, channel_ids) {
-  const { name, mint_token_symbol } = contractRow;
+  const { name, mint_token_symbol, address: nftAddress } = contractRow;
 
   let imageUrl = 'https://via.placeholder.com/400x400.png?text=SOLD';
   try {
@@ -532,6 +586,44 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
   }
 
   if (!tokenAmount || !ethValue) return;
+
+  // ✅ USD value (derived from ETH)
+  let usdValue = null;
+  try {
+    const ethUsd = await getEthUsdPriceCached();
+    if (ethUsd && ethUsd > 0) usdValue = ethValue * ethUsd;
+  } catch {}
+
+  // ✅ DIGEST LOGGING (SALE) — per guild (dedupe by guild+tx+tokenId)
+  try {
+    if (logDigestEvent && txHash) {
+      const guildIds = new Set();
+      for (const id of uniq(normalizeChannels(channel_ids))) {
+        const ch = client.channels.cache.get(id) || (await client.channels.fetch(id).catch(() => null));
+        if (ch?.guildId) guildIds.add(ch.guildId);
+      }
+
+      for (const gid of guildIds) {
+        const key = _digestKey({ guildId: gid, type: 'sale', txHash, tokenId: tokenId?.toString?.() || String(tokenId) });
+        if (_digestSeen.has(key)) continue;
+        _markDigestSeen(key);
+
+        await logDigestEvent(client, {
+          guildId: gid,
+          eventType: 'sale',
+          chain: 'base',
+          contract: (nftAddress || contract.target || contract.address || '').toLowerCase(),
+          tokenId: tokenId?.toString?.() || String(tokenId),
+          amountNative: tokenAmount != null ? Number(tokenAmount) : null,
+          amountEth: ethValue != null ? Number(ethValue) : null,
+          amountUsd: usdValue != null ? Number(usdValue) : null,
+          buyer: to ? String(to).toLowerCase() : null,
+          seller: from ? String(from).toLowerCase() : null,
+          txHash: String(txHash)
+        });
+      }
+    }
+  } catch {}
 
   const embed = {
     title: `💸 NFT SOLD – ${name || 'Collection'} #${tokenId}`,
