@@ -1,3 +1,4 @@
+// services/mintProcessorBase.js
 const { Interface, Contract, ethers } = require('ethers');
 const fetch = require('node-fetch');
 const { getRealDexPriceForToken, getEthPriceFromToken } = require('./price');
@@ -20,7 +21,7 @@ const TOKEN_NAME_TO_ADDRESS = {
 };
 
 // ✅ FIX: If payment token contract == this CA, show "AdrianBot" in Method field
-const ADRIANBOT_PAYMENT_CA = '0xa41d5faf7ba8b82e276125de2a053216e91f4814';
+const ADRIANBOT_PAYMENT_CA = '0xa41d5faf7ba8b82e276125de2a053216e91f4814'.toLowerCase();
 
 const ZERO_ADDRESS = ethers.ZeroAddress;
 const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
@@ -68,6 +69,10 @@ function uniq(arr) {
 function toShort(addr = '') {
   if (!addr) return '';
   return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
+}
+
+function addrEq(a, b) {
+  return (a || '').toLowerCase() === (b || '').toLowerCase();
 }
 
 /* ===================== ETH USD (CACHED) ===================== */
@@ -190,7 +195,7 @@ function setupBaseBlockListener(client, contractRows) {
         });
       } catch {}
 
-      const nftAddress = row.address;
+      const nftAddress = (row.address || '').toLowerCase();
       const contract = new Contract(nftAddress, iface.fragments, provider);
       const name = row.name || 'Unknown';
       let seenTokenIds = new Set(loadJson(seenPath(name)) || []);
@@ -236,7 +241,7 @@ function setupBaseBlockListener(client, contractRows) {
             saveJson(seenPath(name), [...seenTokenIds]);
           }
         } else {
-          // SALE/TRANSFER
+          // SALE/TRANSFER (we validate sale by detecting payment in handleSale)
           let shouldSend = false;
           for (const gid of allGuildIds) {
             const dedupeKey = `${gid}-${txHash}`;
@@ -268,25 +273,6 @@ function setupBaseBlockListener(client, contractRows) {
   }, 8000);
 }
 
-/* ===================== UTILITY: FILTER ACTUAL BUYER TRANSFERS ===================== */
-function isValidBuyerTransfer(log, buyerAddr, nftAddr) {
-  try {
-    const logFrom = ethers.getAddress('0x' + log.topics[1].slice(26));
-    const logTo = ethers.getAddress('0x' + log.topics[2].slice(26));
-    if (logFrom.toLowerCase() !== buyerAddr.toLowerCase()) return false;
-
-    const nftLower = (nftAddr || '').toLowerCase();
-    const toLower = logTo.toLowerCase();
-
-    // Accept only transfers to NFT contract
-    if (toLower === nftLower) return true;
-
-    return false;
-  } catch {
-    return false;
-  }
-}
-
 /* ===================== MINT HANDLER ===================== */
 
 async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, channel_ids, isSingle = false, minterAddress = '') {
@@ -315,15 +301,11 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
   let payer = '';
   try { payer = tx?.from ? ethers.getAddress(tx.from) : ''; } catch { payer = tx?.from || ''; }
 
-  // ✅ This morning’s logic: find ERC20 Transfer(s) where from == payerCandidate
-  // - prioritize configured tokenAddr if present
-  // - otherwise infer best token by biggest amount
-  // - keep skipping NFT contract logs so we don’t grab NFT transfer events
+  // ✅ Find payment transfers from buyer/payer
   let tokenAmount = null;
   let inferredTokenAddr = tokenAddr;
 
-  const nftLower = (contract.target || contract.address || '').toLowerCase();
-  const addrEq = (a, b) => (a || '').toLowerCase() === (b || '').toLowerCase();
+  const nftLower = (contract.target || contract.address || nftAddress || '').toLowerCase();
 
   const payerCandidates = uniq([buyer, payer].filter(Boolean));
 
@@ -352,7 +334,7 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
       if (lg.topics[0] !== TRANSFER_ERC20_TOPIC || lg.topics.length !== 3) continue;
 
       const logAddr = (lg.address || '').toLowerCase();
-      if (!logAddr || logAddr === nftLower) continue; // ✅ same as your working morning file
+      if (!logAddr || logAddr === nftLower) continue;
 
       const fromTopic = '0x' + lg.topics[1].slice(26);
       if (!addrEq(fromTopic, fromAddrCandidate)) continue;
@@ -404,8 +386,6 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
   }
 
   // ✅ ETH value
-  // - if tx has native value (rare for token mints), use it
-  // - else convert tokenAmount -> ETH using your existing logic
   let ethValue = null;
 
   try {
@@ -449,18 +429,46 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
     }
   } catch {}
 
-  // ✅ DIGEST LOGGING (MINT) — per guild, per tokenId
+  const embed = {
+    title: isSingle
+      ? `✨ NEW ${String(name || '').toUpperCase()} MINT!`
+      : `✨ BULK ${String(name || '').toUpperCase()} MINT (${tokenIds.length})!`,
+    description: isSingle
+      ? `Minted Token ID: #${tokenIds[0]}`
+      : `Minted Token IDs: ${tokenIds.map(id => `#${id}`).join(', ')}`,
+    fields: [
+      { name: `💰 Total Spent (${displayTokenSymbol})`, value: tokenAmount ? tokenAmount.toFixed(4) : '0.0000', inline: true },
+      { name: `⇄ ETH Value`, value: ethValue ? `${ethValue.toFixed(4)} ETH` : 'N/A', inline: true },
+      { name: `💵 USD Value`, value: usdValue ? `$${usdValue.toFixed(2)}` : 'N/A', inline: true },
+      { name: `👤 Minter`, value: buyer ? shortWalletLink(buyer) : (minterAddress ? shortWalletLink(minterAddress) : (payer ? shortWalletLink(payer) : 'Unknown')), inline: true }
+    ],
+    thumbnail: { url: imageUrl },
+    color: 0x35A3B3,
+    footer: { text: 'Live on Base • Powered by PimpsDev' },
+    timestamp: new Date().toISOString()
+  };
+
+  // ✅ Send + track successful guilds
+  const sentGuilds = new Set();
+  const sentChannels = new Set();
+
+  for (const id of uniq(normalizeChannels(channel_ids))) {
+    if (sentChannels.has(id)) continue;
+    sentChannels.add(id);
+
+    const ch = client.channels.cache.get(id) || (await client.channels.fetch(id).catch(() => null));
+    if (!ch) continue;
+
+    try {
+      await ch.send({ embeds: [embed] });
+      if (ch?.guildId) sentGuilds.add(String(ch.guildId));
+    } catch {}
+  }
+
+  // ✅ DIGEST LOGGING (MINT) — only for guilds where we actually sent
   try {
-    if (logDigestEvent && txHash && tokenIds?.length) {
-      const guildIds = new Set();
-
-      // channel_ids here is already filtered by caller for this guildId, but we still fetch safely
-      for (const id of uniq(normalizeChannels(channel_ids))) {
-        const ch = client.channels.cache.get(id) || (await client.channels.fetch(id).catch(() => null));
-        if (ch?.guildId) guildIds.add(ch.guildId);
-      }
-
-      for (const gid of guildIds) {
+    if (logDigestEvent && txHash && tokenIds?.length && sentGuilds.size) {
+      for (const gid of sentGuilds) {
         for (const tid of tokenIds) {
           const key = _digestKey({ guildId: gid, type: 'mint', txHash, tokenId: tid });
           if (_digestSeen.has(key)) continue;
@@ -483,36 +491,9 @@ async function handleMintBulk(client, contractRow, contract, tokenIds, txHash, c
       }
     }
   } catch {}
-
-  const embed = {
-    title: isSingle
-      ? `✨ NEW ${String(name || '').toUpperCase()} MINT!`
-      : `✨ BULK ${String(name || '').toUpperCase()} MINT (${tokenIds.length})!`,
-    description: isSingle
-      ? `Minted Token ID: #${tokenIds[0]}`
-      : `Minted Token IDs: ${tokenIds.map(id => `#${id}`).join(', ')}`,
-    fields: [
-      { name: `💰 Total Spent (${displayTokenSymbol})`, value: tokenAmount ? tokenAmount.toFixed(4) : '0.0000', inline: true },
-      { name: `⇄ ETH Value`, value: ethValue ? `${ethValue.toFixed(4)} ETH` : 'N/A', inline: true },
-      { name: `💵 USD Value`, value: usdValue ? `$${usdValue.toFixed(2)}` : 'N/A', inline: true },
-      { name: `👤 Minter`, value: buyer ? shortWalletLink(buyer) : (minterAddress ? shortWalletLink(minterAddress) : (payer ? shortWalletLink(payer) : 'Unknown')), inline: true }
-    ],
-    thumbnail: { url: imageUrl },
-    color: 0x35A3B3,
-    footer: { text: 'Live on Base • Powered by PimpsDev' },
-    timestamp: new Date().toISOString()
-  };
-
-  const sent = new Set();
-  for (const id of uniq(normalizeChannels(channel_ids))) {
-    if (sent.has(id)) continue;
-    sent.add(id);
-    const ch = await client.channels.fetch(id).catch(() => null);
-    if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
-  }
 }
 
-/* ===================== SALE HANDLER ===================== */
+/* ===================== SALE HANDLER (PATCHED PAYMENT DETECTION) ===================== */
 
 async function handleSale(client, contractRow, contract, tokenId, from, to, txHash, channel_ids) {
   const { name, mint_token_symbol, address: nftAddress } = contractRow;
@@ -536,94 +517,104 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     receipt = await provider.getTransactionReceipt(txHash);
     tx = await provider.getTransaction(txHash);
     if (!receipt || !tx) return;
-  } catch { return; }
+  } catch {
+    return;
+  }
 
-  let tokenAmount = null, ethValue = null, methodUsed = null;
+  const buyer = (() => { try { return ethers.getAddress(to); } catch { return (to || ''); } })();
+  const seller = (() => { try { return ethers.getAddress(from); } catch { return (from || ''); } })();
 
+  const nftLower = (contract.target || contract.address || nftAddress || '').toLowerCase();
+
+  let tokenAmount = null;
+  let ethValue = null;
+  let usdValue = null;
+  let methodUsed = null;
+
+  // 1) Native ETH paid
   try {
     if (tx.value && tx.value > 0n) {
-      tokenAmount = parseFloat(ethers.formatEther(tx.value));
-      ethValue = tokenAmount;
-      methodUsed = '🟦 ETH';
+      const v = parseFloat(ethers.formatEther(tx.value));
+      if (v > 0) {
+        tokenAmount = v;
+        ethValue = v;
+        methodUsed = '🟦 ETH';
+      }
     }
   } catch {}
 
+  // 2) ERC20 payment evidence: look for transfers OUT of buyer (largest value)
   if (!ethValue) {
-    const seller = (() => { try { return ethers.getAddress(from); } catch { return (from || ''); } })();
-    for (const log of receipt.logs) {
-      if (log.topics[0] !== TRANSFER_ERC20_TOPIC || log.topics.length !== 3) continue;
-      if (!isValidBuyerTransfer(log, to, contract.address)) continue;
+    const candidates = [];
+    for (const lg of receipt.logs || []) {
+      if (lg.topics?.[0] !== TRANSFER_ERC20_TOPIC || lg.topics.length !== 3) continue;
+
+      const tokenContract = (lg.address || '').toLowerCase();
+      if (!tokenContract || tokenContract === nftLower) continue;
+
+      const fromTopic = '0x' + lg.topics[1].slice(26);
+      if (!addrEq(fromTopic, buyer)) continue;
 
       try {
-        const tokenContract = (log.address || '').toLowerCase();
-        const amt = await formatErc20(provider, tokenContract, log.data);
-        if (!isFinite(amt) || amt <= 0) continue;
-
-        tokenAmount = amt;
-
-        let priceEth = null;
-        try {
-          priceEth = await getRealDexPriceForToken(amt, tokenContract);
-        } catch {}
-        if (!priceEth) {
-          try {
-            const px = await getEthPriceFromToken(tokenContract);
-            if (px) priceEth = amt * px;
-          } catch {}
-        }
-        ethValue = priceEth || null;
-
-        // ✅ FIX: If payment token contract == AdrianBot CA, show AdrianBot instead of token/ETH label
-        if (tokenContract === ADRIANBOT_PAYMENT_CA) {
-          methodUsed = '🤖 AdrianBot';
-        } else {
-          methodUsed = `🟨 ${mint_token_symbol || 'TOKEN'}`;
-        }
-
-        if (ethValue) break;
+        const amt = await formatErc20(provider, tokenContract, lg.data);
+        if (!Number.isFinite(amt) || amt <= 0) continue;
+        candidates.push({ tokenContract, amt });
       } catch {}
+    }
+
+    // Choose best candidate by ETH value (preferred) else by raw amount
+    let best = null;
+    for (const c of candidates) {
+      let cEth = null;
+      try {
+        cEth = await getRealDexPriceForToken(c.amt, c.tokenContract);
+        if (!cEth || isNaN(cEth) || cEth <= 0) cEth = null;
+      } catch { cEth = null; }
+
+      if (!cEth) {
+        try {
+          const px = await getEthPriceFromToken(c.tokenContract);
+          if (px && !isNaN(px) && px > 0) cEth = c.amt * px;
+        } catch {}
+      }
+
+      const score = cEth != null ? cEth : (c.amt / 1e6); // fallback weak score
+      if (!best || score > best.score) best = { ...c, eth: cEth, score };
+    }
+
+    if (best && best.amt > 0) {
+      tokenAmount = best.amt;
+      ethValue = best.eth != null ? best.eth : null;
+
+      if (best.tokenContract === ADRIANBOT_PAYMENT_CA) {
+        methodUsed = '🤖 AdrianBot';
+      } else {
+        // Try resolving symbol
+        let sym = null;
+        try {
+          const ns = await getErc20NameSymbol(provider, best.tokenContract);
+          sym = (ns?.symbol || '').trim() || null;
+        } catch {}
+        methodUsed = `🟨 ${sym || mint_token_symbol || 'TOKEN'}`;
+      }
     }
   }
 
-  if (!tokenAmount || !ethValue) return;
+  // ✅ IMPORTANT: If we found no payment evidence, skip (avoids normal transfers being treated as sales)
+  if (!tokenAmount || tokenAmount <= 0) return;
 
-  // ✅ USD value (derived from ETH)
-  let usdValue = null;
+  // USD from ETH if possible
   try {
-    const ethUsd = await getEthUsdPriceCached();
-    if (ethUsd && ethUsd > 0) usdValue = ethValue * ethUsd;
-  } catch {}
-
-  // ✅ DIGEST LOGGING (SALE) — per guild (dedupe by guild+tx+tokenId)
-  try {
-    if (logDigestEvent && txHash) {
-      const guildIds = new Set();
-      for (const id of uniq(normalizeChannels(channel_ids))) {
-        const ch = client.channels.cache.get(id) || (await client.channels.fetch(id).catch(() => null));
-        if (ch?.guildId) guildIds.add(ch.guildId);
-      }
-
-      for (const gid of guildIds) {
-        const key = _digestKey({ guildId: gid, type: 'sale', txHash, tokenId: tokenId?.toString?.() || String(tokenId) });
-        if (_digestSeen.has(key)) continue;
-        _markDigestSeen(key);
-
-        await logDigestEvent(client, {
-          guildId: gid,
-          eventType: 'sale',
-          chain: 'base',
-          contract: (nftAddress || contract.target || contract.address || '').toLowerCase(),
-          tokenId: tokenId?.toString?.() || String(tokenId),
-          amountNative: tokenAmount != null ? Number(tokenAmount) : null,
-          amountEth: ethValue != null ? Number(ethValue) : null,
-          amountUsd: usdValue != null ? Number(usdValue) : null,
-          buyer: to ? String(to).toLowerCase() : null,
-          seller: from ? String(from).toLowerCase() : null,
-          txHash: String(txHash)
-        });
-      }
+    if (ethValue && isFinite(ethValue) && ethValue > 0) {
+      const ethUsd = await getEthUsdPriceCached();
+      if (ethUsd && ethUsd > 0) usdValue = ethValue * ethUsd;
     }
   } catch {}
+
+  const paidLine = (() => {
+    if (methodUsed === '🟦 ETH') return `${tokenAmount.toFixed(4)} ETH`;
+    return tokenAmount ? `${tokenAmount.toFixed(4)}` : 'N/A';
+  })();
 
   const embed = {
     title: `💸 NFT SOLD – ${name || 'Collection'} #${tokenId}`,
@@ -631,8 +622,9 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     fields: [
       { name: '👤 Seller', value: shortWalletLink(from), inline: true },
       { name: '🧑‍💻 Buyer', value: shortWalletLink(to), inline: true },
-      { name: `💰 Paid`, value: `${tokenAmount.toFixed(4)}`, inline: true },
-      { name: `⇄ ETH Value`, value: `${ethValue.toFixed(4)} ETH`, inline: true },
+      { name: `💰 Paid`, value: paidLine, inline: true },
+      { name: `⇄ ETH Value`, value: (ethValue && ethValue > 0) ? `${ethValue.toFixed(4)} ETH` : 'N/A', inline: true },
+      { name: `💵 USD Value`, value: (usdValue && usdValue > 0) ? `$${usdValue.toFixed(2)}` : 'N/A', inline: true },
       { name: `💳 Method`, value: methodUsed || 'Unknown', inline: true }
     ],
     thumbnail: { url: imageUrl },
@@ -641,13 +633,49 @@ async function handleSale(client, contractRow, contract, tokenId, from, to, txHa
     timestamp: new Date().toISOString()
   };
 
+  // ✅ Send + track successful guilds
+  const sentGuilds = new Set();
   const sentChannels = new Set();
-  for (const id of normalizeChannels(channel_ids)) {
+
+  for (const id of uniq(normalizeChannels(channel_ids))) {
     if (sentChannels.has(id)) continue;
     sentChannels.add(id);
-    const ch = await client.channels.fetch(id).catch(() => null);
-    if (ch) await ch.send({ embeds: [embed] }).catch(() => {});
+
+    const ch = client.channels.cache.get(id) || (await client.channels.fetch(id).catch(() => null));
+    if (!ch) continue;
+
+    try {
+      await ch.send({ embeds: [embed] });
+      if (ch?.guildId) sentGuilds.add(String(ch.guildId));
+    } catch {}
   }
+
+  // ✅ DIGEST LOGGING (SALE) — only for guilds where we actually sent
+  try {
+    if (logDigestEvent && txHash && sentGuilds.size) {
+      const tidStr = tokenId?.toString?.() || String(tokenId);
+
+      for (const gid of sentGuilds) {
+        const key = _digestKey({ guildId: gid, type: 'sale', txHash, tokenId: tidStr });
+        if (_digestSeen.has(key)) continue;
+        _markDigestSeen(key);
+
+        await logDigestEvent(client, {
+          guildId: gid,
+          eventType: 'sale',
+          chain: 'base',
+          contract: (nftAddress || contract.target || contract.address || '').toLowerCase(),
+          tokenId: tidStr,
+          amountNative: tokenAmount != null ? Number(tokenAmount) : null,
+          amountEth: ethValue != null ? Number(ethValue) : null,
+          amountUsd: usdValue != null ? Number(usdValue) : null,
+          buyer: buyer ? String(buyer).toLowerCase() : null,
+          seller: seller ? String(seller).toLowerCase() : null,
+          txHash: String(txHash)
+        });
+      }
+    }
+  } catch {}
 }
 
 /* ===================== EXPORTS ===================== */
