@@ -4,6 +4,14 @@ const { fetchLogs } = require('./logScanner');
 const { getProvider } = require('./providerM');
 const { shortWalletLink } = require('../utils/helpers');
 
+/* ✅ Daily Digest logger (optional; won't crash if missing) */
+let logDigestEvent = null;
+try {
+  ({ logDigestEvent } = require('./digestLogger'));
+} catch (e) {
+  logDigestEvent = null;
+}
+
 const ROUTERS = [
   '0x327Df1E6de05895d2ab08513aaDD9313Fe505d86',
   '0x420dd381b31aef6683e2c581f93b119eee7e3f4d',
@@ -210,6 +218,39 @@ async function handleTokenLog(client, tokenRows, log) {
     if (!channel || !channel.isTextBased() || !channel.permissionsFor(guild.members.me).has('SendMessages')) {
       channel = guild.channels.cache.find(c => c.isTextBased() && c.permissionsFor(guild.members.me).has('SendMessages'));
     }
+
+    // ✅ Log to digest_events (token_buy/token_sell) once per guild+tx
+    // This does NOT affect NFT mint/sale digests unless you later include these types.
+    try {
+      if (logDigestEvent && log.transactionHash) {
+        const eventType = isBuy ? 'token_buy' : 'token_sell';
+
+        // amounts
+        const amountNative = Number.isFinite(displayAmount) ? Number(displayAmount) : null;
+
+        const amountUsd = isBuy
+          ? (Number.isFinite(usdSpent) ? Number(usdSpent) : null)
+          : (Number.isFinite(usdValueSold) ? Number(usdValueSold) : null);
+
+        const amountEth = isBuy
+          ? (Number.isFinite(ethSpent) ? Number(ethSpent) : null)
+          : (Number.isFinite(ethValueSold) ? Number(ethValueSold) : null);
+
+        await logDigestEvent(client, {
+          guildId: token.guild_id,
+          eventType,
+          chain: 'base',
+          contract: tokenAddress,
+          tokenId: null,
+          amountNative,
+          amountEth,
+          amountUsd,
+          buyer: isBuy ? toAddr : null,
+          seller: isSell ? fromAddr : null,
+          txHash: log.transactionHash
+        });
+      }
+    } catch {}
 
     if (channel) {
       const buyValueLine = `$${usdSpent.toFixed(4)} / ${ethSpent.toFixed(4)} ETH`;
