@@ -1,3 +1,4 @@
+// services/globalProcessor.js
 const { Interface, formatUnits, ethers } = require('ethers');
 const fetch = require('node-fetch');
 const { fetchLogs } = require('./logScanner');
@@ -23,32 +24,35 @@ const ROUTERS = [
 
 const seenTx = new Set();
 
-// ✅ Emoji bar logic:
-// - If the BUY > $30 => show 🐳 emoji
-// - For buys above $30, each $5 = 1 🐳 (whale emoji)
+// ✅ Digest dedupe (in-process)
+const _digestSeen = new Set();
+function _digestKey(guildId, txHash, tokenAddr, side) {
+  return `${String(guildId)}:${String(txHash || '').toLowerCase()}:${String(tokenAddr || '').toLowerCase()}:${String(side || '')}`;
+}
+function _markDigestSeen(key) {
+  _digestSeen.add(key);
+  setTimeout(() => _digestSeen.delete(key), 48 * 60 * 60 * 1000);
+}
+
+// ✅ Emoji bar logic
 function buildEmojiLine({ isBuy, usdValue, tokenAmountRaw }) {
   const usd = Number(usdValue);
 
-  // 🐳 RULE: any BUY above $10 shows whale emoji, scales by $5
   if (isBuy && Number.isFinite(usd) && usd > 30) {
-    const whaleCount = Math.floor(usd / 5); // 1 🐳 per $5
-    return '🐳'.repeat(whaleCount);          // Scale whale emoji per $5 spent
+    const whaleCount = Math.floor(usd / 5);
+    return '🐳'.repeat(Math.min(whaleCount, 30));
   }
 
-  // Primary: scale by USD
   if (Number.isFinite(usd) && usd > 0) {
-    const count = Math.max(1, Math.floor(usd / 2)); // 1 emoji per $2
-    const capped = Math.min(count, 20);             // anti-spam cap
-    return isBuy
-      ? '🟥🟦🚀'.repeat(capped)
-      : '🔻💀🔻'.repeat(capped);
+    const count = Math.max(1, Math.floor(usd / 2));
+    const capped = Math.min(count, 20);
+    return isBuy ? '🟥🟦🚀'.repeat(capped) : '🔻💀🔻'.repeat(capped);
   }
 
-  // Fallback: scale by token amount
   const amt = Number(tokenAmountRaw);
   if (!Number.isFinite(amt) || amt <= 0) return isBuy ? '🟥🟦🚀' : '🔻💀🔻';
 
-  const count = Math.max(1, Math.floor(amt / 1000)); // 1 per 1000 tokens
+  const count = Math.max(1, Math.floor(amt / 1000));
   const capped = Math.min(count, 12);
   return isBuy ? '🟥🟦🚀'.repeat(capped) : '🔻💀🔻'.repeat(capped);
 }
@@ -92,6 +96,9 @@ async function handleTokenLog(client, tokenRows, log) {
   if (seenTx.has(log.transactionHash)) return;
   seenTx.add(log.transactionHash);
 
+  const provider = getProvider();
+  if (!provider) return;
+
   const ROUTERS_LOWER = ROUTERS.map(r => r.toLowerCase());
   const taxOrBurn = [
     '0x0000000000000000000000000000000000000000',
@@ -110,19 +117,20 @@ async function handleTokenLog(client, tokenRows, log) {
 
   // ⛔ Skip contract sell sources
   if (isSell) {
-    const code = await getProvider().getCode(fromAddr);
-    if (code !== '0x') {
-      console.log(`⛔ Skipping contract sell from ${fromAddr}`);
-      return;
-    }
+    try {
+      const code = await provider.getCode(fromAddr);
+      if (code !== '0x') {
+        console.log(`⛔ Skipping contract sell from ${fromAddr}`);
+        return;
+      }
+    } catch {}
   }
 
-  // 💰 Value tracking (native value only; token swaps may have tx.value=0)
   let usdSpent = 0, ethSpent = 0;
   let ethPrice = 0;
 
   try {
-    const tx = await getProvider().getTransaction(log.transactionHash);
+    const tx = await provider.getTransaction(log.transactionHash);
     ethPrice = await getETHPrice();
     if (tx?.value) {
       ethSpent = parseFloat(formatUnits(tx.value, 18));
@@ -132,14 +140,14 @@ async function handleTokenLog(client, tokenRows, log) {
 
   const tokenAmountRaw = parseFloat(formatUnits(amount, 18));
 
-  // ❌ Skip tiny tax reroutes (keep your working behavior)
+  // ❌ Skip tiny tax reroutes
   if (usdSpent === 0 && ethSpent === 0 && tokenAmountRaw < 5) return;
 
   // ⛔ LP removal filter
   if (isBuy && usdSpent === 0 && ethSpent === 0) {
     try {
       const abi = ['function balanceOf(address account) view returns (uint256)'];
-      const contract = new ethers.Contract(tokenAddress, abi, getProvider());
+      const contract = new ethers.Contract(tokenAddress, abi, provider);
       const prevBalanceBN = await contract.balanceOf(toAddr, { blockTag: log.blockNumber - 1 });
       const prevBalance = parseFloat(formatUnits(prevBalanceBN, 18));
       if (prevBalance > 0) {
@@ -151,15 +159,13 @@ async function handleTokenLog(client, tokenRows, log) {
     }
   }
 
-  // ✅ Flag "unpriced buy" (usually LP/transfer style) so we DO NOT label as "New Buyer"
   const isUnpricedBuy = isBuy && usdSpent === 0 && ethSpent === 0;
 
-  // 🧠 Buy label (but DO NOT treat unpriced buys as new buyer)
   let buyLabel = isBuy ? '🆕 New Buy' : '💥 Sell';
   try {
     if (isBuy && !isUnpricedBuy) {
       const abi = ['function balanceOf(address account) view returns (uint256)'];
-      const contract = new ethers.Contract(tokenAddress, abi, getProvider());
+      const contract = new ethers.Contract(tokenAddress, abi, provider);
       const prevBalanceBN = await contract.balanceOf(toAddr, { blockTag: log.blockNumber - 1 });
       const prevBalance = parseFloat(formatUnits(prevBalanceBN, 18));
       if (prevBalance > 0) {
@@ -172,7 +178,7 @@ async function handleTokenLog(client, tokenRows, log) {
   const tokenPrice = await getTokenPriceUSD(tokenAddress);
   const marketCap = await getMarketCapUSD(tokenAddress);
 
-  // ✅ FIX: Display amount should be real transfer amount (no *1000 inflation)
+  // ✅ Display amount (keep your behavior)
   let displayAmount = tokenAmountRaw;
   try {
     if (usdSpent > 0 && tokenPrice > 0 && tokenAmountRaw > 0) {
@@ -197,9 +203,18 @@ async function handleTokenLog(client, tokenRows, log) {
     }
   } catch {}
 
-  // ✅ Emoji line:
-  // - Buys: scale by USD spent (whale-only if > $10)
-  // - Sells: scale by USD value sold if available
+  // ✅ BUY: if tx.value was 0, estimate spent using tokenPrice * tokensBought
+  // (this makes digest swaps have real ETH/USD instead of blank)
+  if (isBuy && usdSpent === 0 && ethSpent === 0) {
+    try {
+      if (tokenPrice > 0 && displayAmount > 0) {
+        usdSpent = displayAmount * tokenPrice;
+        const ep = ethPrice || (await getETHPrice());
+        if (ep > 0) ethSpent = usdSpent / ep;
+      }
+    } catch {}
+  }
+
   const emojiLine = buildEmojiLine({
     isBuy,
     usdValue: isBuy ? usdSpent : usdValueSold,
@@ -219,13 +234,74 @@ async function handleTokenLog(client, tokenRows, log) {
       channel = guild.channels.cache.find(c => c.isTextBased() && c.permissionsFor(guild.members.me).has('SendMessages'));
     }
 
-    // ✅ Log to digest_events (token_buy/token_sell) once per guild+tx
-    // This does NOT affect NFT mint/sale digests unless you later include these types.
-    try {
-      if (logDigestEvent && log.transactionHash) {
-        const eventType = isBuy ? 'token_buy' : 'token_sell';
+    if (!channel) continue;
 
-        // amounts
+    const buyValueLine = `$${usdSpent.toFixed(4)} / ${ethSpent.toFixed(4)} ETH`;
+    const sellValueLine = `$${usdValueSold.toFixed(4)} / ${ethValueSold.toFixed(4)} ETH`;
+
+    const embed = {
+      title: `${token.name.toUpperCase()} ${isBuy ? 'Buy' : 'Sell'}!`,
+      description: emojiLine,
+      image: {
+        url: isBuy
+          ? 'https://iili.io/3tSecKP.gif'
+          : 'https://iili.io/f7SxSte.gif'
+      },
+      fields: [
+        {
+          name: isBuy ? '💸 Spent' : '💰 Value Sold',
+          value: isBuy ? buyValueLine : sellValueLine,
+          inline: true
+        },
+        {
+          name: isBuy ? '🎯 Got' : '📤 Sold',
+          value: `${tokenAmountFormatted} ${token.name.toUpperCase()}`,
+          inline: true
+        },
+
+        ...(isBuy && !isUnpricedBuy
+          ? [{
+              name: buyLabel.startsWith('🆕') ? '🆕 New Buyer' : '🔁 Accumulated',
+              value: buyLabel.replace(/^(🆕|🔁) /, ''),
+              inline: true
+            }]
+          : []),
+
+        ...(isSell
+          ? [{
+              name: '🖕 Seller',
+              value: shortWalletLink ? shortWalletLink(fromAddr) : fromAddr,
+              inline: true
+            }]
+          : []),
+
+        { name: '💵 Price', value: `$${(tokenPrice || 0).toFixed(8)}`, inline: true },
+        { name: '📊 MCap', value: marketCap ? `$${marketCap.toLocaleString()}` : 'Fetching...', inline: true }
+      ],
+      url: `https://www.geckoterminal.com/base/pools/${tokenAddress}`,
+      color: getColorByUsd(isBuy ? usdSpent : usdValueSold),
+      footer: { text: 'Live on Base • Powered by PimpsDev' },
+      timestamp: new Date().toISOString()
+    };
+
+    let sentOk = false;
+    try {
+      await channel.send({ embeds: [embed] });
+      sentOk = true;
+    } catch (err) {
+      console.warn(`❌ Failed to send embed: ${err.message}`);
+      sentOk = false;
+    }
+
+    // ✅ Digest logging: log as "sale" with tokenId null so it appears as Swaps in Daily Digest
+    // Only log if we successfully sent to that guild.
+    try {
+      if (sentOk && logDigestEvent && log.transactionHash) {
+        const side = isBuy ? 'buy' : 'sell';
+        const key = _digestKey(token.guild_id, log.transactionHash, tokenAddress, side);
+        if (_digestSeen.has(key)) continue;
+        _markDigestSeen(key);
+
         const amountNative = Number.isFinite(displayAmount) ? Number(displayAmount) : null;
 
         const amountUsd = isBuy
@@ -238,10 +314,10 @@ async function handleTokenLog(client, tokenRows, log) {
 
         await logDigestEvent(client, {
           guildId: token.guild_id,
-          eventType,
+          eventType: 'sale',     // ✅ IMPORTANT: digest counts this
           chain: 'base',
           contract: tokenAddress,
-          tokenId: null,
+          tokenId: null,         // ✅ IMPORTANT: digest will classify as Swap
           amountNative,
           amountEth,
           amountUsd,
@@ -251,62 +327,6 @@ async function handleTokenLog(client, tokenRows, log) {
         });
       }
     } catch {}
-
-    if (channel) {
-      const buyValueLine = `$${usdSpent.toFixed(4)} / ${ethSpent.toFixed(4)} ETH`;
-      const sellValueLine = `$${usdValueSold.toFixed(4)} / ${ethValueSold.toFixed(4)} ETH`;
-
-      const embed = {
-        title: `${token.name.toUpperCase()} ${isBuy ? 'Buy' : 'Sell'}!`,
-        description: emojiLine,
-        image: {
-          url: isBuy
-            ? 'https://iili.io/3tSecKP.gif' // BUY
-            : 'https://iili.io/f7SxSte.gif' // SELL
-        },
-        fields: [
-          {
-            name: isBuy ? '💸 Spent' : '💰 Value Sold',
-            value: isBuy ? buyValueLine : sellValueLine,
-            inline: true
-          },
-          {
-            name: isBuy ? '🎯 Got' : '📤 Sold',
-            value: `${tokenAmountFormatted} ${token.name.toUpperCase()}`,
-            inline: true
-          },
-
-          // ✅ BUY ONLY: do NOT show "New Buyer" field if it's an unpriced buy (LP/transfer style)
-          ...(isBuy && !isUnpricedBuy
-            ? [{
-                name: buyLabel.startsWith('🆕') ? '🆕 New Buyer' : '🔁 Accumulated',
-                value: buyLabel.replace(/^(🆕|🔁) /, ''),
-                inline: true
-              }]
-            : []),
-
-          // ✅ SELL ONLY: show seller wallet with middle finger emoji
-          ...(isSell
-            ? [{
-                name: '🖕 Seller',
-                value: shortWalletLink ? shortWalletLink(fromAddr) : fromAddr,
-                inline: true
-              }]
-            : []),
-
-          { name: '💵 Price', value: `$${tokenPrice.toFixed(8)}`, inline: true },
-          { name: '📊 MCap', value: marketCap ? `$${marketCap.toLocaleString()}` : 'Fetching...', inline: true }
-        ],
-        url: `https://www.geckoterminal.com/base/pools/${tokenAddress}`,
-        color: getColorByUsd(isBuy ? usdSpent : usdValueSold),
-        footer: { text: 'Live on Base • Powered by PimpsDev' },
-        timestamp: new Date().toISOString()
-      };
-
-      await channel.send({ embeds: [embed] }).catch(err => {
-        console.warn(`❌ Failed to send embed: ${err.message}`);
-      });
-    }
   }
 }
 
@@ -334,5 +354,4 @@ async function getMarketCapUSD(address) {
     return parseFloat(data?.data?.attributes?.fdv_usd || data?.data?.attributes?.market_cap_usd || '0');
   } catch { return 0; }
 }
-
 
