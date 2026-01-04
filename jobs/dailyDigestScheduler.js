@@ -88,7 +88,9 @@ function isValidTimeZone(tz) {
 function safeTimeZone(tz, guildIdForLog = "") {
   let t = normalizeTz(tz || "UTC");
   if (!isValidTimeZone(t)) {
-    console.warn(`[DAILY_DIGEST] invalid tz "${tz}"${guildIdForLog ? ` for guild=${guildIdForLog}` : ""} — falling back to UTC`);
+    console.warn(
+      `[DAILY_DIGEST] invalid tz "${tz}"${guildIdForLog ? ` for guild=${guildIdForLog}` : ""} — falling back to UTC`
+    );
     t = "UTC";
   }
   return t;
@@ -257,6 +259,11 @@ function makeRunKey({ guildId, tz, hour, minute, dateObj }) {
   return `${guildId}:${ymd}:${pad2(h)}:${pad2(m)}:${tz}`;
 }
 
+// ✅ Manual/test key (does NOT collide with scheduled run keys)
+function makeManualKey(guildId) {
+  return `manual:${String(guildId)}:${Date.now()}`;
+}
+
 function recentlyRan(guildId, runKey) {
   const rec = lastRunByGuild.get(String(guildId));
   if (!rec) return false;
@@ -279,7 +286,7 @@ async function fetchGuildSafe(client, guildId) {
   return guild;
 }
 
-/* ===================== RUN ONCE ===================== */
+/* ===================== RUN ONCE (SCHEDULED STYLE) ===================== */
 
 async function runOnceForGuild(client, guildId, reason = "scheduled") {
   const pg = client?.pg;
@@ -384,6 +391,77 @@ async function runOnceForGuild(client, guildId, reason = "scheduled") {
   }
 }
 
+/* ===================== RUN NOW (FORCE / TEST) ===================== */
+/**
+ * ✅ This is the fix for "/digest test shows nothing":
+ * It does NOT use the scheduled runKey claim logic.
+ * So even if today's scheduled digest already ran, this still posts.
+ */
+async function runManualForGuild(client, guildId) {
+  const pg = client?.pg;
+  if (!pg?.query) return { ok: false, reason: "no_db" };
+
+  let settings;
+  try {
+    const sres = await pg.query(`SELECT * FROM daily_digest_settings WHERE guild_id = $1 LIMIT 1`, [String(guildId)]);
+    settings = sres.rows?.[0];
+  } catch (e) {
+    return { ok: false, reason: `settings_fetch_failed: ${e?.message || e}` };
+  }
+
+  if (!settings?.enabled) return { ok: false, reason: "disabled" };
+
+  const guild = await fetchGuildSafe(client, guildId);
+  if (!guild) return { ok: false, reason: "guild_not_found" };
+
+  let channel =
+    guild.channels.cache.get(String(settings.channel_id)) ||
+    (await guild.channels.fetch(String(settings.channel_id)).catch(() => null));
+
+  if (!channel) return { ok: false, reason: "channel_not_found" };
+  if (!(await canSend(guild, channel))) return { ok: false, reason: "missing_perms" };
+
+  const tz = safeTimeZone(settings.tz || "UTC", guildId);
+  const hour = clampInt(settings.hour ?? 21, 0, 23, 21);
+  const minute = clampInt(settings.minute ?? 0, 0, 59, 0);
+  const hoursWindow = clampInt(settings.hours_window ?? 24, 1, 168, 24);
+
+  // local spam guard
+  const manualKey = makeManualKey(guildId);
+  if (recentlyRan(guildId, manualKey)) return { ok: false, reason: "recent_guard" };
+
+  // cross-instance anti-spam lock (short)
+  const lockKey = `daily_digest_manual:${String(guildId)}`;
+  const gotLock = await tryAdvisoryLock(pg, lockKey);
+  if (!gotLock) return { ok: false, reason: "locked" };
+
+  try {
+    if (DIGEST_DEBUG) {
+      console.log(
+        `[DAILY_DIGEST] manual send guild=${guildId} tz=${tz} target=${pad2(hour)}:${pad2(minute)} window=${hoursWindow}h`
+      );
+    }
+
+    const embed = await generateDailyDigest({
+      pg,
+      guild,
+      settings: { ...settings, tz },
+      hours: hoursWindow,
+    });
+
+    await channel.send({ embeds: [embed], allowedMentions: { parse: [] } });
+
+    markRan(guildId, manualKey);
+    console.log(`[DAILY_DIGEST] ✅ manual sent guild=${guildId} channel=${settings.channel_id}`);
+    return { ok: true, channelId: String(settings.channel_id) };
+  } catch (e) {
+    console.error(`[DAILY_DIGEST] manual run failed guild=${guildId}:`, e?.message || e);
+    return { ok: false, reason: e?.message || "send_failed" };
+  } finally {
+    await unlockAdvisory(pg, lockKey);
+  }
+}
+
 /* ===================== CATCH-UP (RESTART SAFE) ===================== */
 
 async function maybeCatchUp(client, settings) {
@@ -465,7 +543,9 @@ function scheduleGuild(client, settings) {
   timers.set(guildId, t);
 
   console.log(
-    `[DAILY_DIGEST] scheduled guild=${guildId} tz=${tz} @ ${pad2(hour)}:${pad2(minute)} (in ~${Math.round(delayMs / 60000)}m)`
+    `[DAILY_DIGEST] scheduled guild=${guildId} tz=${tz} @ ${pad2(hour)}:${pad2(minute)} (in ~${Math.round(
+      delayMs / 60000
+    )}m)`
   );
 }
 
@@ -492,7 +572,11 @@ async function acquireLeaderAndStart(client) {
   const pg = client?.pg;
   if (!pg?.query) return;
 
+  // reset state
+  client.__dailyDigestIsLeader = false;
+
   if (!LEADER_LOCK_ENABLED) {
+    client.__dailyDigestIsLeader = true;
     console.log("[DAILY_DIGEST] leader lock disabled — starting scheduler on this instance.");
     await scheduleAllEnabled(client);
     return;
@@ -500,12 +584,15 @@ async function acquireLeaderAndStart(client) {
 
   const gotLeader = await tryAdvisoryLock(pg, LEADER_LOCK_KEY);
   if (gotLeader) {
+    client.__dailyDigestIsLeader = true;
     console.log("[DAILY_DIGEST] leader lock acquired — scheduler is active on this instance.");
     await scheduleAllEnabled(client);
     return;
   }
 
-  console.warn("[DAILY_DIGEST] leader lock not acquired — another instance is scheduler. Will retry...");
+  console.warn(
+    "[DAILY_DIGEST] leader lock not acquired — another instance is scheduler. Scheduled timers disabled here. Will retry..."
+  );
 
   // Retry loop (only one per process)
   if (client.__dailyDigestLeaderRetryTimer) return;
@@ -518,6 +605,7 @@ async function acquireLeaderAndStart(client) {
       clearInterval(client.__dailyDigestLeaderRetryTimer);
       client.__dailyDigestLeaderRetryTimer = null;
 
+      client.__dailyDigestIsLeader = true;
       console.log("[DAILY_DIGEST] leader lock acquired (retry) — scheduler is active on this instance.");
       await scheduleAllEnabled(client);
     } catch (e) {
@@ -545,6 +633,54 @@ async function startDailyDigestScheduler(client) {
   await ensureRunsTable(pg);
   await ensureSettingsTable(pg);
 
+  // ✅ Expose helpers immediately (even if this instance isn't leader)
+  // This is important so /digest test can always post.
+  client.dailyDigestScheduler = {
+    // Leader-only scheduling (non-leader will no-op)
+    rescheduleGuild: async (guildId) => {
+      try {
+        // If not leader, don't schedule timers here (avoids duplicate scheduled digests)
+        if (LEADER_LOCK_ENABLED && client.__dailyDigestIsLeader !== true) return false;
+
+        const r = await pg.query(`SELECT * FROM daily_digest_settings WHERE guild_id = $1 LIMIT 1`, [String(guildId)]);
+        const s = r.rows?.[0];
+        if (s?.enabled) {
+          await maybeCatchUp(client, s);
+          scheduleGuild(client, s);
+        } else {
+          clearGuildTimer(guildId);
+        }
+        return true;
+      } catch {
+        return false;
+      }
+    },
+
+    // Scheduled-style manual run (can be blocked if today's scheduled run already claimed)
+    runNow: async (guildId) => runOnceForGuild(client, guildId, "manual"),
+
+    // ✅ Force/manual run (ALWAYS posts, used for /digest test)
+    runNowForce: async (guildId) => runManualForGuild(client, guildId),
+
+    // Stop timers + retry timer; release leader lock if held
+    stop: async () => {
+      for (const [gid, t] of timers.entries()) {
+        clearTimeout(t);
+        timers.delete(gid);
+      }
+      if (client.__dailyDigestLeaderRetryTimer) {
+        clearInterval(client.__dailyDigestLeaderRetryTimer);
+        client.__dailyDigestLeaderRetryTimer = null;
+      }
+      if (LEADER_LOCK_ENABLED && client.__dailyDigestIsLeader === true) {
+        await unlockAdvisory(pg, LEADER_LOCK_KEY);
+      }
+      client.__dailyDigestIsLeader = false;
+    },
+
+    isLeader: () => Boolean(client.__dailyDigestIsLeader),
+  };
+
   // Prefer starting after Discord ready, but tolerate being called early.
   if (typeof client.isReady === "function" && !client.isReady()) {
     console.warn("[DAILY_DIGEST] client not ready yet — will start leader election on ready.");
@@ -555,36 +691,10 @@ async function startDailyDigestScheduler(client) {
     await acquireLeaderAndStart(client);
   }
 
-  // expose helpers
-  client.dailyDigestScheduler = {
-    rescheduleGuild: async (guildId) => {
-      const r = await pg.query(`SELECT * FROM daily_digest_settings WHERE guild_id = $1 LIMIT 1`, [String(guildId)]);
-      const s = r.rows?.[0];
-      if (s?.enabled) {
-        await maybeCatchUp(client, s);
-        scheduleGuild(client, s);
-      } else {
-        clearGuildTimer(guildId);
-      }
-    },
-    runNow: async (guildId) => runOnceForGuild(client, guildId, "manual"),
-    stop: async () => {
-      for (const [gid, t] of timers.entries()) {
-        clearTimeout(t);
-        timers.delete(gid);
-      }
-      if (client.__dailyDigestLeaderRetryTimer) {
-        clearInterval(client.__dailyDigestLeaderRetryTimer);
-        client.__dailyDigestLeaderRetryTimer = null;
-      }
-      if (LEADER_LOCK_ENABLED) await unlockAdvisory(pg, LEADER_LOCK_KEY);
-    },
-  };
-
   console.log(
     `[DAILY_DIGEST] init complete. leader_lock=${LEADER_LOCK_ENABLED ? "on" : "off"} retry=${Math.round(
       LEADER_RETRY_MS / 1000
-    )}s debug=${DIGEST_DEBUG ? "on" : "off"}`
+    )}s debug=${DIGEST_DEBUG ? "on" : "off"} catchup=${CATCHUP_MINUTES}m`
   );
 }
 
