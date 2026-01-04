@@ -46,6 +46,67 @@ function pad2(n) {
   return String(n).padStart(2, "0");
 }
 
+/* ===================== LABELS (NAMES INSTEAD OF CA) ===================== */
+
+const ADRIAN_TOKEN_CA = String(
+  process.env.ADRIAN_TOKEN_CA || "0x7e99075ce287f1cf8cbcaaa6a1c7894e404fd7ea"
+).toLowerCase();
+
+const ENGINE_CA = String(
+  process.env.ENGINE_CA || "0x0351f7cba83277e891d4a85da498a7eacd764d58"
+).toLowerCase();
+
+// ✅ You provided this
+const ADRIANBOT_CA = String(
+  process.env.ADRIANBOT_CA || "0xa41D5fAF7BA8B82E276125dE2a053216e91f4814"
+).toLowerCase();
+
+// Optional extra labels:
+// DIGEST_ADDR_LABELS="0xabc=User,0xdef=SomeName"
+function parseExtraLabels() {
+  const raw = String(process.env.DIGEST_ADDR_LABELS || "").trim();
+  const m = new Map();
+  if (!raw) return m;
+  for (const pair of raw.split(",")) {
+    const [a, label] = pair.split("=").map((s) => String(s || "").trim());
+    if (!a || !label) continue;
+    m.set(a.toLowerCase(), label);
+  }
+  return m;
+}
+const EXTRA_LABELS = parseExtraLabels();
+
+function normalizeAddr(a) {
+  const s = String(a || "").trim();
+  if (!s) return "";
+  return s.toLowerCase();
+}
+
+function labelAddr(addr) {
+  const low = normalizeAddr(addr);
+  if (!low) return "";
+
+  // Core labels
+  if (low === ADRIAN_TOKEN_CA) return "$ADRIAN";
+  if (low === ENGINE_CA) return "ENGINE";
+  if (low === ADRIANBOT_CA) return "AdrianBot";
+
+  // Custom labels from env
+  const extra = EXTRA_LABELS.get(low);
+  if (extra) return extra;
+
+  // fallback short address
+  return padAddr(low);
+}
+
+function labelContract(contract) {
+  return labelAddr(contract);
+}
+
+function labelWho(addr) {
+  return labelAddr(addr);
+}
+
 /* ===================== TABLE ENSURE (SAFE) ===================== */
 /**
  * NOTE:
@@ -286,17 +347,17 @@ function buildDigestEmbed({ guildName, hours, stats, rows, settings, hadQueryErr
 
   const activeContract =
     mostActive.contract && mostActive.contract !== "unknown"
-      ? `${padAddr(mostActive.contract)} (${mostActive.count})`
+      ? `${labelContract(mostActive.contract)} (${mostActive.count})`
       : "N/A";
 
   const topNftSaleLine = (() => {
     if (!topNftSale) return "N/A";
-    const cshort = padAddr(topNftSale.contract);
+    const cshort = labelContract(topNftSale.contract);
     const t = topNftSale.token_id != null ? `#${topNftSale.token_id}` : "";
     const eth = fmtEth(topNftSale.amount_eth, 4);
     const usd = num(topNftSale.amount_usd, 0) > 0 ? `$${fmtMoney(topNftSale.amount_usd, 2)}` : "";
     const chain = topNftSale.chain ? `(${topNftSale.chain})` : "";
-    const who = topNftSale.buyer ? `→ ${padWho(topNftSale.buyer, 20)}` : "";
+    const who = topNftSale.buyer ? `→ ${padWho(labelWho(topNftSale.buyer), 20)}` : "";
     return `${cshort} ${t} ${chain} — ${eth} ETH ${usd ? `(${usd})` : ""} ${who}`
       .replace(/\s+/g, " ")
       .trim();
@@ -304,14 +365,14 @@ function buildDigestEmbed({ guildName, hours, stats, rows, settings, hadQueryErr
 
   const topSwapLine = (() => {
     if (!topSwapRow) return "N/A";
-    const cshort = padAddr(topSwapRow.contract);
+    const cshort = labelContract(topSwapRow.contract);
     const eth = num(topSwapRow.amount_eth, 0) > 0 ? `${fmtEth(topSwapRow.amount_eth, 4)} ETH` : "";
     const usd = num(topSwapRow.amount_usd, 0) > 0 ? `$${fmtMoney(topSwapRow.amount_usd, 2)}` : "";
     const chain = topSwapRow.chain ? `(${topSwapRow.chain})` : "";
     const who = topSwapRow.buyer
-      ? `buyer:${padWho(topSwapRow.buyer, 14)}`
+      ? `buyer:${padWho(labelWho(topSwapRow.buyer), 14)}`
       : topSwapRow.seller
-        ? `seller:${padWho(topSwapRow.seller, 14)}`
+        ? `seller:${padWho(labelWho(topSwapRow.seller), 14)}`
         : "";
     return `${cshort} ${chain} — ${eth} ${usd ? `(${usd})` : ""} ${who}`
       .replace(/\s+/g, " ")
@@ -320,16 +381,16 @@ function buildDigestEmbed({ guildName, hours, stats, rows, settings, hadQueryErr
 
   const topTokenTradeLine = (() => {
     if (!topTokenTradeRow) return "N/A";
-    const cshort = padAddr(topTokenTradeRow.contract);
+    const cshort = labelContract(topTokenTradeRow.contract);
     const eth = num(topTokenTradeRow.amount_eth, 0) > 0 ? `${fmtEth(topTokenTradeRow.amount_eth, 4)} ETH` : "";
     const usd = num(topTokenTradeRow.amount_usd, 0) > 0 ? `$${fmtMoney(topTokenTradeRow.amount_usd, 2)}` : "";
     const chain = topTokenTradeRow.chain ? `(${topTokenTradeRow.chain})` : "";
     const typ = String(topTokenTradeRow.event_type || "").toLowerCase();
     const tag = typ === "token_buy" ? "BUY" : typ === "token_sell" ? "SELL" : typ.toUpperCase() || "TOKEN";
     const who = topTokenTradeRow.buyer
-      ? `buyer:${padWho(topTokenTradeRow.buyer, 14)}`
+      ? `buyer:${padWho(labelWho(topTokenTradeRow.buyer), 14)}`
       : topTokenTradeRow.seller
-        ? `seller:${padWho(topTokenTradeRow.seller, 14)}`
+        ? `seller:${padWho(labelWho(topTokenTradeRow.seller), 14)}`
         : "";
     return `${tag} • ${cshort} ${chain} — ${eth} ${usd ? `(${usd})` : ""} ${who}`
       .replace(/\s+/g, " ")
@@ -346,12 +407,17 @@ function buildDigestEmbed({ guildName, hours, stats, rows, settings, hadQueryErr
     `Tokens: ${fmtEth(tokenVolEth, 4)} ETH${tokenVolUsd > 0 ? ` (~$${fmtMoney(tokenVolUsd, 2)})` : ""}`,
   ].join("\n");
 
+  // ✅ Small enhancement: add a compact header line with schedule if provided
+  const sched =
+    settings && (settings.hour != null || settings.minute != null || settings.tz)
+      ? `\n⏰ Scheduled: **${pad2(settings.hour ?? 0)}:${pad2(settings.minute ?? 0)}**`
+      : "";
+
   const embed = new EmbedBuilder()
     .setColor("#00b894")
     .setTitle(`📊 Daily Digest — ${safeStr(guildName, 60)}`)
-    .setDescription(
-      `Last **${hours}h** recap.${settings?.tz ? ` Timezone: **${settings.tz}**` : ""}`.trim()
-    )
+    // ✅ Remove timezone display from description (requested)
+    .setDescription(`Last **${hours}h** recap.${sched}`.trim())
     .addFields(
       { name: "Mints", value: `**${totalMints.toLocaleString()}**`, inline: true },
       { name: "NFT Sales", value: `**${totalNftSales.toLocaleString()}**`, inline: true },
@@ -378,15 +444,21 @@ function buildDigestEmbed({ guildName, hours, stats, rows, settings, hadQueryErr
 
   // Recent NFT Sales (last 5)
   const recentNftSales = rows
-    .filter((r) => String(r.event_type || "").toLowerCase() === "sale" && r.token_id != null && String(r.token_id).trim() !== "")
+    .filter(
+      (r) =>
+        String(r.event_type || "").toLowerCase() === "sale" &&
+        r.token_id != null &&
+        String(r.token_id).trim() !== ""
+    )
     .slice(0, 5)
     .map((r) => {
-      const cshort = padAddr(r.contract);
+      const cshort = labelContract(r.contract);
       const tid = r.token_id != null ? `#${r.token_id}` : "";
       const eth = num(r.amount_eth, 0) > 0 ? `${fmtEth(r.amount_eth, 4)} ETH` : "";
       const usd = num(r.amount_usd, 0) > 0 ? `$${fmtMoney(r.amount_usd, 2)}` : "";
       const chain = r.chain ? `(${r.chain})` : "";
-      return `• ${cshort} ${tid} ${chain} ${eth} ${usd ? `(${usd})` : ""}`.replace(/\s+/g, " ").trim();
+      const who = r.buyer ? `→ ${padWho(labelWho(r.buyer), 18)}` : "";
+      return `• ${cshort} ${tid} ${chain} ${eth} ${usd ? `(${usd})` : ""} ${who}`.replace(/\s+/g, " ").trim();
     });
 
   if (recentNftSales.length) {
@@ -395,14 +467,23 @@ function buildDigestEmbed({ guildName, hours, stats, rows, settings, hadQueryErr
 
   // Recent Swaps (last 5) — swaps are event_type='sale' with token_id null/empty
   const recentSwaps = rows
-    .filter((r) => String(r.event_type || "").toLowerCase() === "sale" && (r.token_id == null || String(r.token_id).trim() === ""))
+    .filter(
+      (r) =>
+        String(r.event_type || "").toLowerCase() === "sale" &&
+        (r.token_id == null || String(r.token_id).trim() === "")
+    )
     .slice(0, 5)
     .map((r) => {
-      const cshort = padAddr(r.contract);
+      const cshort = labelContract(r.contract);
       const eth = num(r.amount_eth, 0) > 0 ? `${fmtEth(r.amount_eth, 4)} ETH` : "";
       const usd = num(r.amount_usd, 0) > 0 ? `$${fmtMoney(r.amount_usd, 2)}` : "";
       const chain = r.chain ? `(${r.chain})` : "";
-      return `• ${cshort} ${chain} ${eth} ${usd ? `(${usd})` : ""}`.replace(/\s+/g, " ").trim();
+      const who = r.buyer
+        ? `buyer:${padWho(labelWho(r.buyer), 14)}`
+        : r.seller
+          ? `seller:${padWho(labelWho(r.seller), 14)}`
+          : "";
+      return `• ${cshort} ${chain} ${eth} ${usd ? `(${usd})` : ""} ${who}`.replace(/\s+/g, " ").trim();
     });
 
   if (recentSwaps.length) {
@@ -419,11 +500,16 @@ function buildDigestEmbed({ guildName, hours, stats, rows, settings, hadQueryErr
     .map((r) => {
       const t = String(r.event_type || "").toLowerCase();
       const tag = t === "token_buy" ? "BUY" : t === "token_sell" ? "SELL" : t.toUpperCase();
-      const cshort = padAddr(r.contract);
+      const cshort = labelContract(r.contract);
       const eth = num(r.amount_eth, 0) > 0 ? `${fmtEth(r.amount_eth, 4)} ETH` : "";
       const usd = num(r.amount_usd, 0) > 0 ? `$${fmtMoney(r.amount_usd, 2)}` : "";
       const chain = r.chain ? `(${r.chain})` : "";
-      return `• ${tag} ${cshort} ${chain} ${eth} ${usd ? `(${usd})` : ""}`.replace(/\s+/g, " ").trim();
+      const who = r.buyer
+        ? `buyer:${padWho(labelWho(r.buyer), 14)}`
+        : r.seller
+          ? `seller:${padWho(labelWho(r.seller), 14)}`
+          : "";
+      return `• ${tag} ${cshort} ${chain} ${eth} ${usd ? `(${usd})` : ""} ${who}`.replace(/\s+/g, " ").trim();
     });
 
   if (recentTokenTrades.length) {
@@ -448,9 +534,9 @@ function buildDigestEmbed({ guildName, hours, stats, rows, settings, hadQueryErr
         `types: ${typeLine || "N/A"}`,
         `newest: ${newestLine}`,
         `oldest: ${oldestLine}`,
-        `rows: ${rows?.length || 0}`
+        `rows: ${rows?.length || 0}`,
       ].join("\n").slice(0, 1024),
-      inline: false
+      inline: false,
     });
   }
 
