@@ -2,6 +2,15 @@ const { Interface, ethers } = require("ethers");
 const { safeRpcCall } = require("./providerM");
 const { shortWalletLink } = require("../utils/helpers");
 
+/* ✅ Daily Digest logger (optional; won't crash if missing) */
+let logDigestEvent = null;
+try {
+  ({ logDigestEvent } = require("./digestLogger"));
+} catch (e) {
+  // ok - add services/digestLogger.js later
+  logDigestEvent = null;
+}
+
 /* ======================================================
    CONFIG
 ====================================================== */
@@ -28,6 +37,7 @@ const CHECKPOINT_CHAIN = "base";
 const CHECKPOINT_KEY = "engine_sweep_last_block";
 
 async function ensureCheckpoint(client) {
+  if (!client?.pg?.query) return;
   await client.pg.query(`
     CREATE TABLE IF NOT EXISTS sweep_checkpoints (
       chain TEXT NOT NULL,
@@ -40,6 +50,7 @@ async function ensureCheckpoint(client) {
 }
 
 async function getLastBlock(client) {
+  if (!client?.pg?.query) return null;
   const r = await client.pg.query(
     `SELECT value FROM sweep_checkpoints WHERE chain=$1 AND key=$2`,
     [CHECKPOINT_CHAIN, CHECKPOINT_KEY]
@@ -48,6 +59,7 @@ async function getLastBlock(client) {
 }
 
 async function setLastBlock(client, block) {
+  if (!client?.pg?.query) return;
   await client.pg.query(
     `INSERT INTO sweep_checkpoints(chain,key,value)
      VALUES ($1,$2,$3)
@@ -149,10 +161,61 @@ async function buildTokenAmountString(provider, tokenAddr, amountBN) {
   return `${fmtNumber(ethers.formatUnits(amountBN, 18))} TOKEN`;
 }
 
+/* ✅ Helper: log digest sale once per guild (BUY only) */
+async function logDigestSaleIfPossible(client, provider, data, chans) {
+  try {
+    if (!logDigestEvent) return;
+    if (!data || data.type !== "BUY") return;
+    if (!data.tx?.hash) return;
+
+    const uniqueGuildIds = new Set(
+      (chans || [])
+        .map(c => c?.guild?.id)
+        .filter(Boolean)
+    );
+
+    // compute numeric-ish amounts
+    let amountEth = null;
+    let amountNative = null;
+
+    if (data.ethPaid && data.ethPaid > 0n) {
+      const ethStr = ethers.formatEther(data.ethPaid);
+      amountEth = Number(ethStr);
+      amountNative = amountEth;
+    } else if (data.tokenPayment?.token && data.tokenPayment?.amount != null) {
+      const info = await tokenInfo(provider, data.tokenPayment.token);
+      const tokStr = info
+        ? ethers.formatUnits(data.tokenPayment.amount, info.decimals)
+        : ethers.formatUnits(data.tokenPayment.amount, 18);
+      amountNative = Number(tokStr);
+    }
+
+    for (const guildId of uniqueGuildIds) {
+      await logDigestEvent(client, {
+        guildId,
+        eventType: "sale",
+        chain: "base",
+        contract: data.nft,
+        tokenId: data.tokenId,
+        amountNative,
+        amountEth,      // null for token payments unless you later add conversion
+        amountUsd: null,
+        buyer: data.buyer,
+        seller: data.seller,
+        txHash: data.tx.hash
+      });
+    }
+  } catch (e) {
+    if (DEBUG) console.warn("[SWEEP][DIGEST] log failed:", e?.message || e);
+  }
+}
+
 /* ======================================================
    CHANNEL ROUTING (TEST SERVER ONLY)
 ====================================================== */
 async function resolveChannels(client) {
+  if (!client?.pg?.query) return [];
+
   const r = await client.pg.query(`
     SELECT DISTINCT channel_id
     FROM tracked_tokens
@@ -199,7 +262,6 @@ async function analyzeTx(provider, hash) {
   let listPayment = null;
 
   /* ---------- PASS 1: Find any ERC721 transfers (source of truth for tokenId) ---------- */
-  // Prefer the transfer that goes TO engine (escrow) OR any transfer that indicates sale.
   for (const log of rc.logs) {
     if (log.topics?.[0] !== T_ERC721_TRANSFER || log.topics.length < 4) continue;
 
@@ -208,7 +270,6 @@ async function analyzeTx(provider, hash) {
     const id = BigInt(log.topics[3]).toString();
     const addr = log.address.toLowerCase();
 
-    // Keep first seen; override if it’s the escrow transfer to engine (best for listing)
     if (!nft) {
       nft = addr;
       tokenId = id;
@@ -232,7 +293,6 @@ async function analyzeTx(provider, hash) {
         approvedToEngine = true;
         nft = nft || log.address.toLowerCase();
 
-        // approval includes tokenId, use as fallback if we still don’t have one
         if (!tokenId) {
           try { tokenId = BigInt(log.topics[3]).toString(); } catch {}
         }
@@ -243,7 +303,6 @@ async function analyzeTx(provider, hash) {
     if (t0 === T_ERC721_APPROVAL_ALL && log.topics.length >= 3) {
       const operator = ("0x" + log.topics[2].slice(26)).toLowerCase();
       if (operator === ENGINE_CONTRACT) {
-        // only true approvals
         let ok = false;
         try {
           ok = ethers.AbiCoder.defaultAbiCoder().decode(["bool"], log.data)?.[0];
@@ -280,13 +339,8 @@ async function analyzeTx(provider, hash) {
 
   /* ---------- CLASSIFICATION ---------- */
 
-  // If we have approval AND buyer is engine OR no transfer buyer known -> LIST
-  // (this catches: approval only, and approval+escrow transfer)
   if (approvedToEngine && (!buyer || buyer === ENGINE_CONTRACT)) {
-    // treat seller as tx.from if missing
     const listSeller = (seller || tx.from || "").toLowerCase();
-
-    // Must have tokenId to post a good embed (else skip)
     if (!tokenId) return null;
 
     return {
@@ -299,7 +353,6 @@ async function analyzeTx(provider, hash) {
     };
   }
 
-  // USER BUY ONLY: buyer exists and is NOT engine
   if (buyer && buyer !== ENGINE_CONTRACT) {
     if (!tokenId) return null;
 
@@ -370,12 +423,14 @@ async function sendEmbed(client, provider, data, chans) {
     timestamp: new Date().toISOString()
   };
 
-  // ✅ top-right thumbnail only
   if (thumb) embed.thumbnail = { url: thumb };
 
   for (const c of chans) {
     await c.send({ embeds: [embed] }).catch(() => {});
   }
+
+  // ✅ Log ONLY SALES (BUY) to daily digest
+  await logDigestSaleIfPossible(client, provider, data, chans);
 }
 
 /* ======================================================
@@ -437,7 +492,6 @@ async function tick(client) {
     const res = await analyzeTx(provider, h);
     if (!res) continue;
 
-    // ✅ only user LIST + user BUY already enforced in analyzeTx
     await sendEmbed(client, provider, res, chans);
   }
 
@@ -453,9 +507,9 @@ function startEngineSweepNotifierBase(client) {
 
   console.log("🧹 Engine Sweep notifier started (TEST SERVER ONLY)");
 
-  // ✅ run immediately
   tick(client).catch(() => {});
   setInterval(() => tick(client).catch(() => {}), POLL_MS);
 }
 
 module.exports = { startEngineSweepNotifierBase };
+
