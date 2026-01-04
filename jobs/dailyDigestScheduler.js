@@ -9,6 +9,10 @@ const timers = new Map(); // guildId -> timeout
 const LEADER_LOCK_ENABLED = String(process.env.DAILY_DIGEST_LEADER_LOCK || "1").trim() === "1";
 const LEADER_LOCK_KEY = "daily_digest_scheduler_leader";
 
+// Extra local spam-guard (per process)
+const RECENT_SEND_GUARD_MS = Number(process.env.DAILY_DIGEST_RECENT_GUARD_MS || (3 * 60 * 1000)); // 3 minutes
+const lastRunByGuild = new Map(); // guildId -> { runKey, ts }
+
 // Persistent send-once guard (survives restarts)
 const RUNS_TABLE_SQL = `
 CREATE TABLE IF NOT EXISTS daily_digest_runs (
@@ -50,14 +54,22 @@ function pad2(n) {
   return String(n).padStart(2, "0");
 }
 
-// Finds next local-time match (hour/minute) by scanning forward minute-by-minute.
+/**
+ * Finds next local-time match (hour/minute) by scanning forward minute-by-minute.
+ * ✅ FIX: start from the NEXT minute boundary (never “same minute” re-trigger)
+ */
 function nextRunDelayMs({ tz, hour, minute }) {
   const now = new Date();
   const targetH = Math.max(0, Math.min(23, Number(hour)));
   const targetM = Math.max(0, Math.min(59, Number(minute)));
 
+  // Start from next minute boundary (plus a tiny offset)
+  const msToNextMinute =
+    (60 - now.getSeconds()) * 1000 - now.getMilliseconds() + 250;
+  const base = new Date(now.getTime() + Math.max(250, msToNextMinute));
+
   for (let addMin = 0; addMin <= 48 * 60; addMin++) {
-    const test = new Date(now.getTime() + addMin * 60_000);
+    const test = new Date(base.getTime() + addMin * 60_000);
     const tp = tzPartsAt(tz, test);
     if (tp.hour === targetH && tp.minute === targetM) {
       const delay = test.getTime() - now.getTime();
@@ -72,13 +84,18 @@ async function loadEnabledSettings(pg) {
   return r.rows || [];
 }
 
-function canSend(guild, channel) {
-  const me = guild.members.me;
-  if (!me || !channel) return false;
-  return (
-    channel.isTextBased?.() &&
-    channel.permissionsFor(me)?.has(PermissionsBitField.Flags.SendMessages)
-  );
+async function canSend(guild, channel) {
+  try {
+    const me = guild.members.me || (await guild.members.fetchMe().catch(() => null));
+    if (!me || !channel) return false;
+
+    return (
+      channel.isTextBased?.() &&
+      channel.permissionsFor(me)?.has(PermissionsBitField.Flags.SendMessages)
+    );
+  } catch {
+    return false;
+  }
 }
 
 // ---- Advisory locks (Postgres) ----
@@ -138,6 +155,18 @@ function makeRunKey({ guildId, tz, hour, minute, dateObj }) {
   return `${guildId}:${ymd}:${pad2(hour)}:${pad2(minute)}:${tz}`;
 }
 
+function recentlyRan(guildId, runKey) {
+  const rec = lastRunByGuild.get(String(guildId));
+  if (!rec) return false;
+  if (rec.runKey === runKey) return true;
+  if ((Date.now() - rec.ts) < RECENT_SEND_GUARD_MS) return true;
+  return false;
+}
+
+function markRan(guildId, runKey) {
+  lastRunByGuild.set(String(guildId), { runKey, ts: Date.now() });
+}
+
 async function runOnceForGuild(client, guildId) {
   const pg = client?.pg;
   if (!pg?.query) return;
@@ -152,24 +181,33 @@ async function runOnceForGuild(client, guildId) {
   const guild = client.guilds.cache.get(String(guildId));
   if (!guild) return;
 
-  const channel = guild.channels.cache.get(String(settings.channel_id));
-  if (!channel || !canSend(guild, channel)) return;
+  // fetch channel if not cached
+  let channel =
+    guild.channels.cache.get(String(settings.channel_id)) ||
+    (await guild.channels.fetch(String(settings.channel_id)).catch(() => null));
+
+  if (!channel || !(await canSend(guild, channel))) return;
 
   const tz = String(settings.tz || "UTC");
   const hour = Number(settings.hour ?? 21);
   const minute = Number(settings.minute ?? 0);
 
-  // 1) Per-run advisory lock (blocks duplicates across multiple instances in the SAME moment)
-  const lockKey = `daily_digest_run:${guildId}`;
+  // Build runKey first so both our in-memory guard + locks are tied to the scheduled window
+  const runKey = makeRunKey({ guildId, tz, hour, minute, dateObj: new Date() });
+
+  // ✅ In-process spam guard (covers weird edge cases)
+  if (recentlyRan(guildId, runKey)) return;
+
+  // ✅ Per-run advisory lock (locks THIS runKey across instances)
+  const lockKey = `daily_digest_run:${runKey}`;
   const gotRunLock = await tryAdvisoryLock(pg, lockKey);
   if (!gotRunLock) {
-    // Another instance is running a digest right now
+    // Another instance is running the same digest window right now
     return;
   }
 
   try {
-    // 2) Persistent run claim (prevents repeats across restarts)
-    const runKey = makeRunKey({ guildId, tz, hour, minute, dateObj: new Date() });
+    // ✅ Persistent run claim (prevents repeats across restarts/instances)
     const claimed = await claimRunKey(pg, runKey, {
       guild_id: guildId,
       channel_id: settings.channel_id,
@@ -180,6 +218,7 @@ async function runOnceForGuild(client, guildId) {
 
     if (!claimed) {
       // Already sent this digest window
+      markRan(guildId, runKey);
       return;
     }
 
@@ -191,6 +230,8 @@ async function runOnceForGuild(client, guildId) {
     });
 
     await channel.send({ embeds: [embed], allowedMentions: { parse: [] } });
+
+    markRan(guildId, runKey);
   } catch (e) {
     console.error(`[DAILY_DIGEST] run failed guild=${guildId}:`, e?.message || e);
   } finally {
@@ -303,3 +344,4 @@ async function startDailyDigestScheduler(client) {
 }
 
 module.exports = { startDailyDigestScheduler };
+
