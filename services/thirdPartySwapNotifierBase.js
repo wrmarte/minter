@@ -3,6 +3,14 @@ const fetch = require('node-fetch');
 const { safeRpcCall } = require('./providerM');
 const { shortWalletLink } = require('../utils/helpers');
 
+// ✅ NEW: Daily Digest logger (safe optional import)
+let logDigestEvent = null;
+try {
+  ({ logDigestEvent } = require('./digestLogger'));
+} catch {
+  logDigestEvent = null;
+}
+
 // ======= CONFIG =======
 const ADRIAN = '0x7e99075ce287f1cf8cbcaaa6a1c7894e404fd7ea'.toLowerCase();
 const WETH   = '0x4200000000000000000000000000000000000006'.toLowerCase();
@@ -494,15 +502,55 @@ async function sendSwapEmbed(client, swap, provider) {
   const chans = await resolveChannels(client);
   if (DEBUG) console.log(`[SWAP] send -> channels=${chans.length} tx=${txHash}`);
 
+  // ✅ Track which guilds actually received a message (so digest logs only reflect posted events)
+  const sentGuilds = new Set();
+
   for (const ch of chans) {
     const tag = resolveRoleTag(ch, isBuy ? BUY_TAG_ROLE_NAME : SELL_TAG_ROLE_NAME);
-    await ch.send(
-      tag
+
+    try {
+      const payload = tag
         ? { content: tag.mention, embeds: [embed], allowedMentions: { roles: [tag.roleId] } }
-        : { embeds: [embed] }
-    ).catch(err => {
+        : { embeds: [embed], allowedMentions: { parse: [] } };
+
+      await ch.send(payload);
+      if (ch?.guildId) sentGuilds.add(String(ch.guildId));
+    } catch (err) {
       if (DEBUG) console.log(`[SWAP] send failed channel=${ch?.id} err=${err?.message || err}`);
-    });
+    }
+  }
+
+  // ✅ NEW: Digest logging (once per guild, only if we successfully sent there)
+  if (logDigestEvent && sentGuilds.size) {
+    for (const guildId of sentGuilds) {
+      try {
+        await logDigestEvent(client, {
+          guildId,
+          // Keep digest schema stable: count these under "sale" events
+          // (buys and sells both become activity + volume in digest)
+          eventType: 'sale',
+          chain: 'base',
+          contract: ADRIAN,
+          tokenId: null,
+
+          // amountNative = ADRIAN token amount (not chain native)
+          amountNative: tokenAmount,
+          amountEth: ethValue,
+          amountUsd: usdValue,
+
+          buyer: isBuy ? wallet : null,
+          seller: isBuy ? null : wallet,
+          txHash,
+          ts: new Date()
+        });
+
+        if (DEBUG) {
+          console.log(`[DIGEST_LOG][SWAP] logged guild=${guildId} isBuy=${isBuy} usd=${Number(usdValue || 0).toFixed(2)} tx=${txHash.slice(0, 10)}`);
+        }
+      } catch (e) {
+        if (DEBUG) console.log(`[DIGEST_LOG][SWAP] failed guild=${guildId}: ${e?.message || e}`);
+      }
+    }
   }
 }
 
