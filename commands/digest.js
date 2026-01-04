@@ -13,12 +13,31 @@ const TZ_ALIAS = {
   PDT: "America/Los_Angeles",
   HST: "Pacific/Honolulu",
   AST: "America/Puerto_Rico",
+
+  // Extra friendly aliases people actually type
+  NY: "America/New_York",
+  NEWYORK: "America/New_York",
+  LA: "America/Los_Angeles",
+  LOSANGELES: "America/Los_Angeles",
+  CHI: "America/Chicago",
+  CHICAGO: "America/Chicago",
+  MIA: "America/New_York",
+  MIAMI: "America/New_York",
+  DAL: "America/Chicago",
+  DALLAS: "America/Chicago",
+  DEN: "America/Denver",
+  DENVER: "America/Denver",
 };
 
 function normalizeTz(tz) {
   const raw = String(tz || "").trim();
   if (!raw) return "UTC";
-  const up = raw.toUpperCase();
+
+  // If user passes "utc" or "UTC", normalize
+  if (raw.toUpperCase() === "UTC") return "UTC";
+
+  // If user passes something like "est " or " ny"
+  const up = raw.replace(/\s+/g, "").toUpperCase();
   return TZ_ALIAS[up] || raw;
 }
 
@@ -53,6 +72,49 @@ function nowInTzLine(tz) {
   }
 }
 
+// Friendly preview of the NEXT scheduled run day/time in that timezone (no external deps)
+function nextRunPreview(tz, hour, minute) {
+  try {
+    const targetH = Math.max(0, Math.min(23, Number(hour)));
+    const targetM = Math.max(0, Math.min(59, Number(minute)));
+
+    // start from next minute boundary
+    const now = new Date();
+    const baseMs =
+      now.getTime() +
+      Math.max(
+        250,
+        (60 - now.getSeconds()) * 1000 - now.getMilliseconds() + 250
+      );
+    const base = new Date(baseMs);
+
+    const dtf = new Intl.DateTimeFormat("en-US", {
+      timeZone: tz,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+
+    // scan forward up to 48h minute-by-minute
+    for (let addMin = 0; addMin <= 48 * 60; addMin++) {
+      const test = new Date(base.getTime() + addMin * 60_000);
+      const parts = dtf.formatToParts(test);
+      const get = (type) => parts.find((p) => p.type === type)?.value;
+      const h = Number(get("hour"));
+      const m = Number(get("minute"));
+      if (h === targetH && m === targetM) {
+        return dtf.format(test);
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 module.exports = {
   data: new SlashCommandBuilder()
     .setName("digest")
@@ -76,7 +138,7 @@ module.exports = {
         .addStringOption((o) =>
           o
             .setName("tz")
-            .setDescription("Timezone (IANA like America/New_York or alias like EST/PST)")
+            .setDescription("Timezone (IANA like America/New_York or alias like EST/PST/NY/LA)")
             .setRequired(false)
         )
     )
@@ -134,7 +196,7 @@ module.exports = {
       const hour = interaction.options.getInteger("hour", true);
       const minute = interaction.options.getInteger("minute") ?? 0;
 
-      let tzInput = interaction.options.getString("tz") || "UTC";
+      const tzInput = interaction.options.getString("tz") || "UTC";
       const tzNorm = normalizeTz(tzInput);
 
       if (hour < 0 || hour > 23)
@@ -153,13 +215,12 @@ module.exports = {
           content:
             `❌ Invalid timezone: **${tzInput}**.\n` +
             `Use an IANA timezone like **America/New_York** (recommended) or **UTC**.\n` +
-            `You can also use aliases like **EST/CST/PST**.`,
+            `You can also use aliases like **EST/CST/PST/NY/LA**.`,
           ephemeral: true,
         });
       }
 
-      // hours_window support: keep existing if present, else default 24
-      // (setup command does not change hours_window unless you add an option later)
+      // Keep existing hours_window if present, else default 24
       await pg.query(
         `
         INSERT INTO daily_digest_settings (guild_id, channel_id, enabled, tz, hour, minute, updated_at)
@@ -182,17 +243,20 @@ module.exports = {
         ]
       );
 
+      // Reschedule (may no-op if scheduler leader lock isn't held on this instance)
       try {
         await client.dailyDigestScheduler?.rescheduleGuild?.(interaction.guildId);
       } catch {}
 
       const nowLine = nowInTzLine(tzNorm);
       const when = `${pad2(hour)}:${pad2(minute)}`;
+      const nextLine = nextRunPreview(tzNorm, hour, minute);
 
       return interaction.reply({
         content:
           `✅ Daily digest enabled in <#${channel.id}> at **${when}** (**${tzNorm}**)` +
-          (nowLine ? `\n🕒 Current time in **${tzNorm}**: **${nowLine}**` : ""),
+          (nowLine ? `\n🕒 Current time in **${tzNorm}**: **${nowLine}**` : "") +
+          (nextLine ? `\n⏭️ Next run (approx): **${nextLine}**` : ""),
         ephemeral: true,
       });
     }
@@ -215,6 +279,7 @@ module.exports = {
         const tzOk = isValidTimeZone(tzNorm);
         const when = `${pad2(s.hour ?? 0)}:${pad2(s.minute ?? 0)}`;
         const nowLine = tzOk ? nowInTzLine(tzNorm) : null;
+        const nextLine = tzOk ? nextRunPreview(tzNorm, s.hour ?? 0, s.minute ?? 0) : null;
 
         return interaction.reply({
           content:
@@ -223,7 +288,8 @@ module.exports = {
             `Time: **${when}**\n` +
             `Timezone: **${tzOk ? tzNorm : `${s.tz} (INVALID)`}**\n` +
             `Window: **${s.hours_window ?? 24}h**` +
-            (nowLine ? `\n🕒 Current time there: **${nowLine}**` : ""),
+            (nowLine ? `\n🕒 Current time there: **${nowLine}**` : "") +
+            (nextLine ? `\n⏭️ Next run (approx): **${nextLine}**` : ""),
           ephemeral: true,
         });
       } catch (e) {
@@ -264,4 +330,3 @@ module.exports = {
     }
   },
 };
-
