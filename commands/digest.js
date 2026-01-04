@@ -82,10 +82,7 @@ function nextRunPreview(tz, hour, minute) {
     const now = new Date();
     const baseMs =
       now.getTime() +
-      Math.max(
-        250,
-        (60 - now.getSeconds()) * 1000 - now.getMilliseconds() + 250
-      );
+      Math.max(250, (60 - now.getSeconds()) * 1000 - now.getMilliseconds() + 250);
     const base = new Date(baseMs);
 
     const dtf = new Intl.DateTimeFormat("en-US", {
@@ -138,20 +135,16 @@ module.exports = {
         .addStringOption((o) =>
           o
             .setName("tz")
-            .setDescription("Timezone (IANA like America/New_York or alias like EST/PST/NY/LA)")
+            .setDescription(
+              "Timezone (IANA like America/New_York or alias like EST/PST/NY/LA)"
+            )
             .setRequired(false)
         )
     )
+    .addSubcommand((sc) => sc.setName("off").setDescription("Disable daily digest for this server"))
+    .addSubcommand((sc) => sc.setName("test").setDescription("Post a digest now (last window)"))
     .addSubcommand((sc) =>
-      sc.setName("off").setDescription("Disable daily digest for this server")
-    )
-    .addSubcommand((sc) =>
-      sc.setName("test").setDescription("Post a digest now (last 24h)")
-    )
-    .addSubcommand((sc) =>
-      sc
-        .setName("show")
-        .setDescription("Show current digest configuration for this server")
+      sc.setName("show").setDescription("Show current digest configuration for this server")
     ),
 
   async execute(interaction, client) {
@@ -200,15 +193,9 @@ module.exports = {
       const tzNorm = normalizeTz(tzInput);
 
       if (hour < 0 || hour > 23)
-        return interaction.reply({
-          content: "Hour must be 0-23.",
-          ephemeral: true,
-        });
+        return interaction.reply({ content: "Hour must be 0-23.", ephemeral: true });
       if (minute < 0 || minute > 59)
-        return interaction.reply({
-          content: "Minute must be 0-59.",
-          ephemeral: true,
-        });
+        return interaction.reply({ content: "Minute must be 0-59.", ephemeral: true });
 
       if (!isValidTimeZone(tzNorm)) {
         return interaction.reply({
@@ -289,7 +276,10 @@ module.exports = {
             `Timezone: **${tzOk ? tzNorm : `${s.tz} (INVALID)`}**\n` +
             `Window: **${s.hours_window ?? 24}h**` +
             (nowLine ? `\n🕒 Current time there: **${nowLine}**` : "") +
-            (nextLine ? `\n⏭️ Next run (approx): **${nextLine}**` : ""),
+            (nextLine ? `\n⏭️ Next run (approx): **${nextLine}**` : "") +
+            `\n🧭 Scheduler leader: **${
+              client.dailyDigestScheduler?.isLeader?.() ? "YES" : "NO/UNKNOWN"
+            }**`,
           ephemeral: true,
         });
       } catch (e) {
@@ -316,9 +306,26 @@ module.exports = {
     if (sub === "test") {
       await interaction.reply({ content: "📊 Generating digest…", ephemeral: true });
       try {
+        // ✅ FIX: Use force/manual run if available (always posts)
+        if (client.dailyDigestScheduler?.runNowForce) {
+          const res = await client.dailyDigestScheduler.runNowForce(interaction.guildId);
+          if (!res?.ok) {
+            return interaction.editReply({
+              content: `⚠️ Digest test did not post. Reason: **${res?.reason || "unknown"}**`,
+              ephemeral: true,
+            });
+          }
+          return interaction.editReply({
+            content: `✅ Posted digest to <#${res.channelId || "your channel"}>.`,
+            ephemeral: true,
+          });
+        }
+
+        // Fallback to legacy behavior
         await client.dailyDigestScheduler?.runNow?.(interaction.guildId);
         return interaction.editReply({
-          content: "✅ Posted digest to your configured channel.",
+          content:
+            "✅ Posted digest to your configured channel. (fallback mode — update scheduler for runNowForce)",
           ephemeral: true,
         });
       } catch (e) {
