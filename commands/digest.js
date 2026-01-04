@@ -1,5 +1,6 @@
 // commands/digest.js
 const { SlashCommandBuilder, PermissionsBitField } = require("discord.js");
+const { generateDailyDigest } = require("../services/dailyDigestService");
 
 const TZ_ALIAS = {
   // US common (DST-safe)
@@ -48,6 +49,11 @@ function isValidTimeZone(tz) {
   } catch {
     return false;
   }
+}
+
+function safeTimeZone(tz) {
+  const tzNorm = normalizeTz(tz || "UTC");
+  return isValidTimeZone(tzNorm) ? tzNorm : "UTC";
 }
 
 function pad2(n) {
@@ -100,7 +106,10 @@ function nextRunPreview(tz, hour, minute) {
       const test = new Date(base.getTime() + addMin * 60_000);
       const parts = dtf.formatToParts(test);
       const get = (type) => parts.find((p) => p.type === type)?.value;
-      const h = Number(get("hour"));
+
+      let h = Number(get("hour"));
+      if (h === 24) h = 0;
+
       const m = Number(get("minute"));
       if (h === targetH && m === targetM) {
         return dtf.format(test);
@@ -109,6 +118,26 @@ function nextRunPreview(tz, hour, minute) {
     return null;
   } catch {
     return null;
+  }
+}
+
+async function canSend(guild, channel) {
+  try {
+    const me =
+      guild.members.me || (await guild.members.fetchMe().catch(() => null));
+    if (!me || !channel) return false;
+    if (!channel.isTextBased?.()) return false;
+
+    const perms = channel.permissionsFor(me);
+    if (!perms) return false;
+
+    return (
+      perms.has(PermissionsBitField.Flags.ViewChannel) &&
+      perms.has(PermissionsBitField.Flags.SendMessages) &&
+      perms.has(PermissionsBitField.Flags.EmbedLinks)
+    );
+  } catch {
+    return false;
   }
 }
 
@@ -135,14 +164,16 @@ module.exports = {
         .addStringOption((o) =>
           o
             .setName("tz")
-            .setDescription(
-              "Timezone (IANA like America/New_York or alias like EST/PST/NY/LA)"
-            )
+            .setDescription("Timezone (IANA like America/New_York or alias like EST/PST/NY/LA)")
             .setRequired(false)
         )
     )
-    .addSubcommand((sc) => sc.setName("off").setDescription("Disable daily digest for this server"))
-    .addSubcommand((sc) => sc.setName("test").setDescription("Post a digest now (last window)"))
+    .addSubcommand((sc) =>
+      sc.setName("off").setDescription("Disable daily digest for this server")
+    )
+    .addSubcommand((sc) =>
+      sc.setName("test").setDescription("Post a digest now (last 24h)")
+    )
     .addSubcommand((sc) =>
       sc.setName("show").setDescription("Show current digest configuration for this server")
     ),
@@ -161,8 +192,9 @@ module.exports = {
     }
 
     const pg = client?.pg;
-    if (!pg?.query)
+    if (!pg?.query) {
       return interaction.reply({ content: "DB not connected.", ephemeral: true });
+    }
 
     const sub = interaction.options.getSubcommand();
 
@@ -192,10 +224,12 @@ module.exports = {
       const tzInput = interaction.options.getString("tz") || "UTC";
       const tzNorm = normalizeTz(tzInput);
 
-      if (hour < 0 || hour > 23)
+      if (hour < 0 || hour > 23) {
         return interaction.reply({ content: "Hour must be 0-23.", ephemeral: true });
-      if (minute < 0 || minute > 59)
+      }
+      if (minute < 0 || minute > 59) {
         return interaction.reply({ content: "Minute must be 0-59.", ephemeral: true });
+      }
 
       if (!isValidTimeZone(tzNorm)) {
         return interaction.reply({
@@ -207,7 +241,6 @@ module.exports = {
         });
       }
 
-      // Keep existing hours_window if present, else default 24
       await pg.query(
         `
         INSERT INTO daily_digest_settings (guild_id, channel_id, enabled, tz, hour, minute, updated_at)
@@ -239,11 +272,17 @@ module.exports = {
       const when = `${pad2(hour)}:${pad2(minute)}`;
       const nextLine = nextRunPreview(tzNorm, hour, minute);
 
+      const leaderLine =
+        typeof client.__dailyDigestIsLeader === "boolean"
+          ? `\n🧠 Scheduler leader on this instance: **${client.__dailyDigestIsLeader ? "YES" : "NO"}**`
+          : "";
+
       return interaction.reply({
         content:
           `✅ Daily digest enabled in <#${channel.id}> at **${when}** (**${tzNorm}**)` +
           (nowLine ? `\n🕒 Current time in **${tzNorm}**: **${nowLine}**` : "") +
-          (nextLine ? `\n⏭️ Next run (approx): **${nextLine}**` : ""),
+          (nextLine ? `\n⏭️ Next run (approx): **${nextLine}**` : "") +
+          leaderLine,
         ephemeral: true,
       });
     }
@@ -262,24 +301,26 @@ module.exports = {
           });
         }
 
-        const tzNorm = normalizeTz(s.tz || "UTC");
-        const tzOk = isValidTimeZone(tzNorm);
+        const tzNorm = safeTimeZone(s.tz || "UTC");
         const when = `${pad2(s.hour ?? 0)}:${pad2(s.minute ?? 0)}`;
-        const nowLine = tzOk ? nowInTzLine(tzNorm) : null;
-        const nextLine = tzOk ? nextRunPreview(tzNorm, s.hour ?? 0, s.minute ?? 0) : null;
+        const nowLine = nowInTzLine(tzNorm);
+        const nextLine = nextRunPreview(tzNorm, s.hour ?? 0, s.minute ?? 0);
+
+        const leaderLine =
+          typeof client.__dailyDigestIsLeader === "boolean"
+            ? `\n🧠 Scheduler leader on this instance: **${client.__dailyDigestIsLeader ? "YES" : "NO"}**`
+            : "";
 
         return interaction.reply({
           content:
             `📌 Digest status: **${s.enabled ? "ENABLED" : "DISABLED"}**\n` +
             `Channel: <#${s.channel_id}>\n` +
             `Time: **${when}**\n` +
-            `Timezone: **${tzOk ? tzNorm : `${s.tz} (INVALID)`}**\n` +
+            `Timezone: **${tzNorm}**\n` +
             `Window: **${s.hours_window ?? 24}h**` +
             (nowLine ? `\n🕒 Current time there: **${nowLine}**` : "") +
             (nextLine ? `\n⏭️ Next run (approx): **${nextLine}**` : "") +
-            `\n🧭 Scheduler leader: **${
-              client.dailyDigestScheduler?.isLeader?.() ? "YES" : "NO/UNKNOWN"
-            }**`,
+            leaderLine,
           ephemeral: true,
         });
       } catch (e) {
@@ -305,27 +346,64 @@ module.exports = {
 
     if (sub === "test") {
       await interaction.reply({ content: "📊 Generating digest…", ephemeral: true });
+
       try {
-        // ✅ FIX: Use force/manual run if available (always posts)
-        if (client.dailyDigestScheduler?.runNowForce) {
-          const res = await client.dailyDigestScheduler.runNowForce(interaction.guildId);
-          if (!res?.ok) {
-            return interaction.editReply({
-              content: `⚠️ Digest test did not post. Reason: **${res?.reason || "unknown"}**`,
-              ephemeral: true,
-            });
-          }
+        // Load config
+        const r = await pg.query(
+          `SELECT * FROM daily_digest_settings WHERE guild_id = $1 LIMIT 1`,
+          [String(interaction.guildId)]
+        );
+        const s = r.rows?.[0];
+        if (!s?.enabled) {
           return interaction.editReply({
-            content: `✅ Posted digest to <#${res.channelId || "your channel"}>.`,
+            content: "❌ Digest is not enabled for this server. Use `/digest setup` first.",
             ephemeral: true,
           });
         }
 
-        // Fallback to legacy behavior
-        await client.dailyDigestScheduler?.runNow?.(interaction.guildId);
+        const guild = interaction.guild;
+        if (!guild) {
+          return interaction.editReply({
+            content: "❌ Guild not found in cache. Try again in a moment.",
+            ephemeral: true,
+          });
+        }
+
+        const channelId = String(s.channel_id);
+        const channel =
+          guild.channels.cache.get(channelId) ||
+          (await guild.channels.fetch(channelId).catch(() => null));
+
+        if (!channel) {
+          return interaction.editReply({
+            content: `❌ Configured channel not found: ${channelId}`,
+            ephemeral: true,
+          });
+        }
+
+        if (!(await canSend(guild, channel))) {
+          return interaction.editReply({
+            content:
+              "❌ I can’t post in the configured channel (need ViewChannel + SendMessages + EmbedLinks).",
+            ephemeral: true,
+          });
+        }
+
+        const tz = safeTimeZone(s.tz || "UTC");
+        const hoursWindow = Number(s.hours_window ?? 24);
+
+        // ✅ DIRECT SEND (bypasses leader lock / timers)
+        const embed = await generateDailyDigest({
+          pg,
+          guild,
+          settings: { ...s, tz },
+          hours: Number.isFinite(hoursWindow) ? hoursWindow : 24,
+        });
+
+        await channel.send({ embeds: [embed], allowedMentions: { parse: [] } });
+
         return interaction.editReply({
-          content:
-            "✅ Posted digest to your configured channel. (fallback mode — update scheduler for runNowForce)",
+          content: `✅ Posted digest to <#${channelId}> (direct test).`,
           ephemeral: true,
         });
       } catch (e) {
