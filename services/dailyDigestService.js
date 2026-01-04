@@ -22,15 +22,66 @@ function safeStr(s, max = 120) {
   return t.length > max ? t.slice(0, max - 1) + "…" : t;
 }
 
-function titleCase(s) {
-  return String(s || "")
-    .split(" ")
-    .map(w => (w ? w[0].toUpperCase() + w.slice(1) : ""))
-    .join(" ")
-    .trim();
+function padAddr(addr) {
+  const a = String(addr || "").trim();
+  if (!a) return "";
+  const low = a.toLowerCase();
+  if (low.length < 12) return low;
+  return `${low.slice(0, 6)}…${low.slice(-4)}`;
 }
 
+function padWho(who, max = 22) {
+  const w = String(who || "").trim();
+  if (!w) return "";
+  return w.length > max ? w.slice(0, max - 1) + "…" : w;
+}
+
+/* ===================== TABLE ENSURE (FIX) ===================== */
+
+const DIGEST_EVENTS_TABLE_SQL = `
+CREATE TABLE IF NOT EXISTS digest_events (
+  id            BIGSERIAL PRIMARY KEY,
+  guild_id      TEXT NOT NULL,
+  event_type    TEXT NOT NULL, -- 'mint' | 'sale'
+  chain         TEXT,
+  contract      TEXT,
+  token_id      TEXT,
+  amount_native NUMERIC,
+  amount_eth    NUMERIC,
+  amount_usd    NUMERIC,
+  buyer         TEXT,
+  seller        TEXT,
+  tx_hash       TEXT,
+  ts            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS digest_events_guild_ts_idx
+  ON digest_events (guild_id, ts DESC);
+
+CREATE INDEX IF NOT EXISTS digest_events_guild_type_ts_idx
+  ON digest_events (guild_id, event_type, ts DESC);
+
+CREATE INDEX IF NOT EXISTS digest_events_txhash_idx
+  ON digest_events (tx_hash);
+`;
+
+async function ensureDigestEventsTable(pg) {
+  if (!pg?.query) return false;
+  try {
+    await pg.query(DIGEST_EVENTS_TABLE_SQL);
+    return true;
+  } catch (e) {
+    console.warn("[DAILY_DIGEST] failed to ensure digest_events table:", e?.message || e);
+    return false;
+  }
+}
+
+/* ===================== FETCH WINDOW ===================== */
+
 async function fetchDigestWindow(pg, guildId, hours = 24) {
+  // ✅ Ensure table exists so scheduler doesn't silently fail
+  await ensureDigestEventsTable(pg);
+
   const q = `
     SELECT *
     FROM digest_events
@@ -38,23 +89,44 @@ async function fetchDigestWindow(pg, guildId, hours = 24) {
       AND ts >= NOW() - ($2::text || ' hours')::interval
     ORDER BY ts DESC
   `;
-  const r = await pg.query(q, [String(guildId), String(hours)]);
-  return r.rows || [];
+
+  try {
+    const r = await pg.query(q, [String(guildId), String(hours)]);
+    return r.rows || [];
+  } catch (e) {
+    console.warn("[DAILY_DIGEST] fetchDigestWindow failed:", e?.message || e);
+    return [];
+  }
 }
+
+/* ===================== STATS ===================== */
 
 function computeDigestStats(rows) {
   const mints = rows.filter(r => r.event_type === "mint");
-  const sales = rows.filter(r => r.event_type === "sale");
+
+  // ✅ Split:
+  // - NFT Sales = sale + token_id present
+  // - Swaps (token buys/sells) = sale + token_id NULL (how we logged swaps)
+  const salesAll = rows.filter(r => r.event_type === "sale");
+  const nftSales = salesAll.filter(r => r.token_id != null && String(r.token_id).trim() !== "");
+  const swaps = salesAll.filter(r => r.token_id == null || String(r.token_id).trim() === "");
 
   const sum = (arr, key) => arr.reduce((a, r) => a + num(r[key], 0), 0);
 
   const totalMints = mints.length;
-  const totalSales = sales.length;
+  const totalNftSales = nftSales.length;
+  const totalSwaps = swaps.length;
 
-  const totalSalesEth = sum(sales, "amount_eth");
-  const totalSalesUsd = sum(sales, "amount_usd");
+  const nftVolEth = sum(nftSales, "amount_eth");
+  const nftVolUsd = sum(nftSales, "amount_usd");
 
-  // most active contract by count (mints + sales)
+  const swapVolEth = sum(swaps, "amount_eth");
+  const swapVolUsd = sum(swaps, "amount_usd");
+
+  const totalVolEth = nftVolEth + swapVolEth;
+  const totalVolUsd = nftVolUsd + swapVolUsd;
+
+  // most active contract by count (mints + sales/swaps)
   const byContract = new Map();
   for (const r of rows) {
     const c = (r.contract || "").toLowerCase() || "unknown";
@@ -65,11 +137,21 @@ function computeDigestStats(rows) {
     if (count > mostActive.count) mostActive = { contract, count };
   }
 
-  // top sale by ETH
-  let topSale = null;
-  for (const r of sales) {
+  // top NFT sale by ETH
+  let topNftSale = null;
+  for (const r of nftSales) {
     const v = num(r.amount_eth, 0);
-    if (!topSale || v > num(topSale.amount_eth, 0)) topSale = r;
+    if (!topNftSale || v > num(topNftSale.amount_eth, 0)) topNftSale = r;
+  }
+
+  // top swap by USD (fallback ETH)
+  let topSwap = null;
+  for (const r of swaps) {
+    const u = num(r.amount_usd, 0);
+    const e = num(r.amount_eth, 0);
+    const score = u > 0 ? u : e; // prefer USD if present, else ETH
+    if (!topSwap) topSwap = { row: r, score };
+    else if (score > (topSwap.score || 0)) topSwap = { row: r, score };
   }
 
   // chains breakdown
@@ -81,23 +163,39 @@ function computeDigestStats(rows) {
 
   return {
     totalMints,
-    totalSales,
-    totalSalesEth,
-    totalSalesUsd,
+    totalNftSales,
+    totalSwaps,
+    nftVolEth,
+    nftVolUsd,
+    swapVolEth,
+    swapVolUsd,
+    totalVolEth,
+    totalVolUsd,
     mostActive,
-    topSale,
+    topNftSale,
+    topSwapRow: topSwap?.row || null,
     byChain,
   };
 }
 
-function buildDigestEmbed({
-  guildName,
-  hours,
-  stats,
-  rows,
-  settings,
-}) {
-  const { totalMints, totalSales, totalSalesEth, totalSalesUsd, mostActive, topSale, byChain } = stats;
+/* ===================== EMBED BUILD ===================== */
+
+function buildDigestEmbed({ guildName, hours, stats, rows, settings, hadQueryError = false }) {
+  const {
+    totalMints,
+    totalNftSales,
+    totalSwaps,
+    nftVolEth,
+    nftVolUsd,
+    swapVolEth,
+    swapVolUsd,
+    totalVolEth,
+    totalVolUsd,
+    mostActive,
+    topNftSale,
+    topSwapRow,
+    byChain
+  } = stats;
 
   const chainLine = [...byChain.entries()]
     .sort((a, b) => b[1] - a[1])
@@ -106,43 +204,67 @@ function buildDigestEmbed({
     .join(" • ");
 
   const activeContract = mostActive.contract && mostActive.contract !== "unknown"
-    ? `${mostActive.contract.slice(0, 6)}…${mostActive.contract.slice(-4)} (${mostActive.count})`
+    ? `${padAddr(mostActive.contract)} (${mostActive.count})`
     : "N/A";
 
-  const topSaleLine = (() => {
-    if (!topSale) return "N/A";
-    const c = (topSale.contract || "").toLowerCase();
-    const t = topSale.token_id != null ? `#${topSale.token_id}` : "";
-    const eth = fmtEth(topSale.amount_eth, 4);
-    const usd = num(topSale.amount_usd, 0) > 0 ? `$${fmtMoney(topSale.amount_usd, 2)}` : "";
-    const chain = topSale.chain ? `(${topSale.chain})` : "";
-    const who = topSale.buyer ? `→ ${safeStr(topSale.buyer, 20)}` : "";
-    const cshort = c ? `${c.slice(0, 6)}…${c.slice(-4)}` : "unknown";
-    return `${cshort} ${t} ${chain} — ${eth} ETH ${usd ? `(${usd})` : ""} ${who}`.trim();
+  const topNftSaleLine = (() => {
+    if (!topNftSale) return "N/A";
+    const cshort = padAddr(topNftSale.contract);
+    const t = topNftSale.token_id != null ? `#${topNftSale.token_id}` : "";
+    const eth = fmtEth(topNftSale.amount_eth, 4);
+    const usd = num(topNftSale.amount_usd, 0) > 0 ? `$${fmtMoney(topNftSale.amount_usd, 2)}` : "";
+    const chain = topNftSale.chain ? `(${topNftSale.chain})` : "";
+    const who = topNftSale.buyer ? `→ ${padWho(topNftSale.buyer, 20)}` : "";
+    return `${cshort} ${t} ${chain} — ${eth} ETH ${usd ? `(${usd})` : ""} ${who}`.replace(/\s+/g, " ").trim();
   })();
+
+  const topSwapLine = (() => {
+    if (!topSwapRow) return "N/A";
+    const cshort = padAddr(topSwapRow.contract);
+    const eth = num(topSwapRow.amount_eth, 0) > 0 ? `${fmtEth(topSwapRow.amount_eth, 4)} ETH` : "";
+    const usd = num(topSwapRow.amount_usd, 0) > 0 ? `$${fmtMoney(topSwapRow.amount_usd, 2)}` : "";
+    const chain = topSwapRow.chain ? `(${topSwapRow.chain})` : "";
+    const who = topSwapRow.buyer ? `buyer:${padWho(topSwapRow.buyer, 14)}` : (topSwapRow.seller ? `seller:${padWho(topSwapRow.seller, 14)}` : "");
+    return `${cshort} ${chain} — ${eth} ${usd ? `(${usd})` : ""} ${who}`.replace(/\s+/g, " ").trim();
+  })();
+
+  const volumeLine = `**${fmtEth(totalVolEth, 4)} ETH**${
+    num(totalVolUsd, 0) > 0 ? `\n~ **$${fmtMoney(totalVolUsd, 2)}**` : ""
+  }`.trim();
+
+  const breakdownLine = [
+    `NFT: ${fmtEth(nftVolEth, 4)} ETH${nftVolUsd > 0 ? ` (~$${fmtMoney(nftVolUsd, 2)})` : ""}`,
+    `Swaps: ${fmtEth(swapVolEth, 4)} ETH${swapVolUsd > 0 ? ` (~$${fmtMoney(swapVolUsd, 2)})` : ""}`,
+  ].join("\n");
 
   const embed = new EmbedBuilder()
     .setColor("#00b894")
     .setTitle(`📊 Daily Digest — ${safeStr(guildName, 60)}`)
-    .setDescription(`Last **${hours}h** recap. ${settings?.tz ? `Timezone: **${settings.tz}**` : ""}`.trim())
+    .setDescription(
+      `Last **${hours}h** recap.${settings?.tz ? ` Timezone: **${settings.tz}**` : ""}`.trim()
+    )
     .addFields(
       { name: "Mints", value: `**${totalMints.toLocaleString()}**`, inline: true },
-      { name: "Sales", value: `**${totalSales.toLocaleString()}**`, inline: true },
-      { name: "Volume", value: `**${fmtEth(totalSalesEth, 4)} ETH**\n${num(totalSalesUsd, 0) > 0 ? `~ **$${fmtMoney(totalSalesUsd, 2)}**` : ""}`.trim(), inline: true },
+      { name: "NFT Sales", value: `**${totalNftSales.toLocaleString()}**`, inline: true },
+      { name: "Swaps", value: `**${totalSwaps.toLocaleString()}**`, inline: true },
+
+      { name: "Total Volume", value: volumeLine, inline: true },
+      { name: "Breakdown", value: breakdownLine.slice(0, 1024) || "N/A", inline: true },
+      { name: "Chains", value: chainLine || "N/A", inline: true },
+
       { name: "Most Active", value: activeContract, inline: false },
-      { name: "Top Sale", value: topSaleLine, inline: false },
-      { name: "Chains", value: chainLine || "N/A", inline: false }
+      { name: "Top NFT Sale", value: topNftSaleLine || "N/A", inline: false },
+      { name: "Top Swap", value: topSwapLine || "N/A", inline: false },
     )
-    .setFooter({ text: "MB Digest • powered by your tracker logs" })
+    .setFooter({ text: hadQueryError ? "MB Digest • (warning: digest query error)" : "MB Digest • powered by your tracker logs" })
     .setTimestamp(new Date());
 
-  // Add “recent highlights” (last 5 sales)
-  const recentSales = rows
-    .filter(r => r.event_type === "sale")
+  // Recent NFT Sales (last 5)
+  const recentNftSales = rows
+    .filter(r => r.event_type === "sale" && r.token_id != null && String(r.token_id).trim() !== "")
     .slice(0, 5)
     .map(r => {
-      const c = (r.contract || "").toLowerCase();
-      const cshort = c ? `${c.slice(0, 6)}…${c.slice(-4)}` : "unknown";
+      const cshort = padAddr(r.contract);
       const tid = r.token_id != null ? `#${r.token_id}` : "";
       const eth = num(r.amount_eth, 0) > 0 ? `${fmtEth(r.amount_eth, 4)} ETH` : "";
       const usd = num(r.amount_usd, 0) > 0 ? `$${fmtMoney(r.amount_usd, 2)}` : "";
@@ -150,15 +272,42 @@ function buildDigestEmbed({
       return `• ${cshort} ${tid} ${chain} ${eth} ${usd ? `(${usd})` : ""}`.replace(/\s+/g, " ").trim();
     });
 
-  if (recentSales.length) {
-    embed.addFields({ name: "Recent Sales", value: recentSales.join("\n").slice(0, 1024) });
+  if (recentNftSales.length) {
+    embed.addFields({ name: "Recent NFT Sales", value: recentNftSales.join("\n").slice(0, 1024) });
+  }
+
+  // Recent Swaps (last 5)
+  const recentSwaps = rows
+    .filter(r => r.event_type === "sale" && (r.token_id == null || String(r.token_id).trim() === ""))
+    .slice(0, 5)
+    .map(r => {
+      const cshort = padAddr(r.contract);
+      const eth = num(r.amount_eth, 0) > 0 ? `${fmtEth(r.amount_eth, 4)} ETH` : "";
+      const usd = num(r.amount_usd, 0) > 0 ? `$${fmtMoney(r.amount_usd, 2)}` : "";
+      const chain = r.chain ? `(${r.chain})` : "";
+      return `• ${cshort} ${chain} ${eth} ${usd ? `(${usd})` : ""}`.replace(/\s+/g, " ").trim();
+    });
+
+  if (recentSwaps.length) {
+    embed.addFields({ name: "Recent Swaps", value: recentSwaps.join("\n").slice(0, 1024) });
   }
 
   return embed;
 }
 
+/* ===================== MAIN ===================== */
+
 async function generateDailyDigest({ pg, guild, settings, hours = 24 }) {
-  const rows = await fetchDigestWindow(pg, guild.id, hours);
+  let rows = [];
+  let hadQueryError = false;
+
+  try {
+    rows = await fetchDigestWindow(pg, guild.id, hours);
+  } catch (e) {
+    hadQueryError = true;
+    rows = [];
+  }
+
   const stats = computeDigestStats(rows);
 
   return buildDigestEmbed({
@@ -167,9 +316,11 @@ async function generateDailyDigest({ pg, guild, settings, hours = 24 }) {
     stats,
     rows,
     settings,
+    hadQueryError,
   });
 }
 
 module.exports = {
   generateDailyDigest,
 };
+
