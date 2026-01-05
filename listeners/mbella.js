@@ -152,12 +152,17 @@ module.exports = (client) => {
       }
 
       const replyingToMBella = await Discord.isReplyToMBella(message, client, Config);
-      const partnerId = State.getBellaPartner(message.channel.id);
 
-      const replyAllowed = replyingToMBella && (!partnerId || partnerId === message.author.id);
+      // ✅ Minimal partner-lock fix:
+      // - Replies to MBella are ALWAYS allowed (lock won't block)
+      // - Non-reply triggers still respect current partner lock
+      const replyAllowed = replyingToMBella && State.isPartnerAllowed(message.channel.id, message.author.id, true);
 
       if (!hasFemaleTrigger && !(botMentioned && hintedBella) && !replyAllowed) return;
       if (message.mentions.everyone || message.mentions.roles.size > 0) return;
+
+      // If this is NOT a reply, enforce partner lock (keeps “1 partner per channel”)
+      if (!replyAllowed && !State.isPartnerAllowed(message.channel.id, message.author.id, false)) return;
 
       // ===== cooldown =====
       const isOwner = message.author.id === String(process.env.BOT_OWNER_ID || "");
@@ -453,3 +458,4 @@ module.exports = (client) => {
     }
   });
 };
+
