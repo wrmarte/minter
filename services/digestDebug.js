@@ -1,32 +1,32 @@
 // services/digestDebug.js
 // Runs quick sanity queries against digest_events (Railway-safe via client.pg.query)
 
-const DEBUG = String(process.env.DIGEST_DEBUG || "").trim() === "1";
+const DEBUG = String(process.env.DIGEST_DEBUG || '').trim() === '1';
 
 function dlog(...args) {
-  if (DEBUG) console.log("[DIGEST_DEBUG]", ...args);
+  if (DEBUG) console.log('[DIGEST_DEBUG]', ...args);
 }
 
 function cleanGuildId(guildId) {
-  const s = String(guildId || "").trim();
+  const s = String(guildId || '').trim();
   if (!s) return null;
   return s.length > 64 ? s.slice(0, 64) : s;
 }
 
 async function getDigestDebugSnapshot(client, guildId, hours = 24, limit = 25) {
   const pg = client?.pg;
-  if (!pg?.query) throw new Error("Postgres not available on client.pg");
+  if (!pg?.query) throw new Error('Postgres not available on client.pg');
 
   const gid = cleanGuildId(guildId);
-  if (!gid) throw new Error("Missing guildId");
+  if (!gid) throw new Error('Missing guildId');
 
   const h = Number(hours);
   const l = Number(limit);
 
-  const hoursSafe = Number.isFinite(h) && h > 0 && h <= 168 ? h : 24; // cap 7 days
+  const hoursSafe = Number.isFinite(h) && h > 0 && h <= 168 ? h : 24; // cap at 7 days
   const limitSafe = Number.isFinite(l) && l > 0 && l <= 200 ? l : 25;
 
-  dlog("snapshot", { guildId: gid, hours: hoursSafe, limit: limitSafe });
+  dlog('snapshot', { guildId: gid, hours: hoursSafe, limit: limitSafe });
 
   const bySubTypeQ = `
     SELECT COALESCE(sub_type, '(null)') AS sub_type, COUNT(*)::int AS n
@@ -50,7 +50,7 @@ async function getDigestDebugSnapshot(client, guildId, hours = 24, limit = 25) {
 
   const [bySubTypeRes, recentTokenishRes] = await Promise.all([
     pg.query(bySubTypeQ, [gid, String(hoursSafe)]),
-    pg.query(recentTokenishQ, [gid, String(hoursSafe), limitSafe)]),
+    pg.query(recentTokenishQ, [gid, String(hoursSafe), limitSafe]),
   ]);
 
   return {
@@ -60,3 +60,4 @@ async function getDigestDebugSnapshot(client, guildId, hours = 24, limit = 25) {
 }
 
 module.exports = { getDigestDebugSnapshot };
+
