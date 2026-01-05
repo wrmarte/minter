@@ -18,7 +18,18 @@ const fs = require('fs');
 const path = require('path');
 
 // ✅ NEW: Digest DB debug snapshot (optional, boot-time)
-const { getDigestDebugSnapshot } = require('./services/digestDebug');
+// IMPORTANT: Railway/Linux is case-sensitive. If the file isn't present, we DO NOT crash.
+let getDigestDebugSnapshot = null;
+try {
+  const mod = require('./services/digestDebug');
+  if (mod && typeof mod.getDigestDebugSnapshot === 'function') {
+    getDigestDebugSnapshot = mod.getDigestDebugSnapshot;
+  } else {
+    console.warn('⚠️ digestDebug loaded but missing getDigestDebugSnapshot()');
+  }
+} catch (e) {
+  console.warn('⚠️ digestDebug module not found (safe): ./services/digestDebug');
+}
 
 // ---------- Auto-integrate PG knobs ----------
 process.env.PGSSL_DISABLE      ??= '0';
@@ -145,6 +156,11 @@ try {
 async function runDigestDbDebugOnBoot() {
   const enabled = String(process.env.DIGEST_DEBUG_ON_BOOT || '').trim() === '1';
   if (!enabled) return;
+
+  if (!getDigestDebugSnapshot) {
+    console.warn('[DIGEST_DEBUG] digestDebug module not available; skipping');
+    return;
+  }
 
   if (!client?.pg?.query) {
     console.warn('[DIGEST_DEBUG] client.pg not ready; skipping');
