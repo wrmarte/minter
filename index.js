@@ -17,6 +17,9 @@ const { Pool } = require('pg');
 const fs = require('fs');
 const path = require('path');
 
+// ✅ NEW: Digest DB debug snapshot (optional, boot-time)
+const { getDigestDebugSnapshot } = require('./services/digestDebug');
+
 // ---------- Auto-integrate PG knobs ----------
 process.env.PGSSL_DISABLE      ??= '0';
 process.env.PG_POOL_MAX        ??= '5';
@@ -137,6 +140,63 @@ client.pg = pool;
 try {
   console.log(`🧠 client.pg attached: ${Boolean(client.pg)} | hasQuery: ${Boolean(client.pg?.query)}`);
 } catch {}
+
+// ================= Digest DB Debug (boot-time helper) =================
+async function runDigestDbDebugOnBoot() {
+  const enabled = String(process.env.DIGEST_DEBUG_ON_BOOT || '').trim() === '1';
+  if (!enabled) return;
+
+  if (!client?.pg?.query) {
+    console.warn('[DIGEST_DEBUG] client.pg not ready; skipping');
+    return;
+  }
+
+  // Comma-separated guild ids to check; if empty, we try current cached guilds (best-effort)
+  const envGuilds = String(process.env.DIGEST_DEBUG_GUILDS || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  const hours = Number(process.env.DIGEST_DEBUG_HOURS || 24);
+  const limit = Number(process.env.DIGEST_DEBUG_LIMIT || 25);
+
+  const guildIds = envGuilds.length
+    ? envGuilds
+    : Array.from(client.guilds.cache.keys());
+
+  // Safety: don’t spam logs across tons of guilds unless you explicitly set DIGEST_DEBUG_GUILDS
+  const maxGuilds = Number(process.env.DIGEST_DEBUG_MAX_GUILDS || (envGuilds.length ? 9999 : 5));
+  const slicedGuilds = guildIds.slice(0, Math.max(1, maxGuilds));
+
+  console.log(`[DIGEST_DEBUG] boot check: guilds=${slicedGuilds.length}/${guildIds.length} hours=${hours} limit=${limit}`);
+
+  for (const gid of slicedGuilds) {
+    try {
+      const snap = await getDigestDebugSnapshot(client, gid, hours, limit);
+
+      console.log(`\n[DIGEST_DEBUG] guild=${gid} bySubType (last ${hours}h)`);
+      console.table(snap.bySubType);
+
+      console.log(`[DIGEST_DEBUG] guild=${gid} recentTokenish (token_id IS NULL)`);
+      console.table(
+        (snap.recentTokenish || []).map(r => ({
+          ts: r.ts,
+          type: r.event_type,
+          sub: r.sub_type,
+          chain: r.chain,
+          contract: (r.contract || '').slice(0, 10),
+          eth: r.amount_eth,
+          usd: r.amount_usd,
+          buyer: (r.buyer || '').slice(0, 10),
+          seller: (r.seller || '').slice(0, 10),
+          tx: (r.tx_hash || '').slice(0, 12),
+        }))
+      );
+    } catch (e) {
+      console.warn('[DIGEST_DEBUG] failed for guild', gid, e?.message || e);
+    }
+  }
+}
 
 // ================= Init DB =================
 require('./db/initStakingTables')(pool).catch(console.error);
@@ -329,6 +389,20 @@ async function onClientReady() {
     console.log('✅ Channel ticker started');
   } catch (e) {
     console.warn('⚠️ channel ticker:', e?.message || e);
+  }
+
+  // ✅ NEW: Digest DB sanity snapshot to Railway logs (optional)
+  // Enable via:
+  //   DIGEST_DEBUG_ON_BOOT=1
+  // Optional:
+  //   DIGEST_DEBUG_GUILDS=131658166664246485,....
+  //   DIGEST_DEBUG_HOURS=24
+  //   DIGEST_DEBUG_LIMIT=25
+  //   DIGEST_DEBUG_MAX_GUILDS=5
+  try {
+    await runDigestDbDebugOnBoot();
+  } catch (e) {
+    console.warn('⚠️ Digest DB debug skipped/failed:', e?.message || e);
   }
 }
 
