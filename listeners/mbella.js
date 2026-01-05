@@ -32,15 +32,39 @@ module.exports = (client) => {
       }
     };
 
+    function safeOneLine(s, max = 160) {
+      const t = String(s || "").replace(/\s+/g, " ").trim();
+      if (!t) return "";
+      return t.length > max ? t.slice(0, max - 1) + "…" : t;
+    }
+
+    function buildReplyHeader(msg) {
+      // “Reply-like” header that works with webhook sends (even if Discord won’t render native reply arrow)
+      const who = msg?.member?.displayName || msg?.author?.username || "someone";
+      const snippet = safeOneLine(msg?.content, 180);
+      const jump = msg?.url ? msg.url : "";
+      if (jump && snippet) return `↪ Replying to **${who}**: ${snippet}\n[Jump to message](${jump})\n\n`;
+      if (jump) return `↪ Replying to **${who}**\n[Jump to message](${jump})\n\n`;
+      if (snippet) return `↪ Replying to **${who}**: ${snippet}\n\n`;
+      return `↪ Replying to **${who}**\n\n`;
+    }
+
     async function ensurePlaceholder(channel) {
       const { hook, message: ph } = await Webhook.sendViaBellaWebhook(client, channel, {
         username: Config.MBELLA_NAME,
         avatarURL: Config.MBELLA_AVATAR_URL,
         content: "…",
-        messageReference: message.id, // ✅ reply arrow
+        // We pass messageReference (your patched webhook.js will accept it),
+        // but even if Discord doesn’t show a native reply, we still do “reply-like” header later.
+        messageReference: message.id,
       });
+
       placeholderHook = hook || null;
       placeholder = ph || null;
+
+      if (Config.DEBUG && !ph) {
+        console.log("[MBella] placeholder webhook send failed -> will likely fallback to bot send");
+      }
     }
 
     async function editPlaceholderToEmbed(embed, channel) {
@@ -60,7 +84,7 @@ module.exports = (client) => {
             username: Config.MBELLA_NAME,
             avatarURL: Config.MBELLA_AVATAR_URL,
             embeds: [embed],
-            messageReference: message.id, // ✅ reply arrow
+            messageReference: message.id,
           });
 
           if (fresh) {
@@ -73,12 +97,12 @@ module.exports = (client) => {
         }
       }
 
-      // Fallback: send fresh
+      // Fallback: send fresh (webhook)
       const { message: finalMsg } = await Webhook.sendViaBellaWebhook(client, channel, {
         username: Config.MBELLA_NAME,
         avatarURL: Config.MBELLA_AVATAR_URL,
         embeds: [embed],
-        messageReference: message.id, // ✅ reply arrow
+        messageReference: message.id,
       });
 
       return Boolean(finalMsg);
@@ -155,17 +179,16 @@ module.exports = (client) => {
       }
 
       const replyingToMBella = await Discord.isReplyToMBella(message, client, Config);
+      const partnerId = State.getBellaPartner(message.channel.id);
 
-      // ✅ Minimal partner-lock fix:
-      // - Replies to MBella are ALWAYS allowed (lock won't block)
-      // - Non-reply triggers still respect current partner lock
-      const replyAllowed = replyingToMBella && State.isPartnerAllowed(message.channel.id, message.author.id, true);
+      // Replies to MBella are allowed if partner is not set or matches user
+      const replyAllowed = replyingToMBella && (!partnerId || partnerId === message.author.id);
 
       if (!hasFemaleTrigger && !(botMentioned && hintedBella) && !replyAllowed) return;
       if (message.mentions.everyone || message.mentions.roles.size > 0) return;
 
-      // If this is NOT a reply, enforce partner lock (keeps “1 partner per channel”)
-      if (!replyAllowed && !State.isPartnerAllowed(message.channel.id, message.author.id, false)) return;
+      // If NOT a reply, enforce partner lock (one partner per channel)
+      if (!replyAllowed && partnerId && partnerId !== message.author.id) return;
 
       // ===== cooldown =====
       const isOwner = message.author.id === String(process.env.BOT_OWNER_ID || "");
@@ -319,10 +342,11 @@ module.exports = (client) => {
         const embedErr = new EmbedBuilder()
           .setColor(Config.MBELLA_EMBED_COLOR)
           .setAuthor({ name: Config.MBELLA_NAME, iconURL: Config.MBELLA_AVATAR_URL || undefined })
-          .setDescription("…ugh. signal dipped. say it again. 💋");
+          .setDescription(buildReplyHeader(message) + "…ugh. signal dipped. say it again. 💋");
 
         const ok = await editPlaceholderToEmbed(embedErr, message.channel);
         if (!ok) {
+          if (Config.DEBUG) console.log("[MBella] webhook failed -> bot reply fallback (you will see Muscle MB as sender)");
           try {
             await message.reply({ embeds: [embedErr], allowedMentions: { parse: [] } });
           } catch {}
@@ -353,10 +377,11 @@ module.exports = (client) => {
         const embedErr = new EmbedBuilder()
           .setColor(Config.MBELLA_EMBED_COLOR)
           .setAuthor({ name: Config.MBELLA_NAME, iconURL: Config.MBELLA_AVATAR_URL || undefined })
-          .setDescription(hint);
+          .setDescription(buildReplyHeader(message) + hint);
 
         const ok = await editPlaceholderToEmbed(embedErr, message.channel);
         if (!ok) {
+          if (Config.DEBUG) console.log("[MBella] webhook failed -> bot reply fallback (you will see Muscle MB as sender)");
           try {
             await message.reply({ embeds: [embedErr], allowedMentions: { parse: [] } });
           } catch {}
@@ -370,10 +395,11 @@ module.exports = (client) => {
         const embedErr = new EmbedBuilder()
           .setColor(Config.MBELLA_EMBED_COLOR)
           .setAuthor({ name: Config.MBELLA_NAME, iconURL: Config.MBELLA_AVATAR_URL || undefined })
-          .setDescription("…static. say it again, slower. 😌");
+          .setDescription(buildReplyHeader(message) + "…static. say it again, slower. 😌");
 
         const ok = await editPlaceholderToEmbed(embedErr, message.channel);
         if (!ok) {
+          if (Config.DEBUG) console.log("[MBella] webhook failed -> bot reply fallback (you will see Muscle MB as sender)");
           try {
             await message.reply({ embeds: [embedErr], allowedMentions: { parse: [] } });
           } catch {}
@@ -404,7 +430,7 @@ module.exports = (client) => {
       const embed = new EmbedBuilder()
         .setColor(Config.MBELLA_EMBED_COLOR)
         .setAuthor({ name: Config.MBELLA_NAME, iconURL: Config.MBELLA_AVATAR_URL || undefined })
-        .setDescription(`💬 ${aiReply}`);
+        .setDescription(buildReplyHeader(message) + `💬 ${aiReply}`);
 
       if (mediaUrl) embed.setImage(mediaUrl);
 
@@ -421,6 +447,7 @@ module.exports = (client) => {
 
       const edited = await editPlaceholderToEmbed(embed, message.channel);
       if (!edited) {
+        if (Config.DEBUG) console.log("[MBella] webhook failed -> bot reply fallback (you will see Muscle MB as sender)");
         try {
           await message.reply({ embeds: [embed], allowedMentions: { parse: [] } });
         } catch (err) {
@@ -444,16 +471,17 @@ module.exports = (client) => {
         const embedErr = new EmbedBuilder()
           .setColor(Config.MBELLA_EMBED_COLOR)
           .setAuthor({ name: Config.MBELLA_NAME, iconURL: Config.MBELLA_AVATAR_URL || undefined })
-          .setDescription("…i tripped in heels. i’m up though. 🦵✨");
+          .setDescription(buildReplyHeader(message) + "…i tripped in heels. i’m up though. 🦵✨");
 
         const { message: sent } = await Webhook.sendViaBellaWebhook(client, message.channel, {
           username: Config.MBELLA_NAME,
           avatarURL: Config.MBELLA_AVATAR_URL,
           embeds: [embedErr],
-          messageReference: message.id, // ✅ reply arrow (even on errors)
+          messageReference: message.id,
         });
 
         if (!sent) {
+          if (Config.DEBUG) console.log("[MBella] webhook failed -> bot reply fallback (you will see Muscle MB as sender)");
           try {
             await message.reply({ embeds: [embedErr], allowedMentions: { parse: [] } });
           } catch {}
@@ -462,4 +490,5 @@ module.exports = (client) => {
     }
   });
 };
+
 
