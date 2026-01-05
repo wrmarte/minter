@@ -31,7 +31,10 @@ function cooldownDelete(userId) {
 // partner lock
 const bellaPartners = new Map(); // channelId -> { userId, expiresAt }
 function setBellaPartner(channelId, userId, ttlMs) {
-  bellaPartners.set(channelId, { userId, expiresAt: Date.now() + Number(ttlMs || Config.BELLA_TTL_MS) });
+  bellaPartners.set(channelId, {
+    userId,
+    expiresAt: Date.now() + Number(ttlMs || Config.BELLA_TTL_MS),
+  });
 }
 function getBellaPartner(channelId) {
   const rec = bellaPartners.get(channelId);
@@ -44,6 +47,19 @@ function getBellaPartner(channelId) {
 }
 function clearBellaPartner(channelId) {
   bellaPartners.delete(channelId);
+}
+
+/**
+ * ✅ Minimal fix:
+ * Replies to MBella should ALWAYS be allowed (partner lock must not block them).
+ * Non-reply triggers still respect the partner lock.
+ */
+function isPartnerAllowed(channelId, userId, replyingToMBella) {
+  if (replyingToMBella) return true;
+
+  const partnerId = getBellaPartner(channelId);
+  if (!partnerId) return true;
+  return String(partnerId) === String(userId);
 }
 
 // typing suppress (shared on client)
@@ -114,6 +130,9 @@ module.exports = {
   setBellaPartner,
   getBellaPartner,
   clearBellaPartner,
+
+  // ✅ NEW (tiny)
+  isPartnerAllowed,
 
   setTypingSuppress,
 
