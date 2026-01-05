@@ -1,7 +1,14 @@
 // listeners/mbella/webhook.js
 // ======================================================
 // Webhook sending helpers (uses client.webhookAuto)
-// ✅ Patch: stronger reply/messageReference normalization for webhook sends
+//
+// ✅ PATCH:
+// - Webhook API does NOT support true Discord "reply arrow" (message_reference / reply)
+// - If you include "reply" or "messageReference" in webhook.send payload,
+//   Discord can reject with 400 Invalid Form Body -> causing fallback to bot sender.
+//
+// So we ACCEPT reply/messageReference args but DO NOT send them.
+// Use your embed "reply header" + jump link instead.
 // ======================================================
 
 const { PermissionsBitField } = require("discord.js");
@@ -43,10 +50,12 @@ async function getBellaWebhook(client, channel) {
  * - username, avatarURL
  * - content, embeds
  * - allowedMentions
- * - reply (Discord reply arrow)  -> { messageReference: "<messageId>", failIfNotExists?: false }
- * - messageReference shortcut     -> "<messageId>" OR { messageId, failIfNotExists? }
  * - components, files
  * - threadId (if sending inside a thread)
+ *
+ * NOTE:
+ * - "reply" / "messageReference" are accepted for compatibility,
+ *   but WEBHOOKS cannot do true reply arrows, so they are ignored.
  */
 async function sendViaBellaWebhook(
   client,
@@ -57,48 +66,19 @@ async function sendViaBellaWebhook(
     embeds,
     content,
     allowedMentions,
-    reply,
-    messageReference,
     components,
     files,
     threadId,
+
+    // accepted but ignored (webhook can't truly reply)
+    reply,
+    messageReference,
   } = {}
 ) {
   const hook = await getBellaWebhook(client, channel);
   if (!hook) return { hook: null, message: null };
 
   try {
-    // ✅ Normalize messageReference into a reply object (discord.js-friendly)
-    // Accept:
-    // - messageReference: "123"
-    // - messageReference: { messageId: "123", failIfNotExists: false }
-    // - reply: { messageReference: "123", failIfNotExists: false }
-    let finalReply = undefined;
-
-    if (reply && typeof reply === "object") {
-      // Already in reply format
-      finalReply = reply;
-    } else if (typeof messageReference === "string" && messageReference.trim()) {
-      finalReply = { messageReference: String(messageReference), failIfNotExists: false };
-    } else if (messageReference && typeof messageReference === "object") {
-      const mid = messageReference.messageId || messageReference.messageReference;
-      if (mid) {
-        finalReply = {
-          messageReference: String(mid),
-          failIfNotExists: messageReference.failIfNotExists === true ? true : false,
-        };
-      }
-    }
-
-    // ✅ Strong default: never ping, never ping replied user
-    const finalAllowedMentions =
-      allowedMentions || { parse: [], repliedUser: false };
-
-    // If caller passed allowedMentions but forgot repliedUser, force safe default
-    if (finalAllowedMentions && typeof finalAllowedMentions === "object" && finalAllowedMentions.repliedUser == null) {
-      finalAllowedMentions.repliedUser = false;
-    }
-
     const payload = {
       username: username || Config.MBELLA_NAME,
       avatarURL: avatarURL || Config.MBELLA_AVATAR_URL || undefined,
@@ -106,25 +86,27 @@ async function sendViaBellaWebhook(
       content,
       components,
       files,
-      threadId,
-
-      // ✅ This is the key for native reply arrow in discord.js send options
-      reply: finalReply,
-
-      allowedMentions: finalAllowedMentions,
+      // discord.js supports sending into a thread via threadId for webhooks
+      ...(threadId ? { threadId: String(threadId) } : {}),
+      allowedMentions: allowedMentions || { parse: [] },
     };
-
-    if (Config.DEBUG) {
-      const rmid = payload?.reply?.messageReference ? String(payload.reply.messageReference) : "";
-      console.log(
-        `[MBella] webhook send -> channel=${channel?.id} reply=${rmid ? "YES:" + rmid : "NO"} threadId=${threadId || ""}`
-      );
-    }
 
     const message = await hook.send(payload);
     return { hook, message };
   } catch (e) {
-    if (Config.DEBUG) console.log("[MBella] webhook send failed:", e?.message || e);
+    // Helpful debug for the REAL reason webhook fails
+    if (Config.DEBUG) {
+      console.log("[MBella] webhook send failed:", e?.message || e);
+
+      // discord.js REST errors sometimes include rawError or request body details
+      try {
+        const status = e?.status || e?.httpStatus;
+        const code = e?.code;
+        const raw = e?.rawError ? JSON.stringify(e.rawError).slice(0, 600) : "";
+        console.log(`[MBella] webhook fail details: status=${status || "?"} code=${code || "?"} raw=${raw || "(none)"}`);
+      } catch {}
+    }
+
     try {
       client.webhookAuto?.clearChannelCache?.(channel.id);
     } catch {}
