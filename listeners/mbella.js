@@ -37,6 +37,7 @@ module.exports = (client) => {
         username: Config.MBELLA_NAME,
         avatarURL: Config.MBELLA_AVATAR_URL,
         content: "…",
+        messageReference: message.id, // ✅ reply arrow
       });
       placeholderHook = hook || null;
       placeholder = ph || null;
@@ -59,6 +60,7 @@ module.exports = (client) => {
             username: Config.MBELLA_NAME,
             avatarURL: Config.MBELLA_AVATAR_URL,
             embeds: [embed],
+            messageReference: message.id, // ✅ reply arrow
           });
 
           if (fresh) {
@@ -76,6 +78,7 @@ module.exports = (client) => {
         username: Config.MBELLA_NAME,
         avatarURL: Config.MBELLA_AVATAR_URL,
         embeds: [embed],
+        messageReference: message.id, // ✅ reply arrow
       });
 
       return Boolean(finalMsg);
@@ -447,6 +450,7 @@ module.exports = (client) => {
           username: Config.MBELLA_NAME,
           avatarURL: Config.MBELLA_AVATAR_URL,
           embeds: [embedErr],
+          messageReference: message.id, // ✅ reply arrow (even on errors)
         });
 
         if (!sent) {
