@@ -1,6 +1,12 @@
 // services/digestLogger.js
 // Lightweight event logger for Daily Digest
 // Call this whenever you detect a mint/sale and/or post a notification.
+//
+// ✅ Patch goals (fix Token Buys/Sells showing 0):
+// 1) Preserve “what kind of sale” via sub_type: 'swap' | 'token_buy' | 'token_sell' | 'nft_sale' etc.
+// 2) Allow callers to pass eventType like 'buy'/'sell'/'token_buy'/'token_sell'/'swap' and STILL log,
+//    while keeping canonical event_type strictly 'mint' | 'sale' for the digest aggregator.
+// 3) Keep hard dedupe for NULL token_id via token_id_norm.
 
 const DEBUG = String(process.env.DIGEST_LOG_DEBUG || "").trim() === "1";
 
@@ -43,61 +49,68 @@ function normalizeChain(v) {
   if (!s) return null;
   if (s === "ethereum" || s === "mainnet" || s === "eth-mainnet") return "eth";
   if (s === "base-mainnet" || s === "basechain") return "base";
-  if (s === "apechain" || s === "ape") return "ape";
+  if (s === "apechain") return "ape";
   return s;
 }
 
-// Accept common synonyms and normalize to the two types the digest expects.
-function normalizeEventType(v) {
-  const raw = lowerOrNull(v, 32);
-  if (!raw) return null;
+/**
+ * Normalize event type into canonical event_type ('mint'|'sale') PLUS optional sub_type.
+ * This is the key fix so your digest can split:
+ * - Swaps (sub_type='swap')
+ * - Token Buys (sub_type='token_buy')
+ * - Token Sells (sub_type='token_sell')
+ * while event_type stays 'sale' for all of them.
+ */
+function normalizeTypeAndSubType(rawType, explicitSubType) {
+  const rt = lowerOrNull(rawType, 40);
+  let sub = lowerOrNull(explicitSubType, 40);
 
-  // already canonical
-  if (raw === "mint" || raw === "sale") return raw;
-
-  // mint-ish
-  if (
-    raw === "minted" ||
-    raw === "mints" ||
-    raw === "mint_event" ||
-    raw === "mint-event" ||
-    raw === "newmint" ||
-    raw === "new_mint" ||
-    raw === "nft_mint" ||
-    raw === "nftmint"
-  ) {
-    return "mint";
+  // If caller already set subType, respect it and just normalize event_type.
+  // (Still allow eventType to be mint/sale/buy/sell/etc.)
+  if (sub) {
+    if (rt === "mint" || rt === "minted" || rt === "nft_mint" || rt === "nftmint" || rt === "mints") {
+      return { eventType: "mint", subType: sub };
+    }
+    return { eventType: "sale", subType: sub };
   }
 
-  // sale-ish / swap-ish / buy-ish (log these as "sale" for digest purposes)
-  if (
-    raw === "sold" ||
-    raw === "sell" ||
-    raw === "sales" ||
-    raw === "swap" ||
-    raw === "swaps" ||
-    raw === "token" ||
-    raw === "tokenbuy" ||
-    raw === "token_buy" ||
-    raw === "buy" ||
-    raw === "purchase" ||
-    raw === "trade" ||
-    raw === "transfer_sale" ||
-    raw === "nft_sale" ||
-    raw === "nftsale"
-  ) {
-    return "sale";
+  if (!rt) return { eventType: null, subType: null };
+
+  // Canonical
+  if (rt === "mint") return { eventType: "mint", subType: null };
+  if (rt === "sale") return { eventType: "sale", subType: null };
+
+  // Mint-ish
+  if (rt === "minted" || rt === "mints" || rt === "mint_event" || rt === "mint-event" || rt === "newmint" || rt === "new_mint") {
+    return { eventType: "mint", subType: null };
   }
 
-  return null;
+  // Explicit token buy/sell labels
+  if (rt === "token_buy" || rt === "tokenbuy" || rt === "buy") {
+    return { eventType: "sale", subType: "token_buy" };
+  }
+  if (rt === "token_sell" || rt === "tokensell" || rt === "sell") {
+    return { eventType: "sale", subType: "token_sell" };
+  }
+
+  // Swaps / trades
+  if (rt === "swap" || rt === "swaps" || rt === "trade" || rt === "swap_event" || rt === "swap-event") {
+    return { eventType: "sale", subType: "swap" };
+  }
+
+  // NFT sale labels (optional; useful if your aggregator uses this)
+  if (rt === "nft_sale" || rt === "nftsale" || rt === "sold") {
+    return { eventType: "sale", subType: "nft_sale" };
+  }
+
+  // Unknown -> reject (keeps schema expectations strict)
+  return { eventType: null, subType: null };
 }
 
-// One-time schema init per process (and de-duped per client instance)
+// One-time schema init per process
 async function ensureDigestSchema(client) {
   try {
     if (client.__digestSchemaReady) return true;
-
-    // prevent concurrent schema runs within same process/client
     if (client.__digestSchemaPromise) return await client.__digestSchemaPromise;
 
     const pg = client?.pg;
@@ -109,7 +122,8 @@ async function ensureDigestSchema(client) {
           CREATE TABLE IF NOT EXISTS digest_events (
             id            BIGSERIAL PRIMARY KEY,
             guild_id      TEXT NOT NULL,
-            event_type    TEXT NOT NULL,              -- 'mint' | 'sale'
+            event_type    TEXT NOT NULL,              -- 'mint' | 'sale' (canonical)
+            sub_type      TEXT DEFAULT NULL,          -- 'swap' | 'token_buy' | 'token_sell' | 'nft_sale' | etc
             chain         TEXT DEFAULT NULL,          -- 'base' | 'eth' | 'ape' etc
             contract      TEXT DEFAULT NULL,          -- nft contract OR token contract
             token_id      TEXT DEFAULT NULL,          -- NFT tokenId; NULL for swaps/tokens
@@ -126,6 +140,11 @@ async function ensureDigestSchema(client) {
           );
         `);
 
+        // Backfill: if table existed before sub_type column, add it
+        try {
+          await pg.query(`ALTER TABLE digest_events ADD COLUMN IF NOT EXISTS sub_type TEXT DEFAULT NULL;`);
+        } catch (_) {}
+
         await pg.query(`
           CREATE INDEX IF NOT EXISTS idx_digest_events_guild_ts
           ON digest_events (guild_id, ts DESC);
@@ -136,6 +155,11 @@ async function ensureDigestSchema(client) {
           ON digest_events (guild_id, event_type, ts DESC);
         `);
 
+        await pg.query(`
+          CREATE INDEX IF NOT EXISTS idx_digest_events_guild_subtype_ts
+          ON digest_events (guild_id, sub_type, ts DESC);
+        `);
+
         // ✅ Legacy unique (kept for backward compatibility)
         // NOTE: token_id NULLs do not collide in Postgres, so this won't dedupe swaps.
         await pg.query(`
@@ -144,7 +168,6 @@ async function ensureDigestSchema(client) {
         `);
 
         // ✅ HARD DEDUPE FIX: normalize token_id NULL -> '' using token_id_norm
-        // Makes swaps/tokens (token_id NULL) dedupe properly on (guild,type,tx).
         let hasNorm = false;
 
         try {
@@ -159,7 +182,6 @@ async function ensureDigestSchema(client) {
           hasNorm = col.rowCount > 0;
 
           if (!hasNorm) {
-            // Prefer generated column (PG 12+). Railway PG typically supports this.
             await pg.query(`
               ALTER TABLE digest_events
               ADD COLUMN token_id_norm TEXT GENERATED ALWAYS AS (COALESCE(token_id, '')) STORED
@@ -174,19 +196,16 @@ async function ensureDigestSchema(client) {
               ADD COLUMN IF NOT EXISTS token_id_norm TEXT
             `);
 
-            // default helps new rows even if trigger creation fails
             try {
               await pg.query(`ALTER TABLE digest_events ALTER COLUMN token_id_norm SET DEFAULT ''`);
             } catch (_) {}
 
-            // Backfill existing rows
             await pg.query(`
               UPDATE digest_events
                  SET token_id_norm = COALESCE(token_id, '')
                WHERE token_id_norm IS NULL
             `);
 
-            // Keep it updated for new rows (trigger)
             await pg.query(`
               CREATE OR REPLACE FUNCTION digest_events_set_token_id_norm()
               RETURNS trigger AS $$
@@ -210,7 +229,6 @@ async function ensureDigestSchema(client) {
               END $$;
             `);
 
-            // best-effort tighten to NOT NULL (optional)
             try {
               await pg.query(`
                 UPDATE digest_events
@@ -227,7 +245,6 @@ async function ensureDigestSchema(client) {
           }
         }
 
-        // Unique index using normalized token id so NULLs dedupe
         if (hasNorm) {
           try {
             await pg.query(`
@@ -249,7 +266,6 @@ async function ensureDigestSchema(client) {
         dwarn("schema init failed:", e?.message || e);
         return false;
       } finally {
-        // allow retries if schema failed
         delete client.__digestSchemaPromise;
       }
     })();
@@ -264,7 +280,8 @@ async function ensureDigestSchema(client) {
 /**
  * event = {
  *  guildId: string (required)
- *  eventType: 'mint' | 'sale' (required)
+ *  eventType: 'mint'|'sale' OR synonyms like 'buy'/'sell'/'swap'/'token_buy'/'token_sell'
+ *  subType?: string (optional) // 'swap'|'token_buy'|'token_sell' etc
  *  chain?: 'base'|'eth'|'ape'|...
  *  contract?: string
  *  tokenId?: string|number|null
@@ -277,10 +294,11 @@ async function ensureDigestSchema(client) {
  *  ts?: Date (optional)
  * }
  *
- * ALSO ACCEPTS common alternate key names to avoid silent drops:
+ * ALSO ACCEPTS common alternate key names:
  *  guild_id / guild
  *  event_type / type / kind
- *  contractAddress / nftContract / tokenContract
+ *  sub_type / subtype
+ *  contractAddress / nftContract / tokenContract / ca
  *  token_id / tokenID / token
  *  tx / hash / transactionHash
  */
@@ -291,26 +309,17 @@ async function logDigestEvent(client, event) {
 
     await ensureDigestSchema(client);
 
-    // accept alt keys (this fixes “nothing logged” when callers pass snake_case)
-    const guildId = cleanStr(
-      pick(event, ["guildId", "guild_id", "guild", "guildID"]),
-      64
-    );
+    const guildId = cleanStr(pick(event, ["guildId", "guild_id", "guild", "guildID"]), 64);
 
-    let eventType = normalizeEventType(
-      pick(event, ["eventType", "event_type", "type", "kind"])
-    );
+    const rawType = pick(event, ["eventType", "event_type", "type", "kind"]);
+    const explicitSub = pick(event, ["subType", "sub_type", "subtype"]);
+
+    const norm = normalizeTypeAndSubType(rawType, explicitSub);
+    const eventType = norm.eventType; // 'mint' | 'sale'
+    const subType = lowerOrNull(norm.subType, 40); // nullable
 
     if (!guildId || !eventType) {
-      if (DEBUG) {
-        dlog(
-          "reject: missing guildId/eventType",
-          "guildId=",
-          guildId,
-          "eventType=",
-          pick(event, ["eventType", "event_type", "type", "kind"])
-        );
-      }
+      if (DEBUG) dlog("reject: missing guildId/eventType", { guildId, rawType, explicitSub });
       return false;
     }
 
@@ -334,16 +343,12 @@ async function logDigestEvent(client, event) {
     const buyer = lowerOrNull(pick(event, ["buyer", "to", "recipient"]), 120);
     const seller = lowerOrNull(pick(event, ["seller", "from", "sender"]), 120);
 
-    const txHash = lowerOrNull(
-      pick(event, ["txHash", "tx_hash", "tx", "hash", "transactionHash"]),
-      140
-    );
+    const txHash = lowerOrNull(pick(event, ["txHash", "tx_hash", "tx", "hash", "transactionHash"]), 140);
 
     const tsRaw = pick(event, ["ts", "timestamp", "time"]);
     const ts = tsRaw instanceof Date ? tsRaw : null;
 
-    // Fallback soft-guard ONLY if we failed to set up normKey
-    // (this prevents swap/token duplicates where tokenId is null)
+    // Soft-guard ONLY if normKey is not available (prevents swap duplicates when tokenId is null)
     if (txHash && !tokenId && !client.__digestHasNormKey) {
       const dup = await pg.query(
         `SELECT 1
@@ -355,27 +360,38 @@ async function logDigestEvent(client, event) {
           LIMIT 1`,
         [guildId, eventType, txHash]
       );
-      if (dup.rowCount > 0) return true; // treat as "logged" (deduped)
+      if (dup.rowCount > 0) return true;
     }
 
     const params = [
-      guildId, eventType, chain, contract, tokenId,
-      amountNative, amountEth, amountUsd,
-      buyer, seller, txHash,
+      guildId,
+      eventType,
+      subType,
+      chain,
+      contract,
+      tokenId,
+      amountNative,
+      amountEth,
+      amountUsd,
+      buyer,
+      seller,
+      txHash,
       ts
     ];
 
+    // ✅ Dedupe stays the same: (guild, type, tx, token_norm)
+    // sub_type does NOT participate in dedupe so the same tx won't double-log.
     if (client.__digestHasNormKey) {
       await pg.query(
         `INSERT INTO digest_events (
-          guild_id, event_type, chain, contract, token_id,
+          guild_id, event_type, sub_type, chain, contract, token_id,
           amount_native, amount_eth, amount_usd,
           buyer, seller, tx_hash, ts
         ) VALUES (
-          $1,$2,$3,$4,$5,
-          $6,$7,$8,
-          $9,$10,$11,
-          COALESCE($12, NOW())
+          $1,$2,$3,$4,$5,$6,
+          $7,$8,$9,
+          $10,$11,$12,
+          COALESCE($13, NOW())
         )
         ON CONFLICT (guild_id, event_type, tx_hash, token_id_norm)
         DO NOTHING`,
@@ -384,14 +400,14 @@ async function logDigestEvent(client, event) {
     } else {
       await pg.query(
         `INSERT INTO digest_events (
-          guild_id, event_type, chain, contract, token_id,
+          guild_id, event_type, sub_type, chain, contract, token_id,
           amount_native, amount_eth, amount_usd,
           buyer, seller, tx_hash, ts
         ) VALUES (
-          $1,$2,$3,$4,$5,
-          $6,$7,$8,
-          $9,$10,$11,
-          COALESCE($12, NOW())
+          $1,$2,$3,$4,$5,$6,
+          $7,$8,$9,
+          $10,$11,$12,
+          COALESCE($13, NOW())
         )
         ON CONFLICT (guild_id, event_type, tx_hash, token_id)
         DO NOTHING`,
@@ -400,7 +416,7 @@ async function logDigestEvent(client, event) {
     }
 
     dlog(
-      `${eventType} guild=${guildId} chain=${chain || "-"} ` +
+      `${eventType}${subType ? ":" + subType : ""} guild=${guildId} chain=${chain || "-"} ` +
         `contract=${(contract || "").slice(0, 12) || "-"} token=${tokenId || "-"} ` +
         `tx=${txHash ? txHash.slice(0, 12) : "-"}`
     );
@@ -413,3 +429,4 @@ async function logDigestEvent(client, event) {
 }
 
 module.exports = { logDigestEvent, ensureDigestSchema };
+
