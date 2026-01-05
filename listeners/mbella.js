@@ -2,6 +2,10 @@
 // =======================================================
 // MBella — Modular Entry
 // (Wires messageCreate -> uses modules in ./mbella/*)
+// ✅ PATCH: ALWAYS reply to the user message (native reply when possible)
+// ✅ PATCH: Single-message “placeholder” that gets EDITED (webhook OR bot fallback)
+// ✅ PATCH: If webhook cannot be used (missing Manage Webhooks / webhookAuto),
+//           MBella still replies via bot (but will LOG why webhook persona can't be used)
 // =======================================================
 
 const { EmbedBuilder } = require("discord.js");
@@ -21,8 +25,11 @@ const Utils = require("./mbella/utils");
 module.exports = (client) => {
   client.on("messageCreate", async (message) => {
     let typingTimer = null;
-    let placeholder = null;
-    let placeholderHook = null;
+
+    // Placeholder can be webhook OR bot message (fallback)
+    let placeholder = null; // webhook message OR bot message
+    let placeholderHook = null; // webhook client (if webhook placeholder)
+    let placeholderIsBot = false; // true when placeholder is bot message
     let typingStartMs = 0;
 
     const clearPlaceholderTimer = () => {
@@ -39,7 +46,7 @@ module.exports = (client) => {
     }
 
     function buildReplyHeader(msg) {
-      // “Reply-like” header that works with webhook sends (even if Discord won’t render native reply arrow)
+      // “Reply-like” header that works even if Discord won’t render native webhook reply arrow
       const who = msg?.member?.displayName || msg?.author?.username || "someone";
       const snippet = safeOneLine(msg?.content, 180);
       const jump = msg?.url ? msg.url : "";
@@ -50,62 +57,126 @@ module.exports = (client) => {
     }
 
     async function ensurePlaceholder(channel) {
-      const { hook, message: ph } = await Webhook.sendViaBellaWebhook(client, channel, {
-        username: Config.MBELLA_NAME,
-        avatarURL: Config.MBELLA_AVATAR_URL,
-        content: "…",
-        // We pass messageReference (your patched webhook.js will accept it),
-        // but even if Discord doesn’t show a native reply, we still do “reply-like” header later.
-        messageReference: message.id,
-      });
+      // 1) Try webhook placeholder (preferred: shows MBella as sender)
+      try {
+        const { hook, message: ph } = await Webhook.sendViaBellaWebhook(client, channel, {
+          username: Config.MBELLA_NAME,
+          avatarURL: Config.MBELLA_AVATAR_URL,
+          content: "…",
+          // ✅ attempt native reply arrow
+          messageReference: message.id,
+          allowedMentions: { parse: [], repliedUser: false },
+        });
 
-      placeholderHook = hook || null;
-      placeholder = ph || null;
+        if (ph) {
+          placeholderHook = hook || null;
+          placeholder = ph;
+          placeholderIsBot = false;
+          return;
+        }
 
-      if (Config.DEBUG && !ph) {
-        console.log("[MBella] placeholder webhook send failed -> will likely fallback to bot send");
+        if (Config.DEBUG) {
+          console.log(
+            "[MBella] placeholder webhook send failed (no message returned) -> will fallback to bot reply"
+          );
+        }
+      } catch (e) {
+        if (Config.DEBUG) console.log("[MBella] ensurePlaceholder webhook exception:", e?.message || e);
+      }
+
+      // 2) Fallback placeholder via bot reply (always replies, but sender will be the bot)
+      try {
+        const botPh = await message.reply({
+          content: "…",
+          allowedMentions: { parse: [], repliedUser: false },
+        });
+        placeholder = botPh || null;
+        placeholderHook = null;
+        placeholderIsBot = true;
+
+        if (Config.DEBUG) {
+          console.log(
+            "[MBella] Using bot placeholder (webhook not available). " +
+              "If you want MBella as SENDER, bot needs Manage Webhooks + webhookAuto working."
+          );
+        }
+      } catch (e2) {
+        placeholder = null;
+        placeholderHook = null;
+        placeholderIsBot = false;
+        if (Config.DEBUG) console.log("[MBella] bot placeholder failed too:", e2?.message || e2);
       }
     }
 
     async function editPlaceholderToEmbed(embed, channel) {
-      // Edit placeholder if possible (keeps illusion)
-      if (placeholder && placeholderHook && typeof placeholderHook.editMessage === "function") {
+      // A) If placeholder is webhook message and we can edit via webhook client
+      if (!placeholderIsBot && placeholder && placeholderHook && typeof placeholderHook.editMessage === "function") {
         try {
           await placeholderHook.editMessage(placeholder.id, {
             content: null,
             embeds: [embed],
-            allowedMentions: { parse: [] },
+            allowedMentions: { parse: [], repliedUser: false },
           });
           return true;
         } catch (e) {
-          if (Config.DEBUG) console.log("[MBella] editMessage failed, will resend:", e?.message || e);
+          if (Config.DEBUG) console.log("[MBella] webhook editMessage failed, will resend:", e?.message || e);
+          // try fresh webhook message (still a reply)
+          try {
+            const { hook, message: fresh } = await Webhook.sendViaBellaWebhook(client, channel, {
+              username: Config.MBELLA_NAME,
+              avatarURL: Config.MBELLA_AVATAR_URL,
+              embeds: [embed],
+              messageReference: message.id,
+              allowedMentions: { parse: [], repliedUser: false },
+            });
 
-          const { hook, message: fresh } = await Webhook.sendViaBellaWebhook(client, channel, {
-            username: Config.MBELLA_NAME,
-            avatarURL: Config.MBELLA_AVATAR_URL,
-            embeds: [embed],
-            messageReference: message.id,
-          });
-
-          if (fresh) {
-            try {
-              await placeholderHook.deleteMessage?.(placeholder.id);
-            } catch {}
-            placeholderHook = hook || placeholderHook;
-            return true;
+            if (fresh) {
+              try {
+                await placeholderHook.deleteMessage?.(placeholder.id);
+              } catch {}
+              placeholderHook = hook || placeholderHook;
+              placeholder = fresh;
+              placeholderIsBot = false;
+              return true;
+            }
+          } catch (e2) {
+            if (Config.DEBUG) console.log("[MBella] webhook resend failed:", e2?.message || e2);
           }
         }
       }
 
-      // Fallback: send fresh (webhook)
-      const { message: finalMsg } = await Webhook.sendViaBellaWebhook(client, channel, {
-        username: Config.MBELLA_NAME,
-        avatarURL: Config.MBELLA_AVATAR_URL,
-        embeds: [embed],
-        messageReference: message.id,
-      });
+      // B) If placeholder is a bot message, edit it directly
+      if (placeholderIsBot && placeholder && typeof placeholder.edit === "function") {
+        try {
+          await placeholder.edit({
+            content: null,
+            embeds: [embed],
+            allowedMentions: { parse: [], repliedUser: false },
+          });
+          return true;
+        } catch (e) {
+          if (Config.DEBUG) console.log("[MBella] bot placeholder edit failed:", e?.message || e);
+        }
+      }
 
-      return Boolean(finalMsg);
+      // C) No placeholder or edit failed -> send fresh (prefer webhook, else bot reply)
+      try {
+        const { message: finalMsg } = await Webhook.sendViaBellaWebhook(client, channel, {
+          username: Config.MBELLA_NAME,
+          avatarURL: Config.MBELLA_AVATAR_URL,
+          embeds: [embed],
+          messageReference: message.id,
+          allowedMentions: { parse: [], repliedUser: false },
+        });
+        if (finalMsg) return true;
+      } catch {}
+
+      try {
+        await message.reply({ embeds: [embed], allowedMentions: { parse: [], repliedUser: false } });
+        return true;
+      } catch {}
+
+      return false;
     }
 
     try {
@@ -126,7 +197,7 @@ module.exports = (client) => {
           try {
             await message.reply({
               content: `🪽 MBella GOD MODE: ON (expires in ${Math.round(Config.MBELLA_GOD_TTL_MS / 60000)}m).`,
-              allowedMentions: { parse: [] },
+              allowedMentions: { parse: [], repliedUser: false },
             });
           } catch {}
           return;
@@ -134,7 +205,7 @@ module.exports = (client) => {
         if (Config.GOD_OFF_REGEX.test(message.content || "")) {
           State.setGod(guildId, false);
           try {
-            await message.reply({ content: `🪽 MBella GOD MODE: OFF.`, allowedMentions: { parse: [] } });
+            await message.reply({ content: `🪽 MBella GOD MODE: OFF.`, allowedMentions: { parse: [], repliedUser: false } });
           } catch {}
           return;
         }
@@ -146,7 +217,7 @@ module.exports = (client) => {
           try {
             await message.reply({
               content: `✨ MBella Human Level: ${st.human.level} (expires in ${Math.round(Config.MBELLA_HUMAN_TTL_MS / 60000)}m).`,
-              allowedMentions: { parse: [] },
+              allowedMentions: { parse: [], repliedUser: false },
             });
           } catch {}
           return;
@@ -155,14 +226,14 @@ module.exports = (client) => {
         if (Config.CURSE_ON_REGEX.test(message.content || "")) {
           State.setCurse(guildId, true);
           try {
-            await message.reply({ content: `😈 MBella profanity: ON.`, allowedMentions: { parse: [] } });
+            await message.reply({ content: `😈 MBella profanity: ON.`, allowedMentions: { parse: [], repliedUser: false } });
           } catch {}
           return;
         }
         if (Config.CURSE_OFF_REGEX.test(message.content || "")) {
           State.setCurse(guildId, false);
           try {
-            await message.reply({ content: `😇 MBella profanity: OFF.`, allowedMentions: { parse: [] } });
+            await message.reply({ content: `😇 MBella profanity: OFF.`, allowedMentions: { parse: [], repliedUser: false } });
           } catch {}
           return;
         }
@@ -208,6 +279,7 @@ module.exports = (client) => {
 
       State.setTypingSuppress(client, message.channel.id, 12000);
 
+      // ✅ Always create a placeholder (reply) so MBella ALWAYS “replies to” the user message
       typingTimer = setTimeout(() => {
         ensurePlaceholder(message.channel).catch(() => {});
       }, Config.MBELLA_TYPING_DEBOUNCE_MS);
@@ -339,37 +411,38 @@ module.exports = (client) => {
 
       if (!groqTry || groqTry.error) {
         console.error("❌ (MBella) network error:", groqTry?.error?.message || "unknown");
+
         const embedErr = new EmbedBuilder()
           .setColor(Config.MBELLA_EMBED_COLOR)
           .setAuthor({ name: Config.MBELLA_NAME, iconURL: Config.MBELLA_AVATAR_URL || undefined })
           .setDescription(buildReplyHeader(message) + "…ugh. signal dipped. say it again. 💋");
 
-        const ok = await editPlaceholderToEmbed(embedErr, message.channel);
-        if (!ok) {
-          if (Config.DEBUG) console.log("[MBella] webhook failed -> bot reply fallback (you will see Muscle MB as sender)");
-          try {
-            await message.reply({ embeds: [embedErr], allowedMentions: { parse: [] } });
-          } catch {}
-        }
+        // Ensure we have a placeholder, then edit it (or send fresh)
+        if (!placeholder) await ensurePlaceholder(message.channel).catch(() => {});
+        await editPlaceholderToEmbed(embedErr, message.channel);
         return;
       }
 
       if (!groqTry.res?.ok) {
-        console.error(`❌ (MBella) HTTP ${groqTry.res?.status} on "${groqTry.model}": ${String(groqTry.bodyText || "").slice(0, 400)}`);
+        console.error(
+          `❌ (MBella) HTTP ${groqTry.res?.status} on "${groqTry.model}": ${String(groqTry.bodyText || "").slice(0, 400)}`
+        );
 
         let hint = "…not now. try again in a sec. 😮‍💨";
         const status = groqTry.res?.status;
 
         if (status === 401 || status === 403) {
-          hint = message.author.id === String(process.env.BOT_OWNER_ID || "")
-            ? "Auth error. Check GROQ_API_KEY & model access."
-            : "…hold up. give me a sec. 💅";
+          hint =
+            message.author.id === String(process.env.BOT_OWNER_ID || "")
+              ? "Auth error. Check GROQ_API_KEY & model access."
+              : "…hold up. give me a sec. 💅";
         } else if (status === 429) {
           hint = "rate limited. breathe… then try again. 😘";
         } else if (status === 400 || status === 404) {
-          hint = message.author.id === String(process.env.BOT_OWNER_ID || "")
-            ? "Model issue. Set GROQ_MODEL or let discovery handle it."
-            : "cloud hiccup. one more shot. 🖤";
+          hint =
+            message.author.id === String(process.env.BOT_OWNER_ID || "")
+              ? "Model issue. Set GROQ_MODEL or let discovery handle it."
+              : "cloud hiccup. one more shot. 🖤";
         } else if (status >= 500) {
           hint = "server cramps. i’ll be back. 🥀";
         }
@@ -379,31 +452,22 @@ module.exports = (client) => {
           .setAuthor({ name: Config.MBELLA_NAME, iconURL: Config.MBELLA_AVATAR_URL || undefined })
           .setDescription(buildReplyHeader(message) + hint);
 
-        const ok = await editPlaceholderToEmbed(embedErr, message.channel);
-        if (!ok) {
-          if (Config.DEBUG) console.log("[MBella] webhook failed -> bot reply fallback (you will see Muscle MB as sender)");
-          try {
-            await message.reply({ embeds: [embedErr], allowedMentions: { parse: [] } });
-          } catch {}
-        }
+        if (!placeholder) await ensurePlaceholder(message.channel).catch(() => {});
+        await editPlaceholderToEmbed(embedErr, message.channel);
         return;
       }
 
       const groqData = Utils.safeJsonParse(groqTry.bodyText);
       if (!groqData || groqData.error) {
         console.error("❌ (MBella) API body error:", groqData?.error || String(groqTry.bodyText || "").slice(0, 300));
+
         const embedErr = new EmbedBuilder()
           .setColor(Config.MBELLA_EMBED_COLOR)
           .setAuthor({ name: Config.MBELLA_NAME, iconURL: Config.MBELLA_AVATAR_URL || undefined })
           .setDescription(buildReplyHeader(message) + "…static. say it again, slower. 😌");
 
-        const ok = await editPlaceholderToEmbed(embedErr, message.channel);
-        if (!ok) {
-          if (Config.DEBUG) console.log("[MBella] webhook failed -> bot reply fallback (you will see Muscle MB as sender)");
-          try {
-            await message.reply({ embeds: [embedErr], allowedMentions: { parse: [] } });
-          } catch {}
-        }
+        if (!placeholder) await ensurePlaceholder(message.channel).catch(() => {});
+        await editPlaceholderToEmbed(embedErr, message.channel);
         return;
       }
 
@@ -445,20 +509,9 @@ module.exports = (client) => {
 
       await Utils.sleep(finalDelay);
 
-      const edited = await editPlaceholderToEmbed(embed, message.channel);
-      if (!edited) {
-        if (Config.DEBUG) console.log("[MBella] webhook failed -> bot reply fallback (you will see Muscle MB as sender)");
-        try {
-          await message.reply({ embeds: [embed], allowedMentions: { parse: [] } });
-        } catch (err) {
-          if (Config.DEBUG) console.warn("❌ (MBella) send fallback error:", err.message);
-          if (aiReply) {
-            try {
-              await message.reply({ content: aiReply, allowedMentions: { parse: [] } });
-            } catch {}
-          }
-        }
-      }
+      // Ensure placeholder exists, then edit it (single message)
+      if (!placeholder) await ensurePlaceholder(message.channel).catch(() => {});
+      await editPlaceholderToEmbed(embed, message.channel);
 
       // Lock partner in channel
       State.setBellaPartner(message.channel.id, message.author.id, Config.BELLA_TTL_MS);
@@ -473,22 +526,18 @@ module.exports = (client) => {
           .setAuthor({ name: Config.MBELLA_NAME, iconURL: Config.MBELLA_AVATAR_URL || undefined })
           .setDescription(buildReplyHeader(message) + "…i tripped in heels. i’m up though. 🦵✨");
 
-        const { message: sent } = await Webhook.sendViaBellaWebhook(client, message.channel, {
-          username: Config.MBELLA_NAME,
-          avatarURL: Config.MBELLA_AVATAR_URL,
-          embeds: [embedErr],
-          messageReference: message.id,
-        });
+        if (!placeholder) await ensurePlaceholder(message.channel).catch(() => {});
+        const ok = await editPlaceholderToEmbed(embedErr, message.channel);
 
-        if (!sent) {
-          if (Config.DEBUG) console.log("[MBella] webhook failed -> bot reply fallback (you will see Muscle MB as sender)");
+        if (!ok) {
           try {
-            await message.reply({ embeds: [embedErr], allowedMentions: { parse: [] } });
+            await message.reply({ embeds: [embedErr], allowedMentions: { parse: [], repliedUser: false } });
           } catch {}
         }
       } catch {}
     }
   });
 };
+
 
 
