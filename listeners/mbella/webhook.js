@@ -23,7 +23,9 @@ async function getBellaWebhook(client, channel) {
       const me = channel?.guild?.members?.me;
       const perms = me && channel?.permissionsFor?.(me) ? channel.permissionsFor(me) : null;
       const hasMW = perms?.has(PermissionsBitField.Flags.ManageWebhooks);
-      console.log(`[MBella] No webhook returned. ManageWebhooks=${hasMW ? "YES" : "NO"} channel=${channel?.id} guild=${channel?.guild?.id}`);
+      console.log(
+        `[MBella] No webhook returned. ManageWebhooks=${hasMW ? "YES" : "NO"} channel=${channel?.id} guild=${channel?.guild?.id}`
+      );
     }
 
     return hook || null;
@@ -33,18 +35,58 @@ async function getBellaWebhook(client, channel) {
   }
 }
 
-async function sendViaBellaWebhook(client, channel, { username, avatarURL, embeds, content }) {
+/**
+ * sendViaBellaWebhook(client, channel, options)
+ *
+ * Supports:
+ * - username, avatarURL
+ * - content, embeds
+ * - allowedMentions
+ * - reply (Discord reply arrow)  -> { messageReference: "<messageId>", failIfNotExists?: false }
+ * - messageReference shortcut     -> "<messageId>" (we convert to reply)
+ * - components, files
+ * - threadId (if sending inside a thread)
+ */
+async function sendViaBellaWebhook(
+  client,
+  channel,
+  {
+    username,
+    avatarURL,
+    embeds,
+    content,
+    allowedMentions,
+    reply,
+    messageReference,
+    components,
+    files,
+    threadId,
+  } = {}
+) {
   const hook = await getBellaWebhook(client, channel);
   if (!hook) return { hook: null, message: null };
 
   try {
-    const message = await hook.send({
+    // ✅ Normalize reply shortcut
+    const finalReply =
+      reply ||
+      (messageReference
+        ? { messageReference: String(messageReference), failIfNotExists: false }
+        : undefined);
+
+    const payload = {
       username: username || Config.MBELLA_NAME,
       avatarURL: avatarURL || Config.MBELLA_AVATAR_URL || undefined,
       embeds,
       content,
-      allowedMentions: { parse: [] },
-    });
+      components,
+      files,
+      threadId,
+      reply: finalReply, // ✅ enables reply arrow if supported
+      allowedMentions: allowedMentions || { parse: [] },
+    };
+
+    const message = await hook.send(payload);
     return { hook, message };
   } catch (e) {
     if (Config.DEBUG) console.log("[MBella] webhook send failed:", e?.message || e);
