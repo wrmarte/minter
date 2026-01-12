@@ -1,11 +1,11 @@
 // commands/gift.js
 // ======================================================
 // /gift config  (Step 2)
-// /gift start   (Step 3)  ✅ ADDED NOW
+// /gift start   (Step 3)
+// /gift stop    (Step 5) ✅ ADDED
+// /gift review  (Step 5) ✅ ADDED
 //
-// - Admin config stored per guild in gift_config
-// - /gift start creates a game row (gift_games) + posts the 🎁 Drop Card
-// - Guess handling (button -> modal submit + public chat mode) comes NEXT step
+// NOTE: Runtime (Step 4) is handled by listeners/giftGameListener.js
 // ======================================================
 
 const {
@@ -155,6 +155,11 @@ async function getActiveGiftGame(pg, guildId) {
   return r.rows?.[0] || null;
 }
 
+async function getGiftGameById(pg, gameId) {
+  const r = await pg.query(`SELECT * FROM gift_games WHERE id=$1 LIMIT 1`, [gameId]);
+  return r.rows?.[0] || null;
+}
+
 async function createGiftGameRow(pg, game) {
   const q = `
     INSERT INTO gift_games (
@@ -225,6 +230,32 @@ async function attachDropMessage(pg, { gameId, messageId, messageUrl }) {
     `UPDATE gift_games SET drop_message_id=$1, drop_message_url=$2 WHERE id=$3`,
     [String(messageId), messageUrl || null, gameId]
   );
+}
+
+function disableAllComponents(components) {
+  try {
+    if (!Array.isArray(components)) return [];
+    return components.map(row => {
+      const newRow = ActionRowBuilder.from(row);
+      newRow.components = newRow.components.map(c => {
+        const b = ButtonBuilder.from(c);
+        b.setDisabled(true);
+        return b;
+      });
+      return newRow;
+    });
+  } catch {
+    return [];
+  }
+}
+
+function fmtStatus(s) {
+  const v = String(s || "").toLowerCase();
+  if (v === "active") return "🟢 active";
+  if (v === "ended") return "🏁 ended";
+  if (v === "expired") return "⏳ expired";
+  if (v === "cancelled") return "🛑 cancelled";
+  return v || "unknown";
 }
 
 module.exports = {
@@ -420,6 +451,35 @@ module.exports = {
             .setRequired(false)
         )
     )
+    .addSubcommand((sub) =>
+      sub
+        .setName("stop")
+        .setDescription("Stop the active gift game (admin)")
+        .addStringOption((opt) =>
+          opt
+            .setName("reason")
+            .setDescription("Optional reason (for audit/review)")
+            .setRequired(false)
+        )
+        .addBooleanOption((opt) =>
+          opt
+            .setName("reveal_target")
+            .setDescription("Reveal the target number when stopping (admin-only info)")
+            .setRequired(false)
+        )
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("review")
+        .setDescription("Review a gift game (admin)")
+        .addIntegerOption((opt) =>
+          opt
+            .setName("game_id")
+            .setDescription("Game ID to review (leave empty for latest)")
+            .setMinValue(1)
+            .setRequired(false)
+        )
+    )
     .setDMPermission(false),
 
   async execute(interaction) {
@@ -430,7 +490,7 @@ module.exports = {
 
       const sub = interaction.options.getSubcommand();
 
-      // Admin/manager check for config + start
+      // Admin/manager check for all subcommands here
       const perms = interaction.memberPermissions;
       const allowed =
         perms?.has(PermissionFlagsBits.Administrator) ||
@@ -438,7 +498,7 @@ module.exports = {
 
       if (!allowed) {
         return interaction.reply({
-          content: "⛔ You need **Manage Server** (or Administrator) for Gift admin controls.",
+          content: "⛔ You need **Manage Server** (or Administrator) for Gift controls.",
           ephemeral: true,
         });
       }
@@ -554,7 +614,7 @@ module.exports = {
             { name: "Cooldown", value: `\`${saved?.per_user_cooldown_ms}ms\``, inline: true },
             { name: "Max Guesses/User", value: `\`${saved?.max_guesses_per_user}\``, inline: true }
           )
-          .setFooter({ text: "Next: /gift start (posts the gift drop card)" });
+          .setFooter({ text: "Use /gift start to drop a new gift game." });
 
         return interaction.reply({ embeds: [embed], ephemeral: true });
       }
@@ -572,7 +632,7 @@ module.exports = {
         if (active) {
           return interaction.editReply(
             `⚠️ A Gift game is already **active** in <#${active.channel_id}> (gameId: \`${active.id}\`).\n` +
-              `End it first (next step will add \`/gift stop\`).`
+              `Use \`/gift stop\` to end it.`
           );
         }
 
@@ -659,7 +719,6 @@ module.exports = {
             const parsed = JSON.parse(String(prizeJsonRaw));
             if (parsed && typeof parsed === "object") prizePayload = parsed;
           } catch {
-            // keep null, but log for admin clarity
             prizePayload = { _error: "invalid_json", raw: String(prizeJsonRaw).slice(0, 300) };
           }
         }
@@ -753,7 +812,7 @@ module.exports = {
             .setLabel("Guess")
             .setEmoji("🎯")
             .setStyle(ButtonStyle.Primary)
-            .setDisabled(mode !== "modal"), // public mode doesn't use button for guesses
+            .setDisabled(mode !== "modal"),
           new ButtonBuilder()
             .setCustomId(`gift_rules:${gameRow.id}`)
             .setLabel("Rules")
@@ -772,13 +831,238 @@ module.exports = {
         await attachDropMessage(pg, { gameId: gameRow.id, messageId: dropMsg.id, messageUrl: msgUrl });
 
         return interaction.editReply(
-          `✅ Gift Drop started in <#${channel.id}> (gameId: \`${gameRow.id}\`).\n` +
-            `Next step: I’ll add the **Guess handler** (button→modal submit + public chat parsing) so the game can actually be won.`
+          `✅ Gift Drop started in <#${channel.id}> (gameId: \`${gameRow.id}\`).`
         );
       }
 
-      // Fallback
-      return interaction.reply({ content: "Not implemented yet.", ephemeral: true });
+      // =========================
+      // /gift stop (Step 5)
+      // =========================
+      if (sub === "stop") {
+        await interaction.deferReply({ ephemeral: true });
+
+        const gid = interaction.guildId;
+        const reason = safeStr(interaction.options.getString("reason") || "", 300);
+        const revealTarget = Boolean(interaction.options.getBoolean("reveal_target") ?? false);
+
+        const active = await getActiveGiftGame(pg, gid);
+        if (!active) {
+          return interaction.editReply("ℹ️ No active gift game in this server.");
+        }
+
+        // Cancel active game
+        const upd = await pg.query(
+          `
+          UPDATE gift_games
+          SET status='cancelled', ended_at=NOW()
+          WHERE id=$1 AND status='active'
+          RETURNING *;
+          `,
+          [active.id]
+        );
+
+        const cancelled = upd.rows?.[0] || null;
+        if (!cancelled) {
+          return interaction.editReply("⚠️ Could not stop — game already ended.");
+        }
+
+        // Update unique players (best-effort)
+        let uniquePlayers = 0;
+        try {
+          const r = await pg.query(`SELECT COUNT(DISTINCT user_id) AS n FROM gift_guesses WHERE game_id=$1`, [cancelled.id]);
+          uniquePlayers = Number(r.rows?.[0]?.n || 0);
+          if (!Number.isFinite(uniquePlayers)) uniquePlayers = 0;
+          await pg.query(`UPDATE gift_games SET unique_players=$2 WHERE id=$1`, [cancelled.id, uniquePlayers]);
+        } catch {}
+
+        await writeAudit(pg, {
+          guild_id: gid,
+          game_id: cancelled.id,
+          action: "stop",
+          actor_user_id: interaction.user.id,
+          actor_tag: interaction.user.tag,
+          details: { reason: reason || null }
+        });
+
+        // Edit drop card to cancelled + disable buttons (best-effort)
+        try {
+          const channel = await interaction.client.channels.fetch(cancelled.channel_id).catch(() => null);
+          if (channel && cancelled.drop_message_id) {
+            const msg = await channel.messages.fetch(cancelled.drop_message_id).catch(() => null);
+            if (msg) {
+              const endedEmbed = EmbedBuilder.from(msg.embeds?.[0] || {})
+                .setTitle("🎁 MYSTERY GIFT DROP — CANCELLED")
+                .setDescription(
+                  [
+                    `🛑 This drop was stopped by an admin.`,
+                    reason ? `**Reason:** ${reason}` : null,
+                    ``,
+                    `**Range:** \`${cancelled.range_min} → ${cancelled.range_max}\``,
+                    `**Total Guesses:** \`${Number(cancelled.total_guesses || 0)}\``,
+                    `**Unique Players:** \`${uniquePlayers}\``,
+                  ].filter(Boolean).join("\n")
+                );
+
+              await msg.edit({
+                embeds: [endedEmbed],
+                components: disableAllComponents(msg.components),
+              }).catch(() => {});
+            }
+          }
+        } catch {}
+
+        const extra = revealTarget ? `\n🔐 Target number was: \`${cancelled.target_number}\`` : "";
+        return interaction.editReply(
+          `✅ Stopped active game \`${cancelled.id}\` in <#${cancelled.channel_id}>.${extra}`
+        );
+      }
+
+      // =========================
+      // /gift review (Step 5)
+      // =========================
+      if (sub === "review") {
+        await interaction.deferReply({ ephemeral: true });
+
+        const gid = interaction.guildId;
+        const gameIdOpt = intOrNull(interaction.options.getInteger("game_id"));
+
+        let game = null;
+        if (gameIdOpt) {
+          game = await getGiftGameById(pg, gameIdOpt);
+          if (!game || String(game.guild_id) !== String(gid)) {
+            return interaction.editReply("❌ Game not found for this server.");
+          }
+        } else {
+          const r = await pg.query(
+            `SELECT * FROM gift_games WHERE guild_id=$1 ORDER BY started_at DESC LIMIT 1`,
+            [gid]
+          );
+          game = r.rows?.[0] || null;
+          if (!game) return interaction.editReply("ℹ️ No gift games found for this server.");
+        }
+
+        // Pull guess stats
+        const totalGuesses = Number(game.total_guesses || 0);
+
+        let uniquePlayers = Number(game.unique_players || 0);
+        if (!Number.isFinite(uniquePlayers) || uniquePlayers < 0) uniquePlayers = 0;
+
+        // Top guessers (count)
+        let topGuessers = [];
+        try {
+          const r = await pg.query(
+            `
+            SELECT user_id, COALESCE(MAX(user_tag), '') AS user_tag, COUNT(*) AS n
+            FROM gift_guesses
+            WHERE game_id=$1
+            GROUP BY user_id
+            ORDER BY n DESC
+            LIMIT 10
+            `,
+            [game.id]
+          );
+          topGuessers = (r.rows || []).map(x => ({
+            user_id: x.user_id,
+            user_tag: x.user_tag,
+            n: Number(x.n || 0),
+          }));
+        } catch {}
+
+        // Recent guesses (last 10)
+        let recent = [];
+        try {
+          const r = await pg.query(
+            `
+            SELECT user_id, COALESCE(user_tag,'') AS user_tag, guess_value, source, created_at, is_correct, hint
+            FROM gift_guesses
+            WHERE game_id=$1
+            ORDER BY created_at DESC
+            LIMIT 10
+            `,
+            [game.id]
+          );
+          recent = r.rows || [];
+        } catch {}
+
+        const startedTs = game.started_at ? Math.floor(new Date(game.started_at).getTime() / 1000) : null;
+        const endedTs = game.ended_at ? Math.floor(new Date(game.ended_at).getTime() / 1000) : null;
+        const endsTs = game.ends_at ? Math.floor(new Date(game.ends_at).getTime() / 1000) : null;
+
+        const prizeLine = game.prize_secret && game.status === "active"
+          ? "??? (hidden)"
+          : (game.prize_label || "Mystery prize 🎁");
+
+        const dropUrl = game.drop_message_url ? `[Open Drop Message](${game.drop_message_url})` : "N/A";
+
+        const embed = new EmbedBuilder()
+          .setTitle(`🎁 Gift Game Review — #${game.id}`)
+          .setDescription(
+            [
+              `**Status:** ${fmtStatus(game.status)}`,
+              `**Channel:** <#${game.channel_id}>`,
+              `**Mode:** \`${game.mode}\``,
+              ``,
+              `**Started:** ${startedTs ? `<t:${startedTs}:f>` : "N/A"}`,
+              `**Scheduled End:** ${endsTs ? `<t:${endsTs}:f>` : "N/A"}`,
+              `**Ended:** ${endedTs ? `<t:${endedTs}:f>` : "N/A"}`,
+              ``,
+              `**Range:** \`${game.range_min} → ${game.range_max}\``,
+              `**Hints:** \`${game.hints_mode}\``,
+              `**Cooldown:** \`${game.per_user_cooldown_ms}ms\``,
+              `**Max guesses/user:** \`${game.max_guesses_per_user}\``,
+              ``,
+              `**Prize:** ${prizeLine}`,
+              `**Drop:** ${dropUrl}`,
+              ``,
+              game.winner_user_id
+                ? `🏆 **Winner:** <@${game.winner_user_id}> | number \`${game.winning_guess}\``
+                : `🏆 **Winner:** none`,
+            ].join("\n")
+          )
+          .addFields(
+            { name: "Total Guesses", value: `\`${totalGuesses}\``, inline: true },
+            { name: "Unique Players", value: `\`${uniquePlayers}\``, inline: true },
+            { name: "Commit Proof", value: game.commit_enabled ? "✅ enabled" : "—", inline: true }
+          );
+
+        if (topGuessers.length) {
+          embed.addFields({
+            name: "Top Guessers",
+            value: topGuessers
+              .map((u, i) => `${i + 1}. <@${u.user_id}> — \`${u.n}\` guesses`)
+              .join("\n")
+              .slice(0, 1024),
+            inline: false
+          });
+        }
+
+        if (recent.length) {
+          embed.addFields({
+            name: "Recent Guesses (latest 10)",
+            value: recent
+              .map(r => {
+                const ts = r.created_at ? Math.floor(new Date(r.created_at).getTime() / 1000) : null;
+                const who = `<@${r.user_id}>`;
+                const g = `\`${r.guess_value}\``;
+                const src = `\`${r.source}\``;
+                const tag = r.is_correct ? "✅" : "";
+                const tss = ts ? `<t:${ts}:t>` : "";
+                return `${tss} ${who} → ${g} ${src} ${tag}`;
+              })
+              .join("\n")
+              .slice(0, 1024),
+            inline: false
+          });
+        }
+
+        if (game.notes) {
+          embed.addFields({ name: "Notes", value: safeStr(game.notes, 900), inline: false });
+        }
+
+        return interaction.editReply({ embeds: [embed] });
+      }
+
+      return interaction.reply({ content: "Not implemented.", ephemeral: true });
     } catch (err) {
       console.error("❌ /gift error:", err);
       try {
@@ -790,3 +1074,4 @@ module.exports = {
     }
   },
 };
+
