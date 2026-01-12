@@ -1,12 +1,12 @@
 // listeners/giftGameListener.js
 // ======================================================
-// Gift Drop Guess Game — Runtime Engine (Step 4)
+// Gift Drop Guess Game — Runtime Engine (Step 4 + WOW Step 6)
 // - Handles:
 //   ✅ Button clicks (Guess/Rules/Stats)
 //   ✅ Modal submit (modern mode)
 //   ✅ Public chat guesses (public mode)
 //   ✅ DB logging for every guess + audit trail
-//   ✅ Win lock (atomic) + reveal announcement
+//   ✅ Win lock (atomic) + reveal announcement (+ reveal image card)
 //   ✅ Expiry tick (auto-expire if time runs out)
 // ======================================================
 
@@ -18,12 +18,19 @@ const {
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
+  AttachmentBuilder,
 } = require("discord.js");
 
 let ensureGiftSchema = null;
 try {
   const mod = require("../services/gift/ensureGiftSchema");
   if (mod && typeof mod.ensureGiftSchema === "function") ensureGiftSchema = mod.ensureGiftSchema;
+} catch {}
+
+let renderGiftRevealCard = null;
+try {
+  const rr = require("../services/gift/revealRenderer");
+  if (rr && typeof rr.renderGiftRevealCard === "function") renderGiftRevealCard = rr.renderGiftRevealCard;
 } catch {}
 
 const DEBUG = String(process.env.GIFT_DEBUG || "").trim() === "1";
@@ -147,8 +154,6 @@ async function getUserState(pg, guildId, userId) {
 }
 
 async function upsertUserStateOnGuess(pg, { guildId, userId, gameId, addWin = false }) {
-  // We keep per-game guesses_in_game + last_guess_at for cooldown enforcement.
-  // If last_game_id changes, reset guesses_in_game to 0 before increment.
   const q = `
     INSERT INTO gift_user_state (
       guild_id, user_id,
@@ -274,6 +279,81 @@ function buildExpiredEmbed({ game, elapsedSec, totalGuesses, uniquePlayers }) {
   return e;
 }
 
+async function postWinnerReveal(client, pg, wonGame, winner, guessValue) {
+  const guildId = wonGame.guild_id;
+
+  // Announcement channel preference
+  const cfg = await getGiftConfig(pg, guildId).catch(() => null);
+  const announceChannelId = cfg?.announce_channel_id || wonGame.channel_id;
+
+  const totalGuesses = Number(wonGame.total_guesses || 0);
+  const startedAt = wonGame.started_at ? new Date(wonGame.started_at).getTime() : Date.now();
+  const elapsedSec = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+
+  const uniquePlayers = await computeUniquePlayers(pg, wonGame.id).catch(() => 0);
+
+  // Persist unique_players best-effort
+  try {
+    await pg.query(`UPDATE gift_games SET unique_players=$2 WHERE id=$1`, [wonGame.id, uniquePlayers]);
+  } catch {}
+
+  const revealPrizeText = safeStr(wonGame.prize_label || "Mystery prize 🎁", 220);
+
+  // Build reveal image (WOW)
+  let attach = null;
+  let embedImageName = null;
+
+  if (renderGiftRevealCard) {
+    const prizePayload = wonGame.prize_payload && typeof wonGame.prize_payload === "object"
+      ? wonGame.prize_payload
+      : (() => {
+          try { return wonGame.prize_payload ? JSON.parse(wonGame.prize_payload) : null; } catch { return null; }
+        })();
+
+    const rr = await renderGiftRevealCard({
+      prizeType: wonGame.prize_type,
+      prizeLabel: revealPrizeText,
+      prizePayload,
+      winnerId: winner.id,
+      winnerTag: winner.tag || "",
+      footer: `Game #${wonGame.id} • ${wonGame.prize_type || "prize"} reveal`,
+    }).catch(() => null);
+
+    if (rr?.buffer && rr?.filename) {
+      attach = new AttachmentBuilder(rr.buffer, { name: rr.filename });
+      embedImageName = rr.filename;
+    }
+  }
+
+  // Winner embed
+  const winnerEmbed = buildWinnerEmbed({
+    game: wonGame,
+    winnerId: winner.id,
+    winnerTag: winner.tag || null,
+    winNum: guessValue,
+    elapsedSec,
+    totalGuesses,
+    uniquePlayers,
+    revealPrizeText,
+  });
+
+  // If we have an attachment image, show it in the embed as the main image
+  if (attach && embedImageName) {
+    winnerEmbed.setImage(`attachment://${embedImageName}`);
+  }
+
+  try {
+    const ch = await client.channels.fetch(announceChannelId).catch(() => null);
+    if (ch) {
+      await ch.send({
+        embeds: [winnerEmbed],
+        files: attach ? [attach] : [],
+        allowedMentions: { parse: [] },
+      }).catch(() => {});
+    }
+  } catch {}
+}
+
 async function endGameWithWinner(client, pg, game, winner, guessRow, hint) {
   const guildId = game.guild_id;
   const gameId = game.id;
@@ -305,14 +385,6 @@ async function endGameWithWinner(client, pg, game, winner, guessRow, hint) {
   // Update winner state
   try {
     await upsertUserStateOnGuess(pg, { guildId, userId: winner.id, gameId, addWin: true });
-  } catch {}
-
-  // Unique players
-  const uniquePlayers = await computeUniquePlayers(pg, gameId).catch(() => 0);
-
-  // Update unique_players (best-effort)
-  try {
-    await pg.query(`UPDATE gift_games SET unique_players=$2 WHERE id=$1`, [gameId, uniquePlayers]);
   } catch {}
 
   // Audit
@@ -354,33 +426,8 @@ async function endGameWithWinner(client, pg, game, winner, guessRow, hint) {
     }
   } catch {}
 
-  // Announcement channel preference
-  const cfg = await getGiftConfig(pg, guildId).catch(() => null);
-  const announceChannelId = cfg?.announce_channel_id || game.channel_id;
-
-  const totalGuesses = Number(wonGame.total_guesses || 0);
-  const startedAt = wonGame.started_at ? new Date(wonGame.started_at).getTime() : Date.now();
-  const elapsedSec = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
-
-  const revealPrizeText = safeStr(wonGame.prize_label || "Mystery prize 🎁", 220);
-
-  // Send big reveal
-  try {
-    const ch = await client.channels.fetch(announceChannelId).catch(() => null);
-    if (ch) {
-      const embed = buildWinnerEmbed({
-        game: wonGame,
-        winnerId: winner.id,
-        winnerTag: winner.tag || null,
-        winNum: guessRow.guess_value,
-        elapsedSec,
-        totalGuesses,
-        uniquePlayers,
-        revealPrizeText
-      });
-      await ch.send({ embeds: [embed] }).catch(() => {});
-    }
-  } catch {}
+  // Post WOW winner reveal (+ image card)
+  await postWinnerReveal(client, pg, wonGame, winner, guessRow.guess_value).catch(() => {});
 
   return { ok: true, game: wonGame };
 }
@@ -451,7 +498,7 @@ async function expireGame(client, pg, game) {
     const ch = await client.channels.fetch(expired.channel_id).catch(() => null);
     if (ch) {
       const embed = buildExpiredEmbed({ game: expired, elapsedSec, totalGuesses, uniquePlayers });
-      await ch.send({ embeds: [embed] }).catch(() => {});
+      await ch.send({ embeds: [embed], allowedMentions: { parse: [] } }).catch(() => {});
     }
   } catch {}
 
@@ -471,7 +518,6 @@ async function handleGuess(client, interactionOrMessage, { game, guessValue, sou
 
   const endsAtMs = game.ends_at ? new Date(game.ends_at).getTime() : null;
   if (endsAtMs && Date.now() > endsAtMs) {
-    // Let expiry tick handle it; but we can fast-expire here too
     await expireGame(client, pg, game).catch(() => {});
     return { ok: false, reason: "expired" };
   }
@@ -495,7 +541,6 @@ async function handleGuess(client, interactionOrMessage, { game, guessValue, sou
     }
   }
 
-  // If this is a new game for them, guesses_in_game resets automatically in upsert
   const guessesInThisGame =
     state && String(state.last_game_id || "") === String(game.id)
       ? Number(state.guesses_in_game || 0)
@@ -514,8 +559,7 @@ async function handleGuess(client, interactionOrMessage, { game, guessValue, sou
 
   const isCorrect = guessValue === target;
 
-  // Record guess + increment totals
-  // We do these best-effort; correctness is locked by UPDATE on win.
+  // Record guess
   const guessRow = await insertGuess(pg, {
     gameId: game.id,
     guildId,
@@ -558,7 +602,6 @@ module.exports = (client) => {
       if (!pg?.query) return;
       if (!(await ensureSchemaIfNeeded(client))) return;
 
-      // Find active games whose ends_at passed
       const r = await pg.query(
         `
         SELECT * FROM gift_games
@@ -589,7 +632,6 @@ module.exports = (client) => {
       if (!pg?.query) return;
       if (!(await ensureSchemaIfNeeded(client))) return;
 
-      // Buttons
       if (interaction.isButton()) {
         const cid = String(interaction.customId || "");
         if (!cid.startsWith("gift_")) return;
@@ -603,7 +645,6 @@ module.exports = (client) => {
         const game = await getActiveGiftGameById(pg, gameId);
         if (!game) return interaction.reply({ content: "❌ Game not found.", ephemeral: true });
 
-        // gift_guess:<gameId> (modal mode only)
         if (head === "gift_guess") {
           if (String(game.mode || "").toLowerCase() !== "modal") {
             return interaction.reply({ content: "This game is not using modal mode. Type guesses in chat instead.", ephemeral: true });
@@ -629,7 +670,6 @@ module.exports = (client) => {
           return interaction.showModal(modal);
         }
 
-        // gift_rules:<gameId>
         if (head === "gift_rules") {
           const endsAt = game.ends_at ? `<t:${Math.floor(new Date(game.ends_at).getTime() / 1000)}:R>` : "N/A";
           const prizeLine = game.prize_secret ? "??? (revealed on win)" : (game.prize_label || "Mystery prize 🎁");
@@ -658,7 +698,6 @@ module.exports = (client) => {
           return interaction.reply({ embeds: [embed], ephemeral: true });
         }
 
-        // gift_stats:<gameId>
         if (head === "gift_stats") {
           const state = await getUserState(pg, interaction.guildId, interaction.user.id);
           const guessesInThisGame =
@@ -678,10 +717,9 @@ module.exports = (client) => {
           return interaction.reply({ embeds: [embed], ephemeral: true });
         }
 
-        return; // unknown button
+        return;
       }
 
-      // Modal submissions
       if (interaction.isModalSubmit()) {
         const cid = String(interaction.customId || "");
         if (!cid.startsWith("gift_guess_modal:")) return;
@@ -736,12 +774,10 @@ module.exports = (client) => {
           return interaction.reply({ content: `❌ Guess not accepted (${res.reason}).`, ephemeral: true });
         }
 
-        // Won
         if (res.won) {
           return interaction.reply({ content: `🎁 ${hintToUserText("correct")} Winner announcement posted!`, ephemeral: true });
         }
 
-        // Wrong — return hint
         return interaction.reply({ content: hintToUserText(res.hint), ephemeral: true });
       }
     } catch (e) {
@@ -761,11 +797,9 @@ module.exports = (client) => {
       if (!pg?.query) return;
       if (!(await ensureSchemaIfNeeded(client))) return;
 
-      // Only accept pure numbers
       const guessValue = intFromText(message.content);
       if (guessValue === null) return;
 
-      // Find active game in this channel
       const game = await getActiveGiftGameInChannel(pg, message.guildId, message.channelId);
       if (!game) return;
 
@@ -779,21 +813,17 @@ module.exports = (client) => {
       });
 
       if (!res.ok) {
-        // Keep public mode quiet to avoid spam
         if (PUBLIC_REACT_HINTS && (res.reason === "out_of_range")) {
-          // optional reaction for out-of-range
           message.react("⚠️").catch(() => {});
         }
         return;
       }
 
       if (res.won) {
-        // Optional react moment
         message.react("🎁").catch(() => {});
         return;
       }
 
-      // Optional high/low react hints in public mode (can be rate-limited; disabled by default)
       if (PUBLIC_REACT_HINTS) {
         if (res.hint === "too_low") message.react("🔺").catch(() => {});
         else if (res.hint === "too_high") message.react("🔻").catch(() => {});
@@ -807,5 +837,5 @@ module.exports = (client) => {
     }
   });
 
-  console.log("✅ GiftGameListener loaded (buttons+modal+public guesses+expiry)");
+  console.log("✅ GiftGameListener loaded (WOW reveal enabled: NFT + Token)");
 };
