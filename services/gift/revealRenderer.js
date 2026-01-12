@@ -1,17 +1,9 @@
 // services/gift/revealRenderer.js
 // ======================================================
 // Gift Reveal Renderer (WOW Step 6)
-// - Renders a cinematic reveal card (PNG) using @napi-rs/canvas
-// - Supports BOTH:
-//    ✅ NFT reveal (image, metadataUrl, OR contract+tokenId auto-resolve)
-//    ✅ Token reveal (amount/symbol/label + optional logoUrl)
-// - IPFS + data: URIs + safe fetch timeout
-// - Auto image resolution order for NFT:
-//    1) payload.image / imageUrl / image_uri
-//    2) payload.metadataUrl / tokenUri -> fetch JSON -> image
-//    3) payload.contract + payload.tokenId (or ca+id):
-//          a) Reservoir (if RESERVOIR_API_KEY set)
-//          b) On-chain tokenURI() via providerM.safeRpcCall (base/eth)
+// UPDATE:
+// ✅ NFT reveal is now FULL-BLEED (max image, no wasted space)
+// ✅ Token reveal keeps the cinematic card layout
 // ======================================================
 
 const path = require("path");
@@ -21,11 +13,7 @@ let Canvas = null;
 try {
   Canvas = require("@napi-rs/canvas");
 } catch (e) {
-  try {
-    Canvas = require("canvas");
-  } catch {
-    Canvas = null;
-  }
+  try { Canvas = require("canvas"); } catch { Canvas = null; }
 }
 
 // providerM (for on-chain tokenURI fallback)
@@ -36,24 +24,18 @@ try {
 } catch {}
 
 let ethers = null;
-try {
-  ethers = require("ethers");
-} catch {}
+try { ethers = require("ethers"); } catch {}
 
 const DEBUG = String(process.env.GIFT_REVEAL_DEBUG || "").trim() === "1";
 
-// Default IPFS gateway for resolving ipfs:// links
 const IPFS_GATEWAY =
   (process.env.GIFT_IPFS_GATEWAY || process.env.IPFS_GATEWAY || "").trim() ||
   "https://ipfs.io/ipfs/";
 
-// Reservoir
 const RESERVOIR_API_KEY = String(process.env.RESERVOIR_API_KEY || "").trim();
 const RESERVOIR_BASE_URL = (process.env.RESERVOIR_BASE_URL || "https://api.reservoir.tools").trim();
 
-function log(...a) {
-  if (DEBUG) console.log("[GIFT_REVEAL]", ...a);
-}
+function log(...a) { if (DEBUG) console.log("[GIFT_REVEAL]", ...a); }
 
 function safeStr(v, max = 220) {
   const s = String(v ?? "").trim();
@@ -67,20 +49,14 @@ function isDataUrl(s) {
 }
 
 function parseDataUrl(dataUrl) {
-  // returns { mime, buffer } or null
   const s = String(dataUrl || "").trim();
   if (!/^data:/i.test(s)) return null;
-
-  // data:[<mime>][;base64],<data>
   const idx = s.indexOf(",");
   if (idx === -1) return null;
-
   const meta = s.slice(5, idx);
   const data = s.slice(idx + 1);
-
   const isB64 = /;base64/i.test(meta);
   const mime = (meta.split(";")[0] || "application/octet-stream").trim() || "application/octet-stream";
-
   try {
     const buf = isB64 ? Buffer.from(data, "base64") : Buffer.from(decodeURIComponent(data), "utf8");
     return { mime, buffer: buf };
@@ -92,48 +68,33 @@ function parseDataUrl(dataUrl) {
 function toHttpUrl(u) {
   const s = String(u || "").trim();
   if (!s) return null;
-
-  // allow data URLs through (handled elsewhere)
   if (/^data:/i.test(s)) return s;
 
-  // ipfs://CID/... -> gateway/CID/...
   if (s.startsWith("ipfs://")) {
     const rest = s.replace("ipfs://", "");
     return IPFS_GATEWAY.replace(/\/+$/, "/") + rest.replace(/^\/+/, "");
   }
-
-  // ipfs/CID in plain form
   if (s.startsWith("ipfs/")) {
     const rest = s.replace(/^ipfs\//, "");
     return IPFS_GATEWAY.replace(/\/+$/, "/") + rest.replace(/^\/+/, "");
   }
-
   return s;
 }
 
 async function safeFetch(url, opts = {}) {
   const u = toHttpUrl(url);
   if (!u) return null;
-
-  // data urls are not fetchable
   if (isDataUrl(u)) return null;
 
   const timeoutMs = Number(opts.timeoutMs || 12000);
   const headers = Object.assign(
-    {
-      "user-agent": "MinterPlus-GiftReveal/1.0",
-      "accept": "*/*",
-    },
+    { "user-agent": "MinterPlus-GiftReveal/1.0", "accept": "*/*" },
     opts.headers || {}
   );
 
   let fetchFn = globalThis.fetch;
   if (!fetchFn) {
-    try {
-      fetchFn = require("node-fetch");
-    } catch {
-      fetchFn = null;
-    }
+    try { fetchFn = require("node-fetch"); } catch { fetchFn = null; }
   }
   if (!fetchFn) return null;
 
@@ -141,12 +102,7 @@ async function safeFetch(url, opts = {}) {
   const timer = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs) : null;
 
   try {
-    const res = await fetchFn(u, {
-      method: "GET",
-      headers,
-      signal: ctrl ? ctrl.signal : undefined,
-      redirect: "follow",
-    });
+    const res = await fetchFn(u, { method: "GET", headers, signal: ctrl ? ctrl.signal : undefined, redirect: "follow" });
     if (!res || !res.ok) {
       log("fetch failed:", u, "status=", res?.status);
       return null;
@@ -164,25 +120,18 @@ async function fetchJson(url, opts = {}) {
   const u = toHttpUrl(url);
   if (!u) return null;
 
-  // handle data:application/json;base64,...
   if (isDataUrl(u)) {
     const parsed = parseDataUrl(u);
     if (!parsed) return null;
     try {
       const txt = parsed.buffer.toString("utf8");
       return JSON.parse(txt);
-    } catch {
-      return null;
-    }
+    } catch { return null; }
   }
 
   const res = await safeFetch(u, opts);
   if (!res) return null;
-  try {
-    return await res.json();
-  } catch {
-    return null;
-  }
+  try { return await res.json(); } catch { return null; }
 }
 
 async function fetchBuffer(url, opts = {}) {
@@ -199,9 +148,7 @@ async function fetchBuffer(url, opts = {}) {
   try {
     const ab = await res.arrayBuffer();
     return Buffer.from(ab);
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
 function tryRegisterFonts() {
@@ -266,22 +213,18 @@ function drawBackground(ctx, W, H) {
   v.addColorStop(1, "rgba(0,0,0,0.55)");
   ctx.fillStyle = v;
   ctx.fillRect(0, 0, W, H);
-
-  ctx.save();
-  ctx.globalAlpha = 0.35;
-  for (let i = 0; i < 90; i++) {
-    const x = Math.random() * W;
-    const y = Math.random() * H;
-    const r = Math.random() * 1.8;
-    ctx.fillStyle = "rgba(255,255,255,0.9)";
-    ctx.beginPath();
-    ctx.arc(x, y, r, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  ctx.restore();
 }
 
-function fitRect(imgW, imgH, boxW, boxH) {
+function fitCover(imgW, imgH, boxW, boxH) {
+  const s = Math.max(boxW / imgW, boxH / imgH);
+  const w = imgW * s;
+  const h = imgH * s;
+  const x = (boxW - w) / 2;
+  const y = (boxH - h) / 2;
+  return { x, y, w, h };
+}
+
+function fitContain(imgW, imgH, boxW, boxH) {
   const s = Math.min(boxW / imgW, boxH / imgH);
   const w = imgW * s;
   const h = imgH * s;
@@ -301,14 +244,12 @@ async function tryLoadImage(bufOrUrl) {
     const u = String(bufOrUrl || "").trim();
     if (!u) return null;
 
-    // Support data:image/png;base64,...
     if (isDataUrl(u)) {
       const parsed = parseDataUrl(u);
       if (!parsed?.buffer) return null;
       return await Canvas.loadImage(parsed.buffer);
     }
 
-    // string URL -> buffer first for compatibility
     const b = await fetchBuffer(u, { timeoutMs: 14000 });
     if (!b) return null;
     return await Canvas.loadImage(b);
@@ -328,7 +269,6 @@ function normalizeChainKey(chain) {
 }
 
 function normalizeReservoirChain(chainKey) {
-  // Reservoir uses chain names like "ethereum" and "base"
   const c = normalizeChainKey(chainKey);
   if (c === "eth") return "ethereum";
   if (c === "base") return "base";
@@ -344,26 +284,21 @@ function normalizeAddress(a) {
 function normalizeTokenId(t) {
   const s = String(t ?? "").trim();
   if (!s) return null;
-  // allow numeric or string
   return s;
 }
 
 async function fetchNftImageFromReservoir({ chain, contract, tokenId }) {
   if (!RESERVOIR_API_KEY) return null;
 
-  const ch = normalizeReservoirChain(chain);
   const c = normalizeAddress(contract);
   const id = normalizeTokenId(tokenId);
   if (!c || !id) return null;
 
-  const url =
-    `${RESERVOIR_BASE_URL.replace(/\/+$/, "")}/tokens/v7?tokens=${c}:${encodeURIComponent(id)}`;
-
+  const url = `${RESERVOIR_BASE_URL.replace(/\/+$/, "")}/tokens/v7?tokens=${c}:${encodeURIComponent(id)}`;
   const res = await safeFetch(url, {
     timeoutMs: 14000,
     headers: { "x-api-key": RESERVOIR_API_KEY, "accept": "application/json" },
   });
-
   if (!res) return null;
 
   try {
@@ -371,7 +306,6 @@ async function fetchNftImageFromReservoir({ chain, contract, tokenId }) {
     const tok = j?.tokens?.[0]?.token || null;
     if (!tok) return null;
 
-    // Try common image fields
     const img =
       tok.image ||
       tok.imageSmall ||
@@ -381,14 +315,12 @@ async function fetchNftImageFromReservoir({ chain, contract, tokenId }) {
 
     if (img) return toHttpUrl(img);
 
-    // Sometimes reservoir provides "media" object
     const media = tok?.media;
     if (media && typeof media === "string") return toHttpUrl(media);
     if (media && typeof media === "object") {
       const mimg = media.image || media.small || media.large || media.url;
       if (mimg) return toHttpUrl(mimg);
     }
-
     return null;
   } catch {
     return null;
@@ -403,7 +335,6 @@ async function fetchTokenUriOnChain({ chain, contract, tokenId }) {
   const id = normalizeTokenId(tokenId);
   if (!c || !id) return null;
 
-  // Only allow known chains you already run providers for
   const allowed = ["base", "eth"];
   if (!allowed.includes(chainKey)) return null;
 
@@ -421,18 +352,9 @@ async function fetchTokenUriOnChain({ chain, contract, tokenId }) {
   }
 }
 
-/**
- * Resolve NFT image:
- * - payload.image / image_url / imageUrl
- * - payload.metadataUrl -> JSON -> image fields
- * - payload.contract + tokenId:
- *    - reservoir (if RESERVOIR_API_KEY)
- *    - tokenURI() on-chain -> metadata -> image
- */
 async function resolveNftImageUrl(payload) {
   if (!payload || typeof payload !== "object") return null;
 
-  // Accept many key aliases (so you can type less in Discord)
   const direct =
     payload.image ||
     payload.image_url ||
@@ -442,11 +364,7 @@ async function resolveNftImageUrl(payload) {
     payload.img ||
     payload.png;
 
-  if (direct) {
-    const u = toHttpUrl(direct);
-    log("NFT image direct:", u);
-    return u;
-  }
+  if (direct) return toHttpUrl(direct);
 
   const metaUrl =
     payload.metadataUrl ||
@@ -465,17 +383,11 @@ async function resolveNftImageUrl(payload) {
         meta.imageUrl ||
         meta.imageURI ||
         meta.imageUri ||
-        (meta.metadata && (meta.metadata.image || meta.metadata.image_url)) ||
-        (meta?.properties && meta?.properties?.image);
-      if (img) {
-        const u = toHttpUrl(img);
-        log("NFT image from metadata:", u);
-        return u;
-      }
+        (meta.metadata && (meta.metadata.image || meta.metadata.image_url));
+      if (img) return toHttpUrl(img);
     }
   }
 
-  // contract + tokenId auto resolve
   const contract =
     payload.contract ||
     payload.ca ||
@@ -493,17 +405,11 @@ async function resolveNftImageUrl(payload) {
   const chain = payload.chain || payload.network || payload.net || "base";
 
   if (contract && tokenId) {
-    // 1) Reservoir
     const resImg = await fetchNftImageFromReservoir({ chain, contract, tokenId });
-    if (resImg) {
-      log("NFT image from Reservoir:", resImg);
-      return resImg;
-    }
+    if (resImg) return resImg;
 
-    // 2) On-chain tokenURI
     const tokenUri = await fetchTokenUriOnChain({ chain, contract, tokenId });
     if (tokenUri) {
-      log("tokenURI:", tokenUri);
       const meta = await fetchJson(tokenUri, { timeoutMs: 14000 });
       if (meta && typeof meta === "object") {
         const img =
@@ -513,11 +419,7 @@ async function resolveNftImageUrl(payload) {
           meta.imageURI ||
           meta.imageUri ||
           (meta.metadata && (meta.metadata.image || meta.metadata.image_url));
-        if (img) {
-          const u = toHttpUrl(img);
-          log("NFT image from tokenURI metadata:", u);
-          return u;
-        }
+        if (img) return toHttpUrl(img);
       }
     }
   }
@@ -525,10 +427,6 @@ async function resolveNftImageUrl(payload) {
   return null;
 }
 
-/**
- * Resolve token logo:
- * - payload.logoUrl / logo_url / icon
- */
 function resolveTokenLogoUrl(payload) {
   if (!payload || typeof payload !== "object") return null;
   const u =
@@ -545,11 +443,6 @@ function sha1(s) {
   return crypto.createHash("sha1").update(String(s)).digest("hex").slice(0, 10);
 }
 
-/**
- * Main render function
- * @param {object} args
- * @returns { buffer, filename, contentType, resolvedImageUrl }
- */
 async function renderGiftRevealCard(args = {}) {
   if (!Canvas?.createCanvas) {
     return { buffer: null, filename: null, contentType: null, resolvedImageUrl: null };
@@ -570,6 +463,96 @@ async function renderGiftRevealCard(args = {}) {
   const canvas = Canvas.createCanvas(W, H);
   const ctx = canvas.getContext("2d");
 
+  // Resolve image
+  let imageUrl = null;
+  if (prizeType === "nft") imageUrl = await resolveNftImageUrl(payload);
+  else if (prizeType === "token") imageUrl = resolveTokenLogoUrl(payload);
+  else if (payload?.image) imageUrl = toHttpUrl(payload.image);
+
+  log("resolvedImageUrl:", imageUrl);
+
+  // =========================
+  // NFT FULL-BLEED MODE
+  // =========================
+  if (prizeType === "nft" && imageUrl) {
+    const img = await tryLoadImage(imageUrl);
+    if (img) {
+      // draw full bleed cover
+      const fit = fitCover(img.width || W, img.height || H, W, H);
+      ctx.drawImage(img, fit.x, fit.y, fit.w, fit.h);
+
+      // top/bottom cinematic gradients (so text readable)
+      ctx.save();
+      const topG = ctx.createLinearGradient(0, 0, 0, 160);
+      topG.addColorStop(0, "rgba(0,0,0,0.65)");
+      topG.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.fillStyle = topG;
+      ctx.fillRect(0, 0, W, 160);
+
+      const botG = ctx.createLinearGradient(0, H - 220, 0, H);
+      botG.addColorStop(0, "rgba(0,0,0,0)");
+      botG.addColorStop(1, "rgba(0,0,0,0.70)");
+      ctx.fillStyle = botG;
+      ctx.fillRect(0, H - 220, W, 220);
+      ctx.restore();
+
+      // minimal header
+      ctx.save();
+      ctx.font = "900 52px DejaVuSans, sans-serif";
+      ctx.fillStyle = "rgba(255,255,255,0.96)";
+      ctx.fillText("🎁 GIFT OPENED", 42, 78);
+
+      ctx.font = "600 24px DejaVuSans, sans-serif";
+      ctx.fillStyle = "rgba(255,255,255,0.88)";
+      const whoLine = winnerId ? `Winner: @${winnerTag || winnerId}` : "Winner:";
+      ctx.fillText(whoLine, 44, 120);
+      ctx.restore();
+
+      // prize label bottom
+      ctx.save();
+      ctx.font = "800 34px DejaVuSans, sans-serif";
+      ctx.fillStyle = "rgba(255,255,255,0.98)";
+      ctx.fillText("NFT REVEAL", 42, H - 128);
+
+      ctx.font = "700 30px DejaVuSans, sans-serif";
+      ctx.fillStyle = "rgba(255,255,255,0.96)";
+      // wrap
+      const words = prizeLabel.split(" ");
+      let line = "";
+      let y = H - 84;
+      const maxW = W - 84;
+      for (const w of words) {
+        const test = line ? `${line} ${w}` : w;
+        const m = ctx.measureText(test);
+        if (m.width > maxW && line) {
+          ctx.fillText(line, 42, y);
+          line = w;
+          y += 38;
+          if (y > H - 18) break;
+        } else {
+          line = test;
+        }
+      }
+      if (line && y <= H - 18) ctx.fillText(line, 42, y);
+
+      // subtle frame
+      ctx.save();
+      ctx.globalAlpha = 0.35;
+      ctx.lineWidth = 6;
+      ctx.strokeStyle = "rgba(255,255,255,0.25)";
+      roundedRect(ctx, 18, 18, W - 36, H - 36, 26);
+      ctx.stroke();
+      ctx.restore();
+
+      const buffer = canvas.toBuffer("image/png");
+      const filename = `gift-reveal-${sha1(`${Date.now()}_${Math.random()}_nft`)}.png`;
+      return { buffer, filename, contentType: "image/png", resolvedImageUrl: imageUrl };
+    }
+  }
+
+  // =========================
+  // Default cinematic card layout (token/text)
+  // =========================
   drawBackground(ctx, W, H);
 
   // Header
@@ -600,7 +583,6 @@ async function renderGiftRevealCard(args = {}) {
 
   drawGlowFrame(ctx, boxX, boxY, boxW, boxH);
 
-  // art area + text area
   const artPad = 30;
   const artX = boxX + artPad;
   const artY = boxY + artPad;
@@ -611,52 +593,22 @@ async function renderGiftRevealCard(args = {}) {
   const textY = artY + 10;
   const textW = boxX + boxW - textX - artPad;
 
-  // Determine image
-  let imageUrl = null;
-  if (prizeType === "nft") {
-    imageUrl = await resolveNftImageUrl(payload);
-  } else if (prizeType === "token") {
-    imageUrl = resolveTokenLogoUrl(payload);
-  } else {
-    if (payload?.image) imageUrl = toHttpUrl(payload.image);
-  }
-
-  log("resolvedImageUrl:", imageUrl);
-
-  // Draw image if possible
+  // Draw token/logo image if possible
   let imgDrawn = false;
   if (imageUrl) {
     const img = await tryLoadImage(imageUrl);
     if (img) {
       ctx.save();
       ctx.globalAlpha = 0.95;
-
       roundedRect(ctx, artX, artY, artW, artH, 24);
       ctx.clip();
-
-      const fit = fitRect(img.width || artW, img.height || artH, artW, artH);
+      const fit = fitContain(img.width || artW, img.height || artH, artW, artH);
       ctx.drawImage(img, artX + fit.x, artY + fit.y, fit.w, fit.h);
-
       ctx.restore();
-
-      // overlay shine
-      ctx.save();
-      const shine = ctx.createLinearGradient(artX, artY, artX + artW, artY + artH);
-      shine.addColorStop(0, "rgba(255,255,255,0.08)");
-      shine.addColorStop(0.4, "rgba(255,255,255,0.01)");
-      shine.addColorStop(1, "rgba(255,255,255,0.08)");
-      ctx.fillStyle = shine;
-      roundedRect(ctx, artX, artY, artW, artH, 24);
-      ctx.fill();
-      ctx.restore();
-
       imgDrawn = true;
-    } else {
-      log("image failed to load:", imageUrl);
     }
   }
 
-  // placeholder icon if no image
   if (!imgDrawn) {
     ctx.save();
     ctx.globalAlpha = 0.9;
@@ -666,40 +618,27 @@ async function renderGiftRevealCard(args = {}) {
 
     ctx.font = "900 92px DejaVuSans, sans-serif";
     ctx.fillStyle = "rgba(255,255,255,0.85)";
-    const icon = prizeType === "token" ? "🪙" : (prizeType === "nft" ? "🖼️" : "🎁");
+    const icon = prizeType === "token" ? "🪙" : "🎁";
     ctx.fillText(icon, artX + 18, artY + 110);
 
     ctx.font = "600 26px DejaVuSans, sans-serif";
     ctx.fillStyle = "rgba(255,255,255,0.75)";
     ctx.fillText(prizeType.toUpperCase(), artX + 18, artY + 150);
-
-    // tiny debug stamp (so you can tell it tried)
-    if (DEBUG) {
-      ctx.font = "500 16px DejaVuSans, sans-serif";
-      ctx.fillStyle = "rgba(255,255,255,0.55)";
-      ctx.fillText(`no image`, artX + 18, artY + 180);
-    }
-
     ctx.restore();
   }
 
   // Text block
   ctx.save();
   ctx.globalAlpha = 0.95;
-
   ctx.font = "800 34px DejaVuSans, sans-serif";
   ctx.fillStyle = "rgba(255,255,255,0.95)";
-  const head =
-    prizeType === "nft" ? "NFT REVEAL" :
-    prizeType === "token" ? "TOKEN REWARD" :
-    "PRIZE REVEAL";
+  const head = prizeType === "token" ? "TOKEN REWARD" : "PRIZE REVEAL";
   ctx.fillText(head, textX, textY + 40);
 
   ctx.font = "500 24px DejaVuSans, sans-serif";
   ctx.fillStyle = "rgba(255,255,255,0.86)";
   ctx.fillText("Prize:", textX, textY + 86);
 
-  // Wrap prize label
   ctx.font = "700 30px DejaVuSans, sans-serif";
   ctx.fillStyle = "rgba(255,255,255,0.98)";
   const words = prizeLabel.split(" ");
@@ -721,14 +660,11 @@ async function renderGiftRevealCard(args = {}) {
   }
   if (line && y <= textY + artH - 20) ctx.fillText(line, textX, y);
 
-  // Optional details for token payload
   if (prizeType === "token" && payload && typeof payload === "object") {
     const amount = payload.amount != null ? safeStr(payload.amount, 60) : "";
     const symbol = payload.symbol != null ? safeStr(payload.symbol, 24) : "";
     const chain = payload.chain != null ? safeStr(payload.chain, 24) : "";
-    const extraLine = [amount && symbol ? `${amount} ${symbol}` : "", chain ? `chain: ${chain}` : ""]
-      .filter(Boolean)
-      .join(" • ");
+    const extraLine = [amount && symbol ? `${amount} ${symbol}` : "", chain ? `chain: ${chain}` : ""].filter(Boolean).join(" • ");
 
     if (extraLine) {
       ctx.font = "500 20px DejaVuSans, sans-serif";
@@ -749,17 +685,8 @@ async function renderGiftRevealCard(args = {}) {
   ctx.restore();
 
   const buffer = canvas.toBuffer("image/png");
-
-  // make filename slightly unique (Discord caching can be weird when filenames repeat)
-  const nameSalt = sha1(`${Date.now()}_${Math.random()}_${prizeType}`);
-  const filename = `gift-reveal-${nameSalt}.png`;
-
-  return {
-    buffer,
-    filename,
-    contentType: "image/png",
-    resolvedImageUrl: imageUrl || null,
-  };
+  const filename = `gift-reveal-${sha1(`${Date.now()}_${Math.random()}_${prizeType}`)}.png`;
+  return { buffer, filename, contentType: "image/png", resolvedImageUrl: imageUrl || null };
 }
 
 module.exports = {
