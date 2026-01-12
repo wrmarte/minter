@@ -1,13 +1,9 @@
 // listeners/giftGameListener.js
 // ======================================================
 // Gift Drop Guess Game — Runtime Engine (Step 4 + WOW Step 6)
-// - Handles:
-//   ✅ Button clicks (Guess/Rules/Stats)
-//   ✅ Modal submit (modern mode)
-//   ✅ Public chat guesses (public mode)
-//   ✅ DB logging for every guess + audit trail
-//   ✅ Win lock (atomic) + reveal announcement (+ reveal image card)
-//   ✅ Expiry tick (auto-expire if time runs out)
+// FIXES:
+// ✅ Prevents DiscordAPIError 10062 "Unknown interaction" by deferring modal submit immediately
+// ✅ Moves heavy winner reveal rendering/sending off the interaction critical path
 // ======================================================
 
 const {
@@ -19,6 +15,7 @@ const {
   TextInputBuilder,
   TextInputStyle,
   AttachmentBuilder,
+  ChannelType,
 } = require("discord.js");
 
 let ensureGiftSchema = null;
@@ -57,11 +54,6 @@ function intFromText(s) {
   const n = Number(t);
   if (!Number.isFinite(n)) return null;
   return Math.trunc(n);
-}
-
-function clampInt(n, min, max) {
-  if (!Number.isFinite(n)) return n;
-  return Math.max(min, Math.min(max, n));
 }
 
 function discordMessageUrl(guildId, channelId, messageId) {
@@ -123,10 +115,15 @@ async function getActiveGiftGameInChannel(pg, guildId, channelId) {
   return r.rows?.[0] || null;
 }
 
-async function getActiveGiftGameById(pg, gameId) {
+async function getGiftGameById(pg, gameId) {
+  const r = await pg.query(`SELECT * FROM gift_games WHERE id=$1 LIMIT 1`, [gameId]);
+  return r.rows?.[0] || null;
+}
+
+async function getUserState(pg, guildId, userId) {
   const r = await pg.query(
-    `SELECT * FROM gift_games WHERE id=$1 LIMIT 1`,
-    [gameId]
+    `SELECT * FROM gift_user_state WHERE guild_id=$1 AND user_id=$2`,
+    [guildId, userId]
   );
   return r.rows?.[0] || null;
 }
@@ -143,14 +140,6 @@ async function writeAudit(pg, { guild_id, game_id = null, action, actor_user_id,
   } catch (e) {
     if (DEBUG) console.warn("⚠️ [GIFT] audit insert failed:", e?.message || e);
   }
-}
-
-async function getUserState(pg, guildId, userId) {
-  const r = await pg.query(
-    `SELECT * FROM gift_user_state WHERE guild_id=$1 AND user_id=$2`,
-    [guildId, userId]
-  );
-  return r.rows?.[0] || null;
 }
 
 async function upsertUserStateOnGuess(pg, { guildId, userId, gameId, addWin = false }) {
@@ -282,7 +271,6 @@ function buildExpiredEmbed({ game, elapsedSec, totalGuesses, uniquePlayers }) {
 async function postWinnerReveal(client, pg, wonGame, winner, guessValue) {
   const guildId = wonGame.guild_id;
 
-  // Announcement channel preference
   const cfg = await getGiftConfig(pg, guildId).catch(() => null);
   const announceChannelId = cfg?.announce_channel_id || wonGame.channel_id;
 
@@ -292,23 +280,25 @@ async function postWinnerReveal(client, pg, wonGame, winner, guessValue) {
 
   const uniquePlayers = await computeUniquePlayers(pg, wonGame.id).catch(() => 0);
 
-  // Persist unique_players best-effort
   try {
     await pg.query(`UPDATE gift_games SET unique_players=$2 WHERE id=$1`, [wonGame.id, uniquePlayers]);
   } catch {}
 
   const revealPrizeText = safeStr(wonGame.prize_label || "Mystery prize 🎁", 220);
 
-  // Build reveal image (WOW)
+  // Build reveal image (WOW) — can be heavy, but this runs async (not blocking interaction)
   let attach = null;
   let embedImageName = null;
 
   if (renderGiftRevealCard) {
-    const prizePayload = wonGame.prize_payload && typeof wonGame.prize_payload === "object"
-      ? wonGame.prize_payload
-      : (() => {
-          try { return wonGame.prize_payload ? JSON.parse(wonGame.prize_payload) : null; } catch { return null; }
-        })();
+    const prizePayload = (() => {
+      try {
+        if (wonGame.prize_payload && typeof wonGame.prize_payload === "object") return wonGame.prize_payload;
+        return wonGame.prize_payload ? JSON.parse(wonGame.prize_payload) : null;
+      } catch {
+        return null;
+      }
+    })();
 
     const rr = await renderGiftRevealCard({
       prizeType: wonGame.prize_type,
@@ -325,7 +315,6 @@ async function postWinnerReveal(client, pg, wonGame, winner, guessValue) {
     }
   }
 
-  // Winner embed
   const winnerEmbed = buildWinnerEmbed({
     game: wonGame,
     winnerId: winner.id,
@@ -337,7 +326,6 @@ async function postWinnerReveal(client, pg, wonGame, winner, guessValue) {
     revealPrizeText,
   });
 
-  // If we have an attachment image, show it in the embed as the main image
   if (attach && embedImageName) {
     winnerEmbed.setImage(`attachment://${embedImageName}`);
   }
@@ -377,57 +365,52 @@ async function endGameWithWinner(client, pg, game, winner, guessRow, hint) {
   const wonGame = winUpdate.rows?.[0] || null;
   if (!wonGame) return { ok: false, reason: "already_ended" };
 
-  // Mark the specific guess as correct
-  try {
-    await pg.query(`UPDATE gift_guesses SET is_correct=TRUE, hint='correct' WHERE id=$1`, [guessRow.id]);
-  } catch {}
+  // Fast DB writes (keep awaited; should be quick)
+  try { await pg.query(`UPDATE gift_guesses SET is_correct=TRUE, hint='correct' WHERE id=$1`, [guessRow.id]); } catch {}
+  try { await upsertUserStateOnGuess(pg, { guildId, userId: winner.id, gameId, addWin: true }); } catch {}
 
-  // Update winner state
-  try {
-    await upsertUserStateOnGuess(pg, { guildId, userId: winner.id, gameId, addWin: true });
-  } catch {}
-
-  // Audit
   await writeAudit(pg, {
     guild_id: guildId,
     game_id: gameId,
     action: "winner",
     actor_user_id: winner.id,
     actor_tag: winner.tag || null,
-    details: {
-      winning_guess: guessRow.guess_value,
-      hint: hint || null
-    }
+    details: { winning_guess: guessRow.guess_value, hint: hint || null }
   });
 
-  // Edit drop card to closed + disable buttons
-  try {
-    const channel = await client.channels.fetch(game.channel_id).catch(() => null);
-    if (channel && game.drop_message_id) {
-      const msg = await channel.messages.fetch(game.drop_message_id).catch(() => null);
-      if (msg) {
-        const endedEmbed = EmbedBuilder.from(msg.embeds?.[0] || {})
-          .setTitle("🎁 MYSTERY GIFT DROP — CLOSED")
-          .setDescription(
-            [
-              `✅ Winner found!`,
-              `**Winner:** <@${winner.id}>`,
-              `**Winning Number:** \`${guessRow.guess_value}\``,
-              "",
-              `This drop is now closed.`,
-            ].join("\n")
-          );
+  // IMPORTANT: Everything below is "best-effort async" — do NOT block interaction response
+  setImmediate(async () => {
+    // Edit drop card to closed + disable buttons
+    try {
+      const channel = await client.channels.fetch(game.channel_id).catch(() => null);
+      if (channel && game.drop_message_id) {
+        const msg = await channel.messages.fetch(game.drop_message_id).catch(() => null);
+        if (msg) {
+          const endedEmbed = EmbedBuilder.from(msg.embeds?.[0] || {})
+            .setTitle("🎁 MYSTERY GIFT DROP — CLOSED")
+            .setDescription(
+              [
+                `✅ Winner found!`,
+                `**Winner:** <@${winner.id}>`,
+                `**Winning Number:** \`${guessRow.guess_value}\``,
+                "",
+                `This drop is now closed.`,
+              ].join("\n")
+            );
 
-        await msg.edit({
-          embeds: [endedEmbed],
-          components: disableAllComponents(msg.components),
-        }).catch(() => {});
+          await msg.edit({
+            embeds: [endedEmbed],
+            components: disableAllComponents(msg.components),
+          }).catch(() => {});
+        }
       }
-    }
-  } catch {}
+    } catch {}
 
-  // Post WOW winner reveal (+ image card)
-  await postWinnerReveal(client, pg, wonGame, winner, guessRow.guess_value).catch(() => {});
+    // Post winner reveal (+ image)
+    try {
+      await postWinnerReveal(client, pg, wonGame, winner, guessRow.guess_value);
+    } catch {}
+  });
 
   return { ok: true, game: wonGame };
 }
@@ -435,7 +418,6 @@ async function endGameWithWinner(client, pg, game, winner, guessRow, hint) {
 async function expireGame(client, pg, game) {
   const gameId = game.id;
 
-  // Only expire if still active
   const upd = await pg.query(
     `
     UPDATE gift_games
@@ -451,9 +433,7 @@ async function expireGame(client, pg, game) {
 
   const uniquePlayers = await computeUniquePlayers(pg, gameId).catch(() => 0);
 
-  try {
-    await pg.query(`UPDATE gift_games SET unique_players=$2 WHERE id=$1`, [gameId, uniquePlayers]);
-  } catch {}
+  try { await pg.query(`UPDATE gift_games SET unique_players=$2 WHERE id=$1`, [gameId, uniquePlayers]); } catch {}
 
   await writeAudit(pg, {
     guild_id: expired.guild_id,
@@ -464,43 +444,43 @@ async function expireGame(client, pg, game) {
     details: { reason: "time" }
   });
 
-  // Edit drop card to expired
-  try {
-    const channel = await client.channels.fetch(expired.channel_id).catch(() => null);
-    if (channel && expired.drop_message_id) {
-      const msg = await channel.messages.fetch(expired.drop_message_id).catch(() => null);
-      if (msg) {
-        const expEmbed = EmbedBuilder.from(msg.embeds?.[0] || {})
-          .setTitle("🎁 MYSTERY GIFT DROP — EXPIRED")
-          .setDescription(
-            [
-              `⏳ Time ran out. No winner this round.`,
-              `**Range:** \`${expired.range_min} → ${expired.range_max}\``,
-              "",
-              `This drop is now closed.`,
-            ].join("\n")
-          );
+  setImmediate(async () => {
+    try {
+      const channel = await client.channels.fetch(expired.channel_id).catch(() => null);
+      if (channel && expired.drop_message_id) {
+        const msg = await channel.messages.fetch(expired.drop_message_id).catch(() => null);
+        if (msg) {
+          const expEmbed = EmbedBuilder.from(msg.embeds?.[0] || {})
+            .setTitle("🎁 MYSTERY GIFT DROP — EXPIRED")
+            .setDescription(
+              [
+                `⏳ Time ran out. No winner this round.`,
+                `**Range:** \`${expired.range_min} → ${expired.range_max}\``,
+                "",
+                `This drop is now closed.`,
+              ].join("\n")
+            );
 
-        await msg.edit({
-          embeds: [expEmbed],
-          components: disableAllComponents(msg.components),
-        }).catch(() => {});
+          await msg.edit({
+            embeds: [expEmbed],
+            components: disableAllComponents(msg.components),
+          }).catch(() => {});
+        }
       }
-    }
-  } catch {}
+    } catch {}
 
-  const totalGuesses = Number(expired.total_guesses || 0);
-  const startedAt = expired.started_at ? new Date(expired.started_at).getTime() : Date.now();
-  const elapsedSec = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+    const totalGuesses = Number(expired.total_guesses || 0);
+    const startedAt = expired.started_at ? new Date(expired.started_at).getTime() : Date.now();
+    const elapsedSec = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
 
-  // Announce expiry (quiet; same channel)
-  try {
-    const ch = await client.channels.fetch(expired.channel_id).catch(() => null);
-    if (ch) {
-      const embed = buildExpiredEmbed({ game: expired, elapsedSec, totalGuesses, uniquePlayers });
-      await ch.send({ embeds: [embed], allowedMentions: { parse: [] } }).catch(() => {});
-    }
-  } catch {}
+    try {
+      const ch = await client.channels.fetch(expired.channel_id).catch(() => null);
+      if (ch) {
+        const embed = buildExpiredEmbed({ game: expired, elapsedSec, totalGuesses, uniquePlayers });
+        await ch.send({ embeds: [embed], allowedMentions: { parse: [] } }).catch(() => {});
+      }
+    } catch {}
+  });
 
   return true;
 }
@@ -513,7 +493,6 @@ async function handleGuess(client, interactionOrMessage, { game, guessValue, sou
   const userId = user.id;
   const userTag = user.tag || null;
 
-  // Ensure active + not expired
   if (game.status !== "active") return { ok: false, reason: "not_active" };
 
   const endsAtMs = game.ends_at ? new Date(game.ends_at).getTime() : null;
@@ -522,13 +501,11 @@ async function handleGuess(client, interactionOrMessage, { game, guessValue, sou
     return { ok: false, reason: "expired" };
   }
 
-  // Range
   const rMin = Number(game.range_min);
   const rMax = Number(game.range_max);
   if (!Number.isFinite(rMin) || !Number.isFinite(rMax)) return { ok: false, reason: "bad_range" };
   if (guessValue < rMin || guessValue > rMax) return { ok: false, reason: "out_of_range" };
 
-  // Cooldown + max guesses from snapshot
   const cooldownMs = Number(game.per_user_cooldown_ms || 0);
   const maxGuesses = Number(game.max_guesses_per_user || 25);
   const hintsMode = String(game.hints_mode || "highlow").toLowerCase();
@@ -550,7 +527,6 @@ async function handleGuess(client, interactionOrMessage, { game, guessValue, sou
     return { ok: false, reason: "max_guesses" };
   }
 
-  // Compute hint
   const target = Number(game.target_number);
   let hint = "none";
   if (hintsMode === "hotcold") hint = hintHotCold(guessValue, target);
@@ -559,7 +535,6 @@ async function handleGuess(client, interactionOrMessage, { game, guessValue, sou
 
   const isCorrect = guessValue === target;
 
-  // Record guess
   const guessRow = await insertGuess(pg, {
     gameId: game.id,
     guildId,
@@ -575,10 +550,8 @@ async function handleGuess(client, interactionOrMessage, { game, guessValue, sou
 
   await incrementGameGuessCount(pg, game.id);
 
-  // Update user state (no win increment here; win path adds it)
   await upsertUserStateOnGuess(pg, { guildId, userId, gameId: game.id, addWin: false });
 
-  // Win path
   if (isCorrect) {
     const res = await endGameWithWinner(client, pg, game, user, guessRow, hint);
     if (!res.ok && res.reason === "already_ended") {
@@ -591,9 +564,7 @@ async function handleGuess(client, interactionOrMessage, { game, guessValue, sou
 }
 
 module.exports = (client) => {
-  // ------------------------------------------------------
   // Expiry tick: closes timed-out games
-  // ------------------------------------------------------
   const EXPIRY_TICK_MS = Number(process.env.GIFT_EXPIRY_TICK_MS || 20000);
 
   setInterval(async () => {
@@ -622,9 +593,7 @@ module.exports = (client) => {
     }
   }, Math.max(5000, EXPIRY_TICK_MS));
 
-  // ------------------------------------------------------
   // interactionCreate: buttons + modals
-  // ------------------------------------------------------
   client.on("interactionCreate", async (interaction) => {
     try {
       if (!interaction?.guildId) return;
@@ -639,18 +608,18 @@ module.exports = (client) => {
         const [head, gameIdRaw] = cid.split(":");
         const gameId = Number(gameIdRaw);
         if (!Number.isFinite(gameId)) {
-          return interaction.reply({ content: "❌ Invalid game id.", ephemeral: true });
+          return interaction.reply({ content: "❌ Invalid game id.", ephemeral: true }).catch(() => {});
         }
 
-        const game = await getActiveGiftGameById(pg, gameId);
-        if (!game) return interaction.reply({ content: "❌ Game not found.", ephemeral: true });
+        const game = await getGiftGameById(pg, gameId);
+        if (!game) return interaction.reply({ content: "❌ Game not found.", ephemeral: true }).catch(() => {});
 
         if (head === "gift_guess") {
           if (String(game.mode || "").toLowerCase() !== "modal") {
-            return interaction.reply({ content: "This game is not using modal mode. Type guesses in chat instead.", ephemeral: true });
+            return interaction.reply({ content: "This game is not using modal mode. Type guesses in chat instead.", ephemeral: true }).catch(() => {});
           }
           if (game.status !== "active") {
-            return interaction.reply({ content: "This drop is already closed.", ephemeral: true });
+            return interaction.reply({ content: "This drop is already closed.", ephemeral: true }).catch(() => {});
           }
 
           const modal = new ModalBuilder()
@@ -667,7 +636,7 @@ module.exports = (client) => {
           const row = new ActionRowBuilder().addComponents(input);
           modal.addComponents(row);
 
-          return interaction.showModal(modal);
+          return interaction.showModal(modal).catch(() => {});
         }
 
         if (head === "gift_rules") {
@@ -695,7 +664,7 @@ module.exports = (client) => {
             )
             .setFooter({ text: `Game ID: ${game.id}` });
 
-          return interaction.reply({ embeds: [embed], ephemeral: true });
+          return interaction.reply({ embeds: [embed], ephemeral: true }).catch(() => {});
         }
 
         if (head === "gift_stats") {
@@ -714,7 +683,7 @@ module.exports = (client) => {
             )
             .setFooter({ text: `Game ID: ${game.id}` });
 
-          return interaction.reply({ embeds: [embed], ephemeral: true });
+          return interaction.reply({ embeds: [embed], ephemeral: true }).catch(() => {});
         }
 
         return;
@@ -724,27 +693,30 @@ module.exports = (client) => {
         const cid = String(interaction.customId || "");
         if (!cid.startsWith("gift_guess_modal:")) return;
 
+        // ✅ CRITICAL: ACK IMMEDIATELY to avoid 10062
+        await interaction.deferReply({ ephemeral: true }).catch(() => {});
+
         const gameId = Number(cid.split(":")[1]);
         if (!Number.isFinite(gameId)) {
-          return interaction.reply({ content: "❌ Invalid game id.", ephemeral: true });
+          return interaction.editReply("❌ Invalid game id.").catch(() => {});
         }
 
-        const game = await getActiveGiftGameById(pg, gameId);
-        if (!game) return interaction.reply({ content: "❌ Game not found.", ephemeral: true });
+        const game = await getGiftGameById(pg, gameId);
+        if (!game) return interaction.editReply("❌ Game not found.").catch(() => {});
 
         if (game.status !== "active") {
-          return interaction.reply({ content: "This drop is already closed.", ephemeral: true });
+          return interaction.editReply("This drop is already closed.").catch(() => {});
         }
 
         if (String(game.mode || "").toLowerCase() !== "modal") {
-          return interaction.reply({ content: "This game is not in modal mode.", ephemeral: true });
+          return interaction.editReply("This game is not in modal mode.").catch(() => {});
         }
 
         const val = interaction.fields.getTextInputValue("gift_number");
         const guessValue = intFromText(val);
 
         if (guessValue === null) {
-          return interaction.reply({ content: "❌ Please enter a whole number.", ephemeral: true });
+          return interaction.editReply("❌ Please enter a whole number.").catch(() => {});
         }
 
         const res = await handleGuess(client, interaction, {
@@ -757,37 +729,36 @@ module.exports = (client) => {
         if (!res.ok) {
           if (res.reason === "cooldown") {
             const s = Math.ceil((res.waitMs || 0) / 1000);
-            return interaction.reply({ content: `⏳ Cooldown. Try again in ~${s}s.`, ephemeral: true });
+            return interaction.editReply(`⏳ Cooldown. Try again in ~${s}s.`).catch(() => {});
           }
           if (res.reason === "max_guesses") {
-            return interaction.reply({ content: `⛔ You reached the max guesses for this game.`, ephemeral: true });
+            return interaction.editReply(`⛔ You reached the max guesses for this game.`).catch(() => {});
           }
           if (res.reason === "out_of_range") {
-            return interaction.reply({ content: `❌ Out of range. Use \`${game.range_min}–${game.range_max}\`.`, ephemeral: true });
+            return interaction.editReply(`❌ Out of range. Use \`${game.range_min}–${game.range_max}\`.`).catch(() => {});
           }
           if (res.reason === "already_ended") {
-            return interaction.reply({ content: `⚠️ Too late — someone already won.`, ephemeral: true });
+            return interaction.editReply(`⚠️ Too late — someone already won.`).catch(() => {});
           }
           if (res.reason === "expired") {
-            return interaction.reply({ content: `⏳ This drop already expired.`, ephemeral: true });
+            return interaction.editReply(`⏳ This drop already expired.`).catch(() => {});
           }
-          return interaction.reply({ content: `❌ Guess not accepted (${res.reason}).`, ephemeral: true });
+          return interaction.editReply(`❌ Guess not accepted (${res.reason}).`).catch(() => {});
         }
 
         if (res.won) {
-          return interaction.reply({ content: `🎁 ${hintToUserText("correct")} Winner announcement posted!`, ephemeral: true });
+          // Winner announcement runs async; this message responds instantly
+          return interaction.editReply(`🎁 ${hintToUserText("correct")} Winner announcement posted!`).catch(() => {});
         }
 
-        return interaction.reply({ content: hintToUserText(res.hint), ephemeral: true });
+        return interaction.editReply(hintToUserText(res.hint)).catch(() => {});
       }
     } catch (e) {
       if (DEBUG) console.warn("⚠️ [GIFT] interaction handler error:", e?.message || e);
     }
   });
 
-  // ------------------------------------------------------
   // messageCreate: public mode guesses
-  // ------------------------------------------------------
   client.on("messageCreate", async (message) => {
     try {
       if (!message?.guildId) return;
@@ -802,7 +773,6 @@ module.exports = (client) => {
 
       const game = await getActiveGiftGameInChannel(pg, message.guildId, message.channelId);
       if (!game) return;
-
       if (String(game.mode || "").toLowerCase() !== "public") return;
 
       const res = await handleGuess(client, message, {
@@ -837,5 +807,6 @@ module.exports = (client) => {
     }
   });
 
-  console.log("✅ GiftGameListener loaded (WOW reveal enabled: NFT + Token)");
+  console.log("✅ GiftGameListener loaded (modal defer fix + async winner reveal enabled)");
 };
+;
