@@ -1,4 +1,3 @@
-// index.js (FULL FILE — PATCHED: Gift game DB auto-init added)
 require('dotenv').config();
 
 /* ======================================================
@@ -274,6 +273,9 @@ require('./listeners/fftrigger')(client);
 require('./listeners/battlePrefix')(client);
 require('./listeners/welcomeListener')(client, pool);
 
+// ✅ NEW: Gift Drop Guess Game engine (Step 4)
+require('./listeners/giftGameListener')(client);
+
 // ================= Mint Router =================
 const { trackAllContracts } = require('./services/mintRouter');
 trackAllContracts(client);
@@ -482,4 +484,3 @@ async function gracefulShutdown(sig) {
 
 process.once('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.once('SIGINT', () => gracefulShutdown('SIGINT'));
-
