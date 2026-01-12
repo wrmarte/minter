@@ -1,3 +1,4 @@
+// index.js (FULL FILE — PATCHED: Gift game DB auto-init added)
 require('dotenv').config();
 
 /* ======================================================
@@ -29,6 +30,19 @@ try {
   }
 } catch (e) {
   console.warn('⚠️ digestDebug module not found (safe): ./services/digestDebug');
+}
+
+// ✅ NEW: Gift Game DB schema auto-init (Railway friendly, safe if file missing)
+let ensureGiftSchema = null;
+try {
+  const mod = require('./services/gift/ensureGiftSchema');
+  if (mod && typeof mod.ensureGiftSchema === 'function') {
+    ensureGiftSchema = mod.ensureGiftSchema;
+  } else {
+    console.warn('⚠️ ensureGiftSchema loaded but missing ensureGiftSchema()');
+  }
+} catch (e) {
+  console.warn('⚠️ Gift schema module not found (safe): ./services/gift/ensureGiftSchema');
 }
 
 // ---------- Auto-integrate PG knobs ----------
@@ -340,6 +354,22 @@ async function onClientReady() {
     console.error('❌ Failed to init guild_webhooks table:', e);
   }
 
+  // ✅ NEW: Gift Drop Guess Game tables (auto-init, safe)
+  try {
+    if (ensureGiftSchema) {
+      const ok = await ensureGiftSchema(client);
+      if (ok) {
+        console.log('✅ [GIFT] schema ready (auto)');
+      } else {
+        console.warn('⚠️ [GIFT] schema not ready (pg missing or failed)');
+      }
+    } else {
+      console.warn('⚠️ [GIFT] ensureGiftSchema not loaded; skipping');
+    }
+  } catch (e) {
+    console.warn('⚠️ [GIFT] schema init failed:', e?.message || e);
+  }
+
   // ✅ NEW: Start Daily Digest Scheduler (Automation #2)
   // Requires: jobs/dailyDigestScheduler.js (and digest tables exist; migration runs on boot above)
   try {
@@ -452,3 +482,4 @@ async function gracefulShutdown(sig) {
 
 process.once('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.once('SIGINT', () => gracefulShutdown('SIGINT'));
+
