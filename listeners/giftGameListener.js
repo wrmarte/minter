@@ -1,9 +1,10 @@
 // listeners/giftGameListener.js
 // ======================================================
-// Gift Drop Guess Game — Runtime Engine (Step 4 + WOW Step 6)
-// FIXES:
-// ✅ Prevents DiscordAPIError 10062 "Unknown interaction" by deferring modal submit immediately
-// ✅ Moves heavy winner reveal rendering/sending off the interaction critical path
+// Gift Drop Guess Game — Runtime Engine
+// PATCH:
+// ✅ Modal submit: deferReply() prevents 10062 Unknown interaction
+// ✅ Winner reveal: embed uses ACTUAL NFT image URL when available
+// ✅ Winner reveal: adds NFT name + tokenId (and chain/contract) when provided
 // ======================================================
 
 const {
@@ -15,7 +16,6 @@ const {
   TextInputBuilder,
   TextInputStyle,
   AttachmentBuilder,
-  ChannelType,
 } = require("discord.js");
 
 let ensureGiftSchema = null;
@@ -33,7 +33,6 @@ try {
 const DEBUG = String(process.env.GIFT_DEBUG || "").trim() === "1";
 const PUBLIC_REACT_HINTS = String(process.env.GIFT_PUBLIC_REACT_HINTS || "").trim() === "1";
 
-// Optional: separate GIF for reveal/opened box
 const GIFT_REVEAL_GIF =
   (process.env.GIFT_REVEAL_GIF || "").trim() ||
   "https://media.giphy.com/media/3o6Zt481isNVuQI1l6/giphy.gif";
@@ -56,9 +55,9 @@ function intFromText(s) {
   return Math.trunc(n);
 }
 
-function discordMessageUrl(guildId, channelId, messageId) {
-  if (!guildId || !channelId || !messageId) return null;
-  return `https://discord.com/channels/${guildId}/${channelId}/${messageId}`;
+function isDataUrl(s) {
+  const t = String(s || "").trim();
+  return /^data:/i.test(t);
 }
 
 function hintHighLow(guess, target) {
@@ -219,20 +218,34 @@ function disableAllComponents(components) {
   }
 }
 
-function buildWinnerEmbed({ game, winnerId, winnerTag, winNum, elapsedSec, totalGuesses, uniquePlayers, revealPrizeText }) {
+function buildWinnerEmbed({
+  game,
+  winnerId,
+  winnerTag,
+  winNum,
+  elapsedSec,
+  totalGuesses,
+  uniquePlayers,
+  revealPrizeText,
+  nftDisplayLine,
+  nftMetaLine,
+}) {
+  const lines = [
+    `**Winner:** <@${winnerId}>${winnerTag ? ` (\`${winnerTag}\`)` : ""}`,
+    `**Winning Number:** \`${winNum}\``,
+    `**Time to Win:** \`${elapsedSec}s\``,
+    `**Total Guesses:** \`${totalGuesses}\``,
+    `**Unique Players:** \`${uniquePlayers}\``,
+    "",
+    `🎁 **Prize Revealed:** ${revealPrizeText}`,
+  ];
+
+  if (nftDisplayLine) lines.push(nftDisplayLine);
+  if (nftMetaLine) lines.push(nftMetaLine);
+
   const e = new EmbedBuilder()
     .setTitle("🏆 GIFT OPENED — WE HAVE A WINNER!")
-    .setDescription(
-      [
-        `**Winner:** <@${winnerId}>${winnerTag ? ` (\`${winnerTag}\`)` : ""}`,
-        `**Winning Number:** \`${winNum}\``,
-        `**Time to Win:** \`${elapsedSec}s\``,
-        `**Total Guesses:** \`${totalGuesses}\``,
-        `**Unique Players:** \`${uniquePlayers}\``,
-        "",
-        `🎁 **Prize Revealed:** ${revealPrizeText}`,
-      ].join("\n")
-    )
+    .setDescription(lines.join("\n"))
     .setThumbnail(GIFT_REVEAL_GIF);
 
   if (game?.commit_enabled && game?.commit_hash) {
@@ -268,6 +281,46 @@ function buildExpiredEmbed({ game, elapsedSec, totalGuesses, uniquePlayers }) {
   return e;
 }
 
+function parsePrizePayload(wonGame) {
+  try {
+    if (wonGame.prize_payload && typeof wonGame.prize_payload === "object") return wonGame.prize_payload;
+    return wonGame.prize_payload ? JSON.parse(wonGame.prize_payload) : null;
+  } catch {
+    return null;
+  }
+}
+
+function buildNftDisplayFromPayload(payload) {
+  if (!payload || typeof payload !== "object") return { display: null, meta: null };
+
+  const chain = safeStr(payload.chain || payload.network || payload.net || "", 20);
+  const contract = safeStr(payload.contract || payload.ca || payload.address || "", 80);
+  const tokenId = safeStr(payload.tokenId || payload.token_id || payload.id || payload.token || payload.tokenID || "", 48);
+
+  // name can be:
+  // - payload.name (token name)
+  // - payload.collectionName (collection)
+  // - payload.project (your custom label)
+  const name =
+    safeStr(payload.name || payload.tokenName || payload.collectionName || payload.project || payload.collection || "", 120);
+
+  // Display line: "🖼️ NFT: NAME #ID"
+  let display = null;
+  if (name && tokenId) display = `🖼️ **NFT:** \`${name} #${tokenId}\``;
+  else if (tokenId) display = `🖼️ **NFT:** \`#${tokenId}\``;
+  else if (name) display = `🖼️ **NFT:** \`${name}\``;
+
+  // Meta line: "chain: base • contract: 0xabc... • id: 123"
+  const parts = [];
+  if (chain) parts.push(`chain: \`${chain}\``);
+  if (contract) parts.push(`contract: \`${contract.slice(0, 10)}…${contract.slice(-6)}\``);
+  if (tokenId) parts.push(`tokenId: \`${tokenId}\``);
+
+  const meta = parts.length ? `🔎 ${parts.join(" • ")}` : null;
+
+  return { display, meta };
+}
+
 async function postWinnerReveal(client, pg, wonGame, winner, guessValue) {
   const guildId = wonGame.guild_id;
 
@@ -286,20 +339,19 @@ async function postWinnerReveal(client, pg, wonGame, winner, guessValue) {
 
   const revealPrizeText = safeStr(wonGame.prize_label || "Mystery prize 🎁", 220);
 
-  // Build reveal image (WOW) — can be heavy, but this runs async (not blocking interaction)
-  let attach = null;
-  let embedImageName = null;
+  const prizePayload = parsePrizePayload(wonGame);
+
+  // NFT name/id lines
+  const { display: nftDisplayLine, meta: nftMetaLine } = (wonGame.prize_type === "nft")
+    ? buildNftDisplayFromPayload(prizePayload)
+    : { display: null, meta: null };
+
+  // Render reveal card (optional wow stamp)
+  let attachCard = null;
+  let cardName = null;
+  let resolvedImageUrl = null;
 
   if (renderGiftRevealCard) {
-    const prizePayload = (() => {
-      try {
-        if (wonGame.prize_payload && typeof wonGame.prize_payload === "object") return wonGame.prize_payload;
-        return wonGame.prize_payload ? JSON.parse(wonGame.prize_payload) : null;
-      } catch {
-        return null;
-      }
-    })();
-
     const rr = await renderGiftRevealCard({
       prizeType: wonGame.prize_type,
       prizeLabel: revealPrizeText,
@@ -309,12 +361,16 @@ async function postWinnerReveal(client, pg, wonGame, winner, guessValue) {
       footer: `Game #${wonGame.id} • ${wonGame.prize_type || "prize"} reveal`,
     }).catch(() => null);
 
-    if (rr?.buffer && rr?.filename) {
-      attach = new AttachmentBuilder(rr.buffer, { name: rr.filename });
-      embedImageName = rr.filename;
+    resolvedImageUrl = rr?.resolvedImageUrl || null;
+
+    if (rr?.buffer) {
+      // Always attach as a consistent filename for thumbnail usage
+      cardName = "gift-card.png";
+      attachCard = new AttachmentBuilder(rr.buffer, { name: cardName });
     }
   }
 
+  // Build embed
   const winnerEmbed = buildWinnerEmbed({
     game: wonGame,
     winnerId: winner.id,
@@ -324,10 +380,24 @@ async function postWinnerReveal(client, pg, wonGame, winner, guessValue) {
     totalGuesses,
     uniquePlayers,
     revealPrizeText,
+    nftDisplayLine,
+    nftMetaLine,
   });
 
-  if (attach && embedImageName) {
-    winnerEmbed.setImage(`attachment://${embedImageName}`);
+  // ✅ MAIN FIX:
+  // If resolvedImageUrl is a real http(s) image (NOT data:), show it as the big embed image.
+  // Otherwise fall back to the render card attachment image.
+  const canUseDirectImage = resolvedImageUrl && !isDataUrl(resolvedImageUrl) && /^https?:\/\//i.test(String(resolvedImageUrl));
+
+  if (canUseDirectImage) {
+    winnerEmbed.setImage(resolvedImageUrl); // big Discord preview
+    if (attachCard && cardName) {
+      winnerEmbed.setThumbnail(`attachment://${cardName}`); // nice wow stamp
+    }
+  } else {
+    if (attachCard && cardName) {
+      winnerEmbed.setImage(`attachment://${cardName}`);
+    }
   }
 
   try {
@@ -335,7 +405,7 @@ async function postWinnerReveal(client, pg, wonGame, winner, guessValue) {
     if (ch) {
       await ch.send({
         embeds: [winnerEmbed],
-        files: attach ? [attach] : [],
+        files: attachCard ? [attachCard] : [],
         allowedMentions: { parse: [] },
       }).catch(() => {});
     }
@@ -346,7 +416,6 @@ async function endGameWithWinner(client, pg, game, winner, guessRow, hint) {
   const guildId = game.guild_id;
   const gameId = game.id;
 
-  // Atomic win lock
   const winUpdate = await pg.query(
     `
     UPDATE gift_games
@@ -365,7 +434,6 @@ async function endGameWithWinner(client, pg, game, winner, guessRow, hint) {
   const wonGame = winUpdate.rows?.[0] || null;
   if (!wonGame) return { ok: false, reason: "already_ended" };
 
-  // Fast DB writes (keep awaited; should be quick)
   try { await pg.query(`UPDATE gift_guesses SET is_correct=TRUE, hint='correct' WHERE id=$1`, [guessRow.id]); } catch {}
   try { await upsertUserStateOnGuess(pg, { guildId, userId: winner.id, gameId, addWin: true }); } catch {}
 
@@ -378,9 +446,7 @@ async function endGameWithWinner(client, pg, game, winner, guessRow, hint) {
     details: { winning_guess: guessRow.guess_value, hint: hint || null }
   });
 
-  // IMPORTANT: Everything below is "best-effort async" — do NOT block interaction response
   setImmediate(async () => {
-    // Edit drop card to closed + disable buttons
     try {
       const channel = await client.channels.fetch(game.channel_id).catch(() => null);
       if (channel && game.drop_message_id) {
@@ -406,7 +472,6 @@ async function endGameWithWinner(client, pg, game, winner, guessRow, hint) {
       }
     } catch {}
 
-    // Post winner reveal (+ image)
     try {
       await postWinnerReveal(client, pg, wonGame, winner, guessRow.guess_value);
     } catch {}
@@ -549,14 +614,11 @@ async function handleGuess(client, interactionOrMessage, { game, guessValue, sou
   });
 
   await incrementGameGuessCount(pg, game.id);
-
   await upsertUserStateOnGuess(pg, { guildId, userId, gameId: game.id, addWin: false });
 
   if (isCorrect) {
     const res = await endGameWithWinner(client, pg, game, user, guessRow, hint);
-    if (!res.ok && res.reason === "already_ended") {
-      return { ok: false, reason: "already_ended" };
-    }
+    if (!res.ok && res.reason === "already_ended") return { ok: false, reason: "already_ended" };
     return { ok: true, won: true, hint: "correct" };
   }
 
@@ -564,7 +626,6 @@ async function handleGuess(client, interactionOrMessage, { game, guessValue, sou
 }
 
 module.exports = (client) => {
-  // Expiry tick: closes timed-out games
   const EXPIRY_TICK_MS = Number(process.env.GIFT_EXPIRY_TICK_MS || 20000);
 
   setInterval(async () => {
@@ -593,7 +654,6 @@ module.exports = (client) => {
     }
   }, Math.max(5000, EXPIRY_TICK_MS));
 
-  // interactionCreate: buttons + modals
   client.on("interactionCreate", async (interaction) => {
     try {
       if (!interaction?.guildId) return;
@@ -693,61 +753,38 @@ module.exports = (client) => {
         const cid = String(interaction.customId || "");
         if (!cid.startsWith("gift_guess_modal:")) return;
 
-        // ✅ CRITICAL: ACK IMMEDIATELY to avoid 10062
+        // ✅ CRITICAL: ACK IMMEDIATELY
         await interaction.deferReply({ ephemeral: true }).catch(() => {});
 
         const gameId = Number(cid.split(":")[1]);
-        if (!Number.isFinite(gameId)) {
-          return interaction.editReply("❌ Invalid game id.").catch(() => {});
-        }
+        if (!Number.isFinite(gameId)) return interaction.editReply("❌ Invalid game id.").catch(() => {});
 
         const game = await getGiftGameById(pg, gameId);
         if (!game) return interaction.editReply("❌ Game not found.").catch(() => {});
-
-        if (game.status !== "active") {
-          return interaction.editReply("This drop is already closed.").catch(() => {});
-        }
-
+        if (game.status !== "active") return interaction.editReply("This drop is already closed.").catch(() => {});
         if (String(game.mode || "").toLowerCase() !== "modal") {
           return interaction.editReply("This game is not in modal mode.").catch(() => {});
         }
 
         const val = interaction.fields.getTextInputValue("gift_number");
         const guessValue = intFromText(val);
+        if (guessValue === null) return interaction.editReply("❌ Please enter a whole number.").catch(() => {});
 
-        if (guessValue === null) {
-          return interaction.editReply("❌ Please enter a whole number.").catch(() => {});
-        }
-
-        const res = await handleGuess(client, interaction, {
-          game,
-          guessValue,
-          source: "modal",
-          messageId: null
-        });
+        const res = await handleGuess(client, interaction, { game, guessValue, source: "modal", messageId: null });
 
         if (!res.ok) {
           if (res.reason === "cooldown") {
             const s = Math.ceil((res.waitMs || 0) / 1000);
             return interaction.editReply(`⏳ Cooldown. Try again in ~${s}s.`).catch(() => {});
           }
-          if (res.reason === "max_guesses") {
-            return interaction.editReply(`⛔ You reached the max guesses for this game.`).catch(() => {});
-          }
-          if (res.reason === "out_of_range") {
-            return interaction.editReply(`❌ Out of range. Use \`${game.range_min}–${game.range_max}\`.`).catch(() => {});
-          }
-          if (res.reason === "already_ended") {
-            return interaction.editReply(`⚠️ Too late — someone already won.`).catch(() => {});
-          }
-          if (res.reason === "expired") {
-            return interaction.editReply(`⏳ This drop already expired.`).catch(() => {});
-          }
+          if (res.reason === "max_guesses") return interaction.editReply(`⛔ You reached the max guesses for this game.`).catch(() => {});
+          if (res.reason === "out_of_range") return interaction.editReply(`❌ Out of range. Use \`${game.range_min}–${game.range_max}\`.`).catch(() => {});
+          if (res.reason === "already_ended") return interaction.editReply(`⚠️ Too late — someone already won.`).catch(() => {});
+          if (res.reason === "expired") return interaction.editReply(`⏳ This drop already expired.`).catch(() => {});
           return interaction.editReply(`❌ Guess not accepted (${res.reason}).`).catch(() => {});
         }
 
         if (res.won) {
-          // Winner announcement runs async; this message responds instantly
           return interaction.editReply(`🎁 ${hintToUserText("correct")} Winner announcement posted!`).catch(() => {});
         }
 
@@ -758,7 +795,6 @@ module.exports = (client) => {
     }
   });
 
-  // messageCreate: public mode guesses
   client.on("messageCreate", async (message) => {
     try {
       if (!message?.guildId) return;
@@ -775,17 +811,10 @@ module.exports = (client) => {
       if (!game) return;
       if (String(game.mode || "").toLowerCase() !== "public") return;
 
-      const res = await handleGuess(client, message, {
-        game,
-        guessValue,
-        source: "public",
-        messageId: message.id
-      });
+      const res = await handleGuess(client, message, { game, guessValue, source: "public", messageId: message.id });
 
       if (!res.ok) {
-        if (PUBLIC_REACT_HINTS && (res.reason === "out_of_range")) {
-          message.react("⚠️").catch(() => {});
-        }
+        if (PUBLIC_REACT_HINTS && (res.reason === "out_of_range")) message.react("⚠️").catch(() => {});
         return;
       }
 
@@ -807,6 +836,6 @@ module.exports = (client) => {
     }
   });
 
-  console.log("✅ GiftGameListener loaded (modal defer fix + async winner reveal enabled)");
+  console.log("✅ GiftGameListener loaded (actual NFT image embed + name/tokenId lines)");
 };
-;
+
