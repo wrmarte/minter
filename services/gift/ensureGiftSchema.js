@@ -17,7 +17,6 @@ async function ensureGiftSchema(client) {
       return false;
     }
 
-    // One big migration string is fine (Postgres supports it)
     await pg.query(`
       CREATE TABLE IF NOT EXISTS gift_config (
         guild_id           TEXT PRIMARY KEY,
@@ -153,3 +152,4 @@ async function ensureGiftSchema(client) {
 }
 
 module.exports = { ensureGiftSchema };
+
