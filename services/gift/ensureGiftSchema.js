@@ -1,155 +1,153 @@
 // services/gift/ensureGiftSchema.js
 // ======================================================
-// Gift Drop Guess Game — Schema Auto-Init
-// - Creates all tables/indexes if missing (Railway friendly)
-// - Safe to run on every boot (idempotent)
+// Gift Game Schema Ensurer (SAFE MIGRATION)
+// - Creates tables if missing
+// - Adds columns if missing (ALTER TABLE ... ADD COLUMN IF NOT EXISTS)
 // ======================================================
 
-const DEBUG = String(process.env.GIFT_DEBUG || "").trim() === "1";
+const DEBUG = String(process.env.GIFT_SCHEMA_DEBUG || "").trim() === "1";
+
+function log(...a) { if (DEBUG) console.log("[GIFT_SCHEMA]", ...a); }
 
 async function ensureGiftSchema(client) {
-  try {
-    if (client.__giftSchemaReady) return true;
+  const pg = client?.pg;
+  if (!pg?.query) return false;
 
-    const pg = client?.pg;
-    if (!pg?.query) {
-      if (DEBUG) console.log("[GIFT] schema: pg not available on client.pg");
-      return false;
-    }
+  // --- Core tables ---
+  await pg.query(`
+    CREATE TABLE IF NOT EXISTS gift_config (
+      guild_id TEXT PRIMARY KEY,
+      announce_channel_id TEXT,
+      default_mode TEXT DEFAULT 'modal',               -- modal | public
+      default_range_min INT DEFAULT 1,
+      default_range_max INT DEFAULT 200,
+      default_duration_sec INT DEFAULT 600,
+      default_hints_mode TEXT DEFAULT 'hotcold',       -- hotcold | highlow | none
+      default_per_user_cooldown_ms INT DEFAULT 2500,
+      default_max_guesses_per_user INT DEFAULT 50,
 
-    await pg.query(`
-      CREATE TABLE IF NOT EXISTS gift_config (
-        guild_id           TEXT PRIMARY KEY,
-        channel_id         TEXT,
-        mode_default       TEXT DEFAULT 'modal',
-        allow_public_mode  BOOLEAN DEFAULT TRUE,
-        allow_modal_mode   BOOLEAN DEFAULT TRUE,
+      -- ✅ NEW: public response behavior
+      public_hint_mode TEXT DEFAULT 'reply',           -- reply | react | both | silent
+      public_hint_delete_ms INT DEFAULT 8000,          -- delete bot reply after X ms (0 = keep)
+      public_hint_only_if_reply_to_user INT DEFAULT 1, -- 1 = reply to user's guess message, 0 = normal send
 
-        range_min_default  INT DEFAULT 1,
-        range_max_default  INT DEFAULT 100,
+      -- ✅ NEW: audit visibility default
+      audit_public_default INT DEFAULT 1,              -- 1 = post audit publicly by default
 
-        duration_sec_default INT DEFAULT 600,
-        per_user_cooldown_ms INT DEFAULT 6000,
-        max_guesses_per_user INT DEFAULT 25,
-        hints_mode         TEXT DEFAULT 'highlow',
-        announce_channel_id TEXT,
+      updated_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
 
-        created_at         TIMESTAMPTZ DEFAULT NOW(),
-        updated_at         TIMESTAMPTZ DEFAULT NOW()
-      );
+  await pg.query(`
+    CREATE TABLE IF NOT EXISTS gift_games (
+      id BIGSERIAL PRIMARY KEY,
+      guild_id TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      started_by_user_id TEXT,
+      started_by_tag TEXT,
 
-      CREATE TABLE IF NOT EXISTS gift_games (
-        id                BIGSERIAL PRIMARY KEY,
-        guild_id          TEXT NOT NULL,
-        channel_id        TEXT NOT NULL,
-        thread_id         TEXT,
-        created_by        TEXT NOT NULL,
-        created_by_tag    TEXT,
+      status TEXT NOT NULL DEFAULT 'active',           -- active | ended | expired | cancelled
+      mode TEXT NOT NULL DEFAULT 'modal',              -- modal | public
 
-        mode              TEXT NOT NULL,
-        status            TEXT NOT NULL DEFAULT 'active',
+      range_min INT NOT NULL,
+      range_max INT NOT NULL,
+      target_number INT NOT NULL,
 
-        range_min         INT NOT NULL,
-        range_max         INT NOT NULL,
+      hints_mode TEXT DEFAULT 'hotcold',               -- hotcold | highlow | none
+      per_user_cooldown_ms INT DEFAULT 2500,
+      max_guesses_per_user INT DEFAULT 50,
 
-        target_number     INT,
-        target_source     TEXT NOT NULL DEFAULT 'admin',
-        commit_hash       TEXT,
-        commit_salt       TEXT,
-        commit_enabled    BOOLEAN DEFAULT FALSE,
+      total_guesses INT DEFAULT 0,
+      unique_players INT DEFAULT 0,
 
-        drop_message_id   TEXT,
-        drop_message_url  TEXT,
+      started_at TIMESTAMP DEFAULT NOW(),
+      ends_at TIMESTAMP,
 
-        prize_type        TEXT DEFAULT 'text',
-        prize_label       TEXT,
-        prize_secret      BOOLEAN DEFAULT TRUE,
-        prize_payload     JSONB,
+      drop_message_id TEXT,
 
-        started_at        TIMESTAMPTZ DEFAULT NOW(),
-        ends_at           TIMESTAMPTZ,
-        ended_at          TIMESTAMPTZ,
+      winner_user_id TEXT,
+      winner_user_tag TEXT,
+      winning_guess INT,
 
-        winner_user_id    TEXT,
-        winner_user_tag   TEXT,
-        winning_guess     INT,
-        total_guesses     INT DEFAULT 0,
-        unique_players    INT DEFAULT 0,
+      prize_type TEXT DEFAULT 'text',                  -- nft | token | text
+      prize_label TEXT DEFAULT 'Mystery prize 🎁',
+      prize_payload JSONB,
+      prize_secret INT DEFAULT 1,
 
-        per_user_cooldown_ms INT,
-        max_guesses_per_user INT,
-        hints_mode        TEXT,
+      -- fairness commit
+      commit_enabled INT DEFAULT 0,
+      commit_hash TEXT,
+      commit_salt TEXT,
 
-        notes             TEXT,
+      ended_at TIMESTAMP
+    );
+  `);
 
-        created_at        TIMESTAMPTZ DEFAULT NOW()
-      );
+  await pg.query(`
+    CREATE TABLE IF NOT EXISTS gift_guesses (
+      id BIGSERIAL PRIMARY KEY,
+      game_id BIGINT NOT NULL REFERENCES gift_games(id) ON DELETE CASCADE,
+      guild_id TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      user_tag TEXT,
 
-      CREATE INDEX IF NOT EXISTS idx_gift_games_guild_status
-        ON gift_games (guild_id, status, started_at DESC);
+      guess_value INT NOT NULL,
+      source TEXT DEFAULT 'public',                    -- public | modal
+      message_id TEXT,
 
-      CREATE TABLE IF NOT EXISTS gift_guesses (
-        id                BIGSERIAL PRIMARY KEY,
-        game_id           BIGINT NOT NULL REFERENCES gift_games(id) ON DELETE CASCADE,
-        guild_id          TEXT NOT NULL,
-        channel_id        TEXT NOT NULL,
-        user_id           TEXT NOT NULL,
-        user_tag          TEXT,
+      is_correct BOOLEAN DEFAULT FALSE,
+      hint TEXT,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
 
-        guess_value       INT NOT NULL,
-        source            TEXT NOT NULL,
-        message_id        TEXT,
-        created_at        TIMESTAMPTZ DEFAULT NOW(),
+  await pg.query(`
+    CREATE TABLE IF NOT EXISTS gift_user_state (
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
 
-        is_correct        BOOLEAN DEFAULT FALSE,
-        hint              TEXT
-      );
+      last_guess_at TIMESTAMP,
+      guesses_in_game INT DEFAULT 0,
+      last_game_id BIGINT,
 
-      CREATE INDEX IF NOT EXISTS idx_gift_guesses_game_user
-        ON gift_guesses (game_id, user_id, created_at DESC);
+      wins_total INT DEFAULT 0,
+      guesses_total INT DEFAULT 0,
 
-      CREATE INDEX IF NOT EXISTS idx_gift_guesses_game_value
-        ON gift_guesses (game_id, guess_value);
+      updated_at TIMESTAMP DEFAULT NOW(),
 
-      CREATE TABLE IF NOT EXISTS gift_user_state (
-        guild_id          TEXT NOT NULL,
-        user_id           TEXT NOT NULL,
+      PRIMARY KEY (guild_id, user_id)
+    );
+  `);
 
-        last_guess_at     TIMESTAMPTZ,
-        guesses_in_game   INT DEFAULT 0,
-        last_game_id      BIGINT,
+  await pg.query(`
+    CREATE TABLE IF NOT EXISTS gift_audit (
+      id BIGSERIAL PRIMARY KEY,
+      guild_id TEXT NOT NULL,
+      game_id BIGINT,
+      action TEXT NOT NULL,
+      actor_user_id TEXT,
+      actor_tag TEXT,
+      details JSONB,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+  `);
 
-        wins_total        INT DEFAULT 0,
-        guesses_total     INT DEFAULT 0,
+  // --- Safe “add column” upgrades for older installs ---
+  const alters = [
+    `ALTER TABLE gift_config ADD COLUMN IF NOT EXISTS public_hint_mode TEXT DEFAULT 'reply';`,
+    `ALTER TABLE gift_config ADD COLUMN IF NOT EXISTS public_hint_delete_ms INT DEFAULT 8000;`,
+    `ALTER TABLE gift_config ADD COLUMN IF NOT EXISTS public_hint_only_if_reply_to_user INT DEFAULT 1;`,
+    `ALTER TABLE gift_config ADD COLUMN IF NOT EXISTS audit_public_default INT DEFAULT 1;`,
+  ];
 
-        updated_at        TIMESTAMPTZ DEFAULT NOW(),
-
-        PRIMARY KEY (guild_id, user_id)
-      );
-
-      CREATE TABLE IF NOT EXISTS gift_audit (
-        id                BIGSERIAL PRIMARY KEY,
-        guild_id          TEXT NOT NULL,
-        game_id           BIGINT,
-        action            TEXT NOT NULL,
-        actor_user_id     TEXT,
-        actor_tag         TEXT,
-        details           JSONB,
-        created_at        TIMESTAMPTZ DEFAULT NOW()
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_gift_audit_guild_time
-        ON gift_audit (guild_id, created_at DESC);
-    `);
-
-    client.__giftSchemaReady = true;
-    console.log("✅ [GIFT] schema ready");
-    return true;
-  } catch (err) {
-    console.error("❌ [GIFT] schema init failed:", err?.message || err);
-    return false;
+  for (const q of alters) {
+    try { await pg.query(q); } catch (e) { log("ALTER failed:", e?.message || e); }
   }
+
+  // Ensure config row exists per guild (lazy insert done elsewhere, but safe to keep)
+  client.__giftSchemaReady = true;
+  return true;
 }
 
 module.exports = { ensureGiftSchema };
-
