@@ -2,8 +2,9 @@
 // ======================================================
 // /gift config  (Step 2)
 // /gift start   (Step 3)
-// /gift stop    (Step 5) ✅ ADDED
-// /gift review  (Step 5) ✅ ADDED
+// /gift stop    (Step 5) ✅
+// /gift review  (Step 5) ✅
+// /gift audit   (NEW)    ✅ PUBLIC audit option
 //
 // NOTE: Runtime (Step 4) is handled by listeners/giftGameListener.js
 // ======================================================
@@ -86,7 +87,28 @@ async function writeAudit(pg, { guild_id, game_id = null, action, actor_user_id,
   }
 }
 
+// ✅ Ensure NEW columns exist so upsert won't crash older DBs
+async function ensureGiftConfigColumns(pg) {
+  const alters = [
+    `ALTER TABLE gift_config ADD COLUMN IF NOT EXISTS public_hint_mode TEXT DEFAULT 'reply';`,
+    `ALTER TABLE gift_config ADD COLUMN IF NOT EXISTS public_hint_delete_ms INT DEFAULT 8000;`,
+    `ALTER TABLE gift_config ADD COLUMN IF NOT EXISTS audit_public_default BOOLEAN DEFAULT TRUE;`,
+  ];
+
+  for (const q of alters) {
+    try {
+      await pg.query(q);
+    } catch (e) {
+      // Don't hard-fail: schema might differ per build
+      console.warn("⚠️ [GIFT] gift_config alter skipped:", e?.message || e);
+    }
+  }
+}
+
 async function upsertGiftConfig(pg, row) {
+  // Make sure new columns exist before upsert touches them
+  await ensureGiftConfigColumns(pg);
+
   const q = `
     INSERT INTO gift_config (
       guild_id,
@@ -101,11 +123,18 @@ async function upsertGiftConfig(pg, row) {
       max_guesses_per_user,
       hints_mode,
       announce_channel_id,
+
+      -- ✅ NEW knobs
+      public_hint_mode,
+      public_hint_delete_ms,
+      audit_public_default,
+
       created_at,
       updated_at
     ) VALUES (
       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
-      COALESCE($13, NOW()),
+      $13,$14,$15,
+      COALESCE($16, NOW()),
       NOW()
     )
     ON CONFLICT (guild_id) DO UPDATE SET
@@ -120,9 +149,16 @@ async function upsertGiftConfig(pg, row) {
       max_guesses_per_user = EXCLUDED.max_guesses_per_user,
       hints_mode = EXCLUDED.hints_mode,
       announce_channel_id = EXCLUDED.announce_channel_id,
+
+      -- ✅ NEW knobs
+      public_hint_mode = EXCLUDED.public_hint_mode,
+      public_hint_delete_ms = EXCLUDED.public_hint_delete_ms,
+      audit_public_default = EXCLUDED.audit_public_default,
+
       updated_at = NOW()
     RETURNING *;
   `;
+
   const values = [
     row.guild_id,
     row.channel_id,
@@ -136,13 +172,21 @@ async function upsertGiftConfig(pg, row) {
     row.max_guesses_per_user,
     row.hints_mode,
     row.announce_channel_id,
+
+    row.public_hint_mode,
+    row.public_hint_delete_ms,
+    row.audit_public_default,
+
     row.created_at || null,
   ];
+
   const res = await pg.query(q, values);
   return res.rows?.[0] || null;
 }
 
 async function getGiftConfig(pg, guildId) {
+  // ensure columns exist so SELECT returns them in future
+  await ensureGiftConfigColumns(pg);
   const r = await pg.query(`SELECT * FROM gift_config WHERE guild_id=$1`, [guildId]);
   return r.rows?.[0] || null;
 }
@@ -235,9 +279,9 @@ async function attachDropMessage(pg, { gameId, messageId, messageUrl }) {
 function disableAllComponents(components) {
   try {
     if (!Array.isArray(components)) return [];
-    return components.map(row => {
+    return components.map((row) => {
       const newRow = ActionRowBuilder.from(row);
-      newRow.components = newRow.components.map(c => {
+      newRow.components = newRow.components.map((c) => {
         const b = ButtonBuilder.from(c);
         b.setDisabled(true);
         return b;
@@ -256,6 +300,75 @@ function fmtStatus(s) {
   if (v === "expired") return "⏳ expired";
   if (v === "cancelled") return "🛑 cancelled";
   return v || "unknown";
+}
+
+// ✅ Friendly payload builder (no JSON needed)
+function buildPrizePayloadFromFriendlyInputs(opts = {}) {
+  const prizeType = String(opts.prizeType || "text").toLowerCase();
+
+  // Common
+  const chain = safeStr(opts.chain || "", 16) || "base";
+  const imageUrl = safeStr(opts.image_url || "", 500) || null;
+  const metadataUrl = safeStr(opts.metadata_url || "", 500) || null;
+
+  // NFT
+  const nftName = safeStr(opts.nft_name || "", 120) || null;
+  const nftContract = safeStr(opts.nft_contract || "", 120) || null;
+  const tokenId = safeStr(opts.token_id || "", 80) || null;
+
+  // Token
+  const tokenAmount = safeStr(opts.token_amount || "", 64) || null;
+  const tokenSymbol = safeStr(opts.token_symbol || "", 24) || null;
+  const tokenLogo = safeStr(opts.token_logo || "", 500) || null;
+
+  // Role/URL
+  const roleId = safeStr(opts.role_id || "", 64) || null;
+  const url = safeStr(opts.url || "", 500) || null;
+
+  if (prizeType === "nft") {
+    const p = {
+      chain,
+      name: nftName || undefined,
+      contract: nftContract || undefined,
+      ca: nftContract || undefined,
+      tokenId: tokenId || undefined,
+      id: tokenId || undefined,
+      image: imageUrl || undefined,
+      metadataUrl: metadataUrl || undefined,
+    };
+    // remove undefined keys cleanly
+    Object.keys(p).forEach((k) => (p[k] === undefined ? delete p[k] : null));
+    return p;
+  }
+
+  if (prizeType === "token") {
+    const p = {
+      chain,
+      amount: tokenAmount || undefined,
+      symbol: tokenSymbol || undefined,
+      logoUrl: tokenLogo || undefined,
+      image: imageUrl || undefined,
+    };
+    Object.keys(p).forEach((k) => (p[k] === undefined ? delete p[k] : null));
+    return p;
+  }
+
+  if (prizeType === "role") {
+    const p = { roleId: roleId || undefined, image: imageUrl || undefined };
+    Object.keys(p).forEach((k) => (p[k] === undefined ? delete p[k] : null));
+    return p;
+  }
+
+  if (prizeType === "url") {
+    const p = { url: url || undefined, image: imageUrl || undefined };
+    Object.keys(p).forEach((k) => (p[k] === undefined ? delete p[k] : null));
+    return p;
+  }
+
+  // text or unknown
+  const p = { image: imageUrl || undefined };
+  Object.keys(p).forEach((k) => (p[k] === undefined ? delete p[k] : null));
+  return p;
 }
 
 module.exports = {
@@ -353,6 +466,34 @@ module.exports = {
             )
             .setRequired(false)
         )
+
+        // ✅ NEW: public feedback knobs
+        .addStringOption((opt) =>
+          opt
+            .setName("public_hint_mode")
+            .setDescription("Public mode feedback style (listener uses this)")
+            .addChoices(
+              { name: "Reply", value: "reply" },
+              { name: "React", value: "react" },
+              { name: "Both", value: "both" },
+              { name: "Silent", value: "silent" }
+            )
+            .setRequired(false)
+        )
+        .addIntegerOption((opt) =>
+          opt
+            .setName("public_hint_delete_ms")
+            .setDescription("Auto-delete hint replies after X ms (0 = keep)")
+            .setMinValue(0)
+            .setMaxValue(600000)
+            .setRequired(false)
+        )
+        .addBooleanOption((opt) =>
+          opt
+            .setName("audit_public_default")
+            .setDescription("Default audit visibility (true = public)")
+            .setRequired(false)
+        )
     )
     .addSubcommand((sub) =>
       sub
@@ -438,6 +579,80 @@ module.exports = {
             .setDescription("Hide prize until reveal (recommended)")
             .setRequired(false)
         )
+
+        // ✅ Friendly prize inputs (optional; used when prize_json is empty)
+        .addStringOption((opt) =>
+          opt
+            .setName("chain")
+            .setDescription("Chain for NFT/Token payload (base/eth/ape)")
+            .addChoices(
+              { name: "base", value: "base" },
+              { name: "eth", value: "eth" },
+              { name: "ape", value: "ape" }
+            )
+            .setRequired(false)
+        )
+        .addStringOption((opt) =>
+          opt
+            .setName("nft_name")
+            .setDescription('NFT collection name (ex: "CryptoPimps")')
+            .setRequired(false)
+        )
+        .addStringOption((opt) =>
+          opt
+            .setName("nft_contract")
+            .setDescription("NFT contract (0x...)")
+            .setRequired(false)
+        )
+        .addStringOption((opt) =>
+          opt
+            .setName("token_id")
+            .setDescription("NFT token id (ex: 123)")
+            .setRequired(false)
+        )
+        .addStringOption((opt) =>
+          opt
+            .setName("token_amount")
+            .setDescription('Token amount (ex: "50000")')
+            .setRequired(false)
+        )
+        .addStringOption((opt) =>
+          opt
+            .setName("token_symbol")
+            .setDescription('Token symbol (ex: "ADRIAN")')
+            .setRequired(false)
+        )
+        .addStringOption((opt) =>
+          opt
+            .setName("token_logo")
+            .setDescription("Token logo URL (optional)")
+            .setRequired(false)
+        )
+        .addStringOption((opt) =>
+          opt
+            .setName("image_url")
+            .setDescription("Direct image URL (optional)")
+            .setRequired(false)
+        )
+        .addStringOption((opt) =>
+          opt
+            .setName("metadata_url")
+            .setDescription("Metadata URL (optional)")
+            .setRequired(false)
+        )
+        .addStringOption((opt) =>
+          opt
+            .setName("role_id")
+            .setDescription("Role ID (for prize_type=role)")
+            .setRequired(false)
+        )
+        .addStringOption((opt) =>
+          opt
+            .setName("url")
+            .setDescription("URL (for prize_type=url)")
+            .setRequired(false)
+        )
+
         .addStringOption((opt) =>
           opt
             .setName("prize_json")
@@ -477,6 +692,32 @@ module.exports = {
             .setName("game_id")
             .setDescription("Game ID to review (leave empty for latest)")
             .setMinValue(1)
+            .setRequired(false)
+        )
+    )
+    .addSubcommand((sub) =>
+      sub
+        .setName("audit")
+        .setDescription("Show Gift audit log (admin) — public by default")
+        .addIntegerOption((opt) =>
+          opt
+            .setName("limit")
+            .setDescription("How many rows (default 15)")
+            .setMinValue(1)
+            .setMaxValue(50)
+            .setRequired(false)
+        )
+        .addIntegerOption((opt) =>
+          opt
+            .setName("game_id")
+            .setDescription("Optional: filter by game id")
+            .setMinValue(1)
+            .setRequired(false)
+        )
+        .addBooleanOption((opt) =>
+          opt
+            .setName("public")
+            .setDescription("Post publicly (true) or ephemeral (false)")
             .setRequired(false)
         )
     )
@@ -522,6 +763,9 @@ module.exports = {
         }
       }
 
+      // Ensure new columns exist (safe no-op if already)
+      await ensureGiftConfigColumns(pg);
+
       // =========================
       // /gift config (Step 2)
       // =========================
@@ -541,6 +785,11 @@ module.exports = {
         const maxGuesses = intOrNull(interaction.options.getInteger("max_guesses"));
         const hints = interaction.options.getString("hints");
 
+        // NEW knobs
+        const publicHintMode = interaction.options.getString("public_hint_mode");
+        const publicHintDeleteMs = intOrNull(interaction.options.getInteger("public_hint_delete_ms"));
+        const auditPublicDefault = interaction.options.getBoolean("audit_public_default");
+
         const row = {
           guild_id: interaction.guildId,
           channel_id: (channel?.id ?? cur?.channel_id ?? null),
@@ -558,6 +807,12 @@ module.exports = {
           max_guesses_per_user: (maxGuesses ?? cur?.max_guesses_per_user ?? 25),
 
           hints_mode: (hints ?? cur?.hints_mode ?? "highlow"),
+
+          // ✅ new defaults for listener behavior
+          public_hint_mode: (publicHintMode ?? cur?.public_hint_mode ?? "reply"),
+          public_hint_delete_ms: (publicHintDeleteMs ?? cur?.public_hint_delete_ms ?? 8000),
+          audit_public_default: (auditPublicDefault ?? cur?.audit_public_default ?? true),
+
           created_at: cur?.created_at || null,
         };
 
@@ -568,6 +823,12 @@ module.exports = {
         row.duration_sec_default = clampInt(Number(row.duration_sec_default), 10, 86400);
         row.per_user_cooldown_ms = clampInt(Number(row.per_user_cooldown_ms), 0, 600000);
         row.max_guesses_per_user = clampInt(Number(row.max_guesses_per_user), 1, 1000);
+
+        row.public_hint_delete_ms = clampInt(Number(row.public_hint_delete_ms), 0, 600000);
+
+        // Normalize public_hint_mode
+        const phm = String(row.public_hint_mode || "reply").toLowerCase();
+        row.public_hint_mode = ["reply", "react", "both", "silent"].includes(phm) ? phm : "reply";
 
         if (row.mode_default === "modal" && !row.allow_modal_mode && row.allow_public_mode) row.mode_default = "public";
         if (row.mode_default === "public" && !row.allow_public_mode && row.allow_modal_mode) row.mode_default = "modal";
@@ -591,6 +852,10 @@ module.exports = {
             per_user_cooldown_ms: saved?.per_user_cooldown_ms,
             max_guesses_per_user: saved?.max_guesses_per_user,
             hints_mode: saved?.hints_mode,
+
+            public_hint_mode: saved?.public_hint_mode,
+            public_hint_delete_ms: saved?.public_hint_delete_ms,
+            audit_public_default: saved?.audit_public_default,
           },
         });
 
@@ -612,11 +877,68 @@ module.exports = {
             { name: "Hints", value: `\`${safeStr(saved?.hints_mode || "highlow")}\``, inline: true },
 
             { name: "Cooldown", value: `\`${saved?.per_user_cooldown_ms}ms\``, inline: true },
-            { name: "Max Guesses/User", value: `\`${saved?.max_guesses_per_user}\``, inline: true }
+            { name: "Max Guesses/User", value: `\`${saved?.max_guesses_per_user}\``, inline: true },
+
+            { name: "Public Feedback", value: `mode=\`${safeStr(saved?.public_hint_mode || "reply")}\` • delete=\`${Number(saved?.public_hint_delete_ms ?? 8000)}ms\``, inline: false },
+            { name: "Audit Default", value: `${saved?.audit_public_default ? "🌍 public" : "🔒 private"}`, inline: true }
           )
           .setFooter({ text: "Use /gift start to drop a new gift game." });
 
         return interaction.reply({ embeds: [embed], ephemeral: true });
+      }
+
+      // =========================
+      // /gift audit (NEW)
+      // =========================
+      if (sub === "audit") {
+        const gid = interaction.guildId;
+        const cfg = await getGiftConfig(pg, gid);
+
+        const limit = clampInt(Number(intOrNull(interaction.options.getInteger("limit")) ?? 15), 1, 50);
+        const gameId = intOrNull(interaction.options.getInteger("game_id"));
+        const publicOpt = interaction.options.getBoolean("public");
+
+        const isPublic =
+          publicOpt !== null && publicOpt !== undefined
+            ? Boolean(publicOpt)
+            : Boolean(cfg?.audit_public_default ?? true);
+
+        await interaction.deferReply({ ephemeral: !isPublic });
+
+        const where = ["guild_id=$1"];
+        const params = [gid];
+        let idx = 2;
+
+        if (gameId) {
+          where.push(`game_id=$${idx++}`);
+          params.push(gameId);
+        }
+
+        const q = `
+          SELECT id, created_at, action, actor_tag, game_id
+          FROM gift_audit
+          WHERE ${where.join(" AND ")}
+          ORDER BY created_at DESC
+          LIMIT $${idx++}
+        `;
+        params.push(limit);
+
+        const r = await pg.query(q, params);
+        const rows = r.rows || [];
+
+        const lines = rows.map((x) => {
+          const t = x.created_at ? `<t:${Math.floor(new Date(x.created_at).getTime() / 1000)}:R>` : "";
+          const who = x.actor_tag ? `\`${x.actor_tag}\`` : "`system`";
+          const g = x.game_id ? `game#${x.game_id}` : "";
+          return `${t} • **${x.action}** ${g} • ${who}`;
+        });
+
+        const embed = new EmbedBuilder()
+          .setTitle("📜 Gift Audit Log")
+          .setDescription(lines.length ? lines.join("\n") : "_No audit rows yet._")
+          .setFooter({ text: "Tip: /gift config audit_public_default:true" });
+
+        return interaction.editReply({ embeds: [embed] });
       }
 
       // =========================
@@ -712,8 +1034,10 @@ module.exports = {
         const prizeLabel = safeStr(interaction.options.getString("prize_label") || "Mystery prize 🎁", 200);
         const prizeSecret = Boolean(interaction.options.getBoolean("prize_secret") ?? true);
 
+        // ✅ Prefer prize_json if provided, else build payload from friendly options
         const prizeJsonRaw = interaction.options.getString("prize_json");
         let prizePayload = null;
+
         if (prizeJsonRaw && String(prizeJsonRaw).trim()) {
           try {
             const parsed = JSON.parse(String(prizeJsonRaw));
@@ -721,6 +1045,24 @@ module.exports = {
           } catch {
             prizePayload = { _error: "invalid_json", raw: String(prizeJsonRaw).slice(0, 300) };
           }
+        } else {
+          prizePayload = buildPrizePayloadFromFriendlyInputs({
+            prizeType,
+            chain: interaction.options.getString("chain"),
+            nft_name: interaction.options.getString("nft_name"),
+            nft_contract: interaction.options.getString("nft_contract"),
+            token_id: interaction.options.getString("token_id"),
+            token_amount: interaction.options.getString("token_amount"),
+            token_symbol: interaction.options.getString("token_symbol"),
+            token_logo: interaction.options.getString("token_logo"),
+            image_url: interaction.options.getString("image_url"),
+            metadata_url: interaction.options.getString("metadata_url"),
+            role_id: interaction.options.getString("role_id"),
+            url: interaction.options.getString("url"),
+          });
+
+          // If prizeType is nft but admin forgot contract/tokenId, keep payload but don't error
+          // (renderer can still use prize_label + optional image_url)
         }
 
         const notes = safeStr(interaction.options.getString("notes") || "", 400);
@@ -961,7 +1303,7 @@ module.exports = {
             `,
             [game.id]
           );
-          topGuessers = (r.rows || []).map(x => ({
+          topGuessers = (r.rows || []).map((x) => ({
             user_id: x.user_id,
             user_tag: x.user_tag,
             n: Number(x.n || 0),
@@ -988,9 +1330,10 @@ module.exports = {
         const endedTs = game.ended_at ? Math.floor(new Date(game.ended_at).getTime() / 1000) : null;
         const endsTs = game.ends_at ? Math.floor(new Date(game.ends_at).getTime() / 1000) : null;
 
-        const prizeLine = game.prize_secret && game.status === "active"
-          ? "??? (hidden)"
-          : (game.prize_label || "Mystery prize 🎁");
+        const prizeLine =
+          game.prize_secret && game.status === "active"
+            ? "??? (hidden)"
+            : (game.prize_label || "Mystery prize 🎁");
 
         const dropUrl = game.drop_message_url ? `[Open Drop Message](${game.drop_message_url})` : "N/A";
 
@@ -1040,7 +1383,7 @@ module.exports = {
           embed.addFields({
             name: "Recent Guesses (latest 10)",
             value: recent
-              .map(r => {
+              .map((r) => {
                 const ts = r.created_at ? Math.floor(new Date(r.created_at).getTime() / 1000) : null;
                 const who = `<@${r.user_id}>`;
                 const g = `\`${r.guess_value}\``;
