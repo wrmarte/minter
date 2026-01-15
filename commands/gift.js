@@ -3,7 +3,7 @@
 // /gift config  (Step 2)
 // /gift start   (Wizard Start + Clean Drop Card) ✅ UPDATED
 // /gift stop    ✅
-// /gift review  ✅
+// /gift review  ✅ (NOW POSTS PUBLICLY INTO CHANNEL)
 // /gift audit   ✅ NEW (posts audit into channel)
 //
 // NOTE: Runtime gameplay is handled by listeners/giftGameListener.js
@@ -1100,7 +1100,7 @@ module.exports = {
       }
 
       // =========================
-      // /gift review
+      // /gift review  (NOW POSTS PUBLICLY)
       // =========================
       if (sub === "review") {
         await interaction.deferReply({ ephemeral: true });
@@ -1241,7 +1241,19 @@ module.exports = {
           embed.addFields({ name: "Notes", value: safeStr(game.notes, 900), inline: false });
         }
 
-        return interaction.editReply({ embeds: [embed] });
+        // ✅ POST PUBLICLY INTO THE CHANNEL
+        await interaction.channel.send({ embeds: [embed], allowedMentions: { parse: [] } }).catch(() => {});
+
+        await writeAudit(pg, {
+          guild_id: gid,
+          game_id: game.id,
+          action: "review_posted",
+          actor_user_id: interaction.user.id,
+          actor_tag: interaction.user.tag,
+          details: { channel_id: interaction.channelId }
+        });
+
+        return interaction.editReply("✅ Posted the review into this channel.");
       }
 
       return interaction.reply({ content: "Not implemented.", ephemeral: true });
