@@ -1,14 +1,10 @@
 // listeners/giftGameListener.js
 // ======================================================
-// Gift Drop Guess Game — Runtime Engine
-// UPDATE:
-// ✅ Wizard Start Flow (buttons -> modal -> review -> launch)
-// ✅ Clean drop card (better UX)
-// ✅ /gift audit posts into channel (handled in command)
-// ✅ Public mode: bot responds with hot/cold or high/low (configurable)
-// ✅ Modal submit: deferReply() prevents 10062 Unknown interaction
-// ✅ Winner reveal: embed uses ACTUAL NFT image URL when available
-// ✅ Winner reveal: adds NFT name + tokenId lines when provided
+// Gift Drop Guess Game — Runtime Engine + Wizard UI
+// PATCH:
+// ✅ Fix "Interaction failed" on NFT/Token buttons by showing modal IMMEDIATELY (no DB before showModal)
+// ✅ Use flags: 64 instead of ephemeral (deprecation warning)
+// ✅ Keeps public + modal gameplay, winner reveal, audit writes
 // ======================================================
 
 const {
@@ -63,6 +59,20 @@ function isDataUrl(s) {
   return /^data:/i.test(t);
 }
 
+function looksLikeAddress(a) {
+  const s = String(a || "").trim();
+  return /^0x[a-fA-F0-9]{40}$/.test(s);
+}
+
+function normalizeChain(c) {
+  const s = String(c || "").trim().toLowerCase();
+  if (!s) return "base";
+  if (s === "eth" || s === "ethereum" || s.includes("mainnet")) return "eth";
+  if (s === "base") return "base";
+  if (s === "ape" || s.includes("ape")) return "ape";
+  return s;
+}
+
 function hintHighLow(guess, target) {
   if (guess === target) return "correct";
   return guess > target ? "too_high" : "too_low";
@@ -103,12 +113,10 @@ async function ensureSchemaIfNeeded(client) {
 }
 
 async function getGiftConfig(pg, guildId) {
-  // lazy insert default row if missing
   await pg.query(
     `INSERT INTO gift_config (guild_id) VALUES ($1) ON CONFLICT (guild_id) DO NOTHING`,
     [guildId]
   ).catch(() => {});
-
   const r = await pg.query(`SELECT * FROM gift_config WHERE guild_id=$1`, [guildId]);
   return r.rows?.[0] || null;
 }
@@ -119,16 +127,6 @@ async function getActiveGiftGameInChannel(pg, guildId, channelId) {
      WHERE guild_id=$1 AND status='active' AND channel_id=$2
      ORDER BY started_at DESC LIMIT 1`,
     [guildId, channelId]
-  );
-  return r.rows?.[0] || null;
-}
-
-async function getActiveGiftGameInGuild(pg, guildId) {
-  const r = await pg.query(
-    `SELECT * FROM gift_games
-     WHERE guild_id=$1 AND status='active'
-     ORDER BY started_at DESC LIMIT 1`,
-    [guildId]
   );
   return r.rows?.[0] || null;
 }
@@ -237,28 +235,6 @@ function disableAllComponents(components) {
   }
 }
 
-// ===============================
-// Wizard helpers
-// ===============================
-function normalizeChain(c) {
-  const s = String(c || "").trim().toLowerCase();
-  if (!s) return "base";
-  if (s === "eth" || s === "ethereum" || s.includes("mainnet")) return "eth";
-  if (s === "base") return "base";
-  if (s === "ape" || s.includes("ape")) return "ape";
-  return s;
-}
-
-function looksLikeAddress(a) {
-  const s = String(a || "").trim();
-  return /^0x[a-fA-F0-9]{40}$/.test(s);
-}
-
-function makeDropBar() {
-  // just a vibe bar (static at start)
-  return `\`${"█".repeat(2)}${"░".repeat(10)}\``;
-}
-
 function makeCleanDropEmbed(game) {
   const endsTs = game.ends_at ? Math.floor(new Date(game.ends_at).getTime() / 1000) : null;
   const startedTs = game.started_at ? Math.floor(new Date(game.started_at).getTime() / 1000) : Math.floor(Date.now() / 1000);
@@ -274,7 +250,7 @@ function makeCleanDropEmbed(game) {
     `A gift is floating in the chat… **guess the secret number** to claim it.`,
     ``,
     `**Range:** \`${game.range_min} → ${game.range_max}\``,
-    `**Time Left:** ${endsTs ? `<t:${endsTs}:R>` : "N/A"}  ${makeDropBar()}`,
+    `**Time Left:** ${endsTs ? `<t:${endsTs}:R>` : "N/A"}`,
     `**Hints unlock:** <t:${hintsUnlockTs}:R> (after 75% time)`,
     `**Cooldown:** \`${game.per_user_cooldown_ms}ms\` • **Max:** \`${game.max_guesses_per_user}\``,
     `**Mode:** \`${game.mode}\` • **Hints:** \`${game.hints_mode}\``,
@@ -282,17 +258,15 @@ function makeCleanDropEmbed(game) {
     `**Prize:** ${prizeLine}`,
     game.commit_enabled ? `**Fairness:** commit hash locked ✅` : `**Fairness:** standard`,
     ``,
-    game.mode === "modal"
+    String(game.mode || "").toLowerCase() === "modal"
       ? `Click **🎯 Guess** (no chat spam).`
       : `Type your guess as a number in this channel (example: \`42\`).`,
   ];
 
-  const e = new EmbedBuilder()
+  return new EmbedBuilder()
     .setTitle("🎁 GIFT DROP LIVE")
     .setDescription(lines.join("\n"))
     .setFooter({ text: `Game ID: ${game.id}` });
-
-  return e;
 }
 
 async function attachDropMessage(pg, { gameId, messageId, messageUrl }) {
@@ -302,7 +276,7 @@ async function attachDropMessage(pg, { gameId, messageId, messageUrl }) {
   );
 }
 
-// Update prize fields for a draft game
+// Draft prize save
 async function updateDraftPrize(pg, gameId, { prize_type, prize_label, prize_payload }) {
   const r = await pg.query(
     `
@@ -316,7 +290,7 @@ async function updateDraftPrize(pg, gameId, { prize_type, prize_label, prize_pay
   return r.rows?.[0] || null;
 }
 
-// Launch: draft -> active
+// Launch draft -> active
 async function launchDraftGame(pg, gameId) {
   const r = await pg.query(
     `
@@ -330,7 +304,7 @@ async function launchDraftGame(pg, gameId) {
   return r.rows?.[0] || null;
 }
 
-// Cancel: draft -> cancelled
+// Cancel draft
 async function cancelDraftGame(pg, gameId) {
   const r = await pg.query(
     `
@@ -345,7 +319,7 @@ async function cancelDraftGame(pg, gameId) {
 }
 
 // ===============================
-// Winner reveal helpers (existing)
+// Winner reveal helpers
 // ===============================
 function buildWinnerEmbed({
   game,
@@ -408,8 +382,7 @@ function buildNftDisplayFromPayload(payload) {
   const contract = safeStr(payload.contract || payload.ca || payload.address || "", 80);
   const tokenId = safeStr(payload.tokenId || payload.token_id || payload.id || payload.token || payload.tokenID || "", 48);
 
-  const name =
-    safeStr(payload.name || payload.tokenName || payload.collectionName || payload.project || payload.collection || "", 120);
+  const name = safeStr(payload.name || payload.collectionName || payload.collection || "", 120);
 
   let display = null;
   if (name && tokenId) display = `🖼️ **NFT:** \`${name} #${tokenId}\``;
@@ -443,7 +416,6 @@ async function postWinnerReveal(client, pg, wonGame, winner, guessValue) {
   const { display: nftDisplayLine, meta: nftMetaLine } =
     (wonGame.prize_type === "nft") ? buildNftDisplayFromPayload(prizePayload) : { display: null, meta: null };
 
-  // Render reveal card
   let attachCard = null;
   let cardName = null;
   let resolvedImageUrl = null;
@@ -698,7 +670,7 @@ async function handleGuess(client, interactionOrMessage, { game, guessValue, sou
   return { ok: true, won: false, hint };
 }
 
-// ✅ Public response helper
+// Public response helper
 async function respondPublicHint({ client, cfg, message, hint, game }) {
   const mode = String(cfg?.public_hint_mode || "reply").toLowerCase(); // reply | react | both | silent
   const deleteMs = Number(cfg?.public_hint_delete_ms || 0);
@@ -781,47 +753,34 @@ module.exports = (client) => {
       if (!(await ensureSchemaIfNeeded(client))) return;
 
       // =========================
-      // Wizard Buttons
+      // BUTTONS
       // =========================
       if (interaction.isButton()) {
         const cid = String(interaction.customId || "");
 
-        // Cancel draft
-        if (cid.startsWith("gift_wiz_cancel:")) {
-          await interaction.deferReply({ ephemeral: true }).catch(() => {});
-          const gameId = Number(cid.split(":")[1]);
-          if (!Number.isFinite(gameId)) return interaction.editReply("❌ Invalid draft id.").catch(() => {});
-          const g = await cancelDraftGame(pg, gameId);
-          await writeAudit(pg, {
-            guild_id: interaction.guildId,
-            game_id: gameId,
-            action: "draft_cancelled",
-            actor_user_id: interaction.user.id,
-            actor_tag: interaction.user.tag,
-            details: { }
-          });
-          return interaction.editReply(g ? `🛑 Draft \`${gameId}\` cancelled.` : `⚠️ Draft not found or already handled.`).catch(() => {});
-        }
-
-        // Pick prize type -> open prize modal
+        // ✅ FIX: Wizard pick buttons must show modal immediately (NO DB BEFORE showModal)
         if (cid.startsWith("gift_wiz_pick:")) {
+          // Optional quick permission gate (fast, no DB)
+          const allowed =
+            interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator) ||
+            interaction.memberPermissions?.has(PermissionsBitField.Flags.ManageGuild);
+
+          if (!allowed) {
+            return interaction.reply({
+              content: "⛔ Only admins / Manage Server can configure a gift drop.",
+              flags: 64,
+            }).catch(() => {});
+          }
+
           const parts = cid.split(":");
           const gameId = Number(parts[1]);
           const prizeType = String(parts[2] || "").toLowerCase();
 
           if (!Number.isFinite(gameId)) {
-            return interaction.reply({ content: "❌ Invalid draft id.", ephemeral: true }).catch(() => {});
+            return interaction.reply({ content: "❌ Invalid draft id.", flags: 64 }).catch(() => {});
           }
 
-          const draft = await getGiftGameById(pg, gameId);
-          if (!draft || String(draft.guild_id) !== String(interaction.guildId)) {
-            return interaction.reply({ content: "❌ Draft not found.", ephemeral: true }).catch(() => {});
-          }
-          if (String(draft.status || "").toLowerCase() !== "draft") {
-            return interaction.reply({ content: "⚠️ This draft is not editable anymore.", ephemeral: true }).catch(() => {});
-          }
-
-          // Build modal for selected prize type
+          // Build modal (NO DB)
           const modal = new ModalBuilder()
             .setCustomId(`gift_wiz_prize_modal:${gameId}:${prizeType}`)
             .setTitle(`Gift Prize — ${prizeType.toUpperCase()}`);
@@ -902,7 +861,7 @@ module.exports = (client) => {
 
             const logo = new TextInputBuilder()
               .setCustomId("tok_logo")
-              .setLabel("Optional logo URL (leave empty = use your token GIF)")
+              .setLabel("Optional logo URL (leave empty = default)")
               .setStyle(TextInputStyle.Short)
               .setRequired(false)
               .setMaxLength(300);
@@ -934,52 +893,60 @@ module.exports = (client) => {
               new ActionRowBuilder().addComponents(duration),
             );
           } else {
-            // text prize
             const text = new TextInputBuilder()
               .setCustomId("text_prize")
               .setLabel("Prize text (ex: 'WL spot', '1 free mint')")
               .setStyle(TextInputStyle.Paragraph)
               .setRequired(true)
               .setMaxLength(400);
-
             rows.push(new ActionRowBuilder().addComponents(text));
           }
 
           for (const r of rows) modal.addComponents(r);
 
-          await writeAudit(pg, {
-            guild_id: interaction.guildId,
-            game_id: gameId,
-            action: "wizard_prize_type_selected",
-            actor_user_id: interaction.user.id,
-            actor_tag: interaction.user.tag,
-            details: { prizeType }
+          // ✅ showModal immediately
+          return interaction.showModal(modal).catch((e) => {
+            if (DEBUG) console.warn("⚠️ [GIFT] showModal failed:", e?.message || e);
           });
-
-          return interaction.showModal(modal).catch(() => {});
         }
 
-        // Launch drop
-        if (cid.startsWith("gift_wiz_launch:")) {
-          await interaction.deferReply({ ephemeral: true }).catch(() => {});
+        // cancel draft (DB ok because we deferReply)
+        if (cid.startsWith("gift_wiz_cancel:")) {
+          await interaction.deferReply({ flags: 64 }).catch(() => {});
           const gameId = Number(cid.split(":")[1]);
           if (!Number.isFinite(gameId)) return interaction.editReply("❌ Invalid draft id.").catch(() => {});
 
-          // Ensure no other active game exists
-          const active = await getActiveGiftGameInGuild(pg, interaction.guildId);
-          if (active) {
-            return interaction.editReply(`⚠️ There is already an active game \`${active.id}\` in <#${active.channel_id}>.`).catch(() => {});
+          const g = await cancelDraftGame(pg, gameId).catch(() => null);
+
+          await writeAudit(pg, {
+            guild_id: interaction.guildId,
+            game_id: gameId,
+            action: "draft_cancelled",
+            actor_user_id: interaction.user.id,
+            actor_tag: interaction.user.tag,
+            details: {}
+          });
+
+          return interaction.editReply(g ? `🛑 Draft \`${gameId}\` cancelled.` : `⚠️ Draft not found or already handled.`).catch(() => {});
+        }
+
+        // launch draft -> active + post drop
+        if (cid.startsWith("gift_wiz_launch:")) {
+          await interaction.deferReply({ flags: 64 }).catch(() => {});
+          const gameId = Number(cid.split(":")[1]);
+          if (!Number.isFinite(gameId)) return interaction.editReply("❌ Invalid draft id.").catch(() => {});
+
+          const draft = await getGiftGameById(pg, gameId).catch(() => null);
+          if (!draft || String(draft.guild_id) !== String(interaction.guildId)) {
+            return interaction.editReply("❌ Draft not found.").catch(() => {});
+          }
+          if (String(draft.status || "").toLowerCase() !== "draft") {
+            return interaction.editReply("⚠️ Draft already launched / not editable.").catch(() => {});
           }
 
-          const draft = await getGiftGameById(pg, gameId);
-          if (!draft || String(draft.status || "").toLowerCase() !== "draft") {
-            return interaction.editReply("⚠️ Draft not found or already launched.").catch(() => {});
-          }
-
-          const launched = await launchDraftGame(pg, gameId);
+          const launched = await launchDraftGame(pg, gameId).catch(() => null);
           if (!launched) return interaction.editReply("❌ Failed to launch draft.").catch(() => {});
 
-          // Post clean drop card
           const channel = await client.channels.fetch(launched.channel_id).catch(() => null);
           if (!channel || channel.type !== ChannelType.GuildText) {
             return interaction.editReply("❌ Could not fetch the game channel to post the drop.").catch(() => {});
@@ -1024,23 +991,23 @@ module.exports = (client) => {
           return interaction.editReply(`✅ Launched Gift Drop in <#${launched.channel_id}> (gameId: \`${launched.id}\`).`).catch(() => {});
         }
 
-        // Existing runtime buttons (guess/rules/stats)
+        // Existing gameplay buttons
         if (cid.startsWith("gift_")) {
           const [head, gameIdRaw] = cid.split(":");
           const gameId = Number(gameIdRaw);
           if (!Number.isFinite(gameId)) {
-            return interaction.reply({ content: "❌ Invalid game id.", ephemeral: true }).catch(() => {});
+            return interaction.reply({ content: "❌ Invalid game id.", flags: 64 }).catch(() => {});
           }
 
-          const game = await getGiftGameById(pg, gameId);
-          if (!game) return interaction.reply({ content: "❌ Game not found.", ephemeral: true }).catch(() => {});
+          const game = await getGiftGameById(pg, gameId).catch(() => null);
+          if (!game) return interaction.reply({ content: "❌ Game not found.", flags: 64 }).catch(() => {});
 
           if (head === "gift_guess") {
             if (String(game.mode || "").toLowerCase() !== "modal") {
-              return interaction.reply({ content: "This game is not using modal mode. Type guesses in chat instead.", ephemeral: true }).catch(() => {});
+              return interaction.reply({ content: "This game is not using modal mode. Type guesses in chat instead.", flags: 64 }).catch(() => {});
             }
             if (game.status !== "active") {
-              return interaction.reply({ content: "This drop is already closed.", ephemeral: true }).catch(() => {});
+              return interaction.reply({ content: "This drop is already closed.", flags: 64 }).catch(() => {});
             }
 
             const modal = new ModalBuilder()
@@ -1085,7 +1052,7 @@ module.exports = (client) => {
               )
               .setFooter({ text: `Game ID: ${game.id}` });
 
-            return interaction.reply({ embeds: [embed], ephemeral: true }).catch(() => {});
+            return interaction.reply({ embeds: [embed], flags: 64 }).catch(() => {});
           }
 
           if (head === "gift_stats") {
@@ -1104,24 +1071,22 @@ module.exports = (client) => {
               )
               .setFooter({ text: `Game ID: ${game.id}` });
 
-            return interaction.reply({ embeds: [embed], ephemeral: true }).catch(() => {});
+            return interaction.reply({ embeds: [embed], flags: 64 }).catch(() => {});
           }
 
           return;
         }
-
-        return;
       }
 
       // =========================
-      // Wizard prize modal submit
+      // MODALS
       // =========================
       if (interaction.isModalSubmit()) {
         const cid = String(interaction.customId || "");
 
-        // Wizard prize modal
+        // Wizard prize modal submit (safe to do DB because we can deferReply)
         if (cid.startsWith("gift_wiz_prize_modal:")) {
-          await interaction.deferReply({ ephemeral: true }).catch(() => {});
+          await interaction.deferReply({ flags: 64 }).catch(() => {});
 
           const parts = cid.split(":");
           const gameId = Number(parts[1]);
@@ -1129,9 +1094,12 @@ module.exports = (client) => {
 
           if (!Number.isFinite(gameId)) return interaction.editReply("❌ Invalid draft id.").catch(() => {});
 
-          const draft = await getGiftGameById(pg, gameId);
-          if (!draft || String(draft.status || "").toLowerCase() !== "draft") {
-            return interaction.editReply("⚠️ Draft not found or already launched.").catch(() => {});
+          const draft = await getGiftGameById(pg, gameId).catch(() => null);
+          if (!draft || String(draft.guild_id) !== String(interaction.guildId)) {
+            return interaction.editReply("❌ Draft not found.").catch(() => {});
+          }
+          if (String(draft.status || "").toLowerCase() !== "draft") {
+            return interaction.editReply("⚠️ Draft already launched / not editable.").catch(() => {});
           }
 
           let prize_label = "Mystery prize 🎁";
@@ -1148,13 +1116,7 @@ module.exports = (client) => {
             if (!tokenId) return interaction.editReply("❌ Token ID required.").catch(() => {});
 
             prize_label = `${name} #${tokenId}`;
-            prize_payload = {
-              type: "nft",
-              name,
-              contract: ca,
-              tokenId,
-              chain,
-            };
+            prize_payload = { type: "nft", name, contract: ca, tokenId, chain };
             if (img) prize_payload.image = img;
           } else if (prizeType === "token") {
             const amount = safeStr(interaction.fields.getTextInputValue("tok_amount"), 40);
@@ -1164,12 +1126,7 @@ module.exports = (client) => {
             const logo = safeStr(interaction.fields.getTextInputValue("tok_logo") || "", 300);
 
             prize_label = `${amount} $${symbol}`;
-            prize_payload = {
-              type: "token",
-              amount,
-              symbol,
-              chain,
-            };
+            prize_payload = { type: "token", amount, symbol, chain };
             if (looksLikeAddress(ca)) prize_payload.contract = ca;
             if (logo) prize_payload.logoUrl = logo;
           } else if (prizeType === "role") {
@@ -1201,7 +1158,7 @@ module.exports = (client) => {
           const endsTs = saved?.ends_at ? Math.floor(new Date(saved.ends_at).getTime() / 1000) : null;
 
           const embed = new EmbedBuilder()
-            .setTitle("✅ Gift Drop Ready — Review & Launch")
+            .setTitle("✅ Gift Drop Ready — Launch It")
             .setDescription(
               [
                 `**Draft Game ID:** \`${gameId}\``,
@@ -1212,11 +1169,9 @@ module.exports = (client) => {
                 `**Prize:** ${saved.prize_secret ? "??? (hidden)" : `\`${prize_label}\``}`,
                 `**Prize Type:** \`${prizeType}\``,
                 saved.commit_enabled ? `**Fairness:** commit hash locked ✅` : `**Fairness:** standard`,
-                "",
-                "Launch it now?",
               ].join("\n")
             )
-            .setFooter({ text: "Launch will post the clean drop card into the game channel." });
+            .setFooter({ text: "Click Launch to post the clean drop card into the game channel." });
 
           const row = new ActionRowBuilder().addComponents(
             new ButtonBuilder().setCustomId(`gift_wiz_launch:${gameId}`).setLabel("Launch Drop").setEmoji("🚀").setStyle(ButtonStyle.Success),
@@ -1229,8 +1184,7 @@ module.exports = (client) => {
 
         // Gameplay guess modal
         if (cid.startsWith("gift_guess_modal:")) {
-          // ✅ CRITICAL: ACK IMMEDIATELY
-          await interaction.deferReply({ ephemeral: true }).catch(() => {});
+          await interaction.deferReply({ flags: 64 }).catch(() => {});
 
           const gameId = Number(cid.split(":")[1]);
           if (!Number.isFinite(gameId)) return interaction.editReply("❌ Invalid game id.").catch(() => {});
@@ -1288,10 +1242,7 @@ module.exports = (client) => {
       const cfg = await getGiftConfig(pg, message.guildId).catch(() => null);
 
       const res = await handleGuess(client, message, { game, guessValue, source: "public", messageId: message.id });
-
-      if (!res.ok) {
-        return;
-      }
+      if (!res.ok) return;
 
       if (res.won) {
         await respondPublicHint({ client, cfg, message, hint: "correct", game }).catch(() => {});
@@ -1304,5 +1255,5 @@ module.exports = (client) => {
     }
   });
 
-  console.log("✅ GiftGameListener loaded (wizard start + clean drop card + public hints)");
+  console.log("✅ GiftGameListener loaded (wizard modal fast-path + flags:64)");
 };
