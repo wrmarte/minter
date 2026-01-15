@@ -7,6 +7,8 @@
 // ✅ Modal submit: deferReply() prevents 10062 Unknown interaction
 // ✅ Winner reveal: embed uses ACTUAL NFT image URL when available
 // ✅ Winner reveal: adds NFT name + tokenId lines when provided
+// ✅ NEW: Public audit option for guesses (configurable + sampling to avoid DB spam)
+// ✅ NEW: Optional out-of-range feedback in public mode (configurable)
 // ======================================================
 
 const {
@@ -99,7 +101,29 @@ async function ensureSchemaIfNeeded(client) {
   }
 }
 
+// ✅ Ensure gift_config new columns exist (safe)
+async function ensureGiftConfigColumns(pg) {
+  const alters = [
+    `ALTER TABLE gift_config ADD COLUMN IF NOT EXISTS public_hint_mode TEXT DEFAULT 'reply';`,
+    `ALTER TABLE gift_config ADD COLUMN IF NOT EXISTS public_hint_delete_ms INT DEFAULT 8000;`,
+    `ALTER TABLE gift_config ADD COLUMN IF NOT EXISTS audit_public_default BOOLEAN DEFAULT TRUE;`,
+
+    // ✅ NEW: audit/feedback controls
+    `ALTER TABLE gift_config ADD COLUMN IF NOT EXISTS audit_public_guesses BOOLEAN DEFAULT FALSE;`,
+    `ALTER TABLE gift_config ADD COLUMN IF NOT EXISTS audit_guess_sample_rate INT DEFAULT 1;`, // 1 = every guess, 5 = 1/5 guesses
+    `ALTER TABLE gift_config ADD COLUMN IF NOT EXISTS public_out_of_range_feedback BOOLEAN DEFAULT FALSE;`,
+  ];
+
+  for (const q of alters) {
+    try { await pg.query(q); } catch (e) {
+      if (DEBUG) console.warn("⚠️ [GIFT] gift_config alter skipped:", e?.message || e);
+    }
+  }
+}
+
 async function getGiftConfig(pg, guildId) {
+  await ensureGiftConfigColumns(pg);
+
   // lazy insert default row if missing
   await pg.query(
     `INSERT INTO gift_config (guild_id) VALUES ($1) ON CONFLICT (guild_id) DO NOTHING`,
@@ -356,7 +380,10 @@ async function postWinnerReveal(client, pg, wonGame, winner, guessValue) {
     nftMetaLine,
   });
 
-  const canUseDirectImage = resolvedImageUrl && !isDataUrl(resolvedImageUrl) && /^https?:\/\//i.test(String(resolvedImageUrl));
+  const canUseDirectImage =
+    resolvedImageUrl &&
+    !isDataUrl(resolvedImageUrl) &&
+    /^https?:\/\//i.test(String(resolvedImageUrl));
 
   if (canUseDirectImage) {
     winnerEmbed.setImage(resolvedImageUrl);
@@ -500,6 +527,55 @@ async function expireGame(client, pg, game) {
   return true;
 }
 
+// ✅ Public response helper (reply/react/both/silent)
+async function respondPublicHint({ client, cfg, message, hint, game }) {
+  const mode = String(cfg?.public_hint_mode || "reply").toLowerCase(); // reply | react | both | silent
+  const deleteMs = Number(cfg?.public_hint_delete_ms || 0);
+
+  const channel = message.channel;
+  const me = message.guild?.members?.me || message.guild?.members?.cache?.get(client.user.id);
+  const canSend = channel?.permissionsFor?.(me)?.has?.(PermissionsBitField.Flags.SendMessages);
+  const canManage = channel?.permissionsFor?.(me)?.has?.(PermissionsBitField.Flags.ManageMessages);
+  const canReact = channel?.permissionsFor?.(me)?.has?.(PermissionsBitField.Flags.AddReactions);
+
+  // React mapping
+  const reactEmoji = (() => {
+    switch (hint) {
+      case "too_low": return "🔺";
+      case "too_high": return "🔻";
+      case "hot": return "🔥";
+      case "warm": return "🌡️";
+      case "cold": return "🧊";
+      case "frozen": return "🥶";
+      case "correct": return "🎁";
+      default: return null;
+    }
+  })();
+
+  // 1) React
+  if ((mode === "react" || mode === "both") && canReact && reactEmoji) {
+    message.react(reactEmoji).catch(() => {});
+  }
+
+  // 2) Reply
+  if ((mode === "reply" || mode === "both") && canSend) {
+    // more “game-y” and shorter
+    const txt = hintToUserText(hint);
+
+    const content =
+      hint === "correct"
+        ? `🎁 ${txt} **Winner!** Reveal incoming…`
+        : `${txt}`;
+
+    const sent = await message.reply({ content, allowedMentions: { parse: [] } }).catch(() => null);
+
+    // auto-clean to avoid spam
+    if (sent && deleteMs > 0 && canManage) {
+      setTimeout(() => sent.delete().catch(() => {}), Math.max(1000, deleteMs));
+    }
+  }
+}
+
 async function handleGuess(client, interactionOrMessage, { game, guessValue, source, messageId }) {
   const pg = client.pg;
   const guildId = game.guild_id;
@@ -573,58 +649,6 @@ async function handleGuess(client, interactionOrMessage, { game, guessValue, sou
   }
 
   return { ok: true, won: false, hint };
-}
-
-// ✅ Public response helper (reply/react/both/silent)
-async function respondPublicHint({ client, cfg, message, hint, game }) {
-  const mode = String(cfg?.public_hint_mode || "reply").toLowerCase(); // reply | react | both | silent
-  const deleteMs = Number(cfg?.public_hint_delete_ms || 0);
-  const replyToUser = Number(cfg?.public_hint_only_if_reply_to_user ?? 1) === 1;
-
-  const channel = message.channel;
-  const me = message.guild?.members?.me || message.guild?.members?.cache?.get(client.user.id);
-  const canSend = channel?.permissionsFor?.(me)?.has?.(PermissionsBitField.Flags.SendMessages);
-  const canManage = channel?.permissionsFor?.(me)?.has?.(PermissionsBitField.Flags.ManageMessages);
-  const canReact = channel?.permissionsFor?.(me)?.has?.(PermissionsBitField.Flags.AddReactions);
-
-  // React mapping
-  const reactEmoji = (() => {
-    switch (hint) {
-      case "too_low": return "🔺";
-      case "too_high": return "🔻";
-      case "hot": return "🔥";
-      case "warm": return "🌡️";
-      case "cold": return "🧊";
-      case "frozen": return "🥶";
-      default: return null;
-    }
-  })();
-
-  // 1) React
-  if ((mode === "react" || mode === "both") && canReact && reactEmoji) {
-    message.react(reactEmoji).catch(() => {});
-  }
-
-  // 2) Reply
-  if ((mode === "reply" || mode === "both") && canSend) {
-    const txt = hintToUserText(hint);
-
-    // keep it short + game vibes
-    const content =
-      hint === "correct"
-        ? `🎁 ${txt} Winner announcement incoming…`
-        : `${txt} (range \`${game.range_min}-${game.range_max}\`)`;
-
-    const sent = await (replyToUser
-      ? message.reply({ content, allowedMentions: { parse: [] } })
-      : channel.send({ content, allowedMentions: { parse: [] } })
-    ).catch(() => null);
-
-    // auto-clean to avoid spam
-    if (sent && deleteMs > 0 && canManage) {
-      setTimeout(() => sent.delete().catch(() => {}), Math.max(1000, deleteMs));
-    }
-  }
 }
 
 module.exports = (client) => {
@@ -814,14 +838,56 @@ module.exports = (client) => {
 
       const res = await handleGuess(client, message, { game, guessValue, source: "public", messageId: message.id });
 
+      // ✅ Optional out-of-range feedback (public mode only)
+      if (!res.ok && res.reason === "out_of_range") {
+        if (cfg?.public_out_of_range_feedback) {
+          await respondPublicHint({ client, cfg, message, hint: "none", game }).catch(() => {});
+          // Replace generic with clearer note:
+          const me = message.guild?.members?.me || message.guild?.members?.cache?.get(client.user.id);
+          const canSend = message.channel?.permissionsFor?.(me)?.has?.(PermissionsBitField.Flags.SendMessages);
+          const canManage = message.channel?.permissionsFor?.(me)?.has?.(PermissionsBitField.Flags.ManageMessages);
+          if (canSend) {
+            const sent = await message.reply({
+              content: `⚠️ Out of range. Use \`${game.range_min}-${game.range_max}\`.`,
+              allowedMentions: { parse: [] }
+            }).catch(() => null);
+            const del = Number(cfg?.public_hint_delete_ms || 0);
+            if (sent && del > 0 && canManage) setTimeout(() => sent.delete().catch(() => {}), Math.max(1000, del));
+          }
+        }
+        return;
+      }
+
       if (!res.ok) {
         // optional “quiet fail”: do nothing on cooldown/max guesses
         return;
       }
 
+      // ✅ Public audit for guesses (optional + sampling)
+      try {
+        const auditOn = Boolean(cfg?.audit_public_guesses ?? false);
+        const sampleRate = Math.max(1, Math.min(50, Number(cfg?.audit_guess_sample_rate ?? 1)));
+        const sampled = sampleRate === 1 ? true : (crypto.randomInt(1, sampleRate + 1) === 1);
+
+        if (auditOn && sampled) {
+          await writeAudit(pg, {
+            guild_id: message.guildId,
+            game_id: game.id,
+            action: "guess_public",
+            actor_user_id: message.author.id,
+            actor_tag: message.author.tag || null,
+            details: {
+              guess: guessValue,
+              hint: res.hint,
+              channel_id: message.channelId,
+              message_id: message.id
+            }
+          });
+        }
+      } catch {}
+
       // ✅ Public response (hot/cold etc.)
       if (res.won) {
-        // quick “winner!” reply/react (winner announcement still posts)
         await respondPublicHint({ client, cfg, message, hint: "correct", game }).catch(() => {});
         return;
       }
@@ -832,5 +898,5 @@ module.exports = (client) => {
     }
   });
 
-  console.log("✅ GiftGameListener loaded (public replies + friendly hints)");
+  console.log("✅ GiftGameListener loaded (public replies + friendly hints + public guess audit)");
 };
