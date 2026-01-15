@@ -165,6 +165,22 @@ try {
   console.log(`🧠 client.pg attached: ${Boolean(client.pg)} | hasQuery: ${Boolean(client.pg?.query)}`);
 } catch {}
 
+// ✅ NEW: Early Gift schema warmup (prevents first-interaction lag/timeouts)
+(async () => {
+  try {
+    if (!client?.pg?.query) return;
+    if (!ensureGiftSchema) {
+      console.warn('⚠️ [GIFT] ensureGiftSchema not loaded; early warmup skipped');
+      return;
+    }
+    const ok = await ensureGiftSchema(client);
+    if (ok) console.log('✅ [GIFT] schema warmup OK (early)');
+    else console.warn('⚠️ [GIFT] schema warmup returned false');
+  } catch (e) {
+    console.warn('⚠️ [GIFT] schema warmup failed:', e?.message || e);
+  }
+})().catch(() => {});
+
 // ================= Digest DB Debug (boot-time helper) =================
 async function runDigestDbDebugOnBoot() {
   const enabled = String(process.env.DIGEST_DEBUG_ON_BOOT || '').trim() === '1';
@@ -273,8 +289,13 @@ require('./listeners/fftrigger')(client);
 require('./listeners/battlePrefix')(client);
 require('./listeners/welcomeListener')(client, pool);
 
-// ✅ NEW: Gift Drop Guess Game engine (Step 4)
-require('./listeners/giftGameListener')(client);
+// ✅ Gift Drop Guess Game engine (Step 4)
+try {
+  require('./listeners/giftGameListener')(client);
+  console.log('🎁 GiftGameListener required + attached');
+} catch (e) {
+  console.warn('⚠️ Failed to load GiftGameListener:', e?.message || e);
+}
 
 // ================= Mint Router =================
 const { trackAllContracts } = require('./services/mintRouter');
@@ -356,7 +377,7 @@ async function onClientReady() {
     console.error('❌ Failed to init guild_webhooks table:', e);
   }
 
-  // ✅ NEW: Gift Drop Guess Game tables (auto-init, safe)
+  // ✅ Gift Drop Guess Game tables (auto-init, safe)
   try {
     if (ensureGiftSchema) {
       const ok = await ensureGiftSchema(client);
@@ -372,7 +393,7 @@ async function onClientReady() {
     console.warn('⚠️ [GIFT] schema init failed:', e?.message || e);
   }
 
-  // ✅ NEW: Start Daily Digest Scheduler (Automation #2)
+  // ✅ Start Daily Digest Scheduler (Automation #2)
   // Requires: jobs/dailyDigestScheduler.js (and digest tables exist; migration runs on boot above)
   try {
     const { startDailyDigestScheduler } = require('./jobs/dailyDigestScheduler');
@@ -439,14 +460,7 @@ async function onClientReady() {
     console.warn('⚠️ channel ticker:', e?.message || e);
   }
 
-  // ✅ NEW: Digest DB sanity snapshot to Railway logs (optional)
-  // Enable via:
-  //   DIGEST_DEBUG_ON_BOOT=1
-  // Optional:
-  //   DIGEST_DEBUG_GUILDS=131658166664246485,....
-  //   DIGEST_DEBUG_HOURS=24
-  //   DIGEST_DEBUG_LIMIT=25
-  //   DIGEST_DEBUG_MAX_GUILDS=5
+  // ✅ Digest DB sanity snapshot to Railway logs (optional)
   try {
     await runDigestDbDebugOnBoot();
   } catch (e) {
