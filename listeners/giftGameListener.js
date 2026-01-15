@@ -8,10 +8,13 @@
 // ✅ Winner reveal: embed uses ACTUAL NFT image URL when available
 // ✅ Winner reveal: adds NFT name + tokenId lines when provided
 // ✅ Progressive hints begin after 75% time has passed (3-stage)
+// ✅ NEW: Public cooldown enforcement:
+//    - optional delete too-fast guesses
+//    - reply to user with remaining cooldown
+//    - throttle cooldown warnings per user to avoid bot spam
 // ✅ No manual DB changes: safe ALTER TABLE IF NOT EXISTS
 // ======================================================
 
-const crypto = require("crypto");
 const {
   EmbedBuilder,
   ActionRowBuilder,
@@ -109,6 +112,11 @@ async function ensureGiftConfigColumns(pg) {
     `ALTER TABLE gift_config ADD COLUMN IF NOT EXISTS public_out_of_range_feedback BOOLEAN DEFAULT FALSE;`,
     `ALTER TABLE gift_config ADD COLUMN IF NOT EXISTS progressive_hints_enabled BOOLEAN DEFAULT TRUE;`,
     `ALTER TABLE gift_config ADD COLUMN IF NOT EXISTS progressive_hint_delete_ms INT DEFAULT 0;`,
+
+    // ✅ NEW: public cooldown enforcement
+    `ALTER TABLE gift_config ADD COLUMN IF NOT EXISTS public_cooldown_delete_guess BOOLEAN DEFAULT TRUE;`,
+    `ALTER TABLE gift_config ADD COLUMN IF NOT EXISTS public_cooldown_warn_delete_ms INT DEFAULT 6000;`,
+    `ALTER TABLE gift_config ADD COLUMN IF NOT EXISTS public_cooldown_warn_throttle_ms INT DEFAULT 8000;`,
   ];
   for (const q of alters) {
     try { await pg.query(q); } catch {}
@@ -116,7 +124,6 @@ async function ensureGiftConfigColumns(pg) {
 }
 
 async function ensureGiftGamesHintColumns(pg) {
-  // ✅ store hint stage in DB so restarts do not spam
   const alters = [
     `ALTER TABLE gift_games ADD COLUMN IF NOT EXISTS hint_stage INT DEFAULT 0;`,
     `ALTER TABLE gift_games ADD COLUMN IF NOT EXISTS last_hint_at TIMESTAMPTZ;`,
@@ -348,7 +355,6 @@ async function postWinnerReveal(client, pg, wonGame, winner, guessValue) {
   const { display: nftDisplayLine, meta: nftMetaLine } =
     (wonGame.prize_type === "nft") ? buildNftDisplayFromPayload(prizePayload) : { display: null, meta: null };
 
-  // Render reveal card
   let attachCard = null;
   let cardName = null;
   let resolvedImageUrl = null;
@@ -531,6 +537,7 @@ async function expireGame(client, pg, game) {
   return true;
 }
 
+// ✅ handleGuess returns { ok, won, hint } or { ok:false, reason, waitMs }
 async function handleGuess(client, interactionOrMessage, { game, guessValue, source, messageId }) {
   const pg = client.pg;
   const guildId = game.guild_id;
@@ -581,7 +588,7 @@ async function handleGuess(client, interactionOrMessage, { game, guessValue, sou
 
   const isCorrect = guessValue === target;
 
-  const guessRow = await insertGuess(client.pg, {
+  const guessRow = await insertGuess(pg, {
     gameId: game.id,
     guildId,
     channelId,
@@ -594,11 +601,11 @@ async function handleGuess(client, interactionOrMessage, { game, guessValue, sou
     hint: hint === "correct" ? "correct" : hint
   });
 
-  await incrementGameGuessCount(client.pg, game.id);
-  await upsertUserStateOnGuess(client.pg, { guildId, userId, gameId: game.id, addWin: false });
+  await incrementGameGuessCount(pg, game.id);
+  await upsertUserStateOnGuess(pg, { guildId, userId, gameId: game.id, addWin: false });
 
   if (isCorrect) {
-    const res = await endGameWithWinner(client, client.pg, game, user, guessRow, hint);
+    const res = await endGameWithWinner(client, pg, game, user, guessRow, hint);
     if (!res.ok && res.reason === "already_ended") return { ok: false, reason: "already_ended" };
     return { ok: true, won: true, hint: "correct" };
   }
@@ -606,9 +613,9 @@ async function handleGuess(client, interactionOrMessage, { game, guessValue, sou
   return { ok: true, won: false, hint };
 }
 
-// ✅ Public response helper
+// ✅ Public hint response
 async function respondPublicHint({ client, cfg, message, hint, game }) {
-  const mode = String(cfg?.public_hint_mode || "reply").toLowerCase(); // reply | react | both | silent
+  const mode = String(cfg?.public_hint_mode || "reply").toLowerCase();
   const deleteMs = Number(cfg?.public_hint_delete_ms || 0);
 
   const channel = message.channel;
@@ -650,11 +657,60 @@ async function respondPublicHint({ client, cfg, message, hint, game }) {
 }
 
 // ======================================================
+// ✅ NEW: Cooldown enforcement for PUBLIC mode
+// - optional delete user's guess message if they are on cooldown
+// - reply to the user with remaining seconds
+// - throttle warning replies per user so bot doesn't spam
+// ======================================================
+
+const cooldownWarnThrottle = new Map(); // key: guild:channel:user -> lastWarnMs
+
+function getThrottleKey(guildId, channelId, userId) {
+  return `${guildId}:${channelId}:${userId}`;
+}
+
+async function handlePublicCooldownViolation({ client, cfg, message, game, waitMs }) {
+  const channel = message.channel;
+  const me = message.guild?.members?.me || message.guild?.members?.cache?.get(client.user.id);
+
+  const canSend = channel?.permissionsFor?.(me)?.has?.(PermissionsBitField.Flags.SendMessages);
+  const canManage = channel?.permissionsFor?.(me)?.has?.(PermissionsBitField.Flags.ManageMessages);
+
+  // Throttle warnings
+  const throttleMs = Number(cfg?.public_cooldown_warn_throttle_ms || 8000);
+  const key = getThrottleKey(message.guildId, message.channelId, message.author.id);
+  const last = Number(cooldownWarnThrottle.get(key) || 0);
+  if (Number.isFinite(last) && throttleMs > 0 && nowMs() - last < throttleMs) {
+    // Optionally still delete if configured
+    const delGuess = Boolean(cfg?.public_cooldown_delete_guess ?? true);
+    if (delGuess && canManage) message.delete().catch(() => {});
+    return;
+  }
+  cooldownWarnThrottle.set(key, nowMs());
+
+  // Delete user's guess message to keep channel clean
+  const delGuess = Boolean(cfg?.public_cooldown_delete_guess ?? true);
+  if (delGuess && canManage) {
+    message.delete().catch(() => {});
+  }
+
+  if (!canSend) return;
+
+  const s = Math.max(1, Math.ceil(Number(waitMs || 0) / 1000));
+  const warnDeleteMs = Number(cfg?.public_cooldown_warn_delete_ms || 6000);
+
+  const sent = await channel.send({
+    content: `⏳ <@${message.author.id}> cooldown — wait **${s}s** before guessing again.`,
+    allowedMentions: { users: [message.author.id] }
+  }).catch(() => null);
+
+  if (sent && warnDeleteMs > 0 && canManage) {
+    setTimeout(() => sent.delete().catch(() => {}), Math.max(1000, warnDeleteMs));
+  }
+}
+
+// ======================================================
 // ✅ Progressive hints (start after 75% time)
-// Stages:
-// 1 @ >= 75%: parity + wide narrowed band
-// 2 @ >= 85%: narrower band
-// 3 @ >= 93%: last digit
 // ======================================================
 
 function calcBand(target, min, max, fractionSize) {
@@ -682,7 +738,6 @@ async function maybePostProgressiveHint(client, pg, game, cfg) {
     const elapsed = Date.now() - startedMs;
     const frac = elapsed / total;
 
-    // ✅ only after 75%
     if (frac < 0.75) return;
 
     const stageNow =
@@ -691,14 +746,13 @@ async function maybePostProgressiveHint(client, pg, game, cfg) {
       1;
 
     const stageDb = Number(game.hint_stage || 0);
-    if (stageNow <= stageDb) return; // already posted
+    if (stageNow <= stageDb) return;
 
     const target = Number(game.target_number);
     const rMin = Number(game.range_min);
     const rMax = Number(game.range_max);
     if (!Number.isFinite(target) || !Number.isFinite(rMin) || !Number.isFinite(rMax)) return;
 
-    // Build hint content
     let content = null;
 
     if (stageNow === 1) {
@@ -725,7 +779,6 @@ async function maybePostProgressiveHint(client, pg, game, cfg) {
 
     const sent = await channel.send({ content, allowedMentions: { parse: [] } }).catch(() => null);
 
-    // Update DB stage to prevent repeats (even after restart)
     await pg.query(
       `UPDATE gift_games SET hint_stage=$2, last_hint_at=NOW() WHERE id=$1`,
       [game.id, stageNow]
@@ -740,7 +793,6 @@ async function maybePostProgressiveHint(client, pg, game, cfg) {
       details: { stage: stageNow }
     });
 
-    // Optional auto-delete
     const del = Number(cfg?.progressive_hint_delete_ms || 0);
     if (sent && del > 0 && canManage) {
       setTimeout(() => sent.delete().catch(() => {}), Math.max(1000, del));
@@ -759,7 +811,6 @@ module.exports = (client) => {
       if (!pg?.query) return;
       if (!(await ensureSchemaIfNeeded(client))) return;
 
-      // ✅ ensure hint columns exist
       await ensureGiftGamesHintColumns(pg);
 
       // 1) Expire games
@@ -772,12 +823,11 @@ module.exports = (client) => {
         `
       );
 
-      const expGames = exp.rows || [];
-      for (const g of expGames) {
+      for (const g of (exp.rows || [])) {
         await expireGame(client, pg, g).catch(() => {});
       }
 
-      // 2) Progressive hints for active games (near end)
+      // 2) Progressive hints for active games
       const act = await pg.query(
         `
         SELECT * FROM gift_games
@@ -787,8 +837,7 @@ module.exports = (client) => {
         `
       );
 
-      const activeGames = act.rows || [];
-      for (const g of activeGames) {
+      for (const g of (act.rows || [])) {
         const cfg = await getGiftConfig(pg, g.guild_id).catch(() => null);
         if (!cfg) continue;
         await maybePostProgressiveHint(client, pg, g, cfg);
@@ -897,7 +946,6 @@ module.exports = (client) => {
         const cid = String(interaction.customId || "");
         if (!cid.startsWith("gift_guess_modal:")) return;
 
-        // ✅ ACK IMMEDIATELY
         await interaction.deferReply({ ephemeral: true }).catch(() => {});
 
         const gameId = Number(cid.split(":")[1]);
@@ -956,7 +1004,13 @@ module.exports = (client) => {
 
       const res = await handleGuess(client, message, { game, guessValue, source: "public", messageId: message.id });
 
-      // Optional out-of-range feedback
+      // ✅ cooldown enforcement: delete guess + warn user
+      if (!res.ok && res.reason === "cooldown") {
+        await handlePublicCooldownViolation({ client, cfg, message, game, waitMs: res.waitMs }).catch(() => {});
+        return;
+      }
+
+      // Out-of-range feedback (optional)
       if (!res.ok && res.reason === "out_of_range") {
         if (cfg?.public_out_of_range_feedback) {
           const me = message.guild?.members?.me || message.guild?.members?.cache?.get(client.user.id);
@@ -987,6 +1041,6 @@ module.exports = (client) => {
     }
   });
 
-  console.log("✅ GiftGameListener loaded (public replies + progressive hints after 75%)");
+  console.log("✅ GiftGameListener loaded (public cooldown enforcement + friendly warnings)");
 };
 
