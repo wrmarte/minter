@@ -7,10 +7,11 @@
 // ✅ Modal submit: deferReply() prevents 10062 Unknown interaction
 // ✅ Winner reveal: embed uses ACTUAL NFT image URL when available
 // ✅ Winner reveal: adds NFT name + tokenId lines when provided
-// ✅ NEW: Public audit option for guesses (configurable + sampling to avoid DB spam)
-// ✅ NEW: Optional out-of-range feedback in public mode (configurable)
+// ✅ Progressive hints begin after 75% time has passed (3-stage)
+// ✅ No manual DB changes: safe ALTER TABLE IF NOT EXISTS
 // ======================================================
 
+const crypto = require("crypto");
 const {
   EmbedBuilder,
   ActionRowBuilder,
@@ -101,30 +102,33 @@ async function ensureSchemaIfNeeded(client) {
   }
 }
 
-// ✅ Ensure gift_config new columns exist (safe)
 async function ensureGiftConfigColumns(pg) {
   const alters = [
     `ALTER TABLE gift_config ADD COLUMN IF NOT EXISTS public_hint_mode TEXT DEFAULT 'reply';`,
     `ALTER TABLE gift_config ADD COLUMN IF NOT EXISTS public_hint_delete_ms INT DEFAULT 8000;`,
-    `ALTER TABLE gift_config ADD COLUMN IF NOT EXISTS audit_public_default BOOLEAN DEFAULT TRUE;`,
-
-    // ✅ NEW: audit/feedback controls
-    `ALTER TABLE gift_config ADD COLUMN IF NOT EXISTS audit_public_guesses BOOLEAN DEFAULT FALSE;`,
-    `ALTER TABLE gift_config ADD COLUMN IF NOT EXISTS audit_guess_sample_rate INT DEFAULT 1;`, // 1 = every guess, 5 = 1/5 guesses
     `ALTER TABLE gift_config ADD COLUMN IF NOT EXISTS public_out_of_range_feedback BOOLEAN DEFAULT FALSE;`,
+    `ALTER TABLE gift_config ADD COLUMN IF NOT EXISTS progressive_hints_enabled BOOLEAN DEFAULT TRUE;`,
+    `ALTER TABLE gift_config ADD COLUMN IF NOT EXISTS progressive_hint_delete_ms INT DEFAULT 0;`,
   ];
-
   for (const q of alters) {
-    try { await pg.query(q); } catch (e) {
-      if (DEBUG) console.warn("⚠️ [GIFT] gift_config alter skipped:", e?.message || e);
-    }
+    try { await pg.query(q); } catch {}
+  }
+}
+
+async function ensureGiftGamesHintColumns(pg) {
+  // ✅ store hint stage in DB so restarts do not spam
+  const alters = [
+    `ALTER TABLE gift_games ADD COLUMN IF NOT EXISTS hint_stage INT DEFAULT 0;`,
+    `ALTER TABLE gift_games ADD COLUMN IF NOT EXISTS last_hint_at TIMESTAMPTZ;`,
+  ];
+  for (const q of alters) {
+    try { await pg.query(q); } catch {}
   }
 }
 
 async function getGiftConfig(pg, guildId) {
   await ensureGiftConfigColumns(pg);
 
-  // lazy insert default row if missing
   await pg.query(
     `INSERT INTO gift_config (guild_id) VALUES ($1) ON CONFLICT (guild_id) DO NOTHING`,
     [guildId]
@@ -527,55 +531,6 @@ async function expireGame(client, pg, game) {
   return true;
 }
 
-// ✅ Public response helper (reply/react/both/silent)
-async function respondPublicHint({ client, cfg, message, hint, game }) {
-  const mode = String(cfg?.public_hint_mode || "reply").toLowerCase(); // reply | react | both | silent
-  const deleteMs = Number(cfg?.public_hint_delete_ms || 0);
-
-  const channel = message.channel;
-  const me = message.guild?.members?.me || message.guild?.members?.cache?.get(client.user.id);
-  const canSend = channel?.permissionsFor?.(me)?.has?.(PermissionsBitField.Flags.SendMessages);
-  const canManage = channel?.permissionsFor?.(me)?.has?.(PermissionsBitField.Flags.ManageMessages);
-  const canReact = channel?.permissionsFor?.(me)?.has?.(PermissionsBitField.Flags.AddReactions);
-
-  // React mapping
-  const reactEmoji = (() => {
-    switch (hint) {
-      case "too_low": return "🔺";
-      case "too_high": return "🔻";
-      case "hot": return "🔥";
-      case "warm": return "🌡️";
-      case "cold": return "🧊";
-      case "frozen": return "🥶";
-      case "correct": return "🎁";
-      default: return null;
-    }
-  })();
-
-  // 1) React
-  if ((mode === "react" || mode === "both") && canReact && reactEmoji) {
-    message.react(reactEmoji).catch(() => {});
-  }
-
-  // 2) Reply
-  if ((mode === "reply" || mode === "both") && canSend) {
-    // more “game-y” and shorter
-    const txt = hintToUserText(hint);
-
-    const content =
-      hint === "correct"
-        ? `🎁 ${txt} **Winner!** Reveal incoming…`
-        : `${txt}`;
-
-    const sent = await message.reply({ content, allowedMentions: { parse: [] } }).catch(() => null);
-
-    // auto-clean to avoid spam
-    if (sent && deleteMs > 0 && canManage) {
-      setTimeout(() => sent.delete().catch(() => {}), Math.max(1000, deleteMs));
-    }
-  }
-}
-
 async function handleGuess(client, interactionOrMessage, { game, guessValue, source, messageId }) {
   const pg = client.pg;
   const guildId = game.guild_id;
@@ -626,7 +581,7 @@ async function handleGuess(client, interactionOrMessage, { game, guessValue, sou
 
   const isCorrect = guessValue === target;
 
-  const guessRow = await insertGuess(pg, {
+  const guessRow = await insertGuess(client.pg, {
     gameId: game.id,
     guildId,
     channelId,
@@ -639,16 +594,160 @@ async function handleGuess(client, interactionOrMessage, { game, guessValue, sou
     hint: hint === "correct" ? "correct" : hint
   });
 
-  await incrementGameGuessCount(pg, game.id);
-  await upsertUserStateOnGuess(pg, { guildId, userId, gameId: game.id, addWin: false });
+  await incrementGameGuessCount(client.pg, game.id);
+  await upsertUserStateOnGuess(client.pg, { guildId, userId, gameId: game.id, addWin: false });
 
   if (isCorrect) {
-    const res = await endGameWithWinner(client, pg, game, user, guessRow, hint);
+    const res = await endGameWithWinner(client, client.pg, game, user, guessRow, hint);
     if (!res.ok && res.reason === "already_ended") return { ok: false, reason: "already_ended" };
     return { ok: true, won: true, hint: "correct" };
   }
 
   return { ok: true, won: false, hint };
+}
+
+// ✅ Public response helper
+async function respondPublicHint({ client, cfg, message, hint, game }) {
+  const mode = String(cfg?.public_hint_mode || "reply").toLowerCase(); // reply | react | both | silent
+  const deleteMs = Number(cfg?.public_hint_delete_ms || 0);
+
+  const channel = message.channel;
+  const me = message.guild?.members?.me || message.guild?.members?.cache?.get(client.user.id);
+  const canSend = channel?.permissionsFor?.(me)?.has?.(PermissionsBitField.Flags.SendMessages);
+  const canManage = channel?.permissionsFor?.(me)?.has?.(PermissionsBitField.Flags.ManageMessages);
+  const canReact = channel?.permissionsFor?.(me)?.has?.(PermissionsBitField.Flags.AddReactions);
+
+  const reactEmoji = (() => {
+    switch (hint) {
+      case "too_low": return "🔺";
+      case "too_high": return "🔻";
+      case "hot": return "🔥";
+      case "warm": return "🌡️";
+      case "cold": return "🧊";
+      case "frozen": return "🥶";
+      case "correct": return "🎁";
+      default: return null;
+    }
+  })();
+
+  if ((mode === "react" || mode === "both") && canReact && reactEmoji) {
+    message.react(reactEmoji).catch(() => {});
+  }
+
+  if ((mode === "reply" || mode === "both") && canSend) {
+    const txt = hintToUserText(hint);
+    const content =
+      hint === "correct"
+        ? `🎁 ${txt} **Winner!** Reveal incoming…`
+        : `${txt}`;
+
+    const sent = await message.reply({ content, allowedMentions: { parse: [] } }).catch(() => null);
+
+    if (sent && deleteMs > 0 && canManage) {
+      setTimeout(() => sent.delete().catch(() => {}), Math.max(1000, deleteMs));
+    }
+  }
+}
+
+// ======================================================
+// ✅ Progressive hints (start after 75% time)
+// Stages:
+// 1 @ >= 75%: parity + wide narrowed band
+// 2 @ >= 85%: narrower band
+// 3 @ >= 93%: last digit
+// ======================================================
+
+function calcBand(target, min, max, fractionSize) {
+  const span = Math.max(1, max - min + 1);
+  const width = Math.max(10, Math.floor(span * fractionSize));
+  let lo = target - Math.floor(width / 2);
+  let hi = lo + width;
+
+  if (lo < min) { lo = min; hi = Math.min(max, lo + width); }
+  if (hi > max) { hi = max; lo = Math.max(min, hi - width); }
+  return { lo, hi };
+}
+
+async function maybePostProgressiveHint(client, pg, game, cfg) {
+  try {
+    if (!cfg?.progressive_hints_enabled) return;
+
+    const startedMs = game.started_at ? new Date(game.started_at).getTime() : null;
+    const endsMs = game.ends_at ? new Date(game.ends_at).getTime() : null;
+    if (!startedMs || !endsMs) return;
+
+    const total = endsMs - startedMs;
+    if (total <= 0) return;
+
+    const elapsed = Date.now() - startedMs;
+    const frac = elapsed / total;
+
+    // ✅ only after 75%
+    if (frac < 0.75) return;
+
+    const stageNow =
+      frac >= 0.93 ? 3 :
+      frac >= 0.85 ? 2 :
+      1;
+
+    const stageDb = Number(game.hint_stage || 0);
+    if (stageNow <= stageDb) return; // already posted
+
+    const target = Number(game.target_number);
+    const rMin = Number(game.range_min);
+    const rMax = Number(game.range_max);
+    if (!Number.isFinite(target) || !Number.isFinite(rMin) || !Number.isFinite(rMax)) return;
+
+    // Build hint content
+    let content = null;
+
+    if (stageNow === 1) {
+      const parity = (target % 2 === 0) ? "**even**" : "**odd**";
+      const band = calcBand(target, rMin, rMax, 0.25);
+      content = `🔎 **Hint #1:** The number is ${parity}. Also… it’s somewhere between \`${band.lo}–${band.hi}\`.`;
+    } else if (stageNow === 2) {
+      const band = calcBand(target, rMin, rMax, 0.12);
+      content = `🔎 **Hint #2:** Narrowing in… it’s between \`${band.lo}–${band.hi}\`.`;
+    } else if (stageNow === 3) {
+      const last = Math.abs(target) % 10;
+      content = `🔎 **Final Hint:** The last digit is \`${last}\`.`;
+    }
+
+    if (!content) return;
+
+    const channel = await client.channels.fetch(game.channel_id).catch(() => null);
+    if (!channel) return;
+
+    const me = channel.guild?.members?.me || channel.guild?.members?.cache?.get(client.user.id);
+    const canSend = channel?.permissionsFor?.(me)?.has?.(PermissionsBitField.Flags.SendMessages);
+    const canManage = channel?.permissionsFor?.(me)?.has?.(PermissionsBitField.Flags.ManageMessages);
+    if (!canSend) return;
+
+    const sent = await channel.send({ content, allowedMentions: { parse: [] } }).catch(() => null);
+
+    // Update DB stage to prevent repeats (even after restart)
+    await pg.query(
+      `UPDATE gift_games SET hint_stage=$2, last_hint_at=NOW() WHERE id=$1`,
+      [game.id, stageNow]
+    ).catch(() => {});
+
+    await writeAudit(pg, {
+      guild_id: game.guild_id,
+      game_id: game.id,
+      action: "progressive_hint",
+      actor_user_id: null,
+      actor_tag: null,
+      details: { stage: stageNow }
+    });
+
+    // Optional auto-delete
+    const del = Number(cfg?.progressive_hint_delete_ms || 0);
+    if (sent && del > 0 && canManage) {
+      setTimeout(() => sent.delete().catch(() => {}), Math.max(1000, del));
+    }
+  } catch (e) {
+    if (DEBUG) console.warn("⚠️ [GIFT] progressive hint error:", e?.message || e);
+  }
 }
 
 module.exports = (client) => {
@@ -660,7 +759,11 @@ module.exports = (client) => {
       if (!pg?.query) return;
       if (!(await ensureSchemaIfNeeded(client))) return;
 
-      const r = await pg.query(
+      // ✅ ensure hint columns exist
+      await ensureGiftGamesHintColumns(pg);
+
+      // 1) Expire games
+      const exp = await pg.query(
         `
         SELECT * FROM gift_games
         WHERE status='active' AND ends_at IS NOT NULL AND ends_at < NOW()
@@ -669,14 +772,29 @@ module.exports = (client) => {
         `
       );
 
-      const games = r.rows || [];
-      if (!games.length) return;
-
-      for (const g of games) {
+      const expGames = exp.rows || [];
+      for (const g of expGames) {
         await expireGame(client, pg, g).catch(() => {});
       }
+
+      // 2) Progressive hints for active games (near end)
+      const act = await pg.query(
+        `
+        SELECT * FROM gift_games
+        WHERE status='active' AND ends_at IS NOT NULL AND started_at IS NOT NULL
+        ORDER BY started_at DESC
+        LIMIT 25
+        `
+      );
+
+      const activeGames = act.rows || [];
+      for (const g of activeGames) {
+        const cfg = await getGiftConfig(pg, g.guild_id).catch(() => null);
+        if (!cfg) continue;
+        await maybePostProgressiveHint(client, pg, g, cfg);
+      }
     } catch (e) {
-      if (DEBUG) console.warn("⚠️ [GIFT] expiry tick error:", e?.message || e);
+      if (DEBUG) console.warn("⚠️ [GIFT] tick error:", e?.message || e);
     }
   }, Math.max(5000, EXPIRY_TICK_MS));
 
@@ -779,7 +897,7 @@ module.exports = (client) => {
         const cid = String(interaction.customId || "");
         if (!cid.startsWith("gift_guess_modal:")) return;
 
-        // ✅ CRITICAL: ACK IMMEDIATELY
+        // ✅ ACK IMMEDIATELY
         await interaction.deferReply({ ephemeral: true }).catch(() => {});
 
         const gameId = Number(cid.split(":")[1]);
@@ -838,11 +956,9 @@ module.exports = (client) => {
 
       const res = await handleGuess(client, message, { game, guessValue, source: "public", messageId: message.id });
 
-      // ✅ Optional out-of-range feedback (public mode only)
+      // Optional out-of-range feedback
       if (!res.ok && res.reason === "out_of_range") {
         if (cfg?.public_out_of_range_feedback) {
-          await respondPublicHint({ client, cfg, message, hint: "none", game }).catch(() => {});
-          // Replace generic with clearer note:
           const me = message.guild?.members?.me || message.guild?.members?.cache?.get(client.user.id);
           const canSend = message.channel?.permissionsFor?.(me)?.has?.(PermissionsBitField.Flags.SendMessages);
           const canManage = message.channel?.permissionsFor?.(me)?.has?.(PermissionsBitField.Flags.ManageMessages);
@@ -858,35 +974,8 @@ module.exports = (client) => {
         return;
       }
 
-      if (!res.ok) {
-        // optional “quiet fail”: do nothing on cooldown/max guesses
-        return;
-      }
+      if (!res.ok) return;
 
-      // ✅ Public audit for guesses (optional + sampling)
-      try {
-        const auditOn = Boolean(cfg?.audit_public_guesses ?? false);
-        const sampleRate = Math.max(1, Math.min(50, Number(cfg?.audit_guess_sample_rate ?? 1)));
-        const sampled = sampleRate === 1 ? true : (crypto.randomInt(1, sampleRate + 1) === 1);
-
-        if (auditOn && sampled) {
-          await writeAudit(pg, {
-            guild_id: message.guildId,
-            game_id: game.id,
-            action: "guess_public",
-            actor_user_id: message.author.id,
-            actor_tag: message.author.tag || null,
-            details: {
-              guess: guessValue,
-              hint: res.hint,
-              channel_id: message.channelId,
-              message_id: message.id
-            }
-          });
-        }
-      } catch {}
-
-      // ✅ Public response (hot/cold etc.)
       if (res.won) {
         await respondPublicHint({ client, cfg, message, hint: "correct", game }).catch(() => {});
         return;
@@ -898,5 +987,6 @@ module.exports = (client) => {
     }
   });
 
-  console.log("✅ GiftGameListener loaded (public replies + friendly hints + public guess audit)");
+  console.log("✅ GiftGameListener loaded (public replies + progressive hints after 75%)");
 };
+
