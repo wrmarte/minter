@@ -2,8 +2,8 @@
 // ======================================================
 // Gift Reveal Renderer (WOW Step 6)
 // UPDATE:
-// ✅ NFT reveal is now FULL-BLEED (max image, no wasted space)
-// ✅ Token reveal keeps the cinematic card layout
+// ✅ NFT reveal is FULL-BLEED (max image, no wasted space)
+// ✅ Token reveal uses animated GIF (embed) + GIF-backed art panel (canvas)
 // ======================================================
 
 const path = require("path");
@@ -34,6 +34,11 @@ const IPFS_GATEWAY =
 
 const RESERVOIR_API_KEY = String(process.env.RESERVOIR_API_KEY || "").trim();
 const RESERVOIR_BASE_URL = (process.env.RESERVOIR_BASE_URL || "https://api.reservoir.tools").trim();
+
+// ✅ NEW: Token reveal GIF (embed + canvas accent)
+const TOKEN_REVEAL_GIF =
+  (process.env.GIFT_TOKEN_REVEAL_GIF || "").trim() ||
+  "https://iili.io/fS5Dk3Q.gif";
 
 function log(...a) { if (DEBUG) console.log("[GIFT_REVEAL]", ...a); }
 
@@ -439,6 +444,12 @@ function resolveTokenLogoUrl(payload) {
   return u ? toHttpUrl(u) : null;
 }
 
+// ✅ NEW: token gif resolver (always http url)
+function resolveTokenGifUrl() {
+  const u = toHttpUrl(TOKEN_REVEAL_GIF);
+  return u && !isDataUrl(u) ? u : null;
+}
+
 function sha1(s) {
   return crypto.createHash("sha1").update(String(s)).digest("hex").slice(0, 10);
 }
@@ -463,13 +474,18 @@ async function renderGiftRevealCard(args = {}) {
   const canvas = Canvas.createCanvas(W, H);
   const ctx = canvas.getContext("2d");
 
-  // Resolve image
-  let imageUrl = null;
+  // Resolve image(s)
+  let imageUrl = null;          // token logo OR nft image, depending mode
+  let tokenGifUrl = null;       // ✅ for token rewards (embed + canvas accent)
+
   if (prizeType === "nft") imageUrl = await resolveNftImageUrl(payload);
-  else if (prizeType === "token") imageUrl = resolveTokenLogoUrl(payload);
-  else if (payload?.image) imageUrl = toHttpUrl(payload.image);
+  else if (prizeType === "token") {
+    imageUrl = resolveTokenLogoUrl(payload); // logo/icon
+    tokenGifUrl = resolveTokenGifUrl();      // animated gift
+  } else if (payload?.image) imageUrl = toHttpUrl(payload.image);
 
   log("resolvedImageUrl:", imageUrl);
+  if (prizeType === "token") log("tokenGifUrl:", tokenGifUrl);
 
   // =========================
   // NFT FULL-BLEED MODE
@@ -477,11 +493,10 @@ async function renderGiftRevealCard(args = {}) {
   if (prizeType === "nft" && imageUrl) {
     const img = await tryLoadImage(imageUrl);
     if (img) {
-      // draw full bleed cover
       const fit = fitCover(img.width || W, img.height || H, W, H);
       ctx.drawImage(img, fit.x, fit.y, fit.w, fit.h);
 
-      // top/bottom cinematic gradients (so text readable)
+      // top/bottom cinematic gradients
       ctx.save();
       const topG = ctx.createLinearGradient(0, 0, 0, 160);
       topG.addColorStop(0, "rgba(0,0,0,0.65)");
@@ -516,7 +531,6 @@ async function renderGiftRevealCard(args = {}) {
 
       ctx.font = "700 30px DejaVuSans, sans-serif";
       ctx.fillStyle = "rgba(255,255,255,0.96)";
-      // wrap
       const words = prizeLabel.split(" ");
       let line = "";
       let y = H - 84;
@@ -593,17 +607,50 @@ async function renderGiftRevealCard(args = {}) {
   const textY = artY + 10;
   const textW = boxX + boxW - textX - artPad;
 
-  // Draw token/logo image if possible
+  // ✅ TOKEN: draw GIF as art-panel background (canvas accent)
+  if (prizeType === "token" && tokenGifUrl) {
+    const gifImg = await tryLoadImage(tokenGifUrl); // note: canvas usually loads first frame, which is fine as a backdrop
+    if (gifImg) {
+      ctx.save();
+      roundedRect(ctx, artX, artY, artW, artH, 24);
+      ctx.clip();
+
+      const fit = fitCover(gifImg.width || artW, gifImg.height || artH, artW, artH);
+      ctx.globalAlpha = 0.85;
+      ctx.drawImage(gifImg, artX + fit.x, artY + fit.y, fit.w, fit.h);
+
+      // darken so logo/text pop
+      ctx.globalAlpha = 0.35;
+      ctx.fillStyle = "rgba(0,0,0,1)";
+      ctx.fillRect(artX, artY, artW, artH);
+
+      ctx.restore();
+    }
+  }
+
+  // Draw token/logo image if possible (on top)
   let imgDrawn = false;
   if (imageUrl) {
     const img = await tryLoadImage(imageUrl);
     if (img) {
       ctx.save();
-      ctx.globalAlpha = 0.95;
+      ctx.globalAlpha = 0.98;
+
+      // if token gif exists, we already have a clipped panel background; clip again for safe overlay
       roundedRect(ctx, artX, artY, artW, artH, 24);
       ctx.clip();
-      const fit = fitContain(img.width || artW, img.height || artH, artW, artH);
-      ctx.drawImage(img, artX + fit.x, artY + fit.y, fit.w, fit.h);
+
+      // soft inner frame
+      ctx.globalAlpha = 0.16;
+      ctx.fillStyle = "rgba(255,255,255,1)";
+      ctx.fillRect(artX, artY, artW, artH);
+      ctx.globalAlpha = 0.98;
+
+      // contain logo with padding
+      const pad = Math.max(16, Math.floor(Math.min(artW, artH) * 0.10));
+      const fit = fitContain(img.width || (artW - pad * 2), img.height || (artH - pad * 2), artW - pad * 2, artH - pad * 2);
+      ctx.drawImage(img, artX + pad + fit.x, artY + pad + fit.y, fit.w, fit.h);
+
       ctx.restore();
       imgDrawn = true;
     }
@@ -664,12 +711,23 @@ async function renderGiftRevealCard(args = {}) {
     const amount = payload.amount != null ? safeStr(payload.amount, 60) : "";
     const symbol = payload.symbol != null ? safeStr(payload.symbol, 24) : "";
     const chain = payload.chain != null ? safeStr(payload.chain, 24) : "";
-    const extraLine = [amount && symbol ? `${amount} ${symbol}` : "", chain ? `chain: ${chain}` : ""].filter(Boolean).join(" • ");
+
+    const extraLine = [
+      amount && symbol ? `${amount} ${symbol}` : "",
+      chain ? `chain: ${chain}` : "",
+    ].filter(Boolean).join(" • ");
 
     if (extraLine) {
       ctx.font = "500 20px DejaVuSans, sans-serif";
       ctx.fillStyle = "rgba(255,255,255,0.72)";
       ctx.fillText(extraLine, textX, Math.min(textY + artH - 18, y + 60));
+    }
+
+    // ✅ extra “gift vibe” line for token rewards
+    if (tokenGifUrl) {
+      ctx.font = "500 18px DejaVuSans, sans-serif";
+      ctx.fillStyle = "rgba(255,255,255,0.62)";
+      ctx.fillText("🎁 bonus: animated reveal in embed", textX, Math.min(textY + artH + 10, H - 68));
     }
   }
 
@@ -686,7 +744,16 @@ async function renderGiftRevealCard(args = {}) {
 
   const buffer = canvas.toBuffer("image/png");
   const filename = `gift-reveal-${sha1(`${Date.now()}_${Math.random()}_${prizeType}`)}.png`;
-  return { buffer, filename, contentType: "image/png", resolvedImageUrl: imageUrl || null };
+
+  // ✅ IMPORTANT:
+  // For TOKEN rewards, return the GIF URL as resolvedImageUrl so the winner embed shows the animated GIF.
+  // For others, keep existing behavior.
+  const resolvedForEmbed =
+    prizeType === "token"
+      ? (tokenGifUrl || imageUrl || null)
+      : (imageUrl || null);
+
+  return { buffer, filename, contentType: "image/png", resolvedImageUrl: resolvedForEmbed };
 }
 
 module.exports = {
