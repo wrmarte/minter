@@ -1,10 +1,12 @@
-
 // listeners/giftGameListener.js
 // ======================================================
 // Gift Drop Guess Game — Runtime Engine + Wizard UI
 // PATCH:
 // ✅ Fix "Interaction failed" on NFT/Role/Token buttons by showing modal IMMEDIATELY (no DB before showModal)
 // ✅ FIX: Discord TextInput label limit is 45 chars — shorten long labels (NFT image + role duration)
+// ✅ NEW: Public mode cooldown enforcement:
+//    - If user posts guess too fast -> delete their number message (if possible)
+//    - Warn user with wait time (auto-delete warning)
 // ✅ Use flags: 64 instead of ephemeral (deprecation warning)
 // ✅ Keeps public + modal gameplay, winner reveal, audit writes
 // ======================================================
@@ -718,6 +720,55 @@ async function respondPublicHint({ client, cfg, message, hint, game }) {
   }
 }
 
+// ✅ NEW: Public cooldown / reject handler (delete guess + warn user)
+async function handlePublicReject({ client, cfg, message, game, reason, waitMs }) {
+  try {
+    const channel = message.channel;
+    const me = message.guild?.members?.me || message.guild?.members?.cache?.get(client.user.id);
+
+    const canSend = channel?.permissionsFor?.(me)?.has?.(PermissionsBitField.Flags.SendMessages);
+    const canManage = channel?.permissionsFor?.(me)?.has?.(PermissionsBitField.Flags.ManageMessages);
+
+    const deleteGuessOnCooldown = Number(cfg?.public_cooldown_delete_guess ?? 1) === 1;
+    const warnOnCooldown = Number(cfg?.public_cooldown_warn ?? 1) === 1;
+    const warnDeleteMs = Number(cfg?.public_cooldown_warn_delete_ms ?? 5000);
+
+    // Delete the user's guess message if we can
+    if (reason === "cooldown" && deleteGuessOnCooldown && canManage) {
+      await message.delete().catch(() => {});
+    }
+
+    // Warn user
+    if (reason === "cooldown" && warnOnCooldown && canSend) {
+      const s = Math.max(1, Math.ceil(Number(waitMs || 0) / 1000));
+      const warn = await channel
+        .send({
+          content: `⏳ <@${message.author.id}> slow down — wait ~${s}s before guessing again.`,
+          allowedMentions: { users: [message.author.id] },
+        })
+        .catch(() => null);
+
+      if (warn && warnDeleteMs > 0 && canManage) {
+        setTimeout(() => warn.delete().catch(() => {}), Math.max(1500, warnDeleteMs));
+      }
+    }
+
+    // Optional: max guesses warning (nice-to-have, won’t delete by default)
+    if (reason === "max_guesses" && canSend) {
+      const warn = await channel
+        .send({
+          content: `⛔ <@${message.author.id}> you reached the max guesses for this drop.`,
+          allowedMentions: { users: [message.author.id] },
+        })
+        .catch(() => null);
+
+      if (warn && canManage) {
+        setTimeout(() => warn.delete().catch(() => {}), 5000);
+      }
+    }
+  } catch {}
+}
+
 module.exports = (client) => {
   const EXPIRY_TICK_MS = Number(process.env.GIFT_EXPIRY_TICK_MS || 20000);
 
@@ -1246,7 +1297,21 @@ module.exports = (client) => {
       const cfg = await getGiftConfig(pg, message.guildId).catch(() => null);
 
       const res = await handleGuess(client, message, { game, guessValue, source: "public", messageId: message.id });
-      if (!res.ok) return;
+
+      // ✅ NEW: cooldown enforcement in public mode
+      if (!res.ok) {
+        if (res.reason === "cooldown" || res.reason === "max_guesses") {
+          await handlePublicReject({
+            client,
+            cfg,
+            message,
+            game,
+            reason: res.reason,
+            waitMs: res.waitMs || 0
+          }).catch(() => {});
+        }
+        return;
+      }
 
       if (res.won) {
         await respondPublicHint({ client, cfg, message, hint: "correct", game }).catch(() => {});
@@ -1259,5 +1324,5 @@ module.exports = (client) => {
     }
   });
 
-  console.log("✅ GiftGameListener loaded (wizard modal fast-path + label-limit fix + flags:64)");
+  console.log("✅ GiftGameListener loaded (wizard modal fast-path + label-limit fix + public cooldown delete+warn + flags:64)");
 };
