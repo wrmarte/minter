@@ -5,6 +5,7 @@
 // /gift stop    ✅
 // /gift review  ✅ (NOW POSTS PUBLICLY INTO CHANNEL)
 // /gift audit   ✅ NEW (posts audit into channel)
+// /gift dbcheck ✅ NEW (posts DB fingerprint + gift table counts into channel)
 //
 // NOTE: Runtime gameplay is handled by listeners/giftGameListener.js
 // ======================================================
@@ -225,14 +226,7 @@ async function createGiftGameRow(pg, game) {
     game.notes || null,
   ];
 
-  // If started_at provided as "NOW()", we need a raw SQL value.
-  // Simplest: if it's "NOW()", do a second query. We'll avoid raw insertion and just pass null to default.
-  // So override: started_at = NOW() when null.
-  // We'll do that by building a safer query:
-  // (Handled below by a fallback query.)
   try {
-    // Attempt: if started_at is null, DB default/Now should apply (depends on schema).
-    // If your schema doesn't default, we set started_at = NOW() explicitly.
     const startedAtIsNow = game.started_at === "NOW()";
     if (startedAtIsNow) {
       const q2 = `
@@ -302,7 +296,6 @@ async function createGiftGameRow(pg, game) {
     const res = await pg.query(q, vals);
     return res.rows?.[0] || null;
   } catch (e) {
-    // fallback: started_at = NOW()
     try {
       const q2 = `
         INSERT INTO gift_games (
@@ -383,9 +376,9 @@ async function attachDropMessage(pg, { gameId, messageId, messageUrl }) {
 function disableAllComponents(components) {
   try {
     if (!Array.isArray(components)) return [];
-    return components.map(row => {
+    return components.map((row) => {
       const newRow = ActionRowBuilder.from(row);
-      newRow.components = newRow.components.map(c => {
+      newRow.components = newRow.components.map((c) => {
         const b = ButtonBuilder.from(c);
         b.setDisabled(true);
         return b;
@@ -412,6 +405,15 @@ function makeTimeBar(percent, size = 12) {
   const filled = Math.round(p * size);
   const empty = Math.max(0, size - filled);
   return `\`${"█".repeat(filled)}${"░".repeat(empty)}\``;
+}
+
+async function safeCount(pg, tableName) {
+  try {
+    const r = await pg.query(`SELECT COUNT(*)::int AS n FROM ${tableName}`);
+    return Number(r.rows?.[0]?.n || 0);
+  } catch (e) {
+    return `ERR: ${e?.message || e}`;
+  }
 }
 
 module.exports = {
@@ -631,6 +633,11 @@ module.exports = {
             .setRequired(false)
         )
     )
+    .addSubcommand((sub) =>
+      sub
+        .setName("dbcheck")
+        .setDescription("Debug: post DB fingerprint + gift table health into this channel (admin)")
+    )
     .setDMPermission(false),
 
   async execute(interaction) {
@@ -674,6 +681,118 @@ module.exports = {
       }
 
       // =========================
+      // /gift dbcheck (posts into channel)
+      // =========================
+      if (sub === "dbcheck") {
+        await interaction.deferReply({ ephemeral: true });
+
+        let fp = null;
+        try {
+          const r = await pg.query(`
+            SELECT
+              current_database() AS db,
+              current_user AS db_user,
+              inet_server_addr() AS host,
+              inet_server_port() AS port,
+              version() AS version
+          `);
+          fp = r.rows?.[0] || null;
+        } catch (e) {
+          fp = { error: e?.message || String(e) };
+        }
+
+        const counts = {
+          gift_config: await safeCount(pg, "gift_config"),
+          gift_games: await safeCount(pg, "gift_games"),
+          gift_audit: await safeCount(pg, "gift_audit"),
+          gift_guesses: await safeCount(pg, "gift_guesses"),
+          gift_user_state: await safeCount(pg, "gift_user_state"),
+        };
+
+        let recentGames = [];
+        try {
+          const r = await pg.query(`
+            SELECT id, guild_id, status, mode, channel_id, started_at, ends_at, created_by_tag
+            FROM gift_games
+            ORDER BY id DESC
+            LIMIT 5
+          `);
+          recentGames = r.rows || [];
+        } catch {}
+
+        let recentAudit = [];
+        try {
+          const r = await pg.query(`
+            SELECT id, game_id, action, actor_tag, created_at
+            FROM gift_audit
+            ORDER BY id DESC
+            LIMIT 8
+          `);
+          recentAudit = r.rows || [];
+        } catch {}
+
+        const lines = [];
+
+        lines.push("**DB Fingerprint (where the bot is writing)**");
+        if (fp?.error) {
+          lines.push(`❌ ${fp.error}`);
+        } else if (fp) {
+          lines.push(`• db: \`${fp.db}\``);
+          lines.push(`• user: \`${fp.db_user}\``);
+          lines.push(`• host: \`${fp.host}\``);
+          lines.push(`• port: \`${fp.port}\``);
+        } else {
+          lines.push("❌ Could not read fingerprint.");
+        }
+
+        lines.push("");
+        lines.push("**Gift Table Counts**");
+        for (const [k, v] of Object.entries(counts)) {
+          lines.push(`• \`${k}\`: \`${v}\``);
+        }
+
+        lines.push("");
+        lines.push("**Recent gift_games (last 5)**");
+        if (recentGames.length) {
+          for (const g of recentGames) {
+            const st = g.started_at ? `<t:${Math.floor(new Date(g.started_at).getTime() / 1000)}:t>` : "—";
+            lines.push(`• #${g.id} \`${g.status}\` \`${g.mode}\` ch:${g.channel_id} at:${st}`);
+          }
+        } else {
+          lines.push("• (none or query failed)");
+        }
+
+        lines.push("");
+        lines.push("**Recent gift_audit (last 8)**");
+        if (recentAudit.length) {
+          for (const a of recentAudit) {
+            const ts = a.created_at ? `<t:${Math.floor(new Date(a.created_at).getTime() / 1000)}:t>` : "—";
+            lines.push(`• ${ts} \`${a.action}\` game:${a.game_id ?? "-"} by:${a.actor_tag ?? "system"}`);
+          }
+        } else {
+          lines.push("• (none or query failed)");
+        }
+
+        const embed = new EmbedBuilder()
+          .setTitle("🧪 Gift DB Check")
+          .setDescription(lines.join("\n").slice(0, 3900))
+          .setFooter({ text: "If counts are 0 but games work, you're viewing a different DB than the bot uses." });
+
+        await interaction.channel.send({ embeds: [embed], allowedMentions: { parse: [] } }).catch(() => {});
+
+        await writeAudit(pg, {
+          guild_id: interaction.guildId,
+          game_id: null,
+          action: "dbcheck_posted",
+          actor_user_id: interaction.user.id,
+          actor_tag: interaction.user.tag,
+          details: { channel_id: interaction.channelId }
+        });
+
+        return interaction.editReply("✅ Posted DB check into this channel.");
+      }
+
+      // =========================
       // /gift config
       // =========================
       if (sub === "config") {
@@ -694,21 +813,21 @@ module.exports = {
 
         const row = {
           guild_id: interaction.guildId,
-          channel_id: (channel?.id ?? cur?.channel_id ?? null),
-          announce_channel_id: (announceChannel?.id ?? cur?.announce_channel_id ?? null),
+          channel_id: channel?.id ?? cur?.channel_id ?? null,
+          announce_channel_id: announceChannel?.id ?? cur?.announce_channel_id ?? null,
 
-          mode_default: (modeDefault ?? cur?.mode_default ?? "modal"),
-          allow_modal_mode: (allowModal ?? cur?.allow_modal_mode ?? true),
-          allow_public_mode: (allowPublic ?? cur?.allow_public_mode ?? true),
+          mode_default: modeDefault ?? cur?.mode_default ?? "modal",
+          allow_modal_mode: allowModal ?? cur?.allow_modal_mode ?? true,
+          allow_public_mode: allowPublic ?? cur?.allow_public_mode ?? true,
 
-          range_min_default: (rangeMin ?? cur?.range_min_default ?? 1),
-          range_max_default: (rangeMax ?? cur?.range_max_default ?? 100),
+          range_min_default: rangeMin ?? cur?.range_min_default ?? 1,
+          range_max_default: rangeMax ?? cur?.range_max_default ?? 100,
 
-          duration_sec_default: (durationSec ?? cur?.duration_sec_default ?? 600),
-          per_user_cooldown_ms: (cooldownMs ?? cur?.per_user_cooldown_ms ?? 6000),
-          max_guesses_per_user: (maxGuesses ?? cur?.max_guesses_per_user ?? 25),
+          duration_sec_default: durationSec ?? cur?.duration_sec_default ?? 600,
+          per_user_cooldown_ms: cooldownMs ?? cur?.per_user_cooldown_ms ?? 6000,
+          max_guesses_per_user: maxGuesses ?? cur?.max_guesses_per_user ?? 25,
 
-          hints_mode: (hints ?? cur?.hints_mode ?? "highlow"),
+          hints_mode: hints ?? cur?.hints_mode ?? "highlow",
           created_at: cur?.created_at || null,
         };
 
@@ -814,10 +933,8 @@ module.exports = {
           )
           .setFooter({ text: "This log is posted publicly for transparency." });
 
-        // Post into current channel
         await interaction.channel.send({ embeds: [embed], allowedMentions: { parse: [] } }).catch(() => {});
 
-        // DB audit of audit-post itself
         await writeAudit(pg, {
           guild_id: gid,
           game_id: gameId || null,
@@ -838,7 +955,6 @@ module.exports = {
 
         const gid = interaction.guildId;
 
-        // Block if already active
         const active = await getActiveGiftGame(pg, gid);
         if (active) {
           return interaction.editReply(
@@ -849,19 +965,14 @@ module.exports = {
 
         const cfg = await getGiftConfig(pg, gid);
 
-        // Resolve channel
         const channelOpt = interaction.options.getChannel("channel");
-        const channelId =
-          channelOpt?.id ||
-          cfg?.channel_id ||
-          interaction.channelId;
+        const channelId = channelOpt?.id || cfg?.channel_id || interaction.channelId;
 
         const channel = await interaction.client.channels.fetch(channelId).catch(() => null);
         if (!channel || channel.type !== ChannelType.GuildText) {
           return interaction.editReply("❌ Could not resolve a valid text channel for the game. Set one via `/gift config channel:#...`.");
         }
 
-        // Resolve mode
         const modeOpt = interaction.options.getString("mode");
         let mode = (modeOpt || cfg?.mode_default || "modal").toLowerCase();
         const allowModal = cfg?.allow_modal_mode ?? true;
@@ -877,7 +988,6 @@ module.exports = {
           return interaction.editReply("❌ Public mode is disabled for this server. Enable it via `/gift config allow_public:true`.");
         }
 
-        // Range
         const rangeMin = intOrNull(interaction.options.getInteger("range_min"));
         const rangeMax = intOrNull(interaction.options.getInteger("range_max"));
 
@@ -888,16 +998,13 @@ module.exports = {
         rMax = clampInt(Number(rMax), 1, 1000000);
         if (rMax <= rMin) rMax = rMin + 1;
 
-        // Duration
         const durationOpt = intOrNull(interaction.options.getInteger("duration_sec"));
         const durationSec = clampInt(Number(durationOpt ?? cfg?.duration_sec_default ?? 600), 10, 86400);
 
-        // Cooldown + max guesses snapshot
         const perUserCooldownMs = clampInt(Number(cfg?.per_user_cooldown_ms ?? 6000), 0, 600000);
         const maxGuessesPerUser = clampInt(Number(cfg?.max_guesses_per_user ?? 25), 1, 1000);
         const hintsMode = String(cfg?.hints_mode ?? "highlow").toLowerCase();
 
-        // Target
         const targetOpt = intOrNull(interaction.options.getInteger("target"));
         let targetNumber = null;
         let targetSource = "random";
@@ -909,7 +1016,6 @@ module.exports = {
           targetSource = "random";
         }
 
-        // Commit proof
         const commit = Boolean(interaction.options.getBoolean("commit") ?? false);
         let commitSalt = null;
         let commitHash = null;
@@ -918,14 +1024,11 @@ module.exports = {
           commitHash = sha256Hex(`${targetNumber}:${commitSalt}`);
         }
 
-        // Prize secret toggle (default true)
         const prizeSecret = Boolean(interaction.options.getBoolean("prize_secret") ?? true);
         const notes = safeStr(interaction.options.getString("notes") || "", 400);
 
-        // Ends at
         const endsAt = new Date(Date.now() + durationSec * 1000).toISOString();
 
-        // Create a DRAFT game row (wizard will fill prize fields)
         const gameRow = await createGiftGameRow(pg, {
           guild_id: gid,
           channel_id: channel.id,
@@ -946,7 +1049,6 @@ module.exports = {
           commit_salt: commitSalt,
           commit_hash: commitHash,
 
-          // placeholder prize (wizard fills)
           prize_type: "text",
           prize_label: "Mystery prize 🎁",
           prize_secret: prizeSecret,
@@ -983,7 +1085,6 @@ module.exports = {
           },
         });
 
-        // Wizard UI (ephemeral)
         const hintsUnlockAt = Math.floor(Date.now() / 1000 + Math.floor(durationSec * 0.75));
         const endsTs = Math.floor(Date.now() / 1000 + durationSec);
 
@@ -1032,7 +1133,6 @@ module.exports = {
           return interaction.editReply("ℹ️ No active gift game in this server.");
         }
 
-        // Cancel active game
         const upd = await pg.query(
           `
           UPDATE gift_games
@@ -1048,7 +1148,6 @@ module.exports = {
           return interaction.editReply("⚠️ Could not stop — game already ended.");
         }
 
-        // Update unique players (best-effort)
         let uniquePlayers = 0;
         try {
           const r = await pg.query(`SELECT COUNT(DISTINCT user_id) AS n FROM gift_guesses WHERE game_id=$1`, [cancelled.id]);
@@ -1066,7 +1165,6 @@ module.exports = {
           details: { reason: reason || null }
         });
 
-        // Edit drop card to cancelled + disable buttons (best-effort)
         try {
           const channel = await interaction.client.channels.fetch(cancelled.channel_id).catch(() => null);
           if (channel && cancelled.drop_message_id) {
@@ -1094,9 +1192,7 @@ module.exports = {
         } catch {}
 
         const extra = revealTarget ? `\n🔐 Target number was: \`${cancelled.target_number}\`` : "";
-        return interaction.editReply(
-          `✅ Stopped active game \`${cancelled.id}\` in <#${cancelled.channel_id}>.${extra}`
-        );
+        return interaction.editReply(`✅ Stopped active game \`${cancelled.id}\` in <#${cancelled.channel_id}>.${extra}`);
       }
 
       // =========================
@@ -1115,21 +1211,16 @@ module.exports = {
             return interaction.editReply("❌ Game not found for this server.");
           }
         } else {
-          const r = await pg.query(
-            `SELECT * FROM gift_games WHERE guild_id=$1 ORDER BY started_at DESC LIMIT 1`,
-            [gid]
-          );
+          const r = await pg.query(`SELECT * FROM gift_games WHERE guild_id=$1 ORDER BY started_at DESC LIMIT 1`, [gid]);
           game = r.rows?.[0] || null;
           if (!game) return interaction.editReply("ℹ️ No gift games found for this server.");
         }
 
-        // Pull guess stats
         const totalGuesses = Number(game.total_guesses || 0);
 
         let uniquePlayers = Number(game.unique_players || 0);
         if (!Number.isFinite(uniquePlayers) || uniquePlayers < 0) uniquePlayers = 0;
 
-        // Top guessers
         let topGuessers = [];
         try {
           const r = await pg.query(
@@ -1143,14 +1234,13 @@ module.exports = {
             `,
             [game.id]
           );
-          topGuessers = (r.rows || []).map(x => ({
+          topGuessers = (r.rows || []).map((x) => ({
             user_id: x.user_id,
             user_tag: x.user_tag,
             n: Number(x.n || 0),
           }));
         } catch {}
 
-        // Recent guesses
         let recent = [];
         try {
           const r = await pg.query(
@@ -1170,9 +1260,8 @@ module.exports = {
         const endedTs = game.ended_at ? Math.floor(new Date(game.ended_at).getTime() / 1000) : null;
         const endsTs = game.ends_at ? Math.floor(new Date(game.ends_at).getTime() / 1000) : null;
 
-        const prizeLine = game.prize_secret && game.status === "active"
-          ? "??? (hidden)"
-          : (game.prize_label || "Mystery prize 🎁");
+        const prizeLine =
+          game.prize_secret && game.status === "active" ? "??? (hidden)" : (game.prize_label || "Mystery prize 🎁");
 
         const dropUrl = game.drop_message_url ? `[Open Drop Message](${game.drop_message_url})` : "N/A";
 
@@ -1210,10 +1299,7 @@ module.exports = {
         if (topGuessers.length) {
           embed.addFields({
             name: "Top Guessers",
-            value: topGuessers
-              .map((u, i) => `${i + 1}. <@${u.user_id}> — \`${u.n}\` guesses`)
-              .join("\n")
-              .slice(0, 1024),
+            value: topGuessers.map((u, i) => `${i + 1}. <@${u.user_id}> — \`${u.n}\` guesses`).join("\n").slice(0, 1024),
             inline: false
           });
         }
@@ -1222,7 +1308,7 @@ module.exports = {
           embed.addFields({
             name: "Recent Guesses (latest 10)",
             value: recent
-              .map(r => {
+              .map((r) => {
                 const ts = r.created_at ? Math.floor(new Date(r.created_at).getTime() / 1000) : null;
                 const who = `<@${r.user_id}>`;
                 const g = `\`${r.guess_value}\``;
@@ -1241,7 +1327,6 @@ module.exports = {
           embed.addFields({ name: "Notes", value: safeStr(game.notes, 900), inline: false });
         }
 
-        // ✅ POST PUBLICLY INTO THE CHANNEL
         await interaction.channel.send({ embeds: [embed], allowedMentions: { parse: [] } }).catch(() => {});
 
         await writeAudit(pg, {
