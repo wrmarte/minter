@@ -9,6 +9,10 @@ const fetch = require('node-fetch');
    - Per-endpoint backoff + per-chain cooldown + timeouts
    - Static network hints (no ethers network-detect retries)
    - Never throws from public APIs; returns null on failure
+
+   ✅ Backwards compatible:
+   - safeRpcCall(chain, fn, retries, timeout)
+   - safeRpcCall(fn, retries, timeout)   // defaults chain="base"
 ========================================================= */
 
 
@@ -60,8 +64,8 @@ const RPCS = {
 
 /* ---------- Chain metadata (STATIC NETWORK HINTS) ---------- */
 const CHAIN_META = {
-  eth:  { chainId: 1,    network: { name: 'homestead', chainId: 1 } },
-  base: { chainId: 8453, network: { name: 'base', chainId: 8453 } },
+  eth:  { chainId: 1,     network: { name: 'homestead', chainId: 1 } },
+  base: { chainId: 8453,  network: { name: 'base', chainId: 8453 } },
   ape:  { chainId: 33139, network: { name: 'apechain', chainId: 33139 } }
 };
 
@@ -159,8 +163,12 @@ function rebuildChainEndpoints(key) {
 function makeProvider(key, url) {
   const meta = CHAIN_META[key] || {};
   const u = normalizeUrl(url);
-  // staticNetwork:true prevents ethers network-detect retries
-  const p = new JsonRpcProvider(u, meta.network, { staticNetwork: !!meta.network });
+
+  // ✅ ethers v6: staticNetwork expects a Networkish (not boolean).
+  // Passing it prevents network-detect retries.
+  const opts = meta.network ? { staticNetwork: meta.network } : undefined;
+
+  const p = new JsonRpcProvider(u, meta.network, opts);
   p._rpcUrl = u;
   p.pollingInterval = 8000;
   return p;
@@ -253,7 +261,7 @@ function getProvider(chain = 'base') {
 }
 
 async function rotateProvider(chain = 'base') {
-  const key = chain.toLowerCase();
+  const key = (chain || 'base').toLowerCase();
   initChain(key);
   const st = chains[key];
 
@@ -270,9 +278,50 @@ async function rotateProvider(chain = 'base') {
   await selectHealthy(key);
 }
 
-async function safeRpcCall(chain, callFn, retries = 4, perCallTimeoutMs = 6000) {
-  const key = (chain || 'base').toLowerCase();
+/* =========================================================
+   ✅ Backwards compatible safeRpcCall
+   Supports:
+   - safeRpcCall('base', (p)=>..., retries?, timeout?)
+   - safeRpcCall((p)=>..., retries?, timeout?)  // defaults chain='base'
+========================================================= */
+function normalizeSafeRpcArgs(chainOrFn, maybeFn, maybeRetries, maybeTimeout) {
+  // New style: (chain, fn, retries, timeout)
+  if (typeof chainOrFn === 'string' && typeof maybeFn === 'function') {
+    return {
+      chain: chainOrFn,
+      fn: maybeFn,
+      retries: Number.isFinite(maybeRetries) ? Number(maybeRetries) : 4,
+      timeout: Number.isFinite(maybeTimeout) ? Number(maybeTimeout) : 6000
+    };
+  }
+
+  // Old style: (fn, retries, timeout) -> chain defaults to base
+  if (typeof chainOrFn === 'function') {
+    return {
+      chain: 'base',
+      fn: chainOrFn,
+      retries: Number.isFinite(maybeFn) ? Number(maybeFn) : 4,
+      timeout: Number.isFinite(maybeRetries) ? Number(maybeRetries) : 6000
+    };
+  }
+
+  // If someone passed chain but forgot fn, return nulls safely
+  return { chain: 'base', fn: null, retries: 4, timeout: 6000 };
+}
+
+async function safeRpcCall(chainOrFn, maybeFn, maybeRetries = 4, perCallTimeoutMs = 6000) {
+  const parsed = normalizeSafeRpcArgs(chainOrFn, maybeFn, maybeRetries, perCallTimeoutMs);
+  const key = (parsed.chain || 'base').toLowerCase();
+  const callFn = parsed.fn;
+  const retries = parsed.retries;
+  const timeoutMs = parsed.timeout;
+
   initChain(key);
+
+  if (typeof callFn !== 'function') {
+    console.warn(`⚠️ [${key}] safeRpcCall called without a function. Returning null.`);
+    return null;
+  }
 
   for (let i = 0; i < retries; i++) {
     let provider = getProvider(key);
@@ -282,8 +331,7 @@ async function safeRpcCall(chain, callFn, retries = 4, perCallTimeoutMs = 6000) 
     }
 
     try {
-      // accept sync or async result
-      const result = await withTimeout(callFn(provider), perCallTimeoutMs, 'rpc call timeout');
+      const result = await withTimeout(callFn(provider), timeoutMs, 'rpc call timeout');
 
       // mark success
       const st = chains[key];
@@ -439,6 +487,4 @@ module.exports = {
   safeRpcCall,
   getMaxBatchSize
 };
-
-
 
