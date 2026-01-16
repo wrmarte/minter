@@ -1,11 +1,11 @@
 // commands/gift.js
 // ======================================================
-// /gift config  (Step 2)
-// /gift start   (Wizard Start + Clean Drop Card) ✅ UPDATED
+// /gift config  (PUBLIC ONLY)
+// /gift start   (Wizard Start + Clean Drop Card) ✅ UPDATED (public-only defaults)
 // /gift stop    ✅
-// /gift review  ✅ (NOW POSTS PUBLICLY INTO CHANNEL)
-// /gift audit   ✅ NEW (posts audit into channel)
-// /gift dbcheck ✅ NEW (posts DB fingerprint + gift table counts into channel)
+// /gift review  ✅ (POSTS PUBLICLY INTO CHANNEL)
+// /gift audit   ✅ (posts audit into channel)
+// /gift dbcheck ✅ (posts DB fingerprint + gift table counts into channel)
 //
 // NOTE: Runtime gameplay is handled by listeners/giftGameListener.js
 // ======================================================
@@ -157,6 +157,7 @@ async function getGiftGameById(pg, gameId) {
 }
 
 async function createGiftGameRow(pg, game) {
+  // NOTE: started_at uses NOW() special path below (kept for stability)
   const q = `
     INSERT INTO gift_games (
       guild_id, channel_id, thread_id,
@@ -177,12 +178,13 @@ async function createGiftGameRow(pg, game) {
       $10,$11,
       $12,$13,$14,
       $15,$16,$17,$18,
-      NOW(), $19,
-      $20,$21,$22,
-      $23
+      $19, $20,
+      $21,$22,$23,
+      $24
     )
     RETURNING *;
   `;
+
   const vals = [
     game.guild_id,
     game.channel_id,
@@ -209,6 +211,7 @@ async function createGiftGameRow(pg, game) {
     Boolean(game.prize_secret),
     game.prize_payload ? JSON.stringify(game.prize_payload) : null,
 
+    game.started_at || "NOW()",
     game.ends_at,
 
     game.per_user_cooldown_ms,
@@ -219,6 +222,72 @@ async function createGiftGameRow(pg, game) {
   ];
 
   try {
+    const startedAtIsNow = game.started_at === "NOW()";
+    if (startedAtIsNow) {
+      const q2 = `
+        INSERT INTO gift_games (
+          guild_id, channel_id, thread_id,
+          created_by, created_by_tag,
+          mode, status,
+          range_min, range_max,
+          target_number, target_source,
+          commit_hash, commit_salt, commit_enabled,
+          prize_type, prize_label, prize_secret, prize_payload,
+          started_at, ends_at,
+          per_user_cooldown_ms, max_guesses_per_user, hints_mode,
+          notes
+        ) VALUES (
+          $1,$2,$3,
+          $4,$5,
+          $6,$7,
+          $8,$9,
+          $10,$11,
+          $12,$13,$14,
+          $15,$16,$17,$18,
+          NOW(), $19,
+          $20,$21,$22,
+          $23
+        )
+        RETURNING *;
+      `;
+      const v2 = [
+        game.guild_id,
+        game.channel_id,
+        game.thread_id || null,
+
+        game.created_by,
+        game.created_by_tag || null,
+
+        game.mode,
+        game.status || "active",
+
+        game.range_min,
+        game.range_max,
+
+        game.target_number,
+        game.target_source,
+
+        game.commit_hash || null,
+        game.commit_salt || null,
+        Boolean(game.commit_enabled),
+
+        game.prize_type || "text",
+        game.prize_label || null,
+        Boolean(game.prize_secret),
+        game.prize_payload ? JSON.stringify(game.prize_payload) : null,
+
+        game.ends_at,
+
+        game.per_user_cooldown_ms,
+        game.max_guesses_per_user,
+        game.hints_mode,
+
+        game.notes || null,
+      ];
+      const res2 = await pg.query(q2, v2);
+      return res2.rows?.[0] || null;
+    }
+
     const res = await pg.query(q, vals);
     return res.rows?.[0] || null;
   } catch (e) {
@@ -227,7 +296,7 @@ async function createGiftGameRow(pg, game) {
   }
 }
 
-function disableAllComponents(components) {
+async function disableAllComponents(components) {
   try {
     if (!Array.isArray(components)) return [];
     return components.map((row) => {
@@ -285,28 +354,6 @@ module.exports = {
             .addChannelTypes(ChannelType.GuildText)
             .setRequired(false)
         )
-        .addStringOption((opt) =>
-          opt
-            .setName("mode_default")
-            .setDescription("Default play mode")
-            .addChoices(
-              { name: "Modern (modal)", value: "modal" },
-              { name: "Public (chat guesses)", value: "public" }
-            )
-            .setRequired(false)
-        )
-        .addBooleanOption((opt) =>
-          opt
-            .setName("allow_modal")
-            .setDescription("Allow modern modal mode at all")
-            .setRequired(false)
-        )
-        .addBooleanOption((opt) =>
-          opt
-            .setName("allow_public")
-            .setDescription("Allow public chat mode at all")
-            .setRequired(false)
-        )
         .addIntegerOption((opt) =>
           opt
             .setName("range_min")
@@ -362,17 +409,7 @@ module.exports = {
     .addSubcommand((sub) =>
       sub
         .setName("start")
-        .setDescription("Start a Gift Drop (Wizard UI) (admin)")
-        .addStringOption((opt) =>
-          opt
-            .setName("mode")
-            .setDescription("Game mode for this round")
-            .addChoices(
-              { name: "Modern (modal)", value: "modal" },
-              { name: "Public (chat guesses)", value: "public" }
-            )
-            .setRequired(false)
-        )
+        .setDescription("Start a Gift Drop (Wizard UI) (admin) — PUBLIC MODE ONLY")
         .addChannelOption((opt) =>
           opt
             .setName("channel")
@@ -640,7 +677,7 @@ module.exports = {
       }
 
       // =========================
-      // /gift config
+      // /gift config (PUBLIC ONLY)
       // =========================
       if (sub === "config") {
         const existing = await pg.query(`SELECT * FROM gift_config WHERE guild_id=$1`, [interaction.guildId]);
@@ -648,9 +685,6 @@ module.exports = {
 
         const channel = interaction.options.getChannel("channel");
         const announceChannel = interaction.options.getChannel("announce_channel");
-        const modeDefault = interaction.options.getString("mode_default");
-        const allowModal = interaction.options.getBoolean("allow_modal");
-        const allowPublic = interaction.options.getBoolean("allow_public");
         const rangeMin = intOrNull(interaction.options.getInteger("range_min"));
         const rangeMax = intOrNull(interaction.options.getInteger("range_max"));
         const durationSec = intOrNull(interaction.options.getInteger("duration_sec"));
@@ -658,15 +692,15 @@ module.exports = {
         const maxGuesses = intOrNull(interaction.options.getInteger("max_guesses"));
         const hints = interaction.options.getString("hints");
 
+        // ✅ Public-only defaults enforced here
         const row = {
           guild_id: interaction.guildId,
           channel_id: channel?.id ?? cur?.channel_id ?? null,
           announce_channel_id: announceChannel?.id ?? cur?.announce_channel_id ?? null,
 
-          // ✅ NEW DEFAULT: public
-          mode_default: (modeDefault ?? cur?.mode_default ?? "public"),
-          allow_modal_mode: allowModal ?? cur?.allow_modal_mode ?? true,
-          allow_public_mode: allowPublic ?? cur?.allow_public_mode ?? true,
+          mode_default: "public",
+          allow_public_mode: true,
+          allow_modal_mode: false,
 
           range_min_default: rangeMin ?? cur?.range_min_default ?? 1,
           range_max_default: rangeMax ?? cur?.range_max_default ?? 100,
@@ -687,9 +721,6 @@ module.exports = {
         row.per_user_cooldown_ms = clampInt(Number(row.per_user_cooldown_ms), 0, 600000);
         row.max_guesses_per_user = clampInt(Number(row.max_guesses_per_user), 1, 1000);
 
-        if (row.mode_default === "modal" && !row.allow_modal_mode && row.allow_public_mode) row.mode_default = "public";
-        if (row.mode_default === "public" && !row.allow_public_mode && row.allow_modal_mode) row.mode_default = "modal";
-
         const saved = await upsertGiftConfig(pg, row);
 
         await writeAudit(pg, {
@@ -700,9 +731,9 @@ module.exports = {
           details: {
             channel_id: saved?.channel_id || null,
             announce_channel_id: saved?.announce_channel_id || null,
-            mode_default: saved?.mode_default,
-            allow_modal_mode: saved?.allow_modal_mode,
-            allow_public_mode: saved?.allow_public_mode,
+            mode_default: "public",
+            allow_public_mode: true,
+            allow_modal_mode: false,
             range_min_default: saved?.range_min_default,
             range_max_default: saved?.range_max_default,
             duration_sec_default: saved?.duration_sec_default,
@@ -716,13 +747,12 @@ module.exports = {
         const annStr = saved?.announce_channel_id ? `<#${saved.announce_channel_id}>` : "Not set";
 
         const embed = new EmbedBuilder()
-          .setTitle("🎁 Gift Drop Config Saved")
+          .setTitle("🎁 Gift Drop Config Saved (Public Only)")
           .setDescription("These are the **default** settings for this server.")
           .addFields(
             { name: "Default Channel", value: chStr, inline: true },
             { name: "Announce Channel", value: annStr, inline: true },
-            { name: "Default Mode", value: `\`${safeStr(saved?.mode_default || "public")}\``, inline: true },
-            { name: "Allow Modes", value: `modal: **${saved?.allow_modal_mode ? "ON" : "OFF"}** | public: **${saved?.allow_public_mode ? "ON" : "OFF"}**`, inline: false },
+            { name: "Mode", value: "`public`", inline: true },
             { name: "Range", value: `\`${saved?.range_min_default} → ${saved?.range_max_default}\``, inline: true },
             { name: "Duration", value: `\`${saved?.duration_sec_default}s\``, inline: true },
             { name: "Hints", value: `\`${safeStr(saved?.hints_mode || "highlow")}\``, inline: true },
@@ -796,7 +826,11 @@ module.exports = {
       }
 
       // =========================
-      // /gift start (Wizard UI)
+      // /gift start (Wizard UI) — PUBLIC ONLY + DEFAULTS
+      // Defaults requested:
+      //   - mode: public
+      //   - commit: true
+      //   - prize_secret: true
       // =========================
       if (sub === "start") {
         await interaction.deferReply({ ephemeral: true });
@@ -812,7 +846,6 @@ module.exports = {
         }
 
         const cfg = await getGiftConfig(pg, gid);
-        const hasServerDefaults = Boolean(cfg);
 
         const channelOpt = interaction.options.getChannel("channel");
         const channelId = channelOpt?.id || cfg?.channel_id || interaction.channelId;
@@ -822,21 +855,8 @@ module.exports = {
           return interaction.editReply("❌ Could not resolve a valid text channel for the game. Set one via `/gift config channel:#...`.");
         }
 
-        const modeOpt = interaction.options.getString("mode");
-        // ✅ NEW DEFAULT: public
-        let mode = (modeOpt || cfg?.mode_default || "public").toLowerCase();
-        const allowModal = cfg?.allow_modal_mode ?? true;
-        const allowPublic = cfg?.allow_public_mode ?? true;
-
-        if (mode === "modal" && !allowModal && allowPublic) mode = "public";
-        if (mode === "public" && !allowPublic && allowModal) mode = "modal";
-
-        if (mode === "modal" && !allowModal) {
-          return interaction.editReply("❌ Modal mode is disabled for this server. Enable it via `/gift config allow_modal:true`.");
-        }
-        if (mode === "public" && !allowPublic) {
-          return interaction.editReply("❌ Public mode is disabled for this server. Enable it via `/gift config allow_public:true`.");
-        }
+        // ✅ Force public mode always
+        const mode = "public";
 
         const rangeMin = intOrNull(interaction.options.getInteger("range_min"));
         const rangeMax = intOrNull(interaction.options.getInteger("range_max"));
@@ -866,22 +886,19 @@ module.exports = {
           targetSource = "random";
         }
 
-        // ✅ NEW DEFAULT: commit=true unless explicitly set
-        const commitOpt = interaction.options.getBoolean("commit");
-        const commit = (commitOpt === null || commitOpt === undefined) ? true : Boolean(commitOpt);
-
+        // ✅ default commit ON
+        const commit = Boolean(interaction.options.getBoolean("commit") ?? true);
         let commitSalt = null;
         let commitHash = null;
         if (commit) {
-          commitSalt = crypto.randomBytes(16).toString("hex");
+          commitSalt = randomSaltHex(16);
           commitHash = sha256Hex(`${targetNumber}:${commitSalt}`);
         }
 
-        // ✅ NEW DEFAULT: prize_secret=true unless explicitly set
-        const prizeSecretOpt = interaction.options.getBoolean("prize_secret");
-        const prizeSecret = (prizeSecretOpt === null || prizeSecretOpt === undefined) ? true : Boolean(prizeSecretOpt);
-
+        // ✅ default prize_secret ON
+        const prizeSecret = Boolean(interaction.options.getBoolean("prize_secret") ?? true);
         const notes = safeStr(interaction.options.getString("notes") || "", 400);
+
         const endsAt = new Date(Date.now() + durationSec * 1000).toISOString();
 
         const gameRow = await createGiftGameRow(pg, {
@@ -916,6 +933,7 @@ module.exports = {
           hints_mode: hintsMode,
 
           notes,
+          started_at: "NOW()",
         });
 
         if (!gameRow?.id) {
@@ -942,39 +960,22 @@ module.exports = {
         const hintsUnlockAt = Math.floor(Date.now() / 1000 + Math.floor(durationSec * 0.75));
         const endsTs = Math.floor(Date.now() / 1000 + durationSec);
 
-        // ✅ CLEANER WIZARD: if server defaults exist and user didn't override, don't repeat default lines.
-        const modeWasExplicit = Boolean(modeOpt);
-        const commitWasExplicit = (commitOpt !== null && commitOpt !== undefined);
-        const prizeWasExplicit = (prizeSecretOpt !== null && prizeSecretOpt !== undefined);
-
-        const descLines = [
-          `**Draft Game ID:** \`${gameRow.id}\``,
-          `**Channel:** <#${channel.id}>`,
-          `**Range:** \`${rMin} → ${rMax}\``,
-          `**Ends:** <t:${endsTs}:R>`,
-          `**Hints unlock:** <t:${hintsUnlockAt}:R>`,
-        ];
-
-        // Only show mode if: no server defaults OR user explicitly chose mode
-        if (!hasServerDefaults || modeWasExplicit) {
-          descLines.splice(2, 0, `**Mode:** \`${mode}\``);
-        }
-
-        // Only show prize line if: no server defaults OR user explicitly set OR not secret (because it's important)
-        if (!hasServerDefaults || prizeWasExplicit || prizeSecret === false) {
-          descLines.push(`**Prize:** ${prizeSecret ? "??? (hidden until win)" : "`visible`"}`);
-        }
-
-        // Only show fairness line if: no server defaults OR user explicitly set OR commit disabled (because it's important)
-        if (!hasServerDefaults || commitWasExplicit || commit === false) {
-          descLines.push(commit ? `**Fairness:** commit hash locked ✅` : `**Fairness:** standard`);
-        }
-
-        descLines.push("", "Pick what you’re giving away:");
-
         const embed = new EmbedBuilder()
           .setTitle("🎁 Gift Drop Wizard — Choose Prize Type")
-          .setDescription(descLines.join("\n"))
+          .setDescription(
+            [
+              `**Draft Game ID:** \`${gameRow.id}\``,
+              `**Channel:** <#${channel.id}>`,
+              `**Mode:** \`public\``,
+              `**Range:** \`${rMin} → ${rMax}\``,
+              `**Ends:** <t:${endsTs}:R>`,
+              `**Hints unlock:** <t:${hintsUnlockAt}:R>`,
+              `**Prize:** ${prizeSecret ? "??? (hidden until win)" : "`visible`"}`,
+              commit ? `**Fairness:** commit hash locked ✅` : `**Fairness:** standard`,
+              "",
+              "Pick what you’re giving away:",
+            ].join("\n")
+          )
           .setThumbnail(GIFT_BOX_GIF)
           .setFooter({ text: "Next: you’ll fill only the fields needed for that prize type." });
 
@@ -1056,7 +1057,7 @@ module.exports = {
 
               await msg.edit({
                 embeds: [endedEmbed],
-                components: disableAllComponents(msg.components),
+                components: await disableAllComponents(msg.components),
               }).catch(() => {});
             }
           }
@@ -1067,7 +1068,7 @@ module.exports = {
       }
 
       // =========================
-      // /gift review  (NOW POSTS PUBLICLY)
+      // /gift review  (POSTS PUBLICLY)
       // =========================
       if (sub === "review") {
         await interaction.deferReply({ ephemeral: true });
@@ -1142,7 +1143,7 @@ module.exports = {
             [
               `**Status:** ${fmtStatus(game.status)}`,
               `**Channel:** <#${game.channel_id}>`,
-              `**Mode:** \`${game.mode}\``,
+              `**Mode:** \`public\``,
               ``,
               `**Started:** ${startedTs ? `<t:${startedTs}:f>` : "N/A"}`,
               `**Scheduled End:** ${endsTs ? `<t:${endsTs}:f>` : "N/A"}`,
