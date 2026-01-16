@@ -49,11 +49,6 @@ function safeStr(v, max = 140) {
   return s.length > max ? s.slice(0, max - 1) + "…" : s;
 }
 
-function discordMessageUrl(guildId, channelId, messageId) {
-  if (!guildId || !channelId || !messageId) return null;
-  return `https://discord.com/channels/${guildId}/${channelId}/${messageId}`;
-}
-
 function pickRandomInt(min, max) {
   // inclusive
   const a = Math.trunc(Number(min));
@@ -182,9 +177,9 @@ async function createGiftGameRow(pg, game) {
       $10,$11,
       $12,$13,$14,
       $15,$16,$17,$18,
-      $19, $20,
-      $21,$22,$23,
-      $24
+      NOW(), $19,
+      $20,$21,$22,
+      $23
     )
     RETURNING *;
   `;
@@ -214,9 +209,6 @@ async function createGiftGameRow(pg, game) {
     Boolean(game.prize_secret),
     game.prize_payload ? JSON.stringify(game.prize_payload) : null,
 
-    // started_at:
-    game.started_at || "NOW()",
-    // ends_at timestamptz:
     game.ends_at,
 
     game.per_user_cooldown_ms,
@@ -227,150 +219,12 @@ async function createGiftGameRow(pg, game) {
   ];
 
   try {
-    const startedAtIsNow = game.started_at === "NOW()";
-    if (startedAtIsNow) {
-      const q2 = `
-        INSERT INTO gift_games (
-          guild_id, channel_id, thread_id,
-          created_by, created_by_tag,
-          mode, status,
-          range_min, range_max,
-          target_number, target_source,
-          commit_hash, commit_salt, commit_enabled,
-          prize_type, prize_label, prize_secret, prize_payload,
-          started_at, ends_at,
-          per_user_cooldown_ms, max_guesses_per_user, hints_mode,
-          notes
-        ) VALUES (
-          $1,$2,$3,
-          $4,$5,
-          $6,$7,
-          $8,$9,
-          $10,$11,
-          $12,$13,$14,
-          $15,$16,$17,$18,
-          NOW(), $19,
-          $20,$21,$22,
-          $23
-        )
-        RETURNING *;
-      `;
-      const v2 = [
-        game.guild_id,
-        game.channel_id,
-        game.thread_id || null,
-
-        game.created_by,
-        game.created_by_tag || null,
-
-        game.mode,
-        game.status || "active",
-
-        game.range_min,
-        game.range_max,
-
-        game.target_number,
-        game.target_source,
-
-        game.commit_hash || null,
-        game.commit_salt || null,
-        Boolean(game.commit_enabled),
-
-        game.prize_type || "text",
-        game.prize_label || null,
-        Boolean(game.prize_secret),
-        game.prize_payload ? JSON.stringify(game.prize_payload) : null,
-
-        game.ends_at,
-
-        game.per_user_cooldown_ms,
-        game.max_guesses_per_user,
-        game.hints_mode,
-
-        game.notes || null,
-      ];
-      const res2 = await pg.query(q2, v2);
-      return res2.rows?.[0] || null;
-    }
-
     const res = await pg.query(q, vals);
     return res.rows?.[0] || null;
   } catch (e) {
-    try {
-      const q2 = `
-        INSERT INTO gift_games (
-          guild_id, channel_id, thread_id,
-          created_by, created_by_tag,
-          mode, status,
-          range_min, range_max,
-          target_number, target_source,
-          commit_hash, commit_salt, commit_enabled,
-          prize_type, prize_label, prize_secret, prize_payload,
-          started_at, ends_at,
-          per_user_cooldown_ms, max_guesses_per_user, hints_mode,
-          notes
-        ) VALUES (
-          $1,$2,$3,
-          $4,$5,
-          $6,$7,
-          $8,$9,
-          $10,$11,
-          $12,$13,$14,
-          $15,$16,$17,$18,
-          NOW(), $19,
-          $20,$21,$22,
-          $23
-        )
-        RETURNING *;
-      `;
-      const v2 = [
-        game.guild_id,
-        game.channel_id,
-        game.thread_id || null,
-
-        game.created_by,
-        game.created_by_tag || null,
-
-        game.mode,
-        game.status || "active",
-
-        game.range_min,
-        game.range_max,
-
-        game.target_number,
-        game.target_source,
-
-        game.commit_hash || null,
-        game.commit_salt || null,
-        Boolean(game.commit_enabled),
-
-        game.prize_type || "text",
-        game.prize_label || null,
-        Boolean(game.prize_secret),
-        game.prize_payload ? JSON.stringify(game.prize_payload) : null,
-
-        game.ends_at,
-
-        game.per_user_cooldown_ms,
-        game.max_guesses_per_user,
-        game.hints_mode,
-
-        game.notes || null,
-      ];
-      const res2 = await pg.query(q2, v2);
-      return res2.rows?.[0] || null;
-    } catch (e2) {
-      console.warn("⚠️ [GIFT] createGiftGameRow failed:", e2?.message || e2);
-      return null;
-    }
+    console.warn("⚠️ [GIFT] createGiftGameRow failed:", e?.message || e);
+    return null;
   }
-}
-
-async function attachDropMessage(pg, { gameId, messageId, messageUrl }) {
-  await pg.query(
-    `UPDATE gift_games SET drop_message_id=$1, drop_message_url=$2 WHERE id=$3`,
-    [String(messageId), messageUrl || null, gameId]
-  );
 }
 
 function disableAllComponents(components) {
@@ -398,13 +252,6 @@ function fmtStatus(s) {
   if (v === "expired") return "⏳ expired";
   if (v === "cancelled") return "🛑 cancelled";
   return v || "unknown";
-}
-
-function makeTimeBar(percent, size = 12) {
-  const p = Math.max(0, Math.min(1, Number(percent)));
-  const filled = Math.round(p * size);
-  const empty = Math.max(0, size - filled);
-  return `\`${"█".repeat(filled)}${"░".repeat(empty)}\``;
 }
 
 async function safeCount(pg, tableName) {
@@ -816,7 +663,8 @@ module.exports = {
           channel_id: channel?.id ?? cur?.channel_id ?? null,
           announce_channel_id: announceChannel?.id ?? cur?.announce_channel_id ?? null,
 
-          mode_default: modeDefault ?? cur?.mode_default ?? "modal",
+          // ✅ NEW DEFAULT: public
+          mode_default: (modeDefault ?? cur?.mode_default ?? "public"),
           allow_modal_mode: allowModal ?? cur?.allow_modal_mode ?? true,
           allow_public_mode: allowPublic ?? cur?.allow_public_mode ?? true,
 
@@ -873,7 +721,7 @@ module.exports = {
           .addFields(
             { name: "Default Channel", value: chStr, inline: true },
             { name: "Announce Channel", value: annStr, inline: true },
-            { name: "Default Mode", value: `\`${safeStr(saved?.mode_default || "modal")}\``, inline: true },
+            { name: "Default Mode", value: `\`${safeStr(saved?.mode_default || "public")}\``, inline: true },
             { name: "Allow Modes", value: `modal: **${saved?.allow_modal_mode ? "ON" : "OFF"}** | public: **${saved?.allow_public_mode ? "ON" : "OFF"}**`, inline: false },
             { name: "Range", value: `\`${saved?.range_min_default} → ${saved?.range_max_default}\``, inline: true },
             { name: "Duration", value: `\`${saved?.duration_sec_default}s\``, inline: true },
@@ -964,6 +812,7 @@ module.exports = {
         }
 
         const cfg = await getGiftConfig(pg, gid);
+        const hasServerDefaults = Boolean(cfg);
 
         const channelOpt = interaction.options.getChannel("channel");
         const channelId = channelOpt?.id || cfg?.channel_id || interaction.channelId;
@@ -974,7 +823,8 @@ module.exports = {
         }
 
         const modeOpt = interaction.options.getString("mode");
-        let mode = (modeOpt || cfg?.mode_default || "modal").toLowerCase();
+        // ✅ NEW DEFAULT: public
+        let mode = (modeOpt || cfg?.mode_default || "public").toLowerCase();
         const allowModal = cfg?.allow_modal_mode ?? true;
         const allowPublic = cfg?.allow_public_mode ?? true;
 
@@ -1016,17 +866,22 @@ module.exports = {
           targetSource = "random";
         }
 
-        const commit = Boolean(interaction.options.getBoolean("commit") ?? false);
+        // ✅ NEW DEFAULT: commit=true unless explicitly set
+        const commitOpt = interaction.options.getBoolean("commit");
+        const commit = (commitOpt === null || commitOpt === undefined) ? true : Boolean(commitOpt);
+
         let commitSalt = null;
         let commitHash = null;
         if (commit) {
-          commitSalt = randomSaltHex(16);
+          commitSalt = crypto.randomBytes(16).toString("hex");
           commitHash = sha256Hex(`${targetNumber}:${commitSalt}`);
         }
 
-        const prizeSecret = Boolean(interaction.options.getBoolean("prize_secret") ?? true);
-        const notes = safeStr(interaction.options.getString("notes") || "", 400);
+        // ✅ NEW DEFAULT: prize_secret=true unless explicitly set
+        const prizeSecretOpt = interaction.options.getBoolean("prize_secret");
+        const prizeSecret = (prizeSecretOpt === null || prizeSecretOpt === undefined) ? true : Boolean(prizeSecretOpt);
 
+        const notes = safeStr(interaction.options.getString("notes") || "", 400);
         const endsAt = new Date(Date.now() + durationSec * 1000).toISOString();
 
         const gameRow = await createGiftGameRow(pg, {
@@ -1061,7 +916,6 @@ module.exports = {
           hints_mode: hintsMode,
 
           notes,
-          started_at: "NOW()",
         });
 
         if (!gameRow?.id) {
@@ -1088,22 +942,39 @@ module.exports = {
         const hintsUnlockAt = Math.floor(Date.now() / 1000 + Math.floor(durationSec * 0.75));
         const endsTs = Math.floor(Date.now() / 1000 + durationSec);
 
+        // ✅ CLEANER WIZARD: if server defaults exist and user didn't override, don't repeat default lines.
+        const modeWasExplicit = Boolean(modeOpt);
+        const commitWasExplicit = (commitOpt !== null && commitOpt !== undefined);
+        const prizeWasExplicit = (prizeSecretOpt !== null && prizeSecretOpt !== undefined);
+
+        const descLines = [
+          `**Draft Game ID:** \`${gameRow.id}\``,
+          `**Channel:** <#${channel.id}>`,
+          `**Range:** \`${rMin} → ${rMax}\``,
+          `**Ends:** <t:${endsTs}:R>`,
+          `**Hints unlock:** <t:${hintsUnlockAt}:R>`,
+        ];
+
+        // Only show mode if: no server defaults OR user explicitly chose mode
+        if (!hasServerDefaults || modeWasExplicit) {
+          descLines.splice(2, 0, `**Mode:** \`${mode}\``);
+        }
+
+        // Only show prize line if: no server defaults OR user explicitly set OR not secret (because it's important)
+        if (!hasServerDefaults || prizeWasExplicit || prizeSecret === false) {
+          descLines.push(`**Prize:** ${prizeSecret ? "??? (hidden until win)" : "`visible`"}`);
+        }
+
+        // Only show fairness line if: no server defaults OR user explicitly set OR commit disabled (because it's important)
+        if (!hasServerDefaults || commitWasExplicit || commit === false) {
+          descLines.push(commit ? `**Fairness:** commit hash locked ✅` : `**Fairness:** standard`);
+        }
+
+        descLines.push("", "Pick what you’re giving away:");
+
         const embed = new EmbedBuilder()
           .setTitle("🎁 Gift Drop Wizard — Choose Prize Type")
-          .setDescription(
-            [
-              `**Draft Game ID:** \`${gameRow.id}\``,
-              `**Channel:** <#${channel.id}>`,
-              `**Mode:** \`${mode}\``,
-              `**Range:** \`${rMin} → ${rMax}\``,
-              `**Ends:** <t:${endsTs}:R>`,
-              `**Hints unlock:** <t:${hintsUnlockAt}:R>`,
-              `**Prize:** ${prizeSecret ? "??? (hidden until win)" : "`visible`"}`,
-              commit ? `**Fairness:** commit hash locked ✅` : `**Fairness:** standard`,
-              "",
-              "Pick what you’re giving away:",
-            ].join("\n")
-          )
+          .setDescription(descLines.join("\n"))
           .setThumbnail(GIFT_BOX_GIF)
           .setFooter({ text: "Next: you’ll fill only the fields needed for that prize type." });
 
@@ -1353,3 +1224,4 @@ module.exports = {
     }
   },
 };
+
