@@ -1,14 +1,13 @@
 // listeners/giftGameListener.js
 // ======================================================
-// Gift Drop Guess Game — Runtime Engine + Wizard UI
+// Gift Drop Guess Game — Runtime Engine + Wizard UI (PUBLIC ONLY)
 // PATCH:
-// ✅ Fix "Interaction failed" on NFT/Role/Token buttons by showing modal IMMEDIATELY (no DB before showModal)
-// ✅ FIX: Discord TextInput label limit is 45 chars — shorten long labels (NFT image + role duration)
-// ✅ NEW: Public mode cooldown enforcement:
-//    - If user posts guess too fast -> delete their number message (if possible)
-//    - Warn user with wait time (PRIVATE DM by default; fallback to auto-delete channel notice)
-// ✅ Use flags: 64 instead of ephemeral (deprecation warning)
-// ✅ Keeps public + modal gameplay, winner reveal, audit writes
+// ✅ Public-only gameplay (removed modal/modern guess mode)
+// ✅ When user posts guess too fast (cooldown):
+//    - delete their number message (if possible)
+//    - send a VERY short warning that auto-deletes fast (best possible without DM/ephemeral)
+// ✅ Keeps wizard modals for prize setup (admin UI) + stats/rules buttons
+// ✅ Keeps commit proof, winner reveal, audit writes
 // ======================================================
 
 const {
@@ -38,9 +37,19 @@ try {
 
 const DEBUG = String(process.env.GIFT_DEBUG || "").trim() === "1";
 
+// Winner thumbnail
 const GIFT_REVEAL_GIF =
   (process.env.GIFT_REVEAL_GIF || "").trim() ||
   "https://media.giphy.com/media/3o6Zt481isNVuQI1l6/giphy.gif";
+
+// Cooldown warning delete time (ms) — fast + minimal “public exposure”
+const PUBLIC_COOLDOWN_WARN_DELETE_MS = Math.max(
+  800,
+  Number(process.env.GIFT_PUBLIC_COOLDOWN_WARN_DELETE_MS || 2000)
+);
+
+// Try delete user guess on cooldown
+const DELETE_GUESS_ON_COOLDOWN = String(process.env.GIFT_DELETE_GUESS_ON_COOLDOWN || "1").trim() === "1";
 
 function nowMs() { return Date.now(); }
 
@@ -257,14 +266,12 @@ function makeCleanDropEmbed(game) {
     `**Time Left:** ${endsTs ? `<t:${endsTs}:R>` : "N/A"}`,
     `**Hints unlock:** <t:${hintsUnlockTs}:R> (after 75% time)`,
     `**Cooldown:** \`${game.per_user_cooldown_ms}ms\` • **Max:** \`${game.max_guesses_per_user}\``,
-    `**Mode:** \`${game.mode}\` • **Hints:** \`${game.hints_mode}\``,
+    `**Mode:** \`public\` • **Hints:** \`${game.hints_mode}\``,
     ``,
     `**Prize:** ${prizeLine}`,
     game.commit_enabled ? `**Fairness:** commit hash locked ✅` : `**Fairness:** standard`,
     ``,
-    String(game.mode || "").toLowerCase() === "modal"
-      ? `Click **🎯 Guess** (no chat spam).`
-      : `Type your guess as a number in this channel (example: \`42\`).`,
+    `Type your guess as a number in this channel (example: \`42\`).`,
   ];
 
   return new EmbedBuilder()
@@ -299,7 +306,7 @@ async function launchDraftGame(pg, gameId) {
   const r = await pg.query(
     `
     UPDATE gift_games
-    SET status='active'
+    SET status='active', mode='public'
     WHERE id=$1 AND status='draft'
     RETURNING *;
     `,
@@ -599,11 +606,11 @@ async function expireGame(client, pg, game) {
   return true;
 }
 
-async function handleGuess(client, interactionOrMessage, { game, guessValue, source, messageId }) {
+async function handleGuess(client, message, { game, guessValue, source, messageId }) {
   const pg = client.pg;
   const guildId = game.guild_id;
   const channelId = game.channel_id;
-  const user = interactionOrMessage.user || interactionOrMessage.author;
+  const user = message.author;
   const userId = user.id;
   const userTag = user.tag || null;
 
@@ -674,16 +681,54 @@ async function handleGuess(client, interactionOrMessage, { game, guessValue, sou
   return { ok: true, won: false, hint };
 }
 
-// Public response helper
-async function respondPublicHint({ client, cfg, message, hint, game }) {
-  const mode = String(cfg?.public_hint_mode || "reply").toLowerCase(); // reply | react | both | silent
-  const deleteMs = Number(cfg?.public_hint_delete_ms || 0);
-  const replyToUser = Number(cfg?.public_hint_only_if_reply_to_user ?? 1) === 1;
+// Best-possible “only user sees it” in public chat WITHOUT DM/ephemeral:
+// - delete their guess
+// - post a tiny warning mentioning them
+// - delete the warning fast
+async function handlePublicReject({ client, cfg, message, game, reason, waitMs }) {
+  try {
+    const channel = message.channel;
+    const me = message.guild?.members?.me || message.guild?.members?.cache?.get(client.user.id);
 
+    const canSend = channel?.permissionsFor?.(me)?.has?.(PermissionsBitField.Flags.SendMessages);
+    const canManage = channel?.permissionsFor?.(me)?.has?.(PermissionsBitField.Flags.ManageMessages);
+
+    // 1) remove their guess message if possible
+    if ((reason === "cooldown" || reason === "max_guesses") && DELETE_GUESS_ON_COOLDOWN && canManage) {
+      await message.delete().catch(() => {});
+    }
+
+    // 2) short warning (auto-deletes)
+    if (!canSend) return;
+
+    let content = "";
+    if (reason === "cooldown") {
+      const s = Math.max(1, Math.ceil(Number(waitMs || 0) / 1000));
+      content = `⏳ <@${message.author.id}> too fast — wait ~${s}s.`;
+    } else if (reason === "max_guesses") {
+      content = `⛔ <@${message.author.id}> max guesses reached for this drop.`;
+    } else {
+      return;
+    }
+
+    const warn = await channel
+      .send({
+        content,
+        allowedMentions: { users: [message.author.id] },
+      })
+      .catch(() => null);
+
+    if (warn && canManage) {
+      setTimeout(() => warn.delete().catch(() => {}), PUBLIC_COOLDOWN_WARN_DELETE_MS);
+    }
+  } catch {}
+}
+
+async function respondPublicHint({ client, message, hint, game }) {
+  // Optional lightweight feedback (react only) to reduce spam
+  // You can switch this later if you want replies back.
   const channel = message.channel;
   const me = message.guild?.members?.me || message.guild?.members?.cache?.get(client.user.id);
-  const canSend = channel?.permissionsFor?.(me)?.has?.(PermissionsBitField.Flags.SendMessages);
-  const canManage = channel?.permissionsFor?.(me)?.has?.(PermissionsBitField.Flags.ManageMessages);
   const canReact = channel?.permissionsFor?.(me)?.has?.(PermissionsBitField.Flags.AddReactions);
 
   const reactEmoji = (() => {
@@ -698,110 +743,9 @@ async function respondPublicHint({ client, cfg, message, hint, game }) {
     }
   })();
 
-  if ((mode === "react" || mode === "both") && canReact && reactEmoji) {
+  if (canReact && reactEmoji) {
     message.react(reactEmoji).catch(() => {});
   }
-
-  if ((mode === "reply" || mode === "both") && canSend) {
-    const txt = hintToUserText(hint);
-    const content =
-      hint === "correct"
-        ? `🎁 ${txt} Winner announcement incoming…`
-        : `${txt} (range \`${game.range_min}-${game.range_max}\`)`;
-
-    const sent = await (replyToUser
-      ? message.reply({ content, allowedMentions: { parse: [] } })
-      : channel.send({ content, allowedMentions: { parse: [] } })
-    ).catch(() => null);
-
-    if (sent && deleteMs > 0 && canManage) {
-      setTimeout(() => sent.delete().catch(() => {}), Math.max(1000, deleteMs));
-    }
-  }
-}
-
-// ✅ UPDATED: Public cooldown / reject handler
-// - Deletes the user's guess message on cooldown (if possible)
-// - Sends PRIVATE warning via DM by default
-// - Falls back to a short channel warning that auto-deletes (if DM blocked)
-async function handlePublicReject({ client, cfg, message, game, reason, waitMs }) {
-  try {
-    const channel = message.channel;
-    const me = message.guild?.members?.me || message.guild?.members?.cache?.get(client.user.id);
-
-    const canSend = channel?.permissionsFor?.(me)?.has?.(PermissionsBitField.Flags.SendMessages);
-    const canManage = channel?.permissionsFor?.(me)?.has?.(PermissionsBitField.Flags.ManageMessages);
-
-    const deleteGuessOnCooldown = Number(cfg?.public_cooldown_delete_guess ?? 1) === 1;
-    const warnOnCooldown = Number(cfg?.public_cooldown_warn ?? 1) === 1;
-
-    // ✅ default: private DM warning
-    const warnPrivate = Number(cfg?.public_cooldown_warn_private ?? 1) === 1;
-
-    // channel fallback auto-delete timing
-    const warnDeleteMs = Number(cfg?.public_cooldown_warn_delete_ms ?? 5000);
-
-    // Delete the user's guess message if we can
-    if (reason === "cooldown" && deleteGuessOnCooldown && canManage) {
-      await message.delete().catch(() => {});
-    }
-
-    // Cooldown warning (private DM preferred)
-    if (reason === "cooldown" && warnOnCooldown) {
-      const s = Math.max(1, Math.ceil(Number(waitMs || 0) / 1000));
-      const dmText =
-        `⏳ Slow down — you can guess again in ~${s}s.\n` +
-        `Game range: ${game.range_min}-${game.range_max}`;
-
-      let dmOk = false;
-      if (warnPrivate) {
-        dmOk = await message.author
-          .send({ content: dmText })
-          .then(() => true)
-          .catch(() => false);
-      }
-
-      // Fallback: short channel notice (auto-deletes). Still deletes the user's guess above.
-      if (!dmOk && canSend) {
-        const warn = await channel
-          .send({
-            content: `⏳ <@${message.author.id}> slow down — wait ~${s}s before guessing again.`,
-            allowedMentions: { users: [message.author.id] },
-          })
-          .catch(() => null);
-
-        if (warn && warnDeleteMs > 0 && canManage) {
-          setTimeout(() => warn.delete().catch(() => {}), Math.max(1500, warnDeleteMs));
-        }
-      }
-      return;
-    }
-
-    // Max guesses warning (private DM preferred)
-    if (reason === "max_guesses") {
-      const dmText = `⛔ You reached the max guesses for this drop.`;
-      let dmOk = false;
-      if (warnPrivate) {
-        dmOk = await message.author
-          .send({ content: dmText })
-          .then(() => true)
-          .catch(() => false);
-      }
-
-      if (!dmOk && canSend) {
-        const warn = await channel
-          .send({
-            content: `⛔ <@${message.author.id}> you reached the max guesses for this drop.`,
-            allowedMentions: { users: [message.author.id] },
-          })
-          .catch(() => null);
-
-        if (warn && canManage) {
-          setTimeout(() => warn.delete().catch(() => {}), 5000);
-        }
-      }
-    }
-  } catch {}
 }
 
 module.exports = (client) => {
@@ -841,14 +785,13 @@ module.exports = (client) => {
       if (!(await ensureSchemaIfNeeded(client))) return;
 
       // =========================
-      // BUTTONS
+      // BUTTONS (wizard + rules/stats)
       // =========================
       if (interaction.isButton()) {
         const cid = String(interaction.customId || "");
 
-        // ✅ FIX: Wizard pick buttons must show modal immediately (NO DB BEFORE showModal)
+        // Wizard pick buttons: show modal immediately (no DB before showModal)
         if (cid.startsWith("gift_wiz_pick:")) {
-          // Optional quick permission gate (fast, no DB)
           const allowed =
             interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator) ||
             interaction.memberPermissions?.has(PermissionsBitField.Flags.ManageGuild);
@@ -868,7 +811,6 @@ module.exports = (client) => {
             return interaction.reply({ content: "❌ Invalid draft id.", flags: 64 }).catch(() => {});
           }
 
-          // Build modal (NO DB)
           const modal = new ModalBuilder()
             .setCustomId(`gift_wiz_prize_modal:${gameId}:${prizeType}`)
             .setTitle(`Gift Prize — ${prizeType.toUpperCase()}`);
@@ -904,7 +846,6 @@ module.exports = (client) => {
               .setRequired(false)
               .setMaxLength(12);
 
-            // ✅ label shortened (<=45)
             const imageUrl = new TextInputBuilder()
               .setCustomId("nft_image")
               .setLabel("Image URL (optional; blank = auto)")
@@ -970,7 +911,6 @@ module.exports = (client) => {
               .setRequired(true)
               .setMaxLength(80);
 
-            // ✅ label shortened (<=45)
             const duration = new TextInputBuilder()
               .setCustomId("role_duration")
               .setLabel("Duration (optional: 7d, 24h)")
@@ -994,13 +934,11 @@ module.exports = (client) => {
 
           for (const r of rows) modal.addComponents(r);
 
-          // ✅ showModal immediately
           return interaction.showModal(modal).catch((e) => {
             if (DEBUG) console.warn("⚠️ [GIFT] showModal failed:", e?.message || e);
           });
         }
 
-        // cancel draft (DB ok because we deferReply)
         if (cid.startsWith("gift_wiz_cancel:")) {
           await interaction.deferReply({ flags: 64 }).catch(() => {});
           const gameId = Number(cid.split(":")[1]);
@@ -1020,7 +958,6 @@ module.exports = (client) => {
           return interaction.editReply(g ? `🛑 Draft \`${gameId}\` cancelled.` : `⚠️ Draft not found or already handled.`).catch(() => {});
         }
 
-        // launch draft -> active + post drop
         if (cid.startsWith("gift_wiz_launch:")) {
           await interaction.deferReply({ flags: 64 }).catch(() => {});
           const gameId = Number(cid.split(":")[1]);
@@ -1046,12 +983,6 @@ module.exports = (client) => {
 
           const row = new ActionRowBuilder().addComponents(
             new ButtonBuilder()
-              .setCustomId(`gift_guess:${launched.id}`)
-              .setLabel("Guess")
-              .setEmoji("🎯")
-              .setStyle(ButtonStyle.Primary)
-              .setDisabled(String(launched.mode || "").toLowerCase() !== "modal"),
-            new ButtonBuilder()
               .setCustomId(`gift_rules:${launched.id}`)
               .setLabel("Rules")
               .setEmoji("📜")
@@ -1075,14 +1006,14 @@ module.exports = (client) => {
             action: "launched",
             actor_user_id: interaction.user.id,
             actor_tag: interaction.user.tag,
-            details: { channel_id: launched.channel_id }
+            details: { channel_id: launched.channel_id, mode: "public" }
           });
 
           return interaction.editReply(`✅ Launched Gift Drop in <#${launched.channel_id}> (gameId: \`${launched.id}\`).`).catch(() => {});
         }
 
-        // Existing gameplay buttons
-        if (cid.startsWith("gift_")) {
+        // rules/stats
+        if (cid.startsWith("gift_rules:") || cid.startsWith("gift_stats:")) {
           const [head, gameIdRaw] = cid.split(":");
           const gameId = Number(gameIdRaw);
           if (!Number.isFinite(gameId)) {
@@ -1091,31 +1022,6 @@ module.exports = (client) => {
 
           const game = await getGiftGameById(pg, gameId).catch(() => null);
           if (!game) return interaction.reply({ content: "❌ Game not found.", flags: 64 }).catch(() => {});
-
-          if (head === "gift_guess") {
-            if (String(game.mode || "").toLowerCase() !== "modal") {
-              return interaction.reply({ content: "This game is not using modal mode. Type guesses in chat instead.", flags: 64 }).catch(() => {});
-            }
-            if (game.status !== "active") {
-              return interaction.reply({ content: "This drop is already closed.", flags: 64 }).catch(() => {});
-            }
-
-            const modal = new ModalBuilder()
-              .setCustomId(`gift_guess_modal:${gameId}`)
-              .setTitle("🎁 Guess the Secret Number");
-
-            const input = new TextInputBuilder()
-              .setCustomId("gift_number")
-              .setLabel(`Enter a number (${game.range_min}–${game.range_max})`)
-              .setStyle(TextInputStyle.Short)
-              .setRequired(true)
-              .setMaxLength(12);
-
-            const row = new ActionRowBuilder().addComponents(input);
-            modal.addComponents(row);
-
-            return interaction.showModal(modal).catch(() => {});
-          }
 
           if (head === "gift_rules") {
             const endsAt = game.ends_at ? `<t:${Math.floor(new Date(game.ends_at).getTime() / 1000)}:R>` : "N/A";
@@ -1126,7 +1032,7 @@ module.exports = (client) => {
               .setDescription(
                 [
                   `**Range:** \`${game.range_min} → ${game.range_max}\``,
-                  `**Mode:** \`${game.mode}\``,
+                  `**Mode:** \`public\``,
                   `**Ends:** ${endsAt}`,
                   `**Prize:** ${prizeLine}`,
                   "",
@@ -1135,9 +1041,7 @@ module.exports = (client) => {
                   `🎯 Max guesses/user: \`${game.max_guesses_per_user}\``,
                   `🧠 Hints: \`${game.hints_mode}\``,
                   "",
-                  game.mode === "modal"
-                    ? `Use the **Guess** button to submit (no spam).`
-                    : `Type your number in chat (example: \`42\`).`
+                  `Type your number in chat (example: \`42\`).`
                 ].join("\n")
               )
               .setFooter({ text: `Game ID: ${game.id}` });
@@ -1146,7 +1050,7 @@ module.exports = (client) => {
           }
 
           if (head === "gift_stats") {
-            const state = await getUserState(pg, interaction.guildId, interaction.user.id);
+            const state = await getUserState(pg, interaction.guildId, interaction.user.id).catch(() => null);
             const guessesInThisGame =
               state && String(state.last_game_id || "") === String(game.id)
                 ? Number(state.guesses_in_game || 0)
@@ -1163,18 +1067,15 @@ module.exports = (client) => {
 
             return interaction.reply({ embeds: [embed], flags: 64 }).catch(() => {});
           }
-
-          return;
         }
       }
 
       // =========================
-      // MODALS
+      // MODALS (wizard prize only)
       // =========================
       if (interaction.isModalSubmit()) {
         const cid = String(interaction.customId || "");
 
-        // Wizard prize modal submit (safe to do DB because we can deferReply)
         if (cid.startsWith("gift_wiz_prize_modal:")) {
           await interaction.deferReply({ flags: 64 }).catch(() => {});
 
@@ -1253,7 +1154,7 @@ module.exports = (client) => {
               [
                 `**Draft Game ID:** \`${gameId}\``,
                 `**Channel:** <#${saved.channel_id}>`,
-                `**Mode:** \`${saved.mode}\``,
+                `**Mode:** \`public\``,
                 `**Range:** \`${saved.range_min} → ${saved.range_max}\``,
                 `**Ends:** ${endsTs ? `<t:${endsTs}:R>` : "N/A"}`,
                 `**Prize:** ${saved.prize_secret ? "??? (hidden)" : `\`${prize_label}\``}`,
@@ -1271,48 +1172,15 @@ module.exports = (client) => {
 
           return interaction.editReply({ embeds: [embed], components: [row] }).catch(() => {});
         }
-
-        // Gameplay guess modal
-        if (cid.startsWith("gift_guess_modal:")) {
-          await interaction.deferReply({ flags: 64 }).catch(() => {});
-
-          const gameId = Number(cid.split(":")[1]);
-          if (!Number.isFinite(gameId)) return interaction.editReply("❌ Invalid game id.").catch(() => {});
-
-          const game = await getGiftGameById(pg, gameId);
-          if (!game) return interaction.editReply("❌ Game not found.").catch(() => {});
-          if (game.status !== "active") return interaction.editReply("This drop is already closed.").catch(() => {});
-          if (String(game.mode || "").toLowerCase() !== "modal") {
-            return interaction.editReply("This game is not in modal mode.").catch(() => {});
-          }
-
-          const val = interaction.fields.getTextInputValue("gift_number");
-          const guessValue = intFromText(val);
-          if (guessValue === null) return interaction.editReply("❌ Please enter a whole number.").catch(() => {});
-
-          const res = await handleGuess(client, interaction, { game, guessValue, source: "modal", messageId: null });
-
-          if (!res.ok) {
-            if (res.reason === "cooldown") {
-              const s = Math.ceil((res.waitMs || 0) / 1000);
-              return interaction.editReply(`⏳ Cooldown. Try again in ~${s}s.`).catch(() => {});
-            }
-            if (res.reason === "max_guesses") return interaction.editReply(`⛔ You reached the max guesses for this game.`).catch(() => {});
-            if (res.reason === "out_of_range") return interaction.editReply(`❌ Out of range. Use \`${game.range_min}–${game.range_max}\`.`).catch(() => {});
-            if (res.reason === "already_ended") return interaction.editReply(`⚠️ Too late — someone already won.`).catch(() => {});
-            if (res.reason === "expired") return interaction.editReply(`⏳ This drop already expired.`).catch(() => {});
-            return interaction.editReply(`❌ Guess not accepted (${res.reason}).`).catch(() => {});
-          }
-
-          if (res.won) return interaction.editReply(`🎁 ${hintToUserText("correct")} Winner announcement posted!`).catch(() => {});
-          return interaction.editReply(hintToUserText(res.hint)).catch(() => {});
-        }
       }
     } catch (e) {
       if (DEBUG) console.warn("⚠️ [GIFT] interaction handler error:", e?.message || e);
     }
   });
 
+  // =========================
+  // PUBLIC MODE GUESS CAPTURE
+  // =========================
   client.on("messageCreate", async (message) => {
     try {
       if (!message?.guildId) return;
@@ -1327,13 +1195,14 @@ module.exports = (client) => {
 
       const game = await getActiveGiftGameInChannel(pg, message.guildId, message.channelId);
       if (!game) return;
-      if (String(game.mode || "").toLowerCase() !== "public") return;
 
+      // Force public-only: ignore if DB says otherwise
+      // (keeps backwards compatibility if old rows still say modal)
+      // We still accept guesses for active game in this channel.
       const cfg = await getGiftConfig(pg, message.guildId).catch(() => null);
 
       const res = await handleGuess(client, message, { game, guessValue, source: "public", messageId: message.id });
 
-      // ✅ cooldown enforcement in public mode (delete guess + PRIVATE warning)
       if (!res.ok) {
         if (res.reason === "cooldown" || res.reason === "max_guesses") {
           await handlePublicReject({
@@ -1349,16 +1218,17 @@ module.exports = (client) => {
       }
 
       if (res.won) {
-        await respondPublicHint({ client, cfg, message, hint: "correct", game }).catch(() => {});
+        // winner path: you can optionally react, but endGame already handles closing + announce
+        await respondPublicHint({ client, message, hint: "correct", game }).catch(() => {});
         return;
       }
 
-      await respondPublicHint({ client, cfg, message, hint: res.hint, game }).catch(() => {});
+      await respondPublicHint({ client, message, hint: res.hint, game }).catch(() => {});
     } catch (e) {
       if (DEBUG) console.warn("⚠️ [GIFT] message handler error:", e?.message || e);
     }
   });
 
-  console.log("✅ GiftGameListener loaded (wizard modal fast-path + label-limit fix + public cooldown delete+DM warn + flags:64)");
+  console.log("✅ GiftGameListener loaded (PUBLIC ONLY + cooldown deletes guess + fast auto-delete warning)");
 };
 
