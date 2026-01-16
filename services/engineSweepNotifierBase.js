@@ -1,3 +1,12 @@
+// services/engineSweepNotifierBase.js  (or your current filename)
+// ======================================================
+// Engine Sweep notifier (Base) — load minimized
+// - Leader lock (optional) prevents multi-instance polling
+// - No overlapping ticks (self-scheduling loop + guard)
+// - Channel routing cached (DB query + channel fetch only every N minutes)
+// - seenTx bounded to avoid memory growth
+// ======================================================
+
 const { Interface, ethers } = require("ethers");
 const { safeRpcCall } = require("./providerM");
 const { shortWalletLink } = require("../utils/helpers");
@@ -7,7 +16,6 @@ let logDigestEvent = null;
 try {
   ({ logDigestEvent } = require("./digestLogger"));
 } catch (e) {
-  // ok - add services/digestLogger.js later
   logDigestEvent = null;
 }
 
@@ -19,24 +27,53 @@ const ENGINE_CONTRACT =
 
 const ENGINE_TOPIC = "0x000000000000000000000000" + ENGINE_CONTRACT.slice(2);
 
-// 🔒 TEST SERVER ONLY (TEMP)
+// 🔒 keep your current "test guild only" default behavior,
+// but make it configurable via ENV allowlist.
 const TEST_GUILD_ID = "1335024324184244447";
 
-const POLL_MS = Number(process.env.SWEEP_POLL_MS || 12000);
-const LOOKBACK = Number(process.env.SWEEP_LOOKBACK_BLOCKS || 80);
-const MAX_BLOCKS = Number(process.env.SWEEP_MAX_BLOCKS_PER_TICK || 25);
-const MAX_TXS = Number(process.env.SWEEP_MAX_TX_PER_TICK || 250);
+// Enable switch (default ON)
+const ENABLE_ENGINE_SWEEP = String(process.env.ENABLE_ENGINE_SWEEP ?? "1").trim() === "1";
 
-const DEBUG = process.env.SWEEP_DEBUG === "1";
-const FORCE_RESET_SWEEP = process.env.SWEEP_FORCE_RESET === "1"; // one deploy only
+// Leader lock (default ON if DB exists)
+const USE_LEADER_LOCK = String(process.env.ENGINE_SWEEP_USE_LEADER_LOCK ?? "1").trim() === "1";
+const LEADER_LOCK_KEY = Number(process.env.ENGINE_SWEEP_LOCK_KEY || 917302);
+
+// Polling defaults bumped down for load reduction
+const POLL_MS = Math.max(8000, Number(process.env.SWEEP_POLL_MS || 30000));
+const LOOKBACK = Math.max(5, Number(process.env.SWEEP_LOOKBACK_BLOCKS || 40));
+const MAX_BLOCKS = Math.max(3, Number(process.env.SWEEP_MAX_BLOCKS_PER_TICK || 12));
+const MAX_TXS = Math.max(25, Number(process.env.SWEEP_MAX_TX_PER_TICK || 200));
+
+const DEBUG = String(process.env.SWEEP_DEBUG || "").trim() === "1";
+const FORCE_RESET_SWEEP = String(process.env.SWEEP_FORCE_RESET || "").trim() === "1"; // one deploy only
+
+// Channel routing refresh interval (ms)
+const CHANNEL_REFRESH_MS = Math.max(
+  30000,
+  Number(process.env.SWEEP_CHANNEL_REFRESH_MS || 300000) // 5 min default
+);
+
+// Seen tx cache bound
+const SEEN_MAX = Math.max(500, Number(process.env.SWEEP_SEEN_MAX || 5000));
+const SEEN_TTL_MS = Math.max(60000, Number(process.env.SWEEP_SEEN_TTL_MS || 6 * 60 * 60 * 1000)); // 6h default
+
+// Optional allowlist: comma-separated guild IDs.
+// If set, only those guilds get messages.
+// If NOT set, it falls back to TEST_GUILD_ID behavior (to keep your current safety).
+const GUILD_ALLOWLIST = String(process.env.SWEEP_GUILD_ALLOWLIST || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 
 /* ======================================================
    CHECKPOINT
 ====================================================== */
 const CHECKPOINT_CHAIN = "base";
 const CHECKPOINT_KEY = "engine_sweep_last_block";
+let _checkpointEnsured = false;
 
 async function ensureCheckpoint(client) {
+  if (_checkpointEnsured) return;
   if (!client?.pg?.query) return;
   await client.pg.query(`
     CREATE TABLE IF NOT EXISTS sweep_checkpoints (
@@ -47,6 +84,7 @@ async function ensureCheckpoint(client) {
       PRIMARY KEY (chain, key)
     )
   `);
+  _checkpointEnsured = true;
 }
 
 async function getLastBlock(client) {
@@ -94,7 +132,34 @@ const T_ERC20_TRANSFER = ethers.id("Transfer(address,address,uint256)");
 /* ======================================================
    HELPERS
 ====================================================== */
-const seenTx = new Set();
+const seenTx = new Map(); // hash -> lastSeenMs
+
+function nowMs() {
+  return Date.now();
+}
+
+function pruneSeen() {
+  const t = nowMs();
+  // TTL prune
+  for (const [h, ts] of seenTx) {
+    if (t - ts > SEEN_TTL_MS) seenTx.delete(h);
+  }
+  // size prune (oldest-ish)
+  if (seenTx.size > SEEN_MAX) {
+    const excess = seenTx.size - SEEN_MAX;
+    let i = 0;
+    for (const h of seenTx.keys()) {
+      seenTx.delete(h);
+      i++;
+      if (i >= excess) break;
+    }
+  }
+}
+
+function markSeen(h) {
+  seenTx.set(h, nowMs());
+  if (seenTx.size > SEEN_MAX * 1.2) pruneSeen();
+}
 
 function fmtNumber(x) {
   try {
@@ -157,7 +222,6 @@ async function buildTokenAmountString(provider, tokenAddr, amountBN) {
     const amt = ethers.formatUnits(amountBN, info.decimals);
     return `${fmtNumber(amt)} ${info.symbol}`;
   }
-  // fallback
   return `${fmtNumber(ethers.formatUnits(amountBN, 18))} TOKEN`;
 }
 
@@ -169,12 +233,9 @@ async function logDigestSaleIfPossible(client, provider, data, chans) {
     if (!data.tx?.hash) return;
 
     const uniqueGuildIds = new Set(
-      (chans || [])
-        .map(c => c?.guild?.id)
-        .filter(Boolean)
+      (chans || []).map((c) => c?.guild?.id).filter(Boolean)
     );
 
-    // compute numeric-ish amounts
     let amountEth = null;
     let amountNative = null;
 
@@ -198,7 +259,7 @@ async function logDigestSaleIfPossible(client, provider, data, chans) {
         contract: data.nft,
         tokenId: data.tokenId,
         amountNative,
-        amountEth,      // null for token payments unless you later add conversion
+        amountEth,
         amountUsd: null,
         buyer: data.buyer,
         seller: data.seller,
@@ -211,10 +272,23 @@ async function logDigestSaleIfPossible(client, provider, data, chans) {
 }
 
 /* ======================================================
-   CHANNEL ROUTING (TEST SERVER ONLY)
+   CHANNEL ROUTING (CACHED)
 ====================================================== */
+let _channelsCache = [];
+let _channelsCacheAt = 0;
+
+function guildAllowed(guildId) {
+  if (GUILD_ALLOWLIST.length) return GUILD_ALLOWLIST.includes(String(guildId));
+  return String(guildId) === String(TEST_GUILD_ID);
+}
+
 async function resolveChannels(client) {
   if (!client?.pg?.query) return [];
+
+  const now = nowMs();
+  if (_channelsCacheAt && now - _channelsCacheAt < CHANNEL_REFRESH_MS) {
+    return _channelsCache;
+  }
 
   const r = await client.pg.query(`
     SELECT DISTINCT channel_id
@@ -228,17 +302,18 @@ async function resolveChannels(client) {
       client.channels.cache.get(row.channel_id) ||
       (await client.channels.fetch(row.channel_id).catch(() => null));
 
-    if (ch?.isTextBased() && ch?.guild?.id === TEST_GUILD_ID) out.push(ch);
+    if (ch?.isTextBased() && ch?.guild?.id && guildAllowed(ch.guild.id)) out.push(ch);
   }
 
-  if (DEBUG) console.log(`[SWEEP] channels(test guild)=${out.length}`);
+  _channelsCache = out;
+  _channelsCacheAt = now;
+
+  if (DEBUG) console.log(`[SWEEP] channels(filtered)=${out.length} refreshMs=${CHANNEL_REFRESH_MS}`);
   return out;
 }
 
 /* ======================================================
    ANALYZE TX (USER LIST + USER BUY ONLY)
-   - LIST: approval to engine (and possibly escrow transfer to engine)
-   - BUY: buyer != engine
 ====================================================== */
 async function analyzeTx(provider, hash) {
   const tx = await provider.getTransaction(hash);
@@ -255,13 +330,10 @@ async function analyzeTx(provider, hash) {
 
   let ethPaid = tx.value && tx.value > 0n ? tx.value : 0n;
 
-  // payments:
-  // - tokenPayment: token transfer to seller (for BUY)
-  // - listPayment: token transfer seller -> engine (heuristic list price)
   let tokenPayment = null;
   let listPayment = null;
 
-  /* ---------- PASS 1: Find any ERC721 transfers (source of truth for tokenId) ---------- */
+  // PASS 1: ERC721 transfers
   for (const log of rc.logs) {
     if (log.topics?.[0] !== T_ERC721_TRANSFER || log.topics.length < 4) continue;
 
@@ -283,7 +355,7 @@ async function analyzeTx(provider, hash) {
     }
   }
 
-  /* ---------- PASS 2: approvals (LIST signal) ---------- */
+  // PASS 2: approvals (LIST signal)
   for (const log of rc.logs) {
     const t0 = log.topics?.[0];
 
@@ -292,7 +364,6 @@ async function analyzeTx(provider, hash) {
       if (approved === ENGINE_CONTRACT) {
         approvedToEngine = true;
         nft = nft || log.address.toLowerCase();
-
         if (!tokenId) {
           try { tokenId = BigInt(log.topics[3]).toString(); } catch {}
         }
@@ -316,7 +387,7 @@ async function analyzeTx(provider, hash) {
     }
   }
 
-  /* ---------- PASS 3: ERC20 transfers (price heuristics) ---------- */
+  // PASS 3: ERC20 transfers (price heuristics)
   for (const log of rc.logs) {
     if (log.topics?.[0] !== T_ERC20_TRANSFER || log.topics.length < 3) continue;
 
@@ -326,19 +397,16 @@ async function analyzeTx(provider, hash) {
     let parsed;
     try { parsed = ERC20.parseLog(log); } catch { continue; }
 
-    // BUY price heuristic: token -> seller
     if (seller && to === seller) {
       tokenPayment = { token: log.address.toLowerCase(), amount: parsed.args.value };
     }
 
-    // LIST price heuristic: seller -> engine (if approval happened)
     if (approvedToEngine && seller && from === seller && to === ENGINE_CONTRACT) {
       listPayment = { token: log.address.toLowerCase(), amount: parsed.args.value };
     }
   }
 
-  /* ---------- CLASSIFICATION ---------- */
-
+  // CLASSIFICATION
   if (approvedToEngine && (!buyer || buyer === ENGINE_CONTRACT)) {
     const listSeller = (seller || tx.from || "").toLowerCase();
     if (!tokenId) return null;
@@ -434,81 +502,143 @@ async function sendEmbed(client, provider, data, chans) {
 }
 
 /* ======================================================
-   MAIN LOOP (WORKING SCAN: engine + approvals)
+   MAIN LOOP (WORKING SCAN)
 ====================================================== */
+let _ticking = false;
+
 async function tick(client) {
-  const provider = await safeRpcCall("base", (p) => p);
-  if (!provider) return;
+  if (_ticking) return;
+  _ticking = true;
 
-  await ensureCheckpoint(client);
+  try {
+    pruneSeen();
 
-  const latest = await provider.getBlockNumber();
+    const provider = await safeRpcCall("base", (p) => p);
+    if (!provider) return;
 
-  if (FORCE_RESET_SWEEP && !global.__engineSweepResetDone) {
-    await setLastBlock(client, latest - 25);
-    global.__engineSweepResetDone = true;
-    DEBUG && console.log("🧹 [SWEEP] checkpoint force-reset (one-time)");
+    await ensureCheckpoint(client);
+
+    const latest = await provider.getBlockNumber();
+
+    if (FORCE_RESET_SWEEP && !global.__engineSweepResetDone) {
+      await setLastBlock(client, latest - 25);
+      global.__engineSweepResetDone = true;
+      DEBUG && console.log("🧹 [SWEEP] checkpoint force-reset (one-time)");
+    }
+
+    let last = await getLastBlock(client);
+    if (!last) last = latest - 5;
+
+    const from = Math.max(last + 1, latest - LOOKBACK);
+    const to = Math.min(latest, from + MAX_BLOCKS);
+
+    DEBUG && console.log(`[SWEEP] blocks ${from} → ${to}`);
+
+    const engineLogs = await provider
+      .getLogs({ address: ENGINE_CONTRACT, fromBlock: from, toBlock: to })
+      .catch(() => []);
+
+    const approvalLogs = await provider
+      .getLogs({ fromBlock: from, toBlock: to, topics: [T_ERC721_APPROVAL, null, ENGINE_TOPIC] })
+      .catch(() => []);
+
+    const approvalAllLogs = await provider
+      .getLogs({ fromBlock: from, toBlock: to, topics: [T_ERC721_APPROVAL_ALL, null, ENGINE_TOPIC] })
+      .catch(() => []);
+
+    const merged = [
+      ...engineLogs.map((l) => l.transactionHash),
+      ...approvalLogs.map((l) => l.transactionHash),
+      ...approvalAllLogs.map((l) => l.transactionHash)
+    ];
+
+    const txs = [...new Set(merged)].slice(0, MAX_TXS);
+
+    DEBUG &&
+      console.log(
+        `[SWEEP] logs engine=${engineLogs.length} approval=${approvalLogs.length} approvalAll=${approvalAllLogs.length} txs=${txs.length}`
+      );
+
+    const chans = await resolveChannels(client);
+
+    for (const h of txs) {
+      if (seenTx.has(h)) continue;
+      markSeen(h);
+
+      const res = await analyzeTx(provider, h);
+      if (!res) continue;
+
+      await sendEmbed(client, provider, res, chans);
+    }
+
+    await setLastBlock(client, to);
+  } catch (e) {
+    DEBUG && console.warn("⚠️ [SWEEP] tick error:", e?.message || e);
+  } finally {
+    _ticking = false;
   }
-
-  let last = await getLastBlock(client);
-  if (!last) last = latest - 5;
-
-  const from = Math.max(last + 1, latest - LOOKBACK);
-  const to = Math.min(latest, from + MAX_BLOCKS);
-
-  DEBUG && console.log(`[SWEEP] blocks ${from} → ${to}`);
-
-  const engineLogs = await provider
-    .getLogs({ address: ENGINE_CONTRACT, fromBlock: from, toBlock: to })
-    .catch(() => []);
-
-  const approvalLogs = await provider
-    .getLogs({ fromBlock: from, toBlock: to, topics: [T_ERC721_APPROVAL, null, ENGINE_TOPIC] })
-    .catch(() => []);
-
-  const approvalAllLogs = await provider
-    .getLogs({ fromBlock: from, toBlock: to, topics: [T_ERC721_APPROVAL_ALL, null, ENGINE_TOPIC] })
-    .catch(() => []);
-
-  const merged = [
-    ...engineLogs.map((l) => l.transactionHash),
-    ...approvalLogs.map((l) => l.transactionHash),
-    ...approvalAllLogs.map((l) => l.transactionHash)
-  ];
-
-  const txs = [...new Set(merged)].slice(0, MAX_TXS);
-
-  DEBUG &&
-    console.log(
-      `[SWEEP] logs engine=${engineLogs.length} approval=${approvalLogs.length} approvalAll=${approvalAllLogs.length} txs=${txs.length}`
-    );
-
-  const chans = await resolveChannels(client);
-
-  for (const h of txs) {
-    if (seenTx.has(h)) continue;
-    seenTx.add(h);
-
-    const res = await analyzeTx(provider, h);
-    if (!res) continue;
-
-    await sendEmbed(client, provider, res, chans);
-  }
-
-  await setLastBlock(client, to);
 }
 
 /* ======================================================
-   START
+   LEADER LOCK
+====================================================== */
+async function tryAcquireLeaderLock(client) {
+  if (!USE_LEADER_LOCK) return true;
+  const pg = client?.pg;
+  if (!pg?.query) return true;
+
+  try {
+    const r = await pg.query("SELECT pg_try_advisory_lock($1) AS ok", [LEADER_LOCK_KEY]);
+    return Boolean(r.rows?.[0]?.ok);
+  } catch (e) {
+    console.warn("⚠️ [SWEEP] leader lock check failed:", e?.message || e);
+    return true; // don't brick
+  }
+}
+
+/* ======================================================
+   START (NO OVERLAP + SELF SCHEDULING)
 ====================================================== */
 function startEngineSweepNotifierBase(client) {
   if (global.__engineSweepStarted) return;
   global.__engineSweepStarted = true;
 
+  if (!ENABLE_ENGINE_SWEEP) {
+    console.log("🧹 Engine Sweep notifier: disabled by ENABLE_ENGINE_SWEEP=0");
+    return;
+  }
+
   console.log("🧹 Engine Sweep notifier started (TEST SERVER ONLY)");
 
-  tick(client).catch(() => {});
-  setInterval(() => tick(client).catch(() => {}), POLL_MS);
+  let stopped = false;
+  let backoffMs = 0;
+
+  const loop = async () => {
+    if (stopped) return;
+
+    // leader lock (prevents multi-instance polling)
+    const leaderOk = await tryAcquireLeaderLock(client);
+    if (!leaderOk) {
+      DEBUG && console.log("🧹 [SWEEP] another instance holds leader lock — skipping tick.");
+    } else {
+      try {
+        await tick(client);
+        backoffMs = 0;
+      } catch {
+        backoffMs = Math.min(120000, Math.max(5000, (backoffMs || 0) * 2 || 5000));
+      }
+    }
+
+    const jitter = Math.floor(Math.random() * 750);
+    const next = Math.max(8000, POLL_MS + backoffMs + jitter);
+    setTimeout(loop, next);
+  };
+
+  // Kick after small jitter to avoid boot spikes
+  setTimeout(loop, 1500 + Math.floor(Math.random() * 750));
+
+  // optional stopper hook
+  client.__engineSweepStop = () => { stopped = true; };
 }
 
 module.exports = { startEngineSweepNotifierBase };
