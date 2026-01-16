@@ -8,8 +8,8 @@
 //    - If user posts guess too fast -> delete their number message (if possible)
 //    - Warn user with wait time (auto-delete warning)
 // ✅ Use flags: 64 instead of ephemeral (deprecation warning)
-// ✅ NEW: Winner/reveal GIF for TEXT + ROLE prizes (fits: uses embed IMAGE)
 // ✅ Keeps public + modal gameplay, winner reveal, audit writes
+// ✅ NEW: Use a special WIN GIF for prize_type text/role (fits as main embed image)
 // ======================================================
 
 const {
@@ -39,14 +39,14 @@ try {
 
 const DEBUG = String(process.env.GIFT_DEBUG || "").trim() === "1";
 
-// Default thumbnail (general reveal)
+// Default generic reveal GIF (thumbnail for most prizes)
 const GIFT_REVEAL_GIF =
   (process.env.GIFT_REVEAL_GIF || "").trim() ||
   "https://media.giphy.com/media/3o6Zt481isNVuQI1l6/giphy.gif";
 
-// ✅ NEW: large “fits” GIF for TEXT + ROLE wins (embed image)
-const GIFT_TEXT_ROLE_REVEAL_GIF =
-  (process.env.GIFT_TEXT_ROLE_REVEAL_GIF || "").trim() ||
+// ✅ NEW: Text/Role win GIF (big image so it "fits")
+const GIFT_TEXT_ROLE_WIN_GIF =
+  (process.env.GIFT_TEXT_ROLE_WIN_GIF || "").trim() ||
   "https://iili.io/fSwz7EJ.gif";
 
 function nowMs() { return Date.now(); }
@@ -124,14 +124,10 @@ async function ensureSchemaIfNeeded(client) {
 }
 
 async function getGiftConfig(pg, guildId) {
-  // NOTE: keep a row per guild; but don't swallow silently in debug
   await pg.query(
     `INSERT INTO gift_config (guild_id) VALUES ($1) ON CONFLICT (guild_id) DO NOTHING`,
     [guildId]
-  ).catch((e) => {
-    if (DEBUG) console.warn("⚠️ [GIFT] getGiftConfig upsert failed:", e?.message || e);
-  });
-
+  ).catch(() => {});
   const r = await pg.query(`SELECT * FROM gift_config WHERE guild_id=$1`, [guildId]);
   return r.rows?.[0] || null;
 }
@@ -361,11 +357,20 @@ function buildWinnerEmbed({
   if (nftDisplayLine) lines.push(nftDisplayLine);
   if (nftMetaLine) lines.push(nftMetaLine);
 
+  const prizeType = String(game?.prize_type || "").toLowerCase();
+  const isTextOrRole = prizeType === "text" || prizeType === "role";
+
   const e = new EmbedBuilder()
     .setTitle("🏆 GIFT OPENED — WE HAVE A WINNER!")
     .setDescription(lines.join("\n"));
 
-  // NOTE: image/thumbnail is decided later in postWinnerReveal() so we can "fit" the right GIF.
+  // ✅ NEW: Text/Role uses big gif (fits), others use thumbnail gif
+  if (isTextOrRole) {
+    e.setImage(GIFT_TEXT_ROLE_WIN_GIF);
+  } else {
+    e.setThumbnail(GIFT_REVEAL_GIF);
+  }
+
   if (game?.commit_enabled && game?.commit_hash) {
     e.addFields({
       name: "✅ Fairness Proof",
@@ -428,6 +433,9 @@ async function postWinnerReveal(client, pg, wonGame, winner, guessValue) {
   const revealPrizeText = safeStr(wonGame.prize_label || "Mystery prize 🎁", 220);
   const prizePayload = parsePrizePayload(wonGame);
 
+  const prizeType = String(wonGame.prize_type || "").toLowerCase();
+  const isTextOrRole = prizeType === "text" || prizeType === "role";
+
   const { display: nftDisplayLine, meta: nftMetaLine } =
     (wonGame.prize_type === "nft") ? buildNftDisplayFromPayload(prizePayload) : { display: null, meta: null };
 
@@ -435,7 +443,6 @@ async function postWinnerReveal(client, pg, wonGame, winner, guessValue) {
   let cardName = null;
   let resolvedImageUrl = null;
 
-  // Renderer may produce a nice PNG card (keep it)
   if (renderGiftRevealCard) {
     const rr = await renderGiftRevealCard({
       prizeType: wonGame.prize_type,
@@ -467,30 +474,18 @@ async function postWinnerReveal(client, pg, wonGame, winner, guessValue) {
     nftMetaLine,
   });
 
-  const prizeType = String(wonGame.prize_type || "").toLowerCase();
-  const canUseDirectImage =
-    resolvedImageUrl &&
-    !isDataUrl(resolvedImageUrl) &&
-    /^https?:\/\//i.test(String(resolvedImageUrl));
+  const canUseDirectImage = resolvedImageUrl && !isDataUrl(resolvedImageUrl) && /^https?:\/\//i.test(String(resolvedImageUrl));
 
-  // ✅ NEW: TEXT + ROLE uses big GIF as IMAGE (fits)
-  if (prizeType === "text" || prizeType === "role") {
-    winnerEmbed.setImage(GIFT_TEXT_ROLE_REVEAL_GIF);
-
-    // If we also have a rendered card, put it as thumbnail so we still keep the custom look
-    if (attachCard && cardName) {
-      winnerEmbed.setThumbnail(`attachment://${cardName}`);
-    } else if (canUseDirectImage) {
-      // fallback thumbnail if renderer gave a URL only
+  // ✅ NEW: For text/role, keep GIF as main image, use card/resolved image as THUMBNAIL instead.
+  if (isTextOrRole) {
+    if (canUseDirectImage) {
       winnerEmbed.setThumbnail(resolvedImageUrl);
-    } else {
-      // generic fallback thumbnail
-      winnerEmbed.setThumbnail(GIFT_REVEAL_GIF);
+      if (attachCard && cardName) winnerEmbed.setFooter({ text: `Game ID: ${wonGame.id}` }); // no-op safety
+    } else if (attachCard && cardName) {
+      winnerEmbed.setThumbnail(`attachment://${cardName}`);
     }
   } else {
-    // Default behavior for NFT/token/etc
-    winnerEmbed.setThumbnail(GIFT_REVEAL_GIF);
-
+    // Original behavior (NFT/token/etc)
     if (canUseDirectImage) {
       winnerEmbed.setImage(resolvedImageUrl);
       if (attachCard && cardName) winnerEmbed.setThumbnail(`attachment://${cardName}`);
@@ -755,7 +750,7 @@ async function respondPublicHint({ client, cfg, message, hint, game }) {
   }
 }
 
-// ✅ Public cooldown / reject handler (delete guess + warn user)
+// ✅ NEW: Public cooldown / reject handler (delete guess + warn user)
 async function handlePublicReject({ client, cfg, message, game, reason, waitMs }) {
   try {
     const channel = message.channel;
@@ -788,7 +783,7 @@ async function handlePublicReject({ client, cfg, message, game, reason, waitMs }
       }
     }
 
-    // Optional: max guesses warning
+    // Optional: max guesses warning (nice-to-have, won’t delete by default)
     if (reason === "max_guesses" && canSend) {
       const warn = await channel
         .send({
@@ -1333,7 +1328,7 @@ module.exports = (client) => {
 
       const res = await handleGuess(client, message, { game, guessValue, source: "public", messageId: message.id });
 
-      // cooldown enforcement in public mode
+      // ✅ NEW: cooldown enforcement in public mode
       if (!res.ok) {
         if (res.reason === "cooldown" || res.reason === "max_guesses") {
           await handlePublicReject({
