@@ -8,6 +8,7 @@
 //    - If user posts guess too fast -> delete their number message (if possible)
 //    - Warn user with wait time (auto-delete warning)
 // ✅ Use flags: 64 instead of ephemeral (deprecation warning)
+// ✅ NEW: Winner/reveal GIF for TEXT + ROLE prizes (fits: uses embed IMAGE)
 // ✅ Keeps public + modal gameplay, winner reveal, audit writes
 // ======================================================
 
@@ -38,9 +39,15 @@ try {
 
 const DEBUG = String(process.env.GIFT_DEBUG || "").trim() === "1";
 
+// Default thumbnail (general reveal)
 const GIFT_REVEAL_GIF =
   (process.env.GIFT_REVEAL_GIF || "").trim() ||
   "https://media.giphy.com/media/3o6Zt481isNVuQI1l6/giphy.gif";
+
+// ✅ NEW: large “fits” GIF for TEXT + ROLE wins (embed image)
+const GIFT_TEXT_ROLE_REVEAL_GIF =
+  (process.env.GIFT_TEXT_ROLE_REVEAL_GIF || "").trim() ||
+  "https://iili.io/fSwz7EJ.gif";
 
 function nowMs() { return Date.now(); }
 
@@ -117,10 +124,14 @@ async function ensureSchemaIfNeeded(client) {
 }
 
 async function getGiftConfig(pg, guildId) {
+  // NOTE: keep a row per guild; but don't swallow silently in debug
   await pg.query(
     `INSERT INTO gift_config (guild_id) VALUES ($1) ON CONFLICT (guild_id) DO NOTHING`,
     [guildId]
-  ).catch(() => {});
+  ).catch((e) => {
+    if (DEBUG) console.warn("⚠️ [GIFT] getGiftConfig upsert failed:", e?.message || e);
+  });
+
   const r = await pg.query(`SELECT * FROM gift_config WHERE guild_id=$1`, [guildId]);
   return r.rows?.[0] || null;
 }
@@ -352,9 +363,9 @@ function buildWinnerEmbed({
 
   const e = new EmbedBuilder()
     .setTitle("🏆 GIFT OPENED — WE HAVE A WINNER!")
-    .setDescription(lines.join("\n"))
-    .setThumbnail(GIFT_REVEAL_GIF);
+    .setDescription(lines.join("\n"));
 
+  // NOTE: image/thumbnail is decided later in postWinnerReveal() so we can "fit" the right GIF.
   if (game?.commit_enabled && game?.commit_hash) {
     e.addFields({
       name: "✅ Fairness Proof",
@@ -424,6 +435,7 @@ async function postWinnerReveal(client, pg, wonGame, winner, guessValue) {
   let cardName = null;
   let resolvedImageUrl = null;
 
+  // Renderer may produce a nice PNG card (keep it)
   if (renderGiftRevealCard) {
     const rr = await renderGiftRevealCard({
       prizeType: wonGame.prize_type,
@@ -455,13 +467,36 @@ async function postWinnerReveal(client, pg, wonGame, winner, guessValue) {
     nftMetaLine,
   });
 
-  const canUseDirectImage = resolvedImageUrl && !isDataUrl(resolvedImageUrl) && /^https?:\/\//i.test(String(resolvedImageUrl));
+  const prizeType = String(wonGame.prize_type || "").toLowerCase();
+  const canUseDirectImage =
+    resolvedImageUrl &&
+    !isDataUrl(resolvedImageUrl) &&
+    /^https?:\/\//i.test(String(resolvedImageUrl));
 
-  if (canUseDirectImage) {
-    winnerEmbed.setImage(resolvedImageUrl);
-    if (attachCard && cardName) winnerEmbed.setThumbnail(`attachment://${cardName}`);
+  // ✅ NEW: TEXT + ROLE uses big GIF as IMAGE (fits)
+  if (prizeType === "text" || prizeType === "role") {
+    winnerEmbed.setImage(GIFT_TEXT_ROLE_REVEAL_GIF);
+
+    // If we also have a rendered card, put it as thumbnail so we still keep the custom look
+    if (attachCard && cardName) {
+      winnerEmbed.setThumbnail(`attachment://${cardName}`);
+    } else if (canUseDirectImage) {
+      // fallback thumbnail if renderer gave a URL only
+      winnerEmbed.setThumbnail(resolvedImageUrl);
+    } else {
+      // generic fallback thumbnail
+      winnerEmbed.setThumbnail(GIFT_REVEAL_GIF);
+    }
   } else {
-    if (attachCard && cardName) winnerEmbed.setImage(`attachment://${cardName}`);
+    // Default behavior for NFT/token/etc
+    winnerEmbed.setThumbnail(GIFT_REVEAL_GIF);
+
+    if (canUseDirectImage) {
+      winnerEmbed.setImage(resolvedImageUrl);
+      if (attachCard && cardName) winnerEmbed.setThumbnail(`attachment://${cardName}`);
+    } else {
+      if (attachCard && cardName) winnerEmbed.setImage(`attachment://${cardName}`);
+    }
   }
 
   try {
@@ -720,7 +755,7 @@ async function respondPublicHint({ client, cfg, message, hint, game }) {
   }
 }
 
-// ✅ NEW: Public cooldown / reject handler (delete guess + warn user)
+// ✅ Public cooldown / reject handler (delete guess + warn user)
 async function handlePublicReject({ client, cfg, message, game, reason, waitMs }) {
   try {
     const channel = message.channel;
@@ -753,7 +788,7 @@ async function handlePublicReject({ client, cfg, message, game, reason, waitMs }
       }
     }
 
-    // Optional: max guesses warning (nice-to-have, won’t delete by default)
+    // Optional: max guesses warning
     if (reason === "max_guesses" && canSend) {
       const warn = await channel
         .send({
@@ -1298,7 +1333,7 @@ module.exports = (client) => {
 
       const res = await handleGuess(client, message, { game, guessValue, source: "public", messageId: message.id });
 
-      // ✅ NEW: cooldown enforcement in public mode
+      // cooldown enforcement in public mode
       if (!res.ok) {
         if (res.reason === "cooldown" || res.reason === "max_guesses") {
           await handlePublicReject({
@@ -1324,5 +1359,6 @@ module.exports = (client) => {
     }
   });
 
-  console.log("✅ GiftGameListener loaded (wizard modal fast-path + label-limit fix + public cooldown delete+warn + flags:64)");
+  console.log("✅ GiftGameListener loaded (wizard modal fast-path + label-limit fix + public cooldown delete+warn + flags:64 + text/role win gif)");
 };
+
