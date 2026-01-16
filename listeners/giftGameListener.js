@@ -8,6 +8,8 @@
 //    - send a VERY short warning that auto-deletes fast (best possible without DM/ephemeral)
 // ✅ Keeps wizard modals for prize setup (admin UI) + stats/rules buttons
 // ✅ Keeps commit proof, winner reveal, audit writes
+// ✅ FIX: TEXT winner/reveal now ALWAYS shows the reveal GIF as the MAIN embed image
+// ✅ REMOVE: Role prize type is disabled (NFT / TOKEN / TEXT only)
 // ======================================================
 
 const {
@@ -37,10 +39,11 @@ try {
 
 const DEBUG = String(process.env.GIFT_DEBUG || "").trim() === "1";
 
-// Winner thumbnail
+// Winner reveal GIF (TEXT uses this as main image)
+// You asked for: https://iili.io/fSwz7EJ.gif
 const GIFT_REVEAL_GIF =
   (process.env.GIFT_REVEAL_GIF || "").trim() ||
-  "https://media.giphy.com/media/3o6Zt481isNVuQI1l6/giphy.gif";
+  "https://iili.io/fSwz7EJ.gif";
 
 // Cooldown warning delete time (ms) — fast + minimal “public exposure”
 const PUBLIC_COOLDOWN_WARN_DELETE_MS = Math.max(
@@ -51,7 +54,9 @@ const PUBLIC_COOLDOWN_WARN_DELETE_MS = Math.max(
 // Try delete user guess on cooldown
 const DELETE_GUESS_ON_COOLDOWN = String(process.env.GIFT_DELETE_GUESS_ON_COOLDOWN || "1").trim() === "1";
 
-function nowMs() { return Date.now(); }
+function nowMs() {
+  return Date.now();
+}
 
 function safeStr(v, max = 160) {
   const s = String(v ?? "").trim();
@@ -102,14 +107,22 @@ function hintHotCold(guess, target) {
 
 function hintToUserText(hint) {
   switch (hint) {
-    case "correct": return "🎯 **CORRECT!**";
-    case "too_high": return "🔻 **Too high.**";
-    case "too_low": return "🔺 **Too low.**";
-    case "hot": return "🔥 **HOT.**";
-    case "warm": return "🌡️ **Warm.**";
-    case "cold": return "🧊 **Cold.**";
-    case "frozen": return "🥶 **Frozen.**";
-    default: return "✅ Locked in.";
+    case "correct":
+      return "🎯 **CORRECT!**";
+    case "too_high":
+      return "🔻 **Too high.**";
+    case "too_low":
+      return "🔺 **Too low.**";
+    case "hot":
+      return "🔥 **HOT.**";
+    case "warm":
+      return "🌡️ **Warm.**";
+    case "cold":
+      return "🧊 **Cold.**";
+    case "frozen":
+      return "🥶 **Frozen.**";
+    default:
+      return "✅ Locked in.";
   }
 }
 
@@ -126,10 +139,9 @@ async function ensureSchemaIfNeeded(client) {
 }
 
 async function getGiftConfig(pg, guildId) {
-  await pg.query(
-    `INSERT INTO gift_config (guild_id) VALUES ($1) ON CONFLICT (guild_id) DO NOTHING`,
-    [guildId]
-  ).catch(() => {});
+  await pg
+    .query(`INSERT INTO gift_config (guild_id) VALUES ($1) ON CONFLICT (guild_id) DO NOTHING`, [guildId])
+    .catch(() => {});
   const r = await pg.query(`SELECT * FROM gift_config WHERE guild_id=$1`, [guildId]);
   return r.rows?.[0] || null;
 }
@@ -150,10 +162,7 @@ async function getGiftGameById(pg, gameId) {
 }
 
 async function getUserState(pg, guildId, userId) {
-  const r = await pg.query(
-    `SELECT * FROM gift_user_state WHERE guild_id=$1 AND user_id=$2`,
-    [guildId, userId]
-  );
+  const r = await pg.query(`SELECT * FROM gift_user_state WHERE guild_id=$1 AND user_id=$2`, [guildId, userId]);
   return r.rows?.[0] || null;
 }
 
@@ -210,9 +219,16 @@ async function insertGuess(pg, { gameId, guildId, channelId, userId, userTag, gu
     RETURNING *;
   `;
   const r = await pg.query(q, [
-    gameId, guildId, channelId, userId, userTag || null,
-    guessValue, source, messageId || null,
-    Boolean(isCorrect), hint || null
+    gameId,
+    guildId,
+    channelId,
+    userId,
+    userTag || null,
+    guessValue,
+    source,
+    messageId || null,
+    Boolean(isCorrect),
+    hint || null,
   ]);
   return r.rows?.[0] || null;
 }
@@ -234,9 +250,9 @@ async function computeUniquePlayers(pg, gameId) {
 function disableAllComponents(components) {
   try {
     if (!Array.isArray(components)) return [];
-    return components.map(row => {
+    return components.map((row) => {
       const newRow = ActionRowBuilder.from(row);
-      newRow.components = newRow.components.map(c => {
+      newRow.components = newRow.components.map((c) => {
         const b = ButtonBuilder.from(c);
         b.setDisabled(true);
         return b;
@@ -254,10 +270,7 @@ function makeCleanDropEmbed(game) {
   const dur = endsTs ? Math.max(10, endsTs - startedTs) : 600;
   const hintsUnlockTs = startedTs + Math.floor(dur * 0.75);
 
-  const prizeLine =
-    game.prize_secret
-      ? "??? (reveals when someone wins)"
-      : (game.prize_label || "Mystery prize 🎁");
+  const prizeLine = game.prize_secret ? "??? (reveals when someone wins)" : game.prize_label || "Mystery prize 🎁";
 
   const lines = [
     `A gift is floating in the chat… **guess the secret number** to claim it.`,
@@ -274,17 +287,15 @@ function makeCleanDropEmbed(game) {
     `Type your guess as a number in this channel (example: \`42\`).`,
   ];
 
-  return new EmbedBuilder()
-    .setTitle("🎁 GIFT DROP LIVE")
-    .setDescription(lines.join("\n"))
-    .setFooter({ text: `Game ID: ${game.id}` });
+  return new EmbedBuilder().setTitle("🎁 GIFT DROP LIVE").setDescription(lines.join("\n")).setFooter({ text: `Game ID: ${game.id}` });
 }
 
 async function attachDropMessage(pg, { gameId, messageId, messageUrl }) {
-  await pg.query(
-    `UPDATE gift_games SET drop_message_id=$1, drop_message_url=$2 WHERE id=$3`,
-    [String(messageId), messageUrl || null, gameId]
-  );
+  await pg.query(`UPDATE gift_games SET drop_message_id=$1, drop_message_url=$2 WHERE id=$3`, [
+    String(messageId),
+    messageUrl || null,
+    gameId,
+  ]);
 }
 
 // Draft prize save
@@ -332,18 +343,7 @@ async function cancelDraftGame(pg, gameId) {
 // ===============================
 // Winner reveal helpers
 // ===============================
-function buildWinnerEmbed({
-  game,
-  winnerId,
-  winnerTag,
-  winNum,
-  elapsedSec,
-  totalGuesses,
-  uniquePlayers,
-  revealPrizeText,
-  nftDisplayLine,
-  nftMetaLine,
-}) {
+function buildWinnerEmbed({ game, winnerId, winnerTag, winNum, elapsedSec, totalGuesses, uniquePlayers, revealPrizeText, nftDisplayLine, nftMetaLine }) {
   const lines = [
     `**Winner:** <@${winnerId}>${winnerTag ? ` (\`${winnerTag}\`)` : ""}`,
     `**Winning Number:** \`${winNum}\``,
@@ -360,6 +360,7 @@ function buildWinnerEmbed({
   const e = new EmbedBuilder()
     .setTitle("🏆 GIFT OPENED — WE HAVE A WINNER!")
     .setDescription(lines.join("\n"))
+    // keep as thumbnail, but TEXT will also setImage() (more reliable)
     .setThumbnail(GIFT_REVEAL_GIF);
 
   if (game?.commit_enabled && game?.commit_hash) {
@@ -369,7 +370,7 @@ function buildWinnerEmbed({
         `Commit Hash: \`${game.commit_hash}\`\n` +
         `Reveal: \`${game.winning_guess}:${game.commit_salt}\`\n` +
         `Verify SHA256(target:salt) == commit hash`,
-      inline: false
+      inline: false,
     });
   }
 
@@ -419,19 +420,38 @@ async function postWinnerReveal(client, pg, wonGame, winner, guessValue) {
   const elapsedSec = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
   const uniquePlayers = await computeUniquePlayers(pg, wonGame.id).catch(() => 0);
 
-  try { await pg.query(`UPDATE gift_games SET unique_players=$2 WHERE id=$1`, [wonGame.id, uniquePlayers]); } catch {}
+  try {
+    await pg.query(`UPDATE gift_games SET unique_players=$2 WHERE id=$1`, [wonGame.id, uniquePlayers]);
+  } catch {}
 
   const revealPrizeText = safeStr(wonGame.prize_label || "Mystery prize 🎁", 220);
   const prizePayload = parsePrizePayload(wonGame);
 
   const { display: nftDisplayLine, meta: nftMetaLine } =
-    (wonGame.prize_type === "nft") ? buildNftDisplayFromPayload(prizePayload) : { display: null, meta: null };
+    wonGame.prize_type === "nft" ? buildNftDisplayFromPayload(prizePayload) : { display: null, meta: null };
+
+  const winnerEmbed = buildWinnerEmbed({
+    game: wonGame,
+    winnerId: winner.id,
+    winnerTag: winner.tag || null,
+    winNum: guessValue,
+    elapsedSec,
+    totalGuesses,
+    uniquePlayers,
+    revealPrizeText,
+    nftDisplayLine,
+    nftMetaLine,
+  });
+
+  // ✅ TEXT: always show the reveal gif as MAIN image (most reliable)
+  // (This prevents any renderer image from overriding the gif.)
+  const forceGifImage = String(wonGame?.prize_type || "").toLowerCase() === "text";
 
   let attachCard = null;
   let cardName = null;
   let resolvedImageUrl = null;
 
-  if (renderGiftRevealCard) {
+  if (!forceGifImage && renderGiftRevealCard) {
     const rr = await renderGiftRevealCard({
       prizeType: wonGame.prize_type,
       prizeLabel: revealPrizeText,
@@ -449,36 +469,31 @@ async function postWinnerReveal(client, pg, wonGame, winner, guessValue) {
     }
   }
 
-  const winnerEmbed = buildWinnerEmbed({
-    game: wonGame,
-    winnerId: winner.id,
-    winnerTag: winner.tag || null,
-    winNum: guessValue,
-    elapsedSec,
-    totalGuesses,
-    uniquePlayers,
-    revealPrizeText,
-    nftDisplayLine,
-    nftMetaLine,
-  });
-
-  const canUseDirectImage = resolvedImageUrl && !isDataUrl(resolvedImageUrl) && /^https?:\/\//i.test(String(resolvedImageUrl));
-
-  if (canUseDirectImage) {
-    winnerEmbed.setImage(resolvedImageUrl);
-    if (attachCard && cardName) winnerEmbed.setThumbnail(`attachment://${cardName}`);
+  if (forceGifImage) {
+    winnerEmbed.setImage(GIFT_REVEAL_GIF);
+    // keep thumbnail as the same gif (fine), but the main image is what matters
   } else {
-    if (attachCard && cardName) winnerEmbed.setImage(`attachment://${cardName}`);
+    const canUseDirectImage =
+      resolvedImageUrl && !isDataUrl(resolvedImageUrl) && /^https?:\/\//i.test(String(resolvedImageUrl));
+
+    if (canUseDirectImage) {
+      winnerEmbed.setImage(resolvedImageUrl);
+      if (attachCard && cardName) winnerEmbed.setThumbnail(`attachment://${cardName}`);
+    } else {
+      if (attachCard && cardName) winnerEmbed.setImage(`attachment://${cardName}`);
+    }
   }
 
   try {
     const ch = await client.channels.fetch(announceChannelId).catch(() => null);
     if (ch) {
-      await ch.send({
-        embeds: [winnerEmbed],
-        files: attachCard ? [attachCard] : [],
-        allowedMentions: { parse: [] },
-      }).catch(() => {});
+      await ch
+        .send({
+          embeds: [winnerEmbed],
+          files: attachCard ? [attachCard] : [],
+          allowedMentions: { parse: [] },
+        })
+        .catch(() => {});
     }
   } catch {}
 }
@@ -505,8 +520,12 @@ async function endGameWithWinner(client, pg, game, winner, guessRow, hint) {
   const wonGame = winUpdate.rows?.[0] || null;
   if (!wonGame) return { ok: false, reason: "already_ended" };
 
-  try { await pg.query(`UPDATE gift_guesses SET is_correct=TRUE, hint='correct' WHERE id=$1`, [guessRow.id]); } catch {}
-  try { await upsertUserStateOnGuess(pg, { guildId, userId: winner.id, gameId, addWin: true }); } catch {}
+  try {
+    await pg.query(`UPDATE gift_guesses SET is_correct=TRUE, hint='correct' WHERE id=$1`, [guessRow.id]);
+  } catch {}
+  try {
+    await upsertUserStateOnGuess(pg, { guildId, userId: winner.id, gameId, addWin: true });
+  } catch {}
 
   await writeAudit(pg, {
     guild_id: guildId,
@@ -514,7 +533,7 @@ async function endGameWithWinner(client, pg, game, winner, guessRow, hint) {
     action: "winner",
     actor_user_id: winner.id,
     actor_tag: winner.tag || null,
-    details: { winning_guess: guessRow.guess_value, hint: hint || null }
+    details: { winning_guess: guessRow.guess_value, hint: hint || null },
   });
 
   setImmediate(async () => {
@@ -535,15 +554,19 @@ async function endGameWithWinner(client, pg, game, winner, guessRow, hint) {
               ].join("\n")
             );
 
-          await msg.edit({
-            embeds: [endedEmbed],
-            components: disableAllComponents(msg.components),
-          }).catch(() => {});
+          await msg
+            .edit({
+              embeds: [endedEmbed],
+              components: disableAllComponents(msg.components),
+            })
+            .catch(() => {});
         }
       }
     } catch {}
 
-    try { await postWinnerReveal(client, pg, wonGame, winner, guessRow.guess_value); } catch {}
+    try {
+      await postWinnerReveal(client, pg, wonGame, winner, guessRow.guess_value);
+    } catch {}
   });
 
   return { ok: true, game: wonGame };
@@ -566,7 +589,9 @@ async function expireGame(client, pg, game) {
   if (!expired) return false;
 
   const uniquePlayers = await computeUniquePlayers(pg, gameId).catch(() => 0);
-  try { await pg.query(`UPDATE gift_games SET unique_players=$2 WHERE id=$1`, [gameId, uniquePlayers]); } catch {}
+  try {
+    await pg.query(`UPDATE gift_games SET unique_players=$2 WHERE id=$1`, [gameId, uniquePlayers]);
+  } catch {}
 
   await writeAudit(pg, {
     guild_id: expired.guild_id,
@@ -574,7 +599,7 @@ async function expireGame(client, pg, game) {
     action: "expire",
     actor_user_id: null,
     actor_tag: null,
-    details: { reason: "time" }
+    details: { reason: "time" },
   });
 
   setImmediate(async () => {
@@ -594,10 +619,12 @@ async function expireGame(client, pg, game) {
               ].join("\n")
             );
 
-          await msg.edit({
-            embeds: [expEmbed],
-            components: disableAllComponents(msg.components),
-          }).catch(() => {});
+          await msg
+            .edit({
+              embeds: [expEmbed],
+              components: disableAllComponents(msg.components),
+            })
+            .catch(() => {});
         }
       }
     } catch {}
@@ -639,10 +666,7 @@ async function handleGuess(client, message, { game, guessValue, source, messageI
     }
   }
 
-  const guessesInThisGame =
-    state && String(state.last_game_id || "") === String(game.id)
-      ? Number(state.guesses_in_game || 0)
-      : 0;
+  const guessesInThisGame = state && String(state.last_game_id || "") === String(game.id) ? Number(state.guesses_in_game || 0) : 0;
 
   if (maxGuesses > 0 && guessesInThisGame >= maxGuesses) {
     return { ok: false, reason: "max_guesses" };
@@ -666,7 +690,7 @@ async function handleGuess(client, message, { game, guessValue, source, messageI
     source,
     messageId,
     isCorrect: false,
-    hint: hint === "correct" ? "correct" : hint
+    hint: hint === "correct" ? "correct" : hint,
   });
 
   await incrementGameGuessCount(pg, game.id);
@@ -726,20 +750,26 @@ async function handlePublicReject({ client, cfg, message, game, reason, waitMs }
 
 async function respondPublicHint({ client, message, hint, game }) {
   // Optional lightweight feedback (react only) to reduce spam
-  // You can switch this later if you want replies back.
   const channel = message.channel;
   const me = message.guild?.members?.me || message.guild?.members?.cache?.get(client.user.id);
   const canReact = channel?.permissionsFor?.(me)?.has?.(PermissionsBitField.Flags.AddReactions);
 
   const reactEmoji = (() => {
     switch (hint) {
-      case "too_low": return "🔺";
-      case "too_high": return "🔻";
-      case "hot": return "🔥";
-      case "warm": return "🌡️";
-      case "cold": return "🧊";
-      case "frozen": return "🥶";
-      default: return null;
+      case "too_low":
+        return "🔺";
+      case "too_high":
+        return "🔻";
+      case "hot":
+        return "🔥";
+      case "warm":
+        return "🌡️";
+      case "cold":
+        return "🧊";
+      case "frozen":
+        return "🥶";
+      default:
+        return null;
     }
   })();
 
@@ -797,10 +827,12 @@ module.exports = (client) => {
             interaction.memberPermissions?.has(PermissionsBitField.Flags.ManageGuild);
 
           if (!allowed) {
-            return interaction.reply({
-              content: "⛔ Only admins / Manage Server can configure a gift drop.",
-              flags: 64,
-            }).catch(() => {});
+            return interaction
+              .reply({
+                content: "⛔ Only admins / Manage Server can configure a gift drop.",
+                flags: 64,
+              })
+              .catch(() => {});
           }
 
           const parts = cid.split(":");
@@ -809,6 +841,16 @@ module.exports = (client) => {
 
           if (!Number.isFinite(gameId)) {
             return interaction.reply({ content: "❌ Invalid draft id.", flags: 64 }).catch(() => {});
+          }
+
+          // ✅ ROLE disabled
+          if (prizeType === "role") {
+            return interaction
+              .reply({
+                content: "⛔ Role prizes are disabled. Use **NFT**, **TOKEN**, or **TEXT**.",
+                flags: 64,
+              })
+              .catch(() => {});
           }
 
           const modal = new ModalBuilder()
@@ -858,7 +900,7 @@ module.exports = (client) => {
               new ActionRowBuilder().addComponents(ca),
               new ActionRowBuilder().addComponents(tokenId),
               new ActionRowBuilder().addComponents(chain),
-              new ActionRowBuilder().addComponents(imageUrl),
+              new ActionRowBuilder().addComponents(imageUrl)
             );
           } else if (prizeType === "token") {
             const amount = new TextInputBuilder()
@@ -901,26 +943,7 @@ module.exports = (client) => {
               new ActionRowBuilder().addComponents(symbol),
               new ActionRowBuilder().addComponents(ca),
               new ActionRowBuilder().addComponents(chain),
-              new ActionRowBuilder().addComponents(logo),
-            );
-          } else if (prizeType === "role") {
-            const roleName = new TextInputBuilder()
-              .setCustomId("role_name")
-              .setLabel("Role name (exact)")
-              .setStyle(TextInputStyle.Short)
-              .setRequired(true)
-              .setMaxLength(80);
-
-            const duration = new TextInputBuilder()
-              .setCustomId("role_duration")
-              .setLabel("Duration (optional: 7d, 24h)")
-              .setStyle(TextInputStyle.Short)
-              .setRequired(false)
-              .setMaxLength(20);
-
-            rows.push(
-              new ActionRowBuilder().addComponents(roleName),
-              new ActionRowBuilder().addComponents(duration),
+              new ActionRowBuilder().addComponents(logo)
             );
           } else {
             const text = new TextInputBuilder()
@@ -952,10 +975,12 @@ module.exports = (client) => {
             action: "draft_cancelled",
             actor_user_id: interaction.user.id,
             actor_tag: interaction.user.tag,
-            details: {}
+            details: {},
           });
 
-          return interaction.editReply(g ? `🛑 Draft \`${gameId}\` cancelled.` : `⚠️ Draft not found or already handled.`).catch(() => {});
+          return interaction
+            .editReply(g ? `🛑 Draft \`${gameId}\` cancelled.` : `⚠️ Draft not found or already handled.`)
+            .catch(() => {});
         }
 
         if (cid.startsWith("gift_wiz_launch:")) {
@@ -982,16 +1007,8 @@ module.exports = (client) => {
           const embed = makeCleanDropEmbed(launched);
 
           const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-              .setCustomId(`gift_rules:${launched.id}`)
-              .setLabel("Rules")
-              .setEmoji("📜")
-              .setStyle(ButtonStyle.Secondary),
-            new ButtonBuilder()
-              .setCustomId(`gift_stats:${launched.id}`)
-              .setLabel("Stats")
-              .setEmoji("📊")
-              .setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId(`gift_rules:${launched.id}`).setLabel("Rules").setEmoji("📜").setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId(`gift_stats:${launched.id}`).setLabel("Stats").setEmoji("📊").setStyle(ButtonStyle.Secondary)
           );
 
           const dropMsg = await channel.send({ embeds: [embed], components: [row] }).catch(() => null);
@@ -1006,10 +1023,12 @@ module.exports = (client) => {
             action: "launched",
             actor_user_id: interaction.user.id,
             actor_tag: interaction.user.tag,
-            details: { channel_id: launched.channel_id, mode: "public" }
+            details: { channel_id: launched.channel_id, mode: "public" },
           });
 
-          return interaction.editReply(`✅ Launched Gift Drop in <#${launched.channel_id}> (gameId: \`${launched.id}\`).`).catch(() => {});
+          return interaction
+            .editReply(`✅ Launched Gift Drop in <#${launched.channel_id}> (gameId: \`${launched.id}\`).`)
+            .catch(() => {});
         }
 
         // rules/stats
@@ -1025,7 +1044,7 @@ module.exports = (client) => {
 
           if (head === "gift_rules") {
             const endsAt = game.ends_at ? `<t:${Math.floor(new Date(game.ends_at).getTime() / 1000)}:R>` : "N/A";
-            const prizeLine = game.prize_secret ? "??? (revealed on win)" : (game.prize_label || "Mystery prize 🎁");
+            const prizeLine = game.prize_secret ? "??? (revealed on win)" : game.prize_label || "Mystery prize 🎁";
 
             const embed = new EmbedBuilder()
               .setTitle("📜 Gift Drop Rules")
@@ -1041,7 +1060,7 @@ module.exports = (client) => {
                   `🎯 Max guesses/user: \`${game.max_guesses_per_user}\``,
                   `🧠 Hints: \`${game.hints_mode}\``,
                   "",
-                  `Type your number in chat (example: \`42\`).`
+                  `Type your number in chat (example: \`42\`).`,
                 ].join("\n")
               )
               .setFooter({ text: `Game ID: ${game.id}` });
@@ -1052,9 +1071,7 @@ module.exports = (client) => {
           if (head === "gift_stats") {
             const state = await getUserState(pg, interaction.guildId, interaction.user.id).catch(() => null);
             const guessesInThisGame =
-              state && String(state.last_game_id || "") === String(game.id)
-                ? Number(state.guesses_in_game || 0)
-                : 0;
+              state && String(state.last_game_id || "") === String(game.id) ? Number(state.guesses_in_game || 0) : 0;
 
             const embed = new EmbedBuilder()
               .setTitle("📊 Your Gift Stats")
@@ -1084,6 +1101,13 @@ module.exports = (client) => {
           const prizeType = String(parts[2] || "").toLowerCase();
 
           if (!Number.isFinite(gameId)) return interaction.editReply("❌ Invalid draft id.").catch(() => {});
+
+          // ✅ ROLE disabled
+          if (prizeType === "role") {
+            return interaction
+              .editReply("⛔ Role prizes are disabled. Use **NFT**, **TOKEN**, or **TEXT**.")
+              .catch(() => {});
+          }
 
           const draft = await getGiftGameById(pg, gameId).catch(() => null);
           if (!draft || String(draft.guild_id) !== String(interaction.guildId)) {
@@ -1120,11 +1144,6 @@ module.exports = (client) => {
             prize_payload = { type: "token", amount, symbol, chain };
             if (looksLikeAddress(ca)) prize_payload.contract = ca;
             if (logo) prize_payload.logoUrl = logo;
-          } else if (prizeType === "role") {
-            const roleName = safeStr(interaction.fields.getTextInputValue("role_name"), 80);
-            const duration = safeStr(interaction.fields.getTextInputValue("role_duration") || "", 30);
-            prize_label = duration ? `${roleName} (${duration})` : roleName;
-            prize_payload = { type: "role", roleName, duration: duration || null };
           } else {
             const text = safeStr(interaction.fields.getTextInputValue("text_prize"), 400);
             prize_label = text;
@@ -1134,7 +1153,7 @@ module.exports = (client) => {
           const saved = await updateDraftPrize(pg, gameId, {
             prize_type: prizeType,
             prize_label,
-            prize_payload
+            prize_payload,
           });
 
           await writeAudit(pg, {
@@ -1143,7 +1162,7 @@ module.exports = (client) => {
             action: "wizard_prize_saved",
             actor_user_id: interaction.user.id,
             actor_tag: interaction.user.tag,
-            details: { prizeType, prize_label }
+            details: { prizeType, prize_label },
           });
 
           const endsTs = saved?.ends_at ? Math.floor(new Date(saved.ends_at).getTime() / 1000) : null;
@@ -1167,7 +1186,7 @@ module.exports = (client) => {
           const row = new ActionRowBuilder().addComponents(
             new ButtonBuilder().setCustomId(`gift_wiz_launch:${gameId}`).setLabel("Launch Drop").setEmoji("🚀").setStyle(ButtonStyle.Success),
             new ButtonBuilder().setCustomId(`gift_wiz_pick:${gameId}:${prizeType}`).setLabel("Edit Prize").setEmoji("✏️").setStyle(ButtonStyle.Secondary),
-            new ButtonBuilder().setCustomId(`gift_wiz_cancel:${gameId}`).setLabel("Cancel").setEmoji("❌").setStyle(ButtonStyle.Danger),
+            new ButtonBuilder().setCustomId(`gift_wiz_cancel:${gameId}`).setLabel("Cancel").setEmoji("❌").setStyle(ButtonStyle.Danger)
           );
 
           return interaction.editReply({ embeds: [embed], components: [row] }).catch(() => {});
@@ -1197,8 +1216,6 @@ module.exports = (client) => {
       if (!game) return;
 
       // Force public-only: ignore if DB says otherwise
-      // (keeps backwards compatibility if old rows still say modal)
-      // We still accept guesses for active game in this channel.
       const cfg = await getGiftConfig(pg, message.guildId).catch(() => null);
 
       const res = await handleGuess(client, message, { game, guessValue, source: "public", messageId: message.id });
@@ -1211,14 +1228,13 @@ module.exports = (client) => {
             message,
             game,
             reason: res.reason,
-            waitMs: res.waitMs || 0
+            waitMs: res.waitMs || 0,
           }).catch(() => {});
         }
         return;
       }
 
       if (res.won) {
-        // winner path: you can optionally react, but endGame already handles closing + announce
         await respondPublicHint({ client, message, hint: "correct", game }).catch(() => {});
         return;
       }
