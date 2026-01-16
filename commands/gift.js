@@ -8,6 +8,11 @@
 // /gift dbcheck ✅ (posts DB fingerprint + gift table counts into channel)
 //
 // NOTE: Runtime gameplay is handled by listeners/giftGameListener.js
+//
+// PATCH:
+// ✅ Remove prize type "ROLE" entirely (UI + wizard flow)
+// ✅ Keep only NFT / TOKEN / TEXT
+// ✅ Keep defaults: prize_secret=true, commit=true, mode=public
 // ======================================================
 
 const {
@@ -144,10 +149,9 @@ async function getGiftConfig(pg, guildId) {
 }
 
 async function getActiveGiftGame(pg, guildId) {
-  const r = await pg.query(
-    `SELECT * FROM gift_games WHERE guild_id=$1 AND status='active' ORDER BY started_at DESC LIMIT 1`,
-    [guildId]
-  );
+  const r = await pg.query(`SELECT * FROM gift_games WHERE guild_id=$1 AND status='active' ORDER BY started_at DESC LIMIT 1`, [
+    guildId,
+  ]);
   return r.rows?.[0] || null;
 }
 
@@ -341,11 +345,7 @@ module.exports = {
         .setName("config")
         .setDescription("Configure default Gift Drop settings for this server (admin)")
         .addChannelOption((opt) =>
-          opt
-            .setName("channel")
-            .setDescription("Default channel for gift drops")
-            .addChannelTypes(ChannelType.GuildText)
-            .setRequired(false)
+          opt.setName("channel").setDescription("Default channel for gift drops").addChannelTypes(ChannelType.GuildText).setRequired(false)
         )
         .addChannelOption((opt) =>
           opt
@@ -355,20 +355,10 @@ module.exports = {
             .setRequired(false)
         )
         .addIntegerOption((opt) =>
-          opt
-            .setName("range_min")
-            .setDescription("Default minimum number (ex: 1)")
-            .setMinValue(0)
-            .setMaxValue(1000000)
-            .setRequired(false)
+          opt.setName("range_min").setDescription("Default minimum number (ex: 1)").setMinValue(0).setMaxValue(1000000).setRequired(false)
         )
         .addIntegerOption((opt) =>
-          opt
-            .setName("range_max")
-            .setDescription("Default maximum number (ex: 100)")
-            .setMinValue(1)
-            .setMaxValue(1000000)
-            .setRequired(false)
+          opt.setName("range_max").setDescription("Default maximum number (ex: 100)").setMinValue(1).setMaxValue(1000000).setRequired(false)
         )
         .addIntegerOption((opt) =>
           opt
@@ -379,30 +369,16 @@ module.exports = {
             .setRequired(false)
         )
         .addIntegerOption((opt) =>
-          opt
-            .setName("cooldown_ms")
-            .setDescription("Per-user guess cooldown in ms (ex: 6000)")
-            .setMinValue(0)
-            .setMaxValue(600000)
-            .setRequired(false)
+          opt.setName("cooldown_ms").setDescription("Per-user guess cooldown in ms (ex: 6000)").setMinValue(0).setMaxValue(600000).setRequired(false)
         )
         .addIntegerOption((opt) =>
-          opt
-            .setName("max_guesses")
-            .setDescription("Max guesses per user per game (ex: 25)")
-            .setMinValue(1)
-            .setMaxValue(1000)
-            .setRequired(false)
+          opt.setName("max_guesses").setDescription("Max guesses per user per game (ex: 25)").setMinValue(1).setMaxValue(1000).setRequired(false)
         )
         .addStringOption((opt) =>
           opt
             .setName("hints")
             .setDescription("Hint style")
-            .addChoices(
-              { name: "None", value: "none" },
-              { name: "High / Low", value: "highlow" },
-              { name: "Hot / Warm / Cold", value: "hotcold" }
-            )
+            .addChoices({ name: "None", value: "none" }, { name: "High / Low", value: "highlow" }, { name: "Hot / Warm / Cold", value: "hotcold" })
             .setRequired(false)
         )
     )
@@ -411,117 +387,43 @@ module.exports = {
         .setName("start")
         .setDescription("Start a Gift Drop (Wizard UI) (admin) — PUBLIC MODE ONLY")
         .addChannelOption((opt) =>
-          opt
-            .setName("channel")
-            .setDescription("Channel to run this game in (overrides default)")
-            .addChannelTypes(ChannelType.GuildText)
-            .setRequired(false)
+          opt.setName("channel").setDescription("Channel to run this game in (overrides default)").addChannelTypes(ChannelType.GuildText).setRequired(false)
+        )
+        .addIntegerOption((opt) => opt.setName("range_min").setDescription("Minimum number").setMinValue(0).setMaxValue(1000000).setRequired(false))
+        .addIntegerOption((opt) => opt.setName("range_max").setDescription("Maximum number").setMinValue(1).setMaxValue(1000000).setRequired(false))
+        .addIntegerOption((opt) =>
+          opt.setName("target").setDescription("Secret target number (leave empty to random)").setMinValue(0).setMaxValue(1000000).setRequired(false)
         )
         .addIntegerOption((opt) =>
-          opt
-            .setName("range_min")
-            .setDescription("Minimum number")
-            .setMinValue(0)
-            .setMaxValue(1000000)
-            .setRequired(false)
+          opt.setName("duration_sec").setDescription("Duration in seconds (ex: 600 = 10 minutes)").setMinValue(10).setMaxValue(86400).setRequired(false)
         )
-        .addIntegerOption((opt) =>
-          opt
-            .setName("range_max")
-            .setDescription("Maximum number")
-            .setMinValue(1)
-            .setMaxValue(1000000)
-            .setRequired(false)
-        )
-        .addIntegerOption((opt) =>
-          opt
-            .setName("target")
-            .setDescription("Secret target number (leave empty to random)")
-            .setMinValue(0)
-            .setMaxValue(1000000)
-            .setRequired(false)
-        )
-        .addIntegerOption((opt) =>
-          opt
-            .setName("duration_sec")
-            .setDescription("Duration in seconds (ex: 600 = 10 minutes)")
-            .setMinValue(10)
-            .setMaxValue(86400)
-            .setRequired(false)
-        )
-        .addBooleanOption((opt) =>
-          opt
-            .setName("commit")
-            .setDescription("Enable fairness proof (commit hash revealed at end)")
-            .setRequired(false)
-        )
-        .addBooleanOption((opt) =>
-          opt
-            .setName("prize_secret")
-            .setDescription("Hide prize until reveal (recommended)")
-            .setRequired(false)
-        )
-        .addStringOption((opt) =>
-          opt
-            .setName("notes")
-            .setDescription("Optional admin notes for review later")
-            .setRequired(false)
-        )
+        .addBooleanOption((opt) => opt.setName("commit").setDescription("Enable fairness proof (commit hash revealed at end)").setRequired(false))
+        .addBooleanOption((opt) => opt.setName("prize_secret").setDescription("Hide prize until reveal (recommended)").setRequired(false))
+        .addStringOption((opt) => opt.setName("notes").setDescription("Optional admin notes for review later").setRequired(false))
     )
     .addSubcommand((sub) =>
       sub
         .setName("stop")
         .setDescription("Stop the active gift game (admin)")
-        .addStringOption((opt) =>
-          opt
-            .setName("reason")
-            .setDescription("Optional reason (for audit/review)")
-            .setRequired(false)
-        )
+        .addStringOption((opt) => opt.setName("reason").setDescription("Optional reason (for audit/review)").setRequired(false))
         .addBooleanOption((opt) =>
-          opt
-            .setName("reveal_target")
-            .setDescription("Reveal the target number when stopping (admin-only info)")
-            .setRequired(false)
+          opt.setName("reveal_target").setDescription("Reveal the target number when stopping (admin-only info)").setRequired(false)
         )
     )
     .addSubcommand((sub) =>
       sub
         .setName("review")
         .setDescription("Review a gift game (admin)")
-        .addIntegerOption((opt) =>
-          opt
-            .setName("game_id")
-            .setDescription("Game ID to review (leave empty for latest)")
-            .setMinValue(1)
-            .setRequired(false)
-        )
+        .addIntegerOption((opt) => opt.setName("game_id").setDescription("Game ID to review (leave empty for latest)").setMinValue(1).setRequired(false))
     )
     .addSubcommand((sub) =>
       sub
         .setName("audit")
         .setDescription("Post a visible audit log into this channel (admin)")
-        .addIntegerOption((opt) =>
-          opt
-            .setName("game_id")
-            .setDescription("Optional: audit a specific game id")
-            .setMinValue(1)
-            .setRequired(false)
-        )
-        .addIntegerOption((opt) =>
-          opt
-            .setName("limit")
-            .setDescription("How many rows to show (max 25)")
-            .setMinValue(1)
-            .setMaxValue(25)
-            .setRequired(false)
-        )
+        .addIntegerOption((opt) => opt.setName("game_id").setDescription("Optional: audit a specific game id").setMinValue(1).setRequired(false))
+        .addIntegerOption((opt) => opt.setName("limit").setDescription("How many rows to show (max 25)").setMinValue(1).setMaxValue(25).setRequired(false))
     )
-    .addSubcommand((sub) =>
-      sub
-        .setName("dbcheck")
-        .setDescription("Debug: post DB fingerprint + gift table health into this channel (admin)")
-    )
+    .addSubcommand((sub) => sub.setName("dbcheck").setDescription("Debug: post DB fingerprint + gift table health into this channel (admin)"))
     .setDMPermission(false),
 
   async execute(interaction) {
@@ -534,9 +436,7 @@ module.exports = {
 
       // Admin/manager check for all subcommands
       const perms = interaction.memberPermissions;
-      const allowed =
-        perms?.has(PermissionFlagsBits.Administrator) ||
-        perms?.has(PermissionFlagsBits.ManageGuild);
+      const allowed = perms?.has(PermissionFlagsBits.Administrator) || perms?.has(PermissionFlagsBits.ManageGuild);
 
       if (!allowed) {
         return interaction.reply({
@@ -670,7 +570,7 @@ module.exports = {
           action: "dbcheck_posted",
           actor_user_id: interaction.user.id,
           actor_tag: interaction.user.tag,
-          details: { channel_id: interaction.channelId }
+          details: { channel_id: interaction.channelId },
         });
 
         return interaction.editReply("✅ Posted DB check into this channel.");
@@ -801,7 +701,7 @@ module.exports = {
               ? rows
                   .map((x) => {
                     const ts = x.created_at ? Math.floor(new Date(x.created_at).getTime() / 1000) : null;
-                    const who = x.actor_user_id ? `<@${x.actor_user_id}>` : (x.actor_tag ? `\`${x.actor_tag}\`` : "`system`");
+                    const who = x.actor_user_id ? `<@${x.actor_user_id}>` : x.actor_tag ? `\`${x.actor_tag}\`` : "`system`";
                     const gidTxt = x.game_id ? `#${x.game_id}` : "-";
                     return `${ts ? `<t:${ts}:t>` : ""} **${safeStr(x.action, 40)}** • game \`${gidTxt}\` • ${who}`;
                   })
@@ -819,7 +719,7 @@ module.exports = {
           action: "audit_posted",
           actor_user_id: interaction.user.id,
           actor_tag: interaction.user.tag,
-          details: { limit, channel_id: interaction.channelId }
+          details: { limit, channel_id: interaction.channelId },
         });
 
         return interaction.editReply("✅ Posted audit log into this channel.");
@@ -840,8 +740,7 @@ module.exports = {
         const active = await getActiveGiftGame(pg, gid);
         if (active) {
           return interaction.editReply(
-            `⚠️ A Gift game is already **active** in <#${active.channel_id}> (gameId: \`${active.id}\`).\n` +
-              `Use \`/gift stop\` to end it.`
+            `⚠️ A Gift game is already **active** in <#${active.channel_id}> (gameId: \`${active.id}\`).\n` + `Use \`/gift stop\` to end it.`
           );
         }
 
@@ -979,10 +878,10 @@ module.exports = {
           .setThumbnail(GIFT_BOX_GIF)
           .setFooter({ text: "Next: you’ll fill only the fields needed for that prize type." });
 
+        // ✅ ROLE removed
         const row = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId(`gift_wiz_pick:${gameRow.id}:nft`).setLabel("NFT").setEmoji("🖼️").setStyle(ButtonStyle.Primary),
           new ButtonBuilder().setCustomId(`gift_wiz_pick:${gameRow.id}:token`).setLabel("Token").setEmoji("🪙").setStyle(ButtonStyle.Primary),
-          new ButtonBuilder().setCustomId(`gift_wiz_pick:${gameRow.id}:role`).setLabel("Role").setEmoji("🏷️").setStyle(ButtonStyle.Secondary),
           new ButtonBuilder().setCustomId(`gift_wiz_pick:${gameRow.id}:text`).setLabel("Text").setEmoji("📝").setStyle(ButtonStyle.Secondary),
           new ButtonBuilder().setCustomId(`gift_wiz_cancel:${gameRow.id}`).setLabel("Cancel").setEmoji("❌").setStyle(ButtonStyle.Danger)
         );
@@ -1034,7 +933,7 @@ module.exports = {
           action: "stop",
           actor_user_id: interaction.user.id,
           actor_tag: interaction.user.tag,
-          details: { reason: reason || null }
+          details: { reason: reason || null },
         });
 
         try {
@@ -1052,13 +951,17 @@ module.exports = {
                     `**Range:** \`${cancelled.range_min} → ${cancelled.range_max}\``,
                     `**Total Guesses:** \`${Number(cancelled.total_guesses || 0)}\``,
                     `**Unique Players:** \`${uniquePlayers}\``,
-                  ].filter(Boolean).join("\n")
+                  ]
+                    .filter(Boolean)
+                    .join("\n")
                 );
 
-              await msg.edit({
-                embeds: [endedEmbed],
-                components: await disableAllComponents(msg.components),
-              }).catch(() => {});
+              await msg
+                .edit({
+                  embeds: [endedEmbed],
+                  components: await disableAllComponents(msg.components),
+                })
+                .catch(() => {});
             }
           }
         } catch {}
@@ -1132,8 +1035,7 @@ module.exports = {
         const endedTs = game.ended_at ? Math.floor(new Date(game.ended_at).getTime() / 1000) : null;
         const endsTs = game.ends_at ? Math.floor(new Date(game.ends_at).getTime() / 1000) : null;
 
-        const prizeLine =
-          game.prize_secret && game.status === "active" ? "??? (hidden)" : (game.prize_label || "Mystery prize 🎁");
+        const prizeLine = game.prize_secret && game.status === "active" ? "??? (hidden)" : game.prize_label || "Mystery prize 🎁";
 
         const dropUrl = game.drop_message_url ? `[Open Drop Message](${game.drop_message_url})` : "N/A";
 
@@ -1157,9 +1059,7 @@ module.exports = {
               `**Prize:** ${prizeLine}`,
               `**Drop:** ${dropUrl}`,
               ``,
-              game.winner_user_id
-                ? `🏆 **Winner:** <@${game.winner_user_id}> | number \`${game.winning_guess}\``
-                : `🏆 **Winner:** none`,
+              game.winner_user_id ? `🏆 **Winner:** <@${game.winner_user_id}> | number \`${game.winning_guess}\`` : `🏆 **Winner:** none`,
             ].join("\n")
           )
           .addFields(
@@ -1172,7 +1072,7 @@ module.exports = {
           embed.addFields({
             name: "Top Guessers",
             value: topGuessers.map((u, i) => `${i + 1}. <@${u.user_id}> — \`${u.n}\` guesses`).join("\n").slice(0, 1024),
-            inline: false
+            inline: false,
           });
         }
 
@@ -1191,7 +1091,7 @@ module.exports = {
               })
               .join("\n")
               .slice(0, 1024),
-            inline: false
+            inline: false,
           });
         }
 
@@ -1207,7 +1107,7 @@ module.exports = {
           action: "review_posted",
           actor_user_id: interaction.user.id,
           actor_tag: interaction.user.tag,
-          details: { channel_id: interaction.channelId }
+          details: { channel_id: interaction.channelId },
         });
 
         return interaction.editReply("✅ Posted the review into this channel.");
