@@ -142,32 +142,55 @@ CREATE INDEX IF NOT EXISTS digest_events_txhash_idx
   ON digest_events (tx_hash);
 `;
 
+// ✅ Cache ensure so we don't run DDL repeatedly (saves DB load)
+let _ensureOk = false;
+let _ensureLastAttemptMs = 0;
+const ENSURE_RETRY_MS = Math.max(60000, Number(process.env.DAILY_DIGEST_ENSURE_RETRY_MS || 10 * 60 * 1000)); // 10m
+
 async function ensureDigestEventsTable(pg) {
   if (!pg?.query) return false;
+
+  const now = Date.now();
+  if (_ensureOk) return true;
+
+  // Avoid hammering if DB has temp issues
+  if (_ensureLastAttemptMs && now - _ensureLastAttemptMs < ENSURE_RETRY_MS) {
+    return false;
+  }
+
+  _ensureLastAttemptMs = now;
+
   try {
     await pg.query(DIGEST_EVENTS_TABLE_SQL);
+    _ensureOk = true;
     return true;
   } catch (e) {
     console.warn("[DAILY_DIGEST] failed to ensure digest_events table:", e?.message || e);
+    _ensureOk = false;
     return false;
   }
 }
 
 /* ===================== FETCH WINDOW ===================== */
 
+// Hard cap to prevent huge memory pulls if a guild logs a lot
+const MAX_ROWS = Math.max(200, Number(process.env.DAILY_DIGEST_MAX_ROWS || 2000));
+
 async function fetchDigestWindow(pg, guildId, hours = 24) {
+  // Ensure schema only if needed; cached above
   await ensureDigestEventsTable(pg);
 
   const q = `
     SELECT *
     FROM digest_events
     WHERE guild_id = $1
-      AND ts >= NOW() - ($2::text || ' hours')::interval
+      AND ts >= NOW() - ($2 * INTERVAL '1 hour')
     ORDER BY ts DESC
+    LIMIT $3
   `;
 
   try {
-    const r = await pg.query(q, [String(guildId), String(hours)]);
+    const r = await pg.query(q, [String(guildId), Number(hours), Number(MAX_ROWS)]);
     return r.rows || [];
   } catch (e) {
     console.warn("[DAILY_DIGEST] fetchDigestWindow failed:", e?.message || e);
@@ -176,14 +199,6 @@ async function fetchDigestWindow(pg, guildId, hours = 24) {
 }
 
 /* ===================== STATS ===================== */
-/**
- * Supported event_type values:
- * - mint
- * - sale
- *   - NFT Sales: sale + token_id present
- *   - Swaps:    sale + token_id empty/null  (your ADRIAN swap notifier uses this)
- * - token_buy / token_sell (your unified token scanner uses this)
- */
 
 function computeDigestStats(rows) {
   const byType = new Map();
@@ -226,7 +241,7 @@ function computeDigestStats(rows) {
   const totalVolEth = nftVolEth + swapVolEth + tokenVolEth;
   const totalVolUsd = nftVolUsd + swapVolUsd + tokenVolUsd;
 
-  // most active contract by count (includes mints + sales/swaps + token trades)
+  // most active contract by count
   const byContract = new Map();
   for (const r of rows) {
     const c = (r.contract || "").toLowerCase() || "unknown";
@@ -249,7 +264,7 @@ function computeDigestStats(rows) {
   for (const r of swaps) {
     const u = num(r.amount_usd, 0);
     const e = num(r.amount_eth, 0);
-    const score = u > 0 ? u : e; // prefer USD if present, else ETH
+    const score = u > 0 ? u : e;
     if (!topSwap) topSwap = { row: r, score };
     else if (score > (topSwap.score || 0)) topSwap = { row: r, score };
   }
@@ -276,14 +291,12 @@ function computeDigestStats(rows) {
   const oldestTs = rows?.length ? new Date(rows[rows.length - 1].ts) : null;
 
   return {
-    // counts
     totalMints,
     totalNftSales,
     totalSwaps,
     totalTokenBuys,
     totalTokenSells,
 
-    // volumes
     nftVolEth,
     nftVolUsd,
     swapVolEth,
@@ -293,17 +306,14 @@ function computeDigestStats(rows) {
     totalVolEth,
     totalVolUsd,
 
-    // top/active
     mostActive,
     topNftSale,
     topSwapRow: topSwap?.row || null,
     topTokenTradeRow: topTokenTrade?.row || null,
 
-    // breakdown
     byChain,
     byType,
 
-    // debug timing
     newestTs,
     oldestTs,
   };
@@ -407,7 +417,6 @@ function buildDigestEmbed({ guildName, hours, stats, rows, settings, hadQueryErr
     `Tokens: ${fmtEth(tokenVolEth, 4)} ETH${tokenVolUsd > 0 ? ` (~$${fmtMoney(tokenVolUsd, 2)})` : ""}`,
   ].join("\n");
 
-  // ✅ Small enhancement: add a compact header line with schedule if provided
   const sched =
     settings && (settings.hour != null || settings.minute != null || settings.tz)
       ? `\n⏰ Scheduled: **${pad2(settings.hour ?? 0)}:${pad2(settings.minute ?? 0)}**`
@@ -416,7 +425,6 @@ function buildDigestEmbed({ guildName, hours, stats, rows, settings, hadQueryErr
   const embed = new EmbedBuilder()
     .setColor("#00b894")
     .setTitle(`📊 Daily Digest — ${safeStr(guildName, 60)}`)
-    // ✅ Remove timezone display from description (requested)
     .setDescription(`Last **${hours}h** recap.${sched}`.trim())
     .addFields(
       { name: "Mints", value: `**${totalMints.toLocaleString()}**`, inline: true },
@@ -442,7 +450,6 @@ function buildDigestEmbed({ guildName, hours, stats, rows, settings, hadQueryErr
     })
     .setTimestamp(new Date());
 
-  // Recent NFT Sales (last 5)
   const recentNftSales = rows
     .filter(
       (r) =>
@@ -465,7 +472,6 @@ function buildDigestEmbed({ guildName, hours, stats, rows, settings, hadQueryErr
     embed.addFields({ name: "Recent NFT Sales", value: recentNftSales.join("\n").slice(0, 1024) });
   }
 
-  // Recent Swaps (last 5) — swaps are event_type='sale' with token_id null/empty
   const recentSwaps = rows
     .filter(
       (r) =>
@@ -490,7 +496,6 @@ function buildDigestEmbed({ guildName, hours, stats, rows, settings, hadQueryErr
     embed.addFields({ name: "Recent Swaps", value: recentSwaps.join("\n").slice(0, 1024) });
   }
 
-  // Recent Token Trades (last 5) — token_buy/token_sell
   const recentTokenTrades = rows
     .filter((r) => {
       const t = String(r.event_type || "").toLowerCase();
@@ -516,7 +521,6 @@ function buildDigestEmbed({ guildName, hours, stats, rows, settings, hadQueryErr
     embed.addFields({ name: "Recent Token Trades", value: recentTokenTrades.join("\n").slice(0, 1024) });
   }
 
-  // Optional debug field (helps you confirm what types are flowing)
   const DIGEST_DEBUG = String(process.env.DAILY_DIGEST_DEBUG || "").trim() === "1";
   if (DIGEST_DEBUG) {
     const typeLine = [...byType.entries()]
@@ -534,7 +538,8 @@ function buildDigestEmbed({ guildName, hours, stats, rows, settings, hadQueryErr
         `types: ${typeLine || "N/A"}`,
         `newest: ${newestLine}`,
         `oldest: ${oldestLine}`,
-        `rows: ${rows?.length || 0}`,
+        `rows: ${rows?.length || 0} (cap=${MAX_ROWS})`,
+        `ensure_ok: ${_ensureOk ? "yes" : "no"}`,
       ].join("\n").slice(0, 1024),
       inline: false,
     });
@@ -546,6 +551,16 @@ function buildDigestEmbed({ guildName, hours, stats, rows, settings, hadQueryErr
 /* ===================== MAIN ===================== */
 
 async function generateDailyDigest({ pg, guild, settings, hours = 24 }) {
+  // Optional hard disable (scheduler can still call; it will return a small embed)
+  const ENABLE_DAILY_DIGEST = String(process.env.ENABLE_DAILY_DIGEST ?? "1").trim() === "1";
+  if (!ENABLE_DAILY_DIGEST) {
+    return new EmbedBuilder()
+      .setColor("#636e72")
+      .setTitle(`📊 Daily Digest — ${safeStr(guild?.name || "Server", 60)}`)
+      .setDescription("Daily Digest is currently disabled by `ENABLE_DAILY_DIGEST=0`.")
+      .setTimestamp(new Date());
+  }
+
   let rows = [];
   let hadQueryError = false;
 
@@ -569,10 +584,7 @@ async function generateDailyDigest({ pg, guild, settings, hours = 24 }) {
 }
 
 module.exports = {
-  // main
   generateDailyDigest,
-
-  // exported helpers (for scheduler + debugging)
   ensureDigestEventsTable,
   fetchDigestWindow,
   computeDigestStats,
