@@ -6,10 +6,9 @@
 // ✅ FIX: Discord TextInput label limit is 45 chars — shorten long labels (NFT image + role duration)
 // ✅ NEW: Public mode cooldown enforcement:
 //    - If user posts guess too fast -> delete their number message (if possible)
-//    - Warn user with wait time (auto-delete warning)
+//    - Warn user with wait time (PRIVATE DM by default; fallback to auto-delete channel notice)
 // ✅ Use flags: 64 instead of ephemeral (deprecation warning)
 // ✅ Keeps public + modal gameplay, winner reveal, audit writes
-// ✅ NEW: Use a special WIN GIF for prize_type text/role (fits as main embed image)
 // ======================================================
 
 const {
@@ -39,15 +38,9 @@ try {
 
 const DEBUG = String(process.env.GIFT_DEBUG || "").trim() === "1";
 
-// Default generic reveal GIF (thumbnail for most prizes)
 const GIFT_REVEAL_GIF =
   (process.env.GIFT_REVEAL_GIF || "").trim() ||
   "https://media.giphy.com/media/3o6Zt481isNVuQI1l6/giphy.gif";
-
-// ✅ NEW: Text/Role win GIF (big image so it "fits")
-const GIFT_TEXT_ROLE_WIN_GIF =
-  (process.env.GIFT_TEXT_ROLE_WIN_GIF || "").trim() ||
-  "https://iili.io/fSwz7EJ.gif";
 
 function nowMs() { return Date.now(); }
 
@@ -357,19 +350,10 @@ function buildWinnerEmbed({
   if (nftDisplayLine) lines.push(nftDisplayLine);
   if (nftMetaLine) lines.push(nftMetaLine);
 
-  const prizeType = String(game?.prize_type || "").toLowerCase();
-  const isTextOrRole = prizeType === "text" || prizeType === "role";
-
   const e = new EmbedBuilder()
     .setTitle("🏆 GIFT OPENED — WE HAVE A WINNER!")
-    .setDescription(lines.join("\n"));
-
-  // ✅ NEW: Text/Role uses big gif (fits), others use thumbnail gif
-  if (isTextOrRole) {
-    e.setImage(GIFT_TEXT_ROLE_WIN_GIF);
-  } else {
-    e.setThumbnail(GIFT_REVEAL_GIF);
-  }
+    .setDescription(lines.join("\n"))
+    .setThumbnail(GIFT_REVEAL_GIF);
 
   if (game?.commit_enabled && game?.commit_hash) {
     e.addFields({
@@ -433,9 +417,6 @@ async function postWinnerReveal(client, pg, wonGame, winner, guessValue) {
   const revealPrizeText = safeStr(wonGame.prize_label || "Mystery prize 🎁", 220);
   const prizePayload = parsePrizePayload(wonGame);
 
-  const prizeType = String(wonGame.prize_type || "").toLowerCase();
-  const isTextOrRole = prizeType === "text" || prizeType === "role";
-
   const { display: nftDisplayLine, meta: nftMetaLine } =
     (wonGame.prize_type === "nft") ? buildNftDisplayFromPayload(prizePayload) : { display: null, meta: null };
 
@@ -476,22 +457,11 @@ async function postWinnerReveal(client, pg, wonGame, winner, guessValue) {
 
   const canUseDirectImage = resolvedImageUrl && !isDataUrl(resolvedImageUrl) && /^https?:\/\//i.test(String(resolvedImageUrl));
 
-  // ✅ NEW: For text/role, keep GIF as main image, use card/resolved image as THUMBNAIL instead.
-  if (isTextOrRole) {
-    if (canUseDirectImage) {
-      winnerEmbed.setThumbnail(resolvedImageUrl);
-      if (attachCard && cardName) winnerEmbed.setFooter({ text: `Game ID: ${wonGame.id}` }); // no-op safety
-    } else if (attachCard && cardName) {
-      winnerEmbed.setThumbnail(`attachment://${cardName}`);
-    }
+  if (canUseDirectImage) {
+    winnerEmbed.setImage(resolvedImageUrl);
+    if (attachCard && cardName) winnerEmbed.setThumbnail(`attachment://${cardName}`);
   } else {
-    // Original behavior (NFT/token/etc)
-    if (canUseDirectImage) {
-      winnerEmbed.setImage(resolvedImageUrl);
-      if (attachCard && cardName) winnerEmbed.setThumbnail(`attachment://${cardName}`);
-    } else {
-      if (attachCard && cardName) winnerEmbed.setImage(`attachment://${cardName}`);
-    }
+    if (attachCard && cardName) winnerEmbed.setImage(`attachment://${cardName}`);
   }
 
   try {
@@ -750,7 +720,10 @@ async function respondPublicHint({ client, cfg, message, hint, game }) {
   }
 }
 
-// ✅ NEW: Public cooldown / reject handler (delete guess + warn user)
+// ✅ UPDATED: Public cooldown / reject handler
+// - Deletes the user's guess message on cooldown (if possible)
+// - Sends PRIVATE warning via DM by default
+// - Falls back to a short channel warning that auto-deletes (if DM blocked)
 async function handlePublicReject({ client, cfg, message, game, reason, waitMs }) {
   try {
     const channel = message.channel;
@@ -761,6 +734,11 @@ async function handlePublicReject({ client, cfg, message, game, reason, waitMs }
 
     const deleteGuessOnCooldown = Number(cfg?.public_cooldown_delete_guess ?? 1) === 1;
     const warnOnCooldown = Number(cfg?.public_cooldown_warn ?? 1) === 1;
+
+    // ✅ default: private DM warning
+    const warnPrivate = Number(cfg?.public_cooldown_warn_private ?? 1) === 1;
+
+    // channel fallback auto-delete timing
     const warnDeleteMs = Number(cfg?.public_cooldown_warn_delete_ms ?? 5000);
 
     // Delete the user's guess message if we can
@@ -768,32 +746,59 @@ async function handlePublicReject({ client, cfg, message, game, reason, waitMs }
       await message.delete().catch(() => {});
     }
 
-    // Warn user
-    if (reason === "cooldown" && warnOnCooldown && canSend) {
+    // Cooldown warning (private DM preferred)
+    if (reason === "cooldown" && warnOnCooldown) {
       const s = Math.max(1, Math.ceil(Number(waitMs || 0) / 1000));
-      const warn = await channel
-        .send({
-          content: `⏳ <@${message.author.id}> slow down — wait ~${s}s before guessing again.`,
-          allowedMentions: { users: [message.author.id] },
-        })
-        .catch(() => null);
+      const dmText =
+        `⏳ Slow down — you can guess again in ~${s}s.\n` +
+        `Game range: ${game.range_min}-${game.range_max}`;
 
-      if (warn && warnDeleteMs > 0 && canManage) {
-        setTimeout(() => warn.delete().catch(() => {}), Math.max(1500, warnDeleteMs));
+      let dmOk = false;
+      if (warnPrivate) {
+        dmOk = await message.author
+          .send({ content: dmText })
+          .then(() => true)
+          .catch(() => false);
       }
+
+      // Fallback: short channel notice (auto-deletes). Still deletes the user's guess above.
+      if (!dmOk && canSend) {
+        const warn = await channel
+          .send({
+            content: `⏳ <@${message.author.id}> slow down — wait ~${s}s before guessing again.`,
+            allowedMentions: { users: [message.author.id] },
+          })
+          .catch(() => null);
+
+        if (warn && warnDeleteMs > 0 && canManage) {
+          setTimeout(() => warn.delete().catch(() => {}), Math.max(1500, warnDeleteMs));
+        }
+      }
+      return;
     }
 
-    // Optional: max guesses warning (nice-to-have, won’t delete by default)
-    if (reason === "max_guesses" && canSend) {
-      const warn = await channel
-        .send({
-          content: `⛔ <@${message.author.id}> you reached the max guesses for this drop.`,
-          allowedMentions: { users: [message.author.id] },
-        })
-        .catch(() => null);
+    // Max guesses warning (private DM preferred)
+    if (reason === "max_guesses") {
+      const dmText = `⛔ You reached the max guesses for this drop.`;
+      let dmOk = false;
+      if (warnPrivate) {
+        dmOk = await message.author
+          .send({ content: dmText })
+          .then(() => true)
+          .catch(() => false);
+      }
 
-      if (warn && canManage) {
-        setTimeout(() => warn.delete().catch(() => {}), 5000);
+      if (!dmOk && canSend) {
+        const warn = await channel
+          .send({
+            content: `⛔ <@${message.author.id}> you reached the max guesses for this drop.`,
+            allowedMentions: { users: [message.author.id] },
+          })
+          .catch(() => null);
+
+        if (warn && canManage) {
+          setTimeout(() => warn.delete().catch(() => {}), 5000);
+        }
       }
     }
   } catch {}
@@ -1328,7 +1333,7 @@ module.exports = (client) => {
 
       const res = await handleGuess(client, message, { game, guessValue, source: "public", messageId: message.id });
 
-      // ✅ NEW: cooldown enforcement in public mode
+      // ✅ cooldown enforcement in public mode (delete guess + PRIVATE warning)
       if (!res.ok) {
         if (res.reason === "cooldown" || res.reason === "max_guesses") {
           await handlePublicReject({
@@ -1354,6 +1359,6 @@ module.exports = (client) => {
     }
   });
 
-  console.log("✅ GiftGameListener loaded (wizard modal fast-path + label-limit fix + public cooldown delete+warn + flags:64 + text/role win gif)");
+  console.log("✅ GiftGameListener loaded (wizard modal fast-path + label-limit fix + public cooldown delete+DM warn + flags:64)");
 };
 
