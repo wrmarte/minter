@@ -1,5 +1,5 @@
 // services/providerM.js
-const { JsonRpcProvider } = require('ethers');
+const { JsonRpcProvider, Network } = require('ethers');
 const fetch = require('node-fetch');
 
 /* =========================================================
@@ -11,8 +11,8 @@ const fetch = require('node-fetch');
    - Never throws from public APIs; returns null on failure
 
    ✅ Backwards compatible:
-   - safeRpcCall(chain, fn, retries, timeout)
-   - safeRpcCall(fn, retries, timeout)   // defaults chain="base"
+   - safeRpcCall(chain, fn, retries?, timeout?)
+   - safeRpcCall(fn, retries?, timeout?)        // defaults chain="base"
 ========================================================= */
 
 
@@ -159,16 +159,54 @@ function rebuildChainEndpoints(key) {
   st.pinnedIdx = null; // force reselection
 }
 
+/* =========================================================
+   ✅ Network helpers (ethers v6 staticNetwork needs Network)
+   Fixes: "staticNetwork.matches is not a function"
+========================================================= */
+function getNetworkObject(key) {
+  const meta = CHAIN_META[key] || {};
+  if (meta._networkObj) return meta._networkObj;
+
+  const n = meta.network;
+  // Already a Network instance?
+  if (n && typeof n === 'object' && typeof n.matches === 'function') {
+    meta._networkObj = n;
+    return n;
+  }
+
+  const name =
+    (n && typeof n === 'object' && n.name) ? String(n.name) :
+    (typeof n === 'string' && n.trim()) ? n.trim() :
+    key;
+
+  const chainId =
+    Number.isFinite(Number(meta.chainId)) ? Number(meta.chainId) :
+    (n && typeof n === 'object' && Number.isFinite(Number(n.chainId))) ? Number(n.chainId) :
+    null;
+
+  try {
+    if (chainId != null) {
+      meta._networkObj = Network.from({ name, chainId });
+      return meta._networkObj;
+    }
+  } catch {}
+
+  // Last resort: no static network (will allow detection)
+  meta._networkObj = null;
+  return null;
+}
+
 /* ---------- Provider & scoring ---------- */
 function makeProvider(key, url) {
-  const meta = CHAIN_META[key] || {};
   const u = normalizeUrl(url);
+  const net = getNetworkObject(key);
 
-  // ✅ ethers v6: staticNetwork expects a Networkish (not boolean).
-  // Passing it prevents network-detect retries.
-  const opts = meta.network ? { staticNetwork: meta.network } : undefined;
+  // ✅ If we have a Network, pass it for BOTH network and staticNetwork
+  // so ethers doesn't try to re-detect on every call.
+  const p = net
+    ? new JsonRpcProvider(u, net, { staticNetwork: net })
+    : new JsonRpcProvider(u);
 
-  const p = new JsonRpcProvider(u, meta.network, opts);
   p._rpcUrl = u;
   p.pollingInterval = 8000;
   return p;
@@ -305,7 +343,6 @@ function normalizeSafeRpcArgs(chainOrFn, maybeFn, maybeRetries, maybeTimeout) {
     };
   }
 
-  // If someone passed chain but forgot fn, return nulls safely
   return { chain: 'base', fn: null, retries: 4, timeout: 6000 };
 }
 
@@ -417,6 +454,7 @@ async function discoverChainRpcs(chainId) {
   } catch {}
 
   // 2) Chainlist per-chain endpoint (best effort)
+  // NOTE: may return non-JSON sometimes; wrapped safely
   try {
     const data = await fetchJson(`https://chainlist.org/chain/${chainId}`, 9000).catch(() => null);
     if (data) collected.push(...extractRpcUrlsFromChainRecord(data));
