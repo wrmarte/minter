@@ -1,57 +1,62 @@
 // services/thirdPartySwapNotifierBase.js
-const { Interface, Contract, ethers, PermissionsBitField } = require('ethers');
-const fetch = require('node-fetch');
-const { safeRpcCall } = require('./providerM');
-const { shortWalletLink } = require('../utils/helpers');
+const { Interface, Contract, ethers } = require("ethers");
+const { PermissionsBitField } = require("discord.js");
+const fetch = require("node-fetch");
+const { safeRpcCall } = require("./providerM");
+const { shortWalletLink } = require("../utils/helpers");
 
 // ✅ Daily Digest logger (safe optional import)
 let logDigestEvent = null;
 try {
-  ({ logDigestEvent } = require('./digestLogger'));
+  ({ logDigestEvent } = require("./digestLogger"));
 } catch {
   logDigestEvent = null;
 }
 
 // ======= CONFIG =======
-const ADRIAN = '0x7e99075ce287f1cf8cbcaaa6a1c7894e404fd7ea'.toLowerCase();
-const WETH   = '0x4200000000000000000000000000000000000006'.toLowerCase();
+const ADRIAN = "0x7e99075ce287f1cf8cbcaaa6a1c7894e404fd7ea".toLowerCase();
+const WETH = "0x4200000000000000000000000000000000000006".toLowerCase();
 
 // ✅ PUT YOUR ROUTERS HERE (lowercase)
-const ROUTERS_TO_WATCH = [
-  '0x498581ff718922c3f8e6a244956af099b2652b2b'
-].map(a => (a || '').toLowerCase()).filter(Boolean);
-
-// ✅ ENV fallback channels (only used if DB returns 0)
-const SWAP_NOTI_CHANNELS = (process.env.SWAP_NOTI_CHANNELS || '')
-  .split(',')
-  .map(s => s.trim())
+const ROUTERS_TO_WATCH = ["0x498581ff718922c3f8e6a244956af099b2652b2b"]
+  .map((a) => (a || "").toLowerCase())
   .filter(Boolean);
 
-const MIN_USD_TO_POST   = Number(process.env.SWAP_MIN_USD || 0);
-const POLL_MS           = Number(process.env.SWAP_POLL_MS || 12000);
-const LOOKBACK_BLOCKS   = Number(process.env.SWAP_LOOKBACK_BLOCKS || 20);
-const MAX_EMOJI_REPEAT  = Number(process.env.SWAP_MAX_EMOJIS || 20);
+// ✅ ENV fallback channels (only used if DB returns 0)
+const SWAP_NOTI_CHANNELS = (process.env.SWAP_NOTI_CHANNELS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 
-const BUY_IMG  = process.env.SWAP_BUY_IMG  || 'https://iili.io/f7ifqmB.gif';
-const SELL_IMG = process.env.SWAP_SELL_IMG || 'https://iili.io/f7SxSte.gif';
+const MIN_USD_TO_POST = Number(process.env.SWAP_MIN_USD || 0);
+const POLL_MS = Number(process.env.SWAP_POLL_MS || 12000);
+const LOOKBACK_BLOCKS = Number(process.env.SWAP_LOOKBACK_BLOCKS || 20);
+const MAX_EMOJI_REPEAT = Number(process.env.SWAP_MAX_EMOJIS || 20);
 
-const DEBUG = String(process.env.SWAP_DEBUG || '').trim() === '1';
-const BOOT_PING = String(process.env.SWAP_BOOT_PING || '').trim() === '1';
-const TEST_TX = (process.env.SWAP_TEST_TX || '').trim().toLowerCase();
+const BUY_IMG = process.env.SWAP_BUY_IMG || "https://iili.io/f7ifqmB.gif";
+const SELL_IMG = process.env.SWAP_SELL_IMG || "https://iili.io/f7SxSte.gif";
+
+const DEBUG = String(process.env.SWAP_DEBUG || "").trim() === "1";
+const BOOT_PING = String(process.env.SWAP_BOOT_PING || "").trim() === "1";
+const TEST_TX = (process.env.SWAP_TEST_TX || "").trim().toLowerCase();
+
+// mild throttles to reduce RPC pressure
+const ROUTER_DELAY_MS = Math.max(0, Number(process.env.SWAP_ROUTER_DELAY_MS || 120));
+const JITTER_MS = Math.max(0, Number(process.env.SWAP_JITTER_MS || 80));
 
 // ======= TAG SYSTEM =======
-const BUY_TAG_ROLE_NAME  = 'WAGMI';
-const SELL_TAG_ROLE_NAME = 'NGMI';
+const BUY_TAG_ROLE_NAME = "WAGMI";
+const SELL_TAG_ROLE_NAME = "NGMI";
 
 // ======= CHECKPOINT (DB) =======
-const CHECKPOINT_CHAIN = 'base';
-const CHECKPOINT_KEY   = 'third_party_swaps_last_block';
+const CHECKPOINT_CHAIN = "base";
+const CHECKPOINT_KEY = "third_party_swaps_last_block";
 
 let _checkpointReady = false;
 async function ensureCheckpointTable(client) {
   if (_checkpointReady) return true;
   const pg = client.pg;
-  if (!pg) return false;
+  if (!pg?.query) return false;
   try {
     await pg.query(`
       CREATE TABLE IF NOT EXISTS swap_checkpoints (
@@ -72,14 +77,14 @@ async function ensureCheckpointTable(client) {
 
 async function getLastBlockFromDb(client) {
   const pg = client.pg;
-  if (!pg) return null;
+  if (!pg?.query) return null;
   try {
     const res = await pg.query(
       `SELECT value FROM swap_checkpoints WHERE chain=$1 AND key=$2`,
       [CHECKPOINT_CHAIN, CHECKPOINT_KEY]
     );
     const v = res?.rows?.[0]?.value;
-    return (v !== undefined && v !== null) ? Number(v) : null;
+    return v !== undefined && v !== null ? Number(v) : null;
   } catch {
     return null;
   }
@@ -87,7 +92,7 @@ async function getLastBlockFromDb(client) {
 
 async function setLastBlockInDb(client, blockNum) {
   const pg = client.pg;
-  if (!pg) return;
+  if (!pg?.query) return;
   const v = Number(blockNum);
   if (!Number.isFinite(v) || v <= 0) return;
   try {
@@ -103,9 +108,9 @@ async function setLastBlockInDb(client, blockNum) {
 
 // ======= HELPERS =======
 const ERC20_IFACE = new Interface([
-  'event Transfer(address indexed from, address indexed to, uint256 value)'
+  "event Transfer(address indexed from, address indexed to, uint256 value)",
 ]);
-const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
+const TRANSFER_TOPIC = ethers.id("Transfer(address,address,uint256)");
 
 const seenTx = new Map();
 function markSeen(txh) {
@@ -122,6 +127,24 @@ function isSeen(txh) {
   return seenTx.has(txh);
 }
 
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+function withJitter(ms) {
+  const j = JITTER_MS ? Math.floor(Math.random() * JITTER_MS) : 0;
+  return Math.max(0, ms + j);
+}
+
+function isRateLimitMsg(msg) {
+  const m = String(msg || "").toLowerCase();
+  return (
+    m.includes("over rate limit") ||
+    m.includes("rate limit") ||
+    m.includes("too many requests") ||
+    m.includes("-32016")
+  );
+}
+
 let _ethUsdCache = { value: 0, ts: 0 };
 async function getEthUsdPriceCached(maxAgeMs = 30000) {
   const now = Date.now();
@@ -130,7 +153,7 @@ async function getEthUsdPriceCached(maxAgeMs = 30000) {
   }
   try {
     const res = await fetch(
-      'https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd'
+      "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd"
     );
     const data = await res.json();
     const px = Number(data?.ethereum?.usd || 0);
@@ -147,7 +170,7 @@ async function getDecimals(provider, tokenAddr) {
   const key = tokenAddr.toLowerCase();
   if (decimalsCache.has(key)) return decimalsCache.get(key);
   try {
-    const c = new Contract(tokenAddr, ['function decimals() view returns (uint8)'], provider);
+    const c = new Contract(tokenAddr, ["function decimals() view returns (uint8)"], provider);
     const d = Number(await c.decimals());
     decimalsCache.set(key, d);
     return d;
@@ -158,29 +181,31 @@ async function getDecimals(provider, tokenAddr) {
 }
 
 function safeAddr(x) {
-  try { return ethers.getAddress(x); }
-  catch { return x || ''; }
+  try {
+    return ethers.getAddress(x);
+  } catch {
+    return x || "";
+  }
 }
 function addrEq(a, b) {
-  return (a || '').toLowerCase() === (b || '').toLowerCase();
+  return (a || "").toLowerCase() === (b || "").toLowerCase();
 }
 
 function buildEmojiLine(isBuy, usd) {
   const u = Number(usd);
-  if (!Number.isFinite(u) || u <= 0) return isBuy ? '🟥🟦🚀' : '🔻💀🔻';
+  if (!Number.isFinite(u) || u <= 0) return isBuy ? "🟥🟦🚀" : "🔻💀🔻";
   if (isBuy && u >= 30) {
     const whales = Math.max(1, Math.floor(u / 2));
-    return '🐳🚀'.repeat(Math.min(whales, MAX_EMOJI_REPEAT));
+    return "🐳🚀".repeat(Math.min(whales, MAX_EMOJI_REPEAT));
   }
   const count = Math.max(1, Math.floor(u / 2));
-  return (isBuy ? '🟥🟦🚀' : '🔻💀🔻')
-    .repeat(Math.min(count, MAX_EMOJI_REPEAT));
+  return (isBuy ? "🟥🟦🚀" : "🔻💀🔻").repeat(Math.min(count, MAX_EMOJI_REPEAT));
 }
 
 // ======= TAG HELPERS =======
 function resolveRoleTag(channel, roleName) {
   try {
-    const role = channel.guild?.roles?.cache?.find(r => r.name === roleName);
+    const role = channel.guild?.roles?.cache?.find((r) => r.name === roleName);
     return role ? { mention: `<@&${role.id}>`, roleId: role.id } : null;
   } catch {
     return null;
@@ -193,11 +218,7 @@ async function getTotalSupplyCached(provider, tokenAddr) {
   const key = tokenAddr.toLowerCase();
   if (totalSupplyCache.has(key)) return totalSupplyCache.get(key);
   try {
-    const erc20 = new Contract(
-      tokenAddr,
-      ['function totalSupply() view returns (uint256)'],
-      provider
-    );
+    const erc20 = new Contract(tokenAddr, ["function totalSupply() view returns (uint256)"], provider);
     const raw = await erc20.totalSupply();
     const dec = await getDecimals(provider, tokenAddr);
     const supply = Number(ethers.formatUnits(raw, dec));
@@ -211,11 +232,11 @@ async function getTotalSupplyCached(provider, tokenAddr) {
 
 function formatCompactUsd(n) {
   const v = Number(n);
-  if (!Number.isFinite(v) || v <= 0) return 'N/A';
+  if (!Number.isFinite(v) || v <= 0) return "N/A";
   if (v >= 1e12) return `$${(v / 1e12).toFixed(2)}T`;
-  if (v >= 1e9)  return `$${(v / 1e9).toFixed(2)}B`;
-  if (v >= 1e6)  return `$${(v / 1e6).toFixed(2)}M`;
-  if (v >= 1e3)  return `$${(v / 1e3).toFixed(2)}K`;
+  if (v >= 1e9) return `$${(v / 1e9).toFixed(2)}B`;
+  if (v >= 1e6) return `$${(v / 1e6).toFixed(2)}M`;
+  if (v >= 1e3) return `$${(v / 1e3).toFixed(2)}K`;
   return `$${v.toFixed(4)}`;
 }
 
@@ -224,34 +245,28 @@ let _tokenMarketCache = { ts: 0, data: null };
 
 async function getAdrianMarketDataCached(maxAgeMs = 30_000) {
   const now = Date.now();
-  if (_tokenMarketCache.data && (now - _tokenMarketCache.ts) < maxAgeMs) return _tokenMarketCache.data;
+  if (_tokenMarketCache.data && now - _tokenMarketCache.ts < maxAgeMs) return _tokenMarketCache.data;
 
-  const out = {
-    priceUsd: 0,
-    marketCapUsd: 0,
-    fdvUsd: 0,
-    liquidityUsd: 0,
-    source: ''
-  };
+  const out = { priceUsd: 0, marketCapUsd: 0, fdvUsd: 0, liquidityUsd: 0, source: "" };
 
   // 1) GeckoTerminal (Base)
   try {
     const url = `https://api.geckoterminal.com/api/v2/networks/base/tokens/${ADRIAN}`;
-    const res = await fetch(url, { headers: { accept: 'application/json' } }).catch(() => null);
+    const res = await fetch(url, { headers: { accept: "application/json" } }).catch(() => null);
     const js = res ? await res.json().catch(() => null) : null;
     const attrs = js?.data?.attributes || null;
 
     const priceUsd = Number(attrs?.price_usd || 0);
     const mcap = Number(attrs?.market_cap_usd || 0);
-    const fdv  = Number(attrs?.fdv_usd || 0);
-    const liq  = Number(attrs?.total_reserve_in_usd || 0);
+    const fdv = Number(attrs?.fdv_usd || 0);
+    const liq = Number(attrs?.total_reserve_in_usd || 0);
 
     if (priceUsd > 0) {
       out.priceUsd = priceUsd;
       out.marketCapUsd = mcap > 0 ? mcap : 0;
       out.fdvUsd = fdv > 0 ? fdv : 0;
       out.liquidityUsd = liq > 0 ? liq : 0;
-      out.source = 'geckoterminal';
+      out.source = "geckoterminal";
       _tokenMarketCache = { ts: now, data: out };
       return out;
     }
@@ -260,7 +275,7 @@ async function getAdrianMarketDataCached(maxAgeMs = 30_000) {
   // 2) DexScreener fallback
   try {
     const url = `https://api.dexscreener.com/latest/dex/tokens/${ADRIAN}`;
-    const res = await fetch(url, { headers: { accept: 'application/json' } }).catch(() => null);
+    const res = await fetch(url, { headers: { accept: "application/json" } }).catch(() => null);
     const js = res ? await res.json().catch(() => null) : null;
     const pair = (js?.pairs || [])[0] || null;
 
@@ -274,7 +289,7 @@ async function getAdrianMarketDataCached(maxAgeMs = 30_000) {
       out.marketCapUsd = mcap > 0 ? mcap : 0;
       out.fdvUsd = fdv > 0 ? fdv : 0;
       out.liquidityUsd = liq > 0 ? liq : 0;
-      out.source = 'dexscreener';
+      out.source = "dexscreener";
       _tokenMarketCache = { ts: now, data: out };
       return out;
     }
@@ -291,7 +306,7 @@ async function resolveChannels(client) {
 
   try {
     const pg = client.pg;
-    if (pg) {
+    if (pg?.query) {
       const res = await pg.query(
         `SELECT DISTINCT channel_id
          FROM tracked_tokens
@@ -301,7 +316,7 @@ async function resolveChannels(client) {
         [ADRIAN]
       );
       for (const r of res.rows || []) {
-        const id = String(r.channel_id || '').trim();
+        const id = String(r.channel_id || "").trim();
         if (!id || added.has(id)) continue;
         const ch = await fetchAndValidateChannel(client, id);
         if (ch) {
@@ -336,8 +351,7 @@ function hasSendPerms(ch) {
     const perms = me ? ch.permissionsFor(me) : null;
     if (!perms) return false;
 
-    // discord.js perms object may accept strings OR flags depending on version
-    if (perms.has?.('SendMessages')) return true;
+    if (perms.has?.("SendMessages")) return true;
     if (perms.has?.(PermissionsBitField?.Flags?.SendMessages)) return true;
 
     return false;
@@ -351,7 +365,7 @@ async function fetchAndValidateChannel(client, id) {
   if (!ch) ch = await client.channels.fetch(id).catch(() => null);
   if (!ch) return null;
 
-  const isText = typeof ch.isTextBased === 'function' ? ch.isTextBased() : false;
+  const isText = typeof ch.isTextBased === "function" ? ch.isTextBased() : false;
   if (!isText) return null;
 
   if (!hasSendPerms(ch)) return null;
@@ -360,7 +374,7 @@ async function fetchAndValidateChannel(client, id) {
     const me = ch.guild?.members?.me;
     const perms = me ? ch.permissionsFor(me) : null;
     if (ch.isThread?.() && perms) {
-      if (perms.has?.('SendMessagesInThreads')) return ch;
+      if (perms.has?.("SendMessagesInThreads")) return ch;
       if (perms.has?.(PermissionsBitField?.Flags?.SendMessagesInThreads)) return ch;
       return null;
     }
@@ -376,15 +390,22 @@ async function analyzeSwap(provider, txHash) {
   if (!tx || !receipt) return null;
 
   const wallet = safeAddr(tx.from);
-  let adrianIn = 0n, adrianOut = 0n, wethIn = 0n, wethOut = 0n;
+  let adrianIn = 0n,
+    adrianOut = 0n,
+    wethIn = 0n,
+    wethOut = 0n;
 
   for (const lg of receipt.logs) {
     if (lg.topics?.[0] !== TRANSFER_TOPIC) continue;
-    const token = (lg.address || '').toLowerCase();
+    const token = (lg.address || "").toLowerCase();
     if (token !== ADRIAN && token !== WETH) continue;
 
     let p;
-    try { p = ERC20_IFACE.parseLog(lg); } catch { continue; }
+    try {
+      p = ERC20_IFACE.parseLog(lg);
+    } catch {
+      continue;
+    }
 
     if (addrEq(p.args.to, wallet)) {
       if (token === ADRIAN) adrianIn += p.args.value;
@@ -397,7 +418,7 @@ async function analyzeSwap(provider, txHash) {
   }
 
   const adrianDec = await getDecimals(provider, ADRIAN);
-  const wethDec   = await getDecimals(provider, WETH);
+  const wethDec = await getDecimals(provider, WETH);
 
   const netAdrianNum = Number(ethers.formatUnits(adrianIn - adrianOut, adrianDec));
   if (!Number.isFinite(netAdrianNum) || netAdrianNum === 0) return null;
@@ -405,39 +426,31 @@ async function analyzeSwap(provider, txHash) {
   const isBuy = netAdrianNum > 0;
   const tokenAmount = Math.abs(netAdrianNum);
 
-  // ✅ KEY FIX:
-  // Use NET WETH directionally. Buys = WETH OUT (or tx.value). Sells = WETH IN (net positive).
-  const netWeth = (wethIn - wethOut); // positive means wallet received WETH, negative means wallet spent WETH
+  const netWeth = wethIn - wethOut; // + => received WETH, - => spent WETH
   let ethValue = 0;
 
   if (netWeth !== 0n) {
     ethValue = Math.abs(Number(ethers.formatUnits(netWeth, wethDec)));
   } else {
-    // ETH direct value only makes sense on buys (wallet sending ETH to router)
     const v = Number(ethers.formatUnits(tx.value || 0n, wethDec));
-    ethValue = (isBuy && v > 0) ? v : 0;
+    ethValue = isBuy && v > 0 ? v : 0;
   }
 
   const ethUsd = await getEthUsdPriceCached();
-  const usdValue = (ethUsd > 0 && ethValue > 0) ? (ethValue * ethUsd) : 0;
+  const usdValue = ethUsd > 0 && ethValue > 0 ? ethValue * ethUsd : 0;
 
   if (DEBUG) {
     console.log(
-      `[SWAP][ANALYZE] tx=${txHash.toLowerCase()} ` +
-      `isBuy=${isBuy} netAdrian=${netAdrianNum.toFixed(4)} ` +
-      `wethIn=${ethers.formatUnits(wethIn, wethDec)} wethOut=${ethers.formatUnits(wethOut, wethDec)} ` +
-      `ethValue=${ethValue.toFixed(6)} usd=${usdValue.toFixed(2)}`
+      `[SWAP][ANALYZE] tx=${txHash.toLowerCase()} isBuy=${isBuy} netAdrian=${netAdrianNum.toFixed(
+        4
+      )} wethIn=${ethers.formatUnits(wethIn, wethDec)} wethOut=${ethers.formatUnits(
+        wethOut,
+        wethDec
+      )} ethValue=${ethValue.toFixed(6)} usd=${usdValue.toFixed(2)}`
     );
   }
 
-  return {
-    wallet,
-    txHash: txHash.toLowerCase(),
-    isBuy,
-    tokenAmount,
-    ethValue,
-    usdValue
-  };
+  return { wallet, txHash: txHash.toLowerCase(), isBuy, tokenAmount, ethValue, usdValue };
 }
 
 // ======= SEND EMBED (PRICE shows USD only) =======
@@ -450,21 +463,17 @@ async function sendSwapEmbed(client, swap, provider) {
   }
 
   const emojiLine = buildEmojiLine(isBuy, usdValue);
+  const impliedPriceUsd = usdValue > 0 && tokenAmount > 0 ? usdValue / tokenAmount : 0;
 
-  // tx-implied fallback
-  const impliedPriceUsd = (usdValue > 0 && tokenAmount > 0) ? (usdValue / tokenAmount) : 0;
-
-  // market data (preferred)
   const md = await getAdrianMarketDataCached().catch(() => null);
-  const priceUsd = (md && md.priceUsd > 0) ? md.priceUsd : impliedPriceUsd;
+  const priceUsd = md && md.priceUsd > 0 ? md.priceUsd : impliedPriceUsd;
 
-  // market cap: API mcap first; if missing use FDV; if missing compute supply*priceUsd
-  let marketCapUsd = (md && md.marketCapUsd > 0) ? md.marketCapUsd : 0;
-  let marketCapLabelSuffix = '';
+  let marketCapUsd = md && md.marketCapUsd > 0 ? md.marketCapUsd : 0;
+  let marketCapLabelSuffix = "";
 
   if (!marketCapUsd && md && md.fdvUsd > 0) {
     marketCapUsd = md.fdvUsd;
-    marketCapLabelSuffix = ' (FDV)';
+    marketCapLabelSuffix = " (FDV)";
   }
 
   if (!marketCapUsd && provider && priceUsd > 0) {
@@ -472,58 +481,46 @@ async function sendSwapEmbed(client, swap, provider) {
     if (supply > 0) marketCapUsd = supply * priceUsd;
   }
 
-  const marketCapText = marketCapUsd > 0 ? `${formatCompactUsd(marketCapUsd)}${marketCapLabelSuffix}` : 'N/A';
+  const marketCapText =
+    marketCapUsd > 0 ? `${formatCompactUsd(marketCapUsd)}${marketCapLabelSuffix}` : "N/A";
 
-  // ✅ Price: USD only (no ETH line)
-  const priceText = (priceUsd > 0) ? `$${priceUsd.toFixed(6)}` : `N/A`;
+  const priceText = priceUsd > 0 ? `$${priceUsd.toFixed(6)}` : `N/A`;
 
-  const spentReceivedUsd = (usdValue > 0) ? `$${usdValue.toFixed(2)}` : 'N/A';
-  const spentReceivedEth = (ethValue > 0) ? `${ethValue.toFixed(4)} ETH` : 'N/A';
+  const spentReceivedUsd = usdValue > 0 ? `$${usdValue.toFixed(2)}` : "N/A";
+  const spentReceivedEth = ethValue > 0 ? `${ethValue.toFixed(4)} ETH` : "N/A";
 
   const embed = {
-    title: isBuy ? '🅰️DRIAN SWAP BUY!' : '🅰️DRIAN SWAP SELL!',
+    title: isBuy ? "🅰️DRIAN SWAP BUY!" : "🅰️DRIAN SWAP SELL!",
     description: `${emojiLine}`,
     image: { url: isBuy ? BUY_IMG : SELL_IMG },
-
-    // ✅ ORDER: spent, got, price, market cap, swapper
     fields: [
       {
-        name: isBuy ? '💸 Spent' : '💰 Received',
+        name: isBuy ? "💸 Spent" : "💰 Received",
         value: `${spentReceivedUsd}\n${spentReceivedEth}`,
-        inline: true
+        inline: true,
       },
       {
-        name: isBuy ? '🎯 Got' : '📤 Sold',
+        name: isBuy ? "🎯 Got" : "📤 Sold",
         value: `${tokenAmount.toLocaleString(undefined, { maximumFractionDigits: 2 })} ADRIAN`,
-        inline: true
+        inline: true,
       },
+      { name: "🏷️ Price", value: priceText, inline: true },
+      { name: "📊 Market Cap", value: marketCapText, inline: true },
       {
-        name: '🏷️ Price',
-        value: priceText,
-        inline: true
-      },
-      {
-        name: '📊 Market Cap',
-        value: marketCapText,
-        inline: true
-      },
-      {
-        name: isBuy ? '👤 Swapper' : '🖕 Seller',
+        name: isBuy ? "👤 Swapper" : "🖕 Seller",
         value: shortWalletLink ? shortWalletLink(wallet) : wallet,
-        inline: false
-      }
+        inline: false,
+      },
     ],
-
     url: `https://basescan.org/tx/${txHash}`,
     color: isBuy ? 0x2ecc71 : 0xe74c3c,
-    footer: { text: 'AdrianSWAP • Powered by PimpsDev' },
-    timestamp: new Date().toISOString()
+    footer: { text: "AdrianSWAP • Powered by PimpsDev" },
+    timestamp: new Date().toISOString(),
   };
 
   const chans = await resolveChannels(client);
   if (DEBUG) console.log(`[SWAP] send -> channels=${chans.length} tx=${txHash}`);
 
-  // ✅ Track which guilds actually received a message (so digest logs only reflect posted events)
   const sentGuilds = new Set();
 
   for (const ch of chans) {
@@ -541,28 +538,30 @@ async function sendSwapEmbed(client, swap, provider) {
     }
   }
 
-  // ✅ Digest logging (once per guild, only if we successfully sent there)
-  // These show up as "Swaps" in digest because tokenId is null/empty.
   if (logDigestEvent && sentGuilds.size) {
     for (const guildId of sentGuilds) {
       try {
         await logDigestEvent(client, {
           guildId,
-          eventType: 'sale',
-          chain: 'base',
+          eventType: "sale",
+          chain: "base",
           contract: ADRIAN,
           tokenId: null,
-          amountNative: tokenAmount,     // ADRIAN amount
+          amountNative: tokenAmount,
           amountEth: ethValue,
           amountUsd: usdValue,
           buyer: isBuy ? wallet : null,
           seller: isBuy ? null : wallet,
           txHash,
-          ts: new Date()
+          ts: new Date(),
         });
 
         if (DEBUG) {
-          console.log(`[DIGEST_LOG][SWAP] logged guild=${guildId} isBuy=${isBuy} usd=${Number(usdValue || 0).toFixed(2)} tx=${txHash.slice(0, 10)}`);
+          console.log(
+            `[DIGEST_LOG][SWAP] logged guild=${guildId} isBuy=${isBuy} usd=${Number(
+              usdValue || 0
+            ).toFixed(2)} tx=${txHash.slice(0, 10)}`
+          );
         }
       } catch (e) {
         if (DEBUG) console.log(`[DIGEST_LOG][SWAP] failed guild=${guildId}: ${e?.message || e}`);
@@ -571,11 +570,41 @@ async function sendSwapEmbed(client, swap, provider) {
   }
 }
 
+/* ======================================================
+   RANGE FIX (THE IMPORTANT PART)
+   - ensures fromBlock <= toBlock ALWAYS
+   - heals "future" checkpoints
+====================================================== */
+function clampScanRange(blockNumber, lastFromDb) {
+  const bn = Number(blockNumber);
+  if (!Number.isFinite(bn) || bn <= 0) return null;
+
+  let last = Number(lastFromDb);
+  if (!Number.isFinite(last) || last < 0) last = -1;
+
+  // If checkpoint is in the future (bad write / old bug / multi instance),
+  // heal it back close to head so we don't create an invalid range.
+  if (last > bn) {
+    last = bn - 1;
+  }
+
+  // Start from last+1, but never older than lookback window
+  const minFrom = Math.max(0, bn - Math.max(1, LOOKBACK_BLOCKS));
+  let fromBlock = Math.max(minFrom, last + 1);
+  let toBlock = bn;
+
+  // Final safety: never allow invalid range
+  if (fromBlock > toBlock) fromBlock = toBlock;
+
+  return { fromBlock, toBlock, healedLast: lastFromDb != null && Number(lastFromDb) > bn ? last : null };
+}
+
 // ======= LOOP =======
 async function tick(client) {
-  const provider = await safeRpcCall('base', p => p);
+  // Ensure a live provider exists (safeRpcCall handles rotate/backoff internally)
+  const provider = await safeRpcCall("base", (p) => p, 2, 5000);
   if (!provider) {
-    if (DEBUG) console.log('[SWAP] safeRpcCall(base) returned no provider');
+    if (DEBUG) console.log("[SWAP] safeRpcCall(base) returned no provider");
     return;
   }
 
@@ -587,28 +616,54 @@ async function tick(client) {
     if (swap) await sendSwapEmbed(client, swap, provider);
   }
 
-  const blockNumber = await provider.getBlockNumber().catch(() => null);
+  const blockNumber = await safeRpcCall("base", (p) => p.getBlockNumber(), 3, 8000);
   if (!blockNumber) return;
 
   let last = await getLastBlockFromDb(client);
-  if (!last) last = Math.max(blockNumber - 2, 0);
+  if (last == null) last = Math.max(Number(blockNumber) - 2, 0);
 
-  const fromBlock = Math.max(blockNumber - LOOKBACK_BLOCKS, last);
-  const toBlock = blockNumber;
+  const range = clampScanRange(blockNumber, last);
+  if (!range) return;
+
+  const { fromBlock, toBlock, healedLast } = range;
+
+  // If we detected a future checkpoint, persist the healed value immediately
+  if (healedLast != null) {
+    if (DEBUG) console.log(`[SWAP] healed future checkpoint -> ${healedLast} (head=${blockNumber})`);
+    await setLastBlockInDb(client, healedLast);
+  }
+
+  if (DEBUG) console.log(`[SWAP] scan ${fromBlock} -> ${toBlock} (last=${last})`);
 
   const txs = new Set();
+
   for (const router of ROUTERS_TO_WATCH) {
+    if (!router) continue;
+
+    const filter = { address: router, fromBlock, toBlock };
+
     let logs = [];
     try {
-      logs = await provider.getLogs({ address: router, fromBlock, toBlock });
+      logs = await safeRpcCall("base", (p) => p.getLogs(filter), 4, 12000);
+      if (!Array.isArray(logs)) logs = [];
     } catch (e) {
+      const msg = e?.info?.responseBody || e?.message || "";
       if (DEBUG) console.log(`[SWAP] router getLogs failed ${router}: ${e?.message || e}`);
+
+      // If rate-limited, add a little extra wait and continue
+      if (isRateLimitMsg(msg)) {
+        await sleep(withJitter(1000));
+      }
       continue;
     }
+
     for (const lg of logs) {
-      const h = (lg.transactionHash || '').toLowerCase();
+      const h = (lg.transactionHash || "").toLowerCase();
       if (h) txs.add(h);
     }
+
+    // throttle between routers
+    await sleep(withJitter(ROUTER_DELAY_MS));
   }
 
   for (const h of txs) {
@@ -618,6 +673,7 @@ async function tick(client) {
     if (swap) await sendSwapEmbed(client, swap, provider);
   }
 
+  // checkpoint to the end of the scanned range
   await setLastBlockInDb(client, toBlock);
 }
 
@@ -625,11 +681,9 @@ async function tick(client) {
 function startThirdPartySwapNotifierBase(client) {
   if (global._third_party_swap_base) return;
   global._third_party_swap_base = true;
-  if (BOOT_PING) console.log('Swap notifier online');
+  if (BOOT_PING) console.log("Swap notifier online");
   tick(client).catch(() => {});
   setInterval(() => tick(client).catch(() => {}), POLL_MS);
 }
 
 module.exports = { startThirdPartySwapNotifierBase };
-
-
