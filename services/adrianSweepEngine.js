@@ -20,39 +20,32 @@ const { safeRpcCall, getProvider } = require("./providerM");
 /* ======================================================
    REQUIRED ENVS
 ====================================================== */
-const ADRIAN_TOKEN_CA = (
-  process.env.ADRIAN_TOKEN_CA ||
-  "0x7e99075ce287f1cf8cbcaaa6a1c7894e404fd7ea"
-).toLowerCase();
+const ADRIAN_TOKEN_CA =
+  (process.env.ADRIAN_TOKEN_CA ||
+    "0x7e99075ce287f1cf8cbcaaa6a1c7894e404fd7ea").toLowerCase();
 
-const ENGINE_CA = (
-  process.env.ENGINE_CA ||
-  "0x0351f7cba83277e891d4a85da498a7eacd764d58"
-).toLowerCase();
+const ENGINE_CA =
+  (process.env.ENGINE_CA ||
+    "0x0351f7cba83277e891d4a85da498a7eacd764d58").toLowerCase();
 
 /* ======================================================
    OPTIONAL ENVS
 ====================================================== */
 // Master enable switch (default ON)
-const ENABLED =
-  String(process.env.ENABLE_ADRIAN_SWEEP_ENGINE ?? "1").trim() === "1";
+const ENABLED = String(process.env.ENABLE_ADRIAN_SWEEP_ENGINE ?? "1").trim() === "1";
 
 // Chain selection (safe normalize)
 const RAW_CHAIN = process.env.SWEEP_ENGINE_CHAIN ?? "base";
 
 // Polling (default bumped to 30s to reduce load)
 const POLL_MS_RAW = Number(process.env.SWEEP_ENGINE_POLL_MS || 30000);
-const POLL_MS = Math.max(
-  8000,
-  Number.isFinite(POLL_MS_RAW) ? POLL_MS_RAW : 30000
-);
+const POLL_MS = Math.max(8000, Number.isFinite(POLL_MS_RAW) ? POLL_MS_RAW : 30000);
 
 // Optional jitter to avoid synchronized polling across restarts/instances
 const JITTER_MS = Math.max(0, Number(process.env.SWEEP_ENGINE_JITTER_MS || 750));
 
 // Optional DB leader lock to prevent multi-instance polling
-const USE_LEADER_LOCK =
-  String(process.env.SWEEP_ENGINE_USE_LEADER_LOCK ?? "1").trim() === "1";
+const USE_LEADER_LOCK = String(process.env.SWEEP_ENGINE_USE_LEADER_LOCK ?? "1").trim() === "1";
 // Change this if you want a different lock namespace
 const LEADER_LOCK_KEY = Number(process.env.SWEEP_ENGINE_LOCK_KEY || 917301); // int32-ish key
 
@@ -60,12 +53,6 @@ const DEBUG = String(process.env.SWEEP_ENGINE_DEBUG || "").trim() === "1";
 
 // fallback RPC if providerM is unavailable
 const FALLBACK_RPC = process.env.SWEEP_ENGINE_BASE_RPC_URL || null;
-
-// Optional: tune sweep engine RPC timeout (separate from providerM default)
-const SWEEP_RPC_TIMEOUT_MS = Math.max(
-  5000,
-  Number(process.env.SWEEP_ENGINE_RPC_TIMEOUT_MS || 12000)
-);
 
 /* ======================================================
    ERC-20 ABI (MINIMAL)
@@ -92,6 +79,7 @@ function log(...args) {
 }
 
 function normalizeChain(v) {
+  // Handles string OR accidental object values
   const raw =
     (v && typeof v === "object" && (v.chain || v.name || v.network)) ||
     v ||
@@ -109,46 +97,31 @@ function withJitter(ms) {
 }
 
 async function tryAcquireLeaderLock(client) {
-  if (!USE_LEADER_LOCK) return true;
+  if (!USE_LEADER_LOCK) return true; // allow running
   const pg = client?.pg;
-  if (!pg?.query) return true;
+  if (!pg?.query) return true; // no DB available, just run
 
   try {
-    const r = await pg.query("SELECT pg_try_advisory_lock($1) AS ok", [
-      LEADER_LOCK_KEY,
-    ]);
+    // Use a single advisory lock key for the whole engine (global)
+    const r = await pg.query("SELECT pg_try_advisory_lock($1) AS ok", [LEADER_LOCK_KEY]);
     return Boolean(r.rows?.[0]?.ok);
   } catch (e) {
+    // If lock fails, we still allow running (don't brick the bot)
     console.warn("⚠️ [SweepEngine] leader lock check failed:", e?.message || e);
-    return true; // do not brick
+    return true;
   }
 }
 
 async function resolveProvider(chainName) {
-  // 1) Try providerM pinned provider
   try {
     if (typeof getProvider === "function") {
       const p = getProvider(chainName);
       if (p) return p;
     }
-  } catch {}
+  } catch (_) {}
 
-  // 2) Force provider selection via safeRpcCall (this triggers selectHealthy)
-  try {
-    const p = await safeRpcCall(
-      chainName,
-      async (prov) => prov,
-      2,
-      SWEEP_RPC_TIMEOUT_MS
-    );
-    if (p) return p;
-  } catch {}
-
-  // 3) Fallback RPC if provided
   if (!FALLBACK_RPC) {
-    throw new Error(
-      "No provider available for sweep engine (no providerM pinned + no fallback RPC)"
-    );
+    throw new Error("No provider available for sweep engine (no providerM + no fallback RPC)");
   }
 
   return new ethers.JsonRpcProvider(FALLBACK_RPC);
@@ -157,24 +130,18 @@ async function resolveProvider(chainName) {
 /* ======================================================
    CORE: FETCH BALANCE
 ====================================================== */
-async function fetchEngineBalance(chainName, token) {
-  // ✅ FIX: safeRpcCall signature requires (chain, callFn)
-  return safeRpcCall(
-    chainName,
-    async () => {
-      const bal = await token.balanceOf(ENGINE_CA);
-      return bal;
-    },
-    3,
-    SWEEP_RPC_TIMEOUT_MS
-  );
+async function fetchEngineBalance(token) {
+  return safeRpcCall(async () => {
+    const bal = await token.balanceOf(ENGINE_CA);
+    return bal;
+  });
 }
 
 /* ======================================================
    INITIALIZE SNAPSHOT (ON BOOT)
 ====================================================== */
-async function initSweepPower(client, chainName, token, decimals) {
-  const balRaw = await fetchEngineBalance(chainName, token);
+async function initSweepPower(client, token, decimals) {
+  const balRaw = await fetchEngineBalance(token);
   const bal = Number(ethers.formatUnits(balRaw, decimals));
 
   client.sweepPowerSnapshot = {
@@ -191,8 +158,8 @@ async function initSweepPower(client, chainName, token, decimals) {
 /* ======================================================
    POLL LOOP (NO OVERLAP)
 ====================================================== */
-async function pollSweepPower(client, chainName, token, decimals) {
-  const balRaw = await fetchEngineBalance(chainName, token);
+async function pollSweepPower(client, token, decimals) {
+  const balRaw = await fetchEngineBalance(token);
   const bal = Number(ethers.formatUnits(balRaw, decimals));
 
   const prev = client.sweepPowerSnapshot;
@@ -219,19 +186,16 @@ async function startSweepEngine(client) {
   _stopped = false;
 
   if (!ENABLED) {
-    console.log(
-      "🧹 ADRIAN Sweep Power Engine: disabled by ENABLE_ADRIAN_SWEEP_ENGINE=0"
-    );
+    console.log("🧹 ADRIAN Sweep Power Engine: disabled by ENABLE_ADRIAN_SWEEP_ENGINE=0");
     return;
   }
 
   const chainName = normalizeChain(RAW_CHAIN);
 
+  // Optional leader lock (prevents multi-instance polling)
   const leaderOk = await tryAcquireLeaderLock(client);
   if (!leaderOk) {
-    console.log(
-      "🧹 ADRIAN Sweep Power Engine: another instance holds leader lock — this instance will not poll."
-    );
+    console.log("🧹 ADRIAN Sweep Power Engine: another instance holds leader lock — this instance will not poll.");
     return;
   }
 
@@ -247,58 +211,45 @@ async function startSweepEngine(client) {
 
   const token = new ethers.Contract(ADRIAN_TOKEN_CA, ERC20_ABI, provider);
 
-  // ✅ FIX: safeRpcCall signature requires chainName first
-  const decimals = await safeRpcCall(
-    chainName,
-    async () => token.decimals(),
-    2,
-    SWEEP_RPC_TIMEOUT_MS
-  ).catch(() => 18);
+  // Cache these once; no need to re-fetch every poll
+  const decimals = await safeRpcCall(() => token.decimals()).catch(() => 18);
+  const symbol = await safeRpcCall(() => token.symbol()).catch(() => "TOKEN");
 
-  const symbol = await safeRpcCall(
-    chainName,
-    async () => token.symbol(),
-    2,
-    SWEEP_RPC_TIMEOUT_MS
-  ).catch(() => "TOKEN");
-
-  console.log(
-    `🧹 Token loaded → ${symbol} | Decimals: ${decimals} | chain=${chainName}`
-  );
+  console.log(`🧹 Token loaded → ${symbol} | Decimals: ${decimals} | chain=${chainName}`);
 
   // Always initialize from chain
   try {
-    await initSweepPower(client, chainName, token, decimals);
+    await initSweepPower(client, token, decimals);
   } catch (e) {
     console.warn("🧹 Sweep engine init failed:", e?.message || e);
   }
 
+  // Self-scheduling loop to prevent overlap + add backoff on errors
   let backoffMs = 0;
 
   const loop = async () => {
     if (_stopped) return;
-    if (_looping) return;
+    if (_looping) return; // extra safety
     _looping = true;
 
     try {
-      await pollSweepPower(client, chainName, token, decimals);
-      backoffMs = 0;
+      await pollSweepPower(client, token, decimals);
+      backoffMs = 0; // reset on success
     } catch (err) {
       const msg = err?.message || String(err);
       console.warn("🧹 Sweep poll error:", msg);
 
       // basic backoff (caps at 2 minutes)
-      backoffMs = Math.min(
-        120000,
-        Math.max(5000, (backoffMs || 0) * 2 || 5000)
-      );
+      backoffMs = Math.min(120000, Math.max(5000, (backoffMs || 0) * 2 || 5000));
     } finally {
       _looping = false;
+
       const next = withJitter(POLL_MS + backoffMs);
       _timer = setTimeout(loop, next);
     }
   };
 
+  // Start after a small jitter to avoid boot spikes
   _timer = setTimeout(loop, withJitter(1000));
 }
 
@@ -317,5 +268,4 @@ module.exports = {
   startSweepEngine,
   stopSweepEngine,
 };
-
 
