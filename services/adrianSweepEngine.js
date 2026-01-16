@@ -31,21 +31,32 @@ const ENGINE_CA =
 /* ======================================================
    OPTIONAL ENVS
 ====================================================== */
+// Master enable switch (default ON)
 const ENABLED = String(process.env.ENABLE_ADRIAN_SWEEP_ENGINE ?? "1").trim() === "1";
+
+// Chain selection (safe normalize)
 const RAW_CHAIN = process.env.SWEEP_ENGINE_CHAIN ?? "base";
 
+// Polling (default bumped to 30s to reduce load)
 const POLL_MS_RAW = Number(process.env.SWEEP_ENGINE_POLL_MS || 30000);
 const POLL_MS = Math.max(8000, Number.isFinite(POLL_MS_RAW) ? POLL_MS_RAW : 30000);
 
+// Optional jitter to avoid synchronized polling across restarts/instances
 const JITTER_MS = Math.max(0, Number(process.env.SWEEP_ENGINE_JITTER_MS || 750));
 
+// Optional DB leader lock to prevent multi-instance polling
 const USE_LEADER_LOCK = String(process.env.SWEEP_ENGINE_USE_LEADER_LOCK ?? "1").trim() === "1";
-const LEADER_LOCK_KEY = Number(process.env.SWEEP_ENGINE_LOCK_KEY || 917301);
+// Change this if you want a different lock namespace
+const LEADER_LOCK_KEY = Number(process.env.SWEEP_ENGINE_LOCK_KEY || 917301); // int32-ish key
 
 const DEBUG = String(process.env.SWEEP_ENGINE_DEBUG || "").trim() === "1";
 
 // fallback RPC if providerM is unavailable
-const FALLBACK_RPC = (process.env.SWEEP_ENGINE_BASE_RPC_URL || "").trim() || null;
+const FALLBACK_RPC = process.env.SWEEP_ENGINE_BASE_RPC_URL || null;
+
+// RPC call timeouts (reduce false timeouts on busy RPCs)
+const CALL_TIMEOUT_MS = Math.max(4000, Number(process.env.SWEEP_ENGINE_CALL_TIMEOUT_MS || 12000));
+const CALL_RETRIES = Math.max(1, Number(process.env.SWEEP_ENGINE_CALL_RETRIES || 4));
 
 /* ======================================================
    ERC-20 ABI (MINIMAL)
@@ -102,103 +113,65 @@ async function tryAcquireLeaderLock(client) {
   }
 }
 
-/**
- * Ensure providerM has a pinned provider for this chain.
- * We do this by doing a tiny safeRpcCall. (safeRpcCall returns null on failure.)
- */
-async function ensurePinnedProvider(chainName) {
-  const p0 = (() => {
-    try { return getProvider(chainName); } catch { return null; }
-  })();
-  if (p0) return true;
-
-  const ok = await safeRpcCall(chainName, (p) => p.getBlockNumber(), 2, 5000);
-  if (ok == null) return false;
-
-  const p1 = (() => {
-    try { return getProvider(chainName); } catch { return null; }
-  })();
-  return Boolean(p1);
-}
-
 async function resolveProvider(chainName) {
-  // Try providerM
   try {
-    const ok = await ensurePinnedProvider(chainName);
-    if (ok) {
+    if (typeof getProvider === "function") {
       const p = getProvider(chainName);
       if (p) return p;
     }
   } catch (_) {}
 
-  // Fallback
+  // Force providerM to pin one (best effort)
+  try {
+    const forced = await safeRpcCall(chainName, (p) => p, 2, 6000);
+    if (forced) return forced;
+  } catch {}
+
   if (!FALLBACK_RPC) {
-    throw new Error("No provider available for sweep engine (no providerM pinned + no fallback RPC)");
+    throw new Error("No provider available for sweep engine (no providerM + no fallback RPC)");
   }
+
   return new ethers.JsonRpcProvider(FALLBACK_RPC);
 }
 
-function safeNum(n, d = 0) {
-  const x = Number(n);
-  return Number.isFinite(x) ? x : d;
+function isValidBigIntish(x) {
+  return typeof x === "bigint" || (x && typeof x === "object" && typeof x.toString === "function");
 }
 
 /* ======================================================
-   CORE RPC READERS (IMPORTANT FIXES)
-   - safeRpcCall MUST be called as: safeRpcCall(chain, (provider)=>..., retries, timeout)
-   - Never formatUnits(null)
+   CORE: FETCH BALANCE (SAFE)
 ====================================================== */
-async function readDecimals(chainName) {
-  const dec = await safeRpcCall(
+async function fetchEngineBalance(chainName) {
+  // ✅ Use safeRpcCall correctly: safeRpcCall(chain, (provider)=>...)
+  const balRaw = await safeRpcCall(
     chainName,
-    (p) => new ethers.Contract(ADRIAN_TOKEN_CA, ERC20_ABI, p).decimals(),
-    3,
-    8000
+    async (p) => {
+      const token = new ethers.Contract(ADRIAN_TOKEN_CA, ERC20_ABI, p);
+      return await token.balanceOf(ENGINE_CA);
+    },
+    CALL_RETRIES,
+    CALL_TIMEOUT_MS
   );
-  return dec == null ? 18 : Number(dec);
-}
 
-async function readSymbol(chainName) {
-  const sym = await safeRpcCall(
-    chainName,
-    (p) => new ethers.Contract(ADRIAN_TOKEN_CA, ERC20_ABI, p).symbol(),
-    3,
-    8000
-  );
-  return (sym && String(sym).trim()) ? String(sym).trim() : "TOKEN";
-}
-
-async function readEngineBalanceRaw(chainName) {
-  // returns BigInt or null
-  const bal = await safeRpcCall(
-    chainName,
-    (p) => new ethers.Contract(ADRIAN_TOKEN_CA, ERC20_ABI, p).balanceOf(ENGINE_CA),
-    4,
-    9000
-  );
-  return bal == null ? null : bal;
+  if (!balRaw) return null;
+  return balRaw;
 }
 
 /* ======================================================
    INITIALIZE SNAPSHOT (ON BOOT)
 ====================================================== */
 async function initSweepPower(client, chainName, decimals) {
-  const balRaw = await readEngineBalanceRaw(chainName);
-
-  if (balRaw == null) {
-    console.warn("🧹 Sweep engine init: balance read returned null (RPC issue). Snapshot set to 0.");
-    client.sweepPowerSnapshot = {
-      balanceRaw: 0n,
-      balance: 0,
-      lastBalance: null,
-      delta: 0,
-      updatedAt: new Date(),
-      ok: false,
-    };
-    return false;
+  const balRaw = await fetchEngineBalance(chainName);
+  if (!balRaw) {
+    console.warn("🧹 Sweep engine init: balance fetch returned null (will retry on next poll)");
+    return;
   }
 
-  const bal = safeNum(ethers.formatUnits(balRaw, decimals), 0);
+  const bal = Number(ethers.formatUnits(balRaw, decimals));
+  if (!Number.isFinite(bal)) {
+    console.warn("🧹 Sweep engine init: formatted balance not finite");
+    return;
+  }
 
   client.sweepPowerSnapshot = {
     balanceRaw: balRaw,
@@ -206,27 +179,27 @@ async function initSweepPower(client, chainName, decimals) {
     lastBalance: null,
     delta: 0,
     updatedAt: new Date(),
-    ok: true,
   };
 
   console.log(`🧹 Sweep Power initialized → ${bal.toLocaleString()} ADRIAN`);
-  return true;
 }
 
 /* ======================================================
    POLL LOOP (NO OVERLAP)
 ====================================================== */
 async function pollSweepPower(client, chainName, decimals) {
-  const balRaw = await readEngineBalanceRaw(chainName);
-
-  if (balRaw == null) {
-    throw new Error("balanceOf returned null (RPC failed / rotated)");
+  const balRaw = await fetchEngineBalance(chainName);
+  if (!balRaw || !isValidBigIntish(balRaw)) {
+    throw new Error("balanceOf returned null/invalid (RPC unstable or rate limited)");
   }
 
-  const bal = safeNum(ethers.formatUnits(balRaw, decimals), 0);
+  const bal = Number(ethers.formatUnits(balRaw, decimals));
+  if (!Number.isFinite(bal)) {
+    throw new Error("formatted balance is not finite");
+  }
 
   const prev = client.sweepPowerSnapshot;
-  const lastBalance = prev && typeof prev.balance === "number" ? prev.balance : null;
+  const lastBalance = prev ? prev.balance : null;
   const delta = lastBalance !== null ? bal - lastBalance : 0;
 
   client.sweepPowerSnapshot = {
@@ -235,7 +208,6 @@ async function pollSweepPower(client, chainName, decimals) {
     lastBalance,
     delta,
     updatedAt: new Date(),
-    ok: true,
   };
 
   log("Balance updated:", bal, "Δ", delta >= 0 ? `+${delta}` : delta);
@@ -264,7 +236,6 @@ async function startSweepEngine(client) {
 
   console.log("🧹 Starting ADRIAN Sweep Power Engine (BALANCE MODE)");
 
-  // Try resolve provider once so we can fail early if totally dead
   try {
     await resolveProvider(chainName);
   } catch (e) {
@@ -272,12 +243,32 @@ async function startSweepEngine(client) {
     return;
   }
 
-  // Cache decimals/symbol once
-  const decimals = await readDecimals(chainName);
-  const symbol = await readSymbol(chainName);
+  // Fetch decimals/symbol safely (don’t spam; retries small)
+  const decimals =
+    (await safeRpcCall(
+      chainName,
+      async (p) => {
+        const token = new ethers.Contract(ADRIAN_TOKEN_CA, ERC20_ABI, p);
+        return Number(await token.decimals());
+      },
+      2,
+      8000
+    ).catch(() => 18)) || 18;
+
+  const symbol =
+    (await safeRpcCall(
+      chainName,
+      async (p) => {
+        const token = new ethers.Contract(ADRIAN_TOKEN_CA, ERC20_ABI, p);
+        return String(await token.symbol());
+      },
+      2,
+      8000
+    ).catch(() => "TOKEN")) || "TOKEN";
+
   console.log(`🧹 Token loaded → ${symbol} | Decimals: ${decimals} | chain=${chainName}`);
 
-  // Initialize snapshot from chain
+  // Always initialize from chain (best effort)
   try {
     await initSweepPower(client, chainName, decimals);
   } catch (e) {
@@ -298,10 +289,7 @@ async function startSweepEngine(client) {
       const msg = err?.message || String(err);
       console.warn("🧹 Sweep poll error:", msg);
 
-      // backoff (cap 2 min)
       backoffMs = Math.min(120000, Math.max(5000, (backoffMs || 0) * 2 || 5000));
-      // mark snapshot unhealthy (but keep last values)
-      if (client?.sweepPowerSnapshot) client.sweepPowerSnapshot.ok = false;
     } finally {
       _looping = false;
       const next = withJitter(POLL_MS + backoffMs);
