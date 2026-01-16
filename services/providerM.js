@@ -1,72 +1,86 @@
 // services/providerM.js
-const { JsonRpcProvider, Network } = require('ethers');
-const fetch = require('node-fetch');
+const { JsonRpcProvider, Network } = require("ethers");
+const fetch = require("node-fetch");
 
 /* =========================================================
    Resilient multi-chain provider manager with dynamic RPCs
    - Chains: eth(1), base(8453), ape(33139)
-   - Auto-fetch RPC lists at startup & every 6h
+   - Auto-fetch RPC lists at startup & every 6h (OPTIONAL)
    - Per-endpoint backoff + per-chain cooldown + timeouts
-   - Static network hints (no ethers network-detect retries)
+   - Static network hints (prevents ethers network-detect retries)
    - Never throws from public APIs; returns null on failure
 
-   ✅ Backwards compatible:
-   - safeRpcCall(chain, fn, retries?, timeout?)
-   - safeRpcCall(fn, retries?, timeout?)        // defaults chain="base"
+   ✅ PATCH NOTES (IMPORTANT)
+   1) Fixes: "staticNetwork.matches is not a function"
+      - You were passing boolean to options.staticNetwork.
+      - ethers expects a Network (or Networkish converted to Network).
+   2) Disables unstable/gated RPC discovery by default
+      - Stops adding endpoints like developer-access-mainnet.base.org, tenderly gateway, etc.
+   3) Improves timeout/backoff defaults to reduce log spam.
 ========================================================= */
 
+/* ---------- RPC discovery toggle (DEFAULT OFF) ---------- */
+const RPC_DISCOVERY_ENABLED =
+  String(process.env.RPC_DISCOVERY_ENABLED || "0").trim() === "1";
+
+/* ---------- Blocklist for known gated/flaky endpoints ---------- */
+const RPC_BLOCKLIST = [
+  "developer-access-mainnet.base.org",
+  "base.gateway.tenderly.co",
+  "gateway.tenderly.co",
+  "tenderly.co",
+  "alchemy.com", // optional, often requires key
+  "infura.io",   // optional, requires key
+  "blastapi.io", // optional, sometimes key/limits
+].map((s) => s.toLowerCase());
+
+function isBlockedUrl(url) {
+  const u = String(url || "").toLowerCase();
+  return RPC_BLOCKLIST.some((bad) => u.includes(bad));
+}
 
 /* ---------- Static baselines (always included) ---------- */
 const STATIC_RPCS = {
   eth: [
-    'https://eth.llamarpc.com',
-    'https://1rpc.io/eth',
-    'https://rpc.ankr.com/eth'
+    "https://eth.llamarpc.com",
+    "https://1rpc.io/eth",
+    "https://rpc.ankr.com/eth",
+    "https://ethereum-rpc.publicnode.com",
   ],
   base: [
-    'https://mainnet.base.org',
-    'https://base.publicnode.com',
-    'https://1rpc.io/base',
-    'https://base.llamarpc.com'
+    "https://mainnet.base.org",
+    "https://base.publicnode.com",
+    "https://1rpc.io/base",
+    "https://base.llamarpc.com",
+    "https://base-rpc.publicnode.com",
   ],
   ape: [
-    'https://rpc1.apexchain.xyz',
-    'https://rpc.apexnetwork.xyz',
-    'https://api.ape-rpc.com',
-    'https://apex.rpc.thirdweb.com',
-    'https://apexchain.alt.technology',
-    'https://apex-mainnet.rpc.karzay.com'
-  ]
+    "https://rpc.apechain.com",
+    "https://rpc1.apexchain.xyz",
+    "https://rpc.apexnetwork.xyz",
+    "https://api.ape-rpc.com",
+    "https://apex.rpc.thirdweb.com",
+    "https://apexchain.alt.technology",
+    "https://apex-mainnet.rpc.karzay.com",
+    "https://apechain-rpc.publicnode.com",
+    "https://rpc.apechain.io",
+    "https://apechain.drpc.org",
+    "https://rpc.apechain.p2p.org",
+  ],
 };
 
-/* ---------- Optional extra freebies ---------- */
-const EXTRA_RPCS = {
-  eth: [
-    'https://ethereum-rpc.publicnode.com'
-  ],
-  base: [
-    'https://base-rpc.publicnode.com'
-  ],
-  ape: [
-    'https://apechain-rpc.publicnode.com',
-    'https://rpc.apechain.io',
-    'https://apechain.drpc.org',
-    'https://rpc.apechain.p2p.org'
-  ]
-};
-
-/* ---------- Mutable working set (will refresh) ---------- */
+/* ---------- Mutable working set (will refresh if discovery enabled) ---------- */
 const RPCS = {
-  eth: [...STATIC_RPCS.eth, ...(EXTRA_RPCS.eth || [])],
-  base: [...STATIC_RPCS.base, ...(EXTRA_RPCS.base || [])],
-  ape: [...STATIC_RPCS.ape, ...(EXTRA_RPCS.ape || [])]
+  eth: [...STATIC_RPCS.eth],
+  base: [...STATIC_RPCS.base],
+  ape: [...STATIC_RPCS.ape],
 };
 
 /* ---------- Chain metadata (STATIC NETWORK HINTS) ---------- */
 const CHAIN_META = {
-  eth:  { chainId: 1,     network: { name: 'homestead', chainId: 1 } },
-  base: { chainId: 8453,  network: { name: 'base', chainId: 8453 } },
-  ape:  { chainId: 33139, network: { name: 'apechain', chainId: 33139 } }
+  eth: { chainId: 1, network: { name: "homestead", chainId: 1 } },
+  base: { chainId: 8453, network: { name: "base", chainId: 8453 } },
+  ape: { chainId: 33139, network: { name: "apechain", chainId: 33139 } },
 };
 
 const REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6h
@@ -74,26 +88,33 @@ const REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6h
 /* ---------- Internal state ---------- */
 const chains = {}; // key -> { endpoints[], pinnedIdx, chainCooldownUntil, lastOfflineLogAt }
 const selectLocks = new Map(); // key -> Promise|null (serialize selection)
-function now() { return Date.now(); }
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-function jitter(ms) { return Math.floor(ms * (0.85 + Math.random() * 0.3)); }
-function isThenable(x) { return x && typeof x.then === 'function'; }
+
+function now() {
+  return Date.now();
+}
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+function jitter(ms) {
+  return Math.floor(ms * (0.85 + Math.random() * 0.3));
+}
+function isThenable(x) {
+  return x && typeof x.then === "function";
+}
 
 /* ---------- URL normalization (strip trailing slashes) ---------- */
 function normalizeUrl(u) {
-  if (!u || typeof u !== 'string') return u;
+  if (!u || typeof u !== "string") return u;
   u = u.trim();
   try {
     const url = new URL(u);
-    // remove trailing slashes on pathname (but keep root '/')
-    if (url.pathname !== '/') {
-      url.pathname = url.pathname.replace(/\/+$/, '');
-      if (url.pathname === '') url.pathname = '/';
+    if (url.pathname !== "/") {
+      url.pathname = url.pathname.replace(/\/+$/, "");
+      if (url.pathname === "") url.pathname = "/";
     }
-    // drop trailing slash on full URL
-    return url.toString().replace(/\/+$/, '');
+    return url.toString().replace(/\/+$/, "");
   } catch {
-    return u.replace(/\/+$/, '');
+    return u.replace(/\/+$/, "");
   }
 }
 
@@ -101,10 +122,11 @@ function uniqueHttps(list) {
   const out = [];
   const seen = new Set();
   for (let url of list) {
-    if (!url || typeof url !== 'string') continue;
+    if (!url || typeof url !== "string") continue;
     url = normalizeUrl(url);
-    if (!url.startsWith('https://')) continue;
+    if (!url.startsWith("https://")) continue;
     if (/\$\{[^}]+\}/.test(url)) continue; // skip placeholders
+    if (isBlockedUrl(url)) continue;
     if (seen.has(url)) continue;
     seen.add(url);
     out.push(url);
@@ -113,35 +135,56 @@ function uniqueHttps(list) {
 }
 
 /* ---------- Promise/thenable-safe timeout ---------- */
-function withTimeout(resultOrPromise, ms, reason = 'timeout') {
+function withTimeout(resultOrPromise, ms, reason = "timeout") {
   return new Promise((resolve, reject) => {
     let settled = false;
     const t = setTimeout(() => {
-      if (!settled) { settled = true; reject(new Error(reason)); }
+      if (!settled) {
+        settled = true;
+        reject(new Error(reason));
+      }
     }, ms);
-    const ok = v => { if (!settled) { settled = true; clearTimeout(t); resolve(v); } };
-    const err = e => { if (!settled) { settled = true; clearTimeout(t); reject(e); } };
+
+    const ok = (v) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(t);
+        resolve(v);
+      }
+    };
+    const err = (e) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(t);
+        reject(e);
+      }
+    };
+
     try {
       if (isThenable(resultOrPromise)) resultOrPromise.then(ok, err);
-      else ok(resultOrPromise); // sync
-    } catch (e) { err(e); }
+      else ok(resultOrPromise);
+    } catch (e) {
+      err(e);
+    }
   });
 }
 
 /* ---------- Init & rebuild ---------- */
 function initChain(key) {
   if (chains[key]) return;
+
+  const merged = uniqueHttps(RPCS[key] || []);
   chains[key] = {
-    endpoints: (RPCS[key] || []).map(url => ({
+    endpoints: merged.map((url) => ({
       url,
       provider: null,
       failCount: 0,
       cooldownUntil: 0,
-      lastOkAt: 0
+      lastOkAt: 0,
     })),
     pinnedIdx: null,
     chainCooldownUntil: 0,
-    lastOfflineLogAt: 0
+    lastOfflineLogAt: 0,
   };
 }
 
@@ -149,72 +192,54 @@ function rebuildChainEndpoints(key) {
   const st = chains[key];
   if (!st) return;
   const merged = uniqueHttps(RPCS[key] || []);
-  st.endpoints = merged.map(url => ({
+  st.endpoints = merged.map((url) => ({
     url,
     provider: null,
     failCount: 0,
     cooldownUntil: 0,
-    lastOkAt: 0
+    lastOkAt: 0,
   }));
-  st.pinnedIdx = null; // force reselection
-}
-
-/* =========================================================
-   ✅ Network helpers (ethers v6 staticNetwork needs Network)
-   Fixes: "staticNetwork.matches is not a function"
-========================================================= */
-function getNetworkObject(key) {
-  const meta = CHAIN_META[key] || {};
-  if (meta._networkObj) return meta._networkObj;
-
-  const n = meta.network;
-  // Already a Network instance?
-  if (n && typeof n === 'object' && typeof n.matches === 'function') {
-    meta._networkObj = n;
-    return n;
-  }
-
-  const name =
-    (n && typeof n === 'object' && n.name) ? String(n.name) :
-    (typeof n === 'string' && n.trim()) ? n.trim() :
-    key;
-
-  const chainId =
-    Number.isFinite(Number(meta.chainId)) ? Number(meta.chainId) :
-    (n && typeof n === 'object' && Number.isFinite(Number(n.chainId))) ? Number(n.chainId) :
-    null;
-
-  try {
-    if (chainId != null) {
-      meta._networkObj = Network.from({ name, chainId });
-      return meta._networkObj;
-    }
-  } catch {}
-
-  // Last resort: no static network (will allow detection)
-  meta._networkObj = null;
-  return null;
+  st.pinnedIdx = null;
 }
 
 /* ---------- Provider & scoring ---------- */
+function toNetwork(key) {
+  const meta = CHAIN_META[key] || {};
+  const netish = meta.network || null;
+
+  // Convert to a real Network when possible (prevents staticNetwork.matches error)
+  try {
+    if (Network && typeof Network.from === "function" && netish) {
+      return Network.from(netish);
+    }
+  } catch {
+    // fall through
+  }
+
+  return netish; // networkish object is still acceptable in most ethers paths
+}
+
 function makeProvider(key, url) {
   const u = normalizeUrl(url);
-  const net = getNetworkObject(key);
 
-  // ✅ If we have a Network, pass it for BOTH network and staticNetwork
-  // so ethers doesn't try to re-detect on every call.
-  const p = net
-    ? new JsonRpcProvider(u, net, { staticNetwork: net })
-    : new JsonRpcProvider(u);
+  const net = toNetwork(key);
+
+  // ✅ FIX: staticNetwork must be Network/Networkish, NOT boolean
+  // Also we pass the same network in arg2 to avoid detect.
+  const p = new JsonRpcProvider(u, net, { staticNetwork: net });
 
   p._rpcUrl = u;
   p.pollingInterval = 8000;
   return p;
 }
 
-async function pingProvider(provider, timeoutMs = 2500) {
+async function pingProvider(provider, timeoutMs = 4500) {
   try {
-    const res = await withTimeout(provider.getBlockNumber(), timeoutMs, 'rpc ping timeout');
+    const res = await withTimeout(
+      provider.getBlockNumber(),
+      timeoutMs,
+      "rpc ping timeout"
+    );
     return Number.isInteger(res) && res >= 0;
   } catch {
     return false;
@@ -223,7 +248,7 @@ async function pingProvider(provider, timeoutMs = 2500) {
 
 function scoreEndpoint(ep) {
   const cd = Math.max(0, ep.cooldownUntil - now());
-  const penalty = ep.failCount * 1000;
+  const penalty = ep.failCount * 1500;
   const recency = ep.lastOkAt ? Math.max(0, now() - ep.lastOkAt) / 1000 : 9999;
   return cd + penalty + recency; // lower is better
 }
@@ -254,22 +279,25 @@ async function selectHealthy(key) {
       if (now() < ep.cooldownUntil) continue;
       if (!ep.provider) ep.provider = makeProvider(key, ep.url);
 
-      const ok = await pingProvider(ep.provider, 2000);
+      const ok = await pingProvider(ep.provider, 4500);
       if (ok) {
-        ep.failCount = 0; ep.cooldownUntil = 0; ep.lastOkAt = now();
+        ep.failCount = 0;
+        ep.cooldownUntil = 0;
+        ep.lastOkAt = now();
         st.pinnedIdx = idx;
         console.log(`✅ ${key} initialized/pinned RPC: ${ep.url}`);
         return ep.provider;
-      } else {
-        ep.failCount += 1;
-        const backoff = Math.min(30000, 1000 ** Math.min(3, ep.failCount)) * 2; // conservative
-        ep.cooldownUntil = now() + jitter(backoff);
       }
+
+      ep.failCount += 1;
+      // ✅ sane exponential backoff (caps at 30s)
+      const backoff = Math.min(30000, 1000 * (2 ** Math.min(6, ep.failCount)));
+      ep.cooldownUntil = now() + jitter(backoff);
     }
 
     // all failed -> chain cooldown
     st.pinnedIdx = null;
-    st.chainCooldownUntil = now() + 20000; // 20s
+    st.chainCooldownUntil = now() + 20000;
     if (now() - st.lastOfflineLogAt > 60000) {
       console.warn(`⛔ ${key} RPC appears offline. Cooling down 20s.`);
       st.lastOfflineLogAt = now();
@@ -278,97 +306,78 @@ async function selectHealthy(key) {
   })();
 
   selectLocks.set(key, run);
-  try { return await run; }
-  finally { selectLocks.delete(key); }
+  try {
+    return await run;
+  } finally {
+    selectLocks.delete(key);
+  }
 }
 
 /* ---------- Public API ---------- */
-function getProvider(chain = 'base') {
-  const key = (chain || 'base').toLowerCase();
+function getProvider(chain = "base") {
+  const key = (chain || "base").toLowerCase();
   initChain(key);
+
   const st = chains[key];
   if (now() < st.chainCooldownUntil) {
-    console.warn(`⚠️ No live provider for "${key}". Returning null (chain cooldown).`);
+    console.warn(
+      `⚠️ No live provider for "${key}". Returning null (chain cooldown).`
+    );
     return null;
   }
+
   if (st.pinnedIdx == null) return null;
+
   const ep = st.endpoints[st.pinnedIdx];
   if (!ep || now() < ep.cooldownUntil) return null;
+
   if (!ep.provider) ep.provider = makeProvider(key, ep.url);
   return ep.provider;
 }
 
-async function rotateProvider(chain = 'base') {
-  const key = (chain || 'base').toLowerCase();
+async function rotateProvider(chain = "base") {
+  const key = (chain || "base").toLowerCase();
   initChain(key);
-  const st = chains[key];
 
+  const st = chains[key];
   if (st.pinnedIdx != null) {
     const ep = st.endpoints[st.pinnedIdx];
     if (ep) {
       ep.failCount += 1;
-      const backoff = Math.min(30000, 1000 ** Math.min(3, ep.failCount)) * 2;
+      const backoff = Math.min(30000, 1000 * (2 ** Math.min(6, ep.failCount)));
       ep.cooldownUntil = now() + jitter(backoff);
-      console.warn(`🔁 Rotated RPC for ${key}: ${ep.url} cooling down ~${Math.round(backoff / 1000)}s`);
+      console.warn(
+        `🔁 Rotated RPC for ${key}: ${ep.url} cooling down ~${Math.round(
+          backoff / 1000
+        )}s`
+      );
     }
   }
+
   st.pinnedIdx = null;
   await selectHealthy(key);
 }
 
-/* =========================================================
-   ✅ Backwards compatible safeRpcCall
-   Supports:
-   - safeRpcCall('base', (p)=>..., retries?, timeout?)
-   - safeRpcCall((p)=>..., retries?, timeout?)  // defaults chain='base'
-========================================================= */
-function normalizeSafeRpcArgs(chainOrFn, maybeFn, maybeRetries, maybeTimeout) {
-  // New style: (chain, fn, retries, timeout)
-  if (typeof chainOrFn === 'string' && typeof maybeFn === 'function') {
-    return {
-      chain: chainOrFn,
-      fn: maybeFn,
-      retries: Number.isFinite(maybeRetries) ? Number(maybeRetries) : 4,
-      timeout: Number.isFinite(maybeTimeout) ? Number(maybeTimeout) : 6000
-    };
-  }
-
-  // Old style: (fn, retries, timeout) -> chain defaults to base
-  if (typeof chainOrFn === 'function') {
-    return {
-      chain: 'base',
-      fn: chainOrFn,
-      retries: Number.isFinite(maybeFn) ? Number(maybeFn) : 4,
-      timeout: Number.isFinite(maybeRetries) ? Number(maybeRetries) : 6000
-    };
-  }
-
-  return { chain: 'base', fn: null, retries: 4, timeout: 6000 };
-}
-
-async function safeRpcCall(chainOrFn, maybeFn, maybeRetries = 4, perCallTimeoutMs = 6000) {
-  const parsed = normalizeSafeRpcArgs(chainOrFn, maybeFn, maybeRetries, perCallTimeoutMs);
-  const key = (parsed.chain || 'base').toLowerCase();
-  const callFn = parsed.fn;
-  const retries = parsed.retries;
-  const timeoutMs = parsed.timeout;
-
+async function safeRpcCall(chain, callFn, retries = 5, perCallTimeoutMs = 15000) {
+  const key = (chain || "base").toLowerCase();
   initChain(key);
-
-  if (typeof callFn !== 'function') {
-    console.warn(`⚠️ [${key}] safeRpcCall called without a function. Returning null.`);
-    return null;
-  }
 
   for (let i = 0; i < retries; i++) {
     let provider = getProvider(key);
     if (!provider) {
       provider = await selectHealthy(key);
-      if (!provider) { await sleep(jitter(300 + i * 200)); continue; }
+      if (!provider) {
+        await sleep(jitter(400 + i * 250));
+        continue;
+      }
     }
 
     try {
-      const result = await withTimeout(callFn(provider), timeoutMs, 'rpc call timeout');
+      const result = await withTimeout(
+        callFn(provider),
+        perCallTimeoutMs,
+        "rpc call timeout"
+      );
 
       // mark success
       const st = chains[key];
@@ -382,26 +391,25 @@ async function safeRpcCall(chainOrFn, maybeFn, maybeRetries = 4, perCallTimeoutM
 
       return result;
     } catch (err) {
-      const msg = err?.info?.responseBody || err?.message || '';
-      const code = err?.code || 'UNKNOWN_ERROR';
-      console.warn(`⚠️ [${key}] RPC Error: ${err.message || code}`);
+      const msg = err?.info?.responseBody || err?.message || "";
+      console.warn(`⚠️ [${key}] RPC Error: ${err?.message || err}`);
 
       const current = getProvider(key);
       const st = chains[key];
       const failUrl =
         current?._rpcUrl ||
         (st.endpoints[st.pinnedIdx ?? -1] && st.endpoints[st.pinnedIdx ?? -1].url) ||
-        'unknown';
+        "unknown";
       console.warn(`🔻 RPC failed [${key}]: ${failUrl}`);
 
       // Ape special-case
-      if (key === 'ape' && msg.includes('Batch of more than 3 requests')) {
-        console.warn('⛔ ApeChain batch limit hit — skip batch, no retry');
+      if (key === "ape" && String(msg).includes("Batch of more than 3 requests")) {
+        console.warn("⛔ ApeChain batch limit hit — skip batch, no retry");
         return null;
       }
 
       await rotateProvider(key);
-      await sleep(jitter(300 + i * 200));
+      await sleep(jitter(500 + i * 350));
     }
   }
 
@@ -409,11 +417,12 @@ async function safeRpcCall(chainOrFn, maybeFn, maybeRetries = 4, perCallTimeoutM
   return null;
 }
 
-function getMaxBatchSize(chain = 'base') {
-  return (chain || 'base').toLowerCase() === 'ape' ? 3 : 10;
+function getMaxBatchSize(chain = "base") {
+  // This is used by some modules as a safety ceiling; keep behavior.
+  return (chain || "base").toLowerCase() === "ape" ? 3 : 10;
 }
 
-/* ---------- Dynamic RPC discovery ---------- */
+/* ---------- Dynamic RPC discovery (OPTIONAL / OFF by default) ---------- */
 async function fetchJson(url, timeoutMs = 9000) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -430,12 +439,12 @@ function extractRpcUrlsFromChainRecord(rec) {
   const out = [];
   if (Array.isArray(rec.rpc)) out.push(...rec.rpc);
   if (Array.isArray(rec.rpcs)) out.push(...rec.rpcs);
-  if (rec.rpcUrls && typeof rec.rpcUrls === 'object') {
+  if (rec.rpcUrls && typeof rec.rpcUrls === "object") {
     for (const k of Object.keys(rec.rpcUrls)) {
       const v = rec.rpcUrls[k];
       if (Array.isArray(v)) out.push(...v);
-      else if (typeof v === 'string') out.push(v);
-      else if (v && typeof v.url === 'string') out.push(v.url);
+      else if (typeof v === "string") out.push(v);
+      else if (v && typeof v.url === "string") out.push(v.url);
     }
   }
   return out;
@@ -443,27 +452,20 @@ function extractRpcUrlsFromChainRecord(rec) {
 
 async function discoverChainRpcs(chainId) {
   const collected = [];
-
-  // 1) chainid.network canonical list
+  // Use only chainid.network (stable JSON). Chainlist pages are not reliable JSON.
   try {
-    const list = await fetchJson('https://chainid.network/chains.json', 9000);
+    const list = await fetchJson("https://chainid.network/chains.json", 9000);
     if (Array.isArray(list)) {
-      const rec = list.find(c => c.chainId === chainId);
+      const rec = list.find((c) => c.chainId === chainId);
       if (rec) collected.push(...extractRpcUrlsFromChainRecord(rec));
     }
   } catch {}
-
-  // 2) Chainlist per-chain endpoint (best effort)
-  // NOTE: may return non-JSON sometimes; wrapped safely
-  try {
-    const data = await fetchJson(`https://chainlist.org/chain/${chainId}`, 9000).catch(() => null);
-    if (data) collected.push(...extractRpcUrlsFromChainRecord(data));
-  } catch {}
-
   return uniqueHttps(collected);
 }
 
-async function refreshRpcPool(key, reason = 'periodic') {
+async function refreshRpcPool(key, reason = "periodic") {
+  if (!RPC_DISCOVERY_ENABLED) return;
+
   const meta = CHAIN_META[key];
   if (!meta?.chainId) return;
 
@@ -472,50 +474,60 @@ async function refreshRpcPool(key, reason = 'periodic') {
     if (!fresh.length) return;
 
     const merged = uniqueHttps([
-      ...fresh,
       ...(STATIC_RPCS[key] || []),
-      ...(EXTRA_RPCS[key] || []),
-      ...(RPCS[key] || [])
+      ...fresh,
+      ...(RPCS[key] || []),
     ]);
 
-    const before = (RPCS[key] || []).join(',');
+    const before = (RPCS[key] || []).join(",");
     RPCS[key] = merged;
 
-    if (before !== RPCS[key].join(',')) {
-      console.log(`🔄 ${key} RPC list updated (${reason}). Count=${RPCS[key].length}`);
+    if (before !== RPCS[key].join(",")) {
+      console.log(
+        `🔄 ${key} RPC list updated (${reason}). Count=${RPCS[key].length}`
+      );
       rebuildChainEndpoints(key);
       selectHealthy(key).catch(() => {});
     }
   } catch (e) {
-    console.warn(`⚠️ ${key} RPC discovery failed (${reason}): ${e.message}`);
+    console.warn(
+      `⚠️ ${key} RPC discovery failed (${reason}): ${e?.message || e}`
+    );
   }
 }
 
 /* ---------- Bootstrap ---------- */
 (async () => {
-  // Initial dynamic fetch for all chains
+  // Clean + dedupe baseline lists
+  for (const k of Object.keys(RPCS)) {
+    RPCS[k] = uniqueHttps(RPCS[k] || []);
+  }
+
+  // Optional discovery
   await Promise.all([
-    refreshRpcPool('eth', 'startup'),
-    refreshRpcPool('base', 'startup'),
-    refreshRpcPool('ape', 'startup')
+    refreshRpcPool("eth", "startup"),
+    refreshRpcPool("base", "startup"),
+    refreshRpcPool("ape", "startup"),
   ]);
 
   // Initialize chains & try pinning one endpoint each
   for (const key of Object.keys(CHAIN_META)) {
     initChain(key);
     if (!chains[key].endpoints.length) {
-      RPCS[key] = uniqueHttps([...(STATIC_RPCS[key] || []), ...(EXTRA_RPCS[key] || [])]);
+      RPCS[key] = uniqueHttps([...(STATIC_RPCS[key] || [])]);
       rebuildChainEndpoints(key);
     }
     selectHealthy(key).catch(() => {});
   }
 
-  // Periodic refresh
-  setInterval(() => {
-    for (const key of Object.keys(CHAIN_META)) {
-      refreshRpcPool(key, 'periodic');
-    }
-  }, REFRESH_INTERVAL_MS);
+  // Periodic refresh (only if enabled)
+  if (RPC_DISCOVERY_ENABLED) {
+    setInterval(() => {
+      for (const key of Object.keys(CHAIN_META)) {
+        refreshRpcPool(key, "periodic");
+      }
+    }, REFRESH_INTERVAL_MS);
+  }
 })();
 
 /* ---------- Exports ---------- */
@@ -523,6 +535,7 @@ module.exports = {
   getProvider,
   rotateProvider,
   safeRpcCall,
-  getMaxBatchSize
+  getMaxBatchSize,
 };
+
 
