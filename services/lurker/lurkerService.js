@@ -281,10 +281,13 @@ async function fillRarity(client, rule, listing) {
 }
 
 async function processRule(client, rule, debug) {
-  const { listings } = await fetchFromSource(rule);
+  const out = await fetchFromSource(rule);
+  const listings = Array.isArray(out?.listings) ? out.listings : [];
 
   if (debug) {
-    console.log(`[LURKER] rule#${rule.id} src=${process.env.LURKER_SOURCE || "opensea"} chain=${rule.chain} contract=${String(rule.contract).slice(0, 10)}.. listings=${listings.length}`);
+    console.log(
+      `[LURKER] rule#${rule.id} src=${process.env.LURKER_SOURCE || "opensea"} chain=${rule.chain} contract=${String(rule.contract).slice(0, 10)}.. listings=${listings.length}`
+    );
   }
 
   for (const listing of listings) {
