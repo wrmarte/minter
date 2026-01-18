@@ -1,0 +1,14 @@
+{
+  "name": "lurker-lister",
+  "version": "1.0.0",
+  "private": true,
+  "main": "lister/lister.js",
+  "scripts": {
+    "start:lister": "node lister/lister.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "node-fetch": "^2.7.0",
+    "pg": "^8.12.0"
+  }
+}
