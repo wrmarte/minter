@@ -25,6 +25,12 @@ function isOwner(interaction) {
   return owner && interaction.user?.id === owner;
 }
 
+function resolveClient(ctx, interaction) {
+  // ctx may be client OR {pg} depending on your router
+  if (ctx && ctx.pg && !ctx.channels) return interaction.client; // ctx is not client
+  return ctx || interaction.client;
+}
+
 async function requireSchema(client) {
   const ok = await ensureLurkerSchema(client);
   if (!ok) throw new Error("DB not ready (client.pg missing?)");
@@ -91,7 +97,9 @@ module.exports = {
         .setDescription("Show Lurker config/health")
     ),
 
-  async execute(interaction, client) {
+  async execute(interaction, ctx) {
+    const client = resolveClient(ctx, interaction);
+
     // Owner-only for now
     if (!isOwner(interaction)) {
       return interaction.reply({ content: "Owner-only for now (set BOT_OWNER_ID).", ephemeral: true }).catch(() => null);
@@ -105,7 +113,7 @@ module.exports = {
       const enabled = String(process.env.LURKER_ENABLED || "0").trim() === "1";
       const pollMs = Number(process.env.LURKER_POLL_MS || 15000);
       const defCh = (process.env.LURKER_DEFAULT_CHANNEL_ID || "").trim();
-      const src = (process.env.LURKER_SOURCE || "reservoir").trim();
+      const src = (process.env.LURKER_SOURCE || "opensea").trim();
       const owner = (process.env.BOT_OWNER_ID || "").trim();
 
       const res = await pg.query(`SELECT COUNT(*)::int AS n FROM lurker_rules WHERE enabled=TRUE AND guild_id=$1`, [interaction.guildId]);
@@ -271,7 +279,9 @@ module.exports = {
   },
 
   // Modal submit handler (call this from your interactionCreate router)
-  async handleModal(interaction, client) {
+  async handleModal(interaction, ctx) {
+    const client = resolveClient(ctx, interaction);
+
     if (interaction.customId !== "lurker_modal_set") return false;
 
     if (!isOwner(interaction)) {
@@ -330,4 +340,5 @@ module.exports = {
     return true;
   }
 };
+
 
