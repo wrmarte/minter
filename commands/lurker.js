@@ -1,8 +1,10 @@
 // commands/lurker.js
 // ======================================================
-// /lurker set -> modal to create rule
-// /lurker stop -> disable a rule (or all)
-// /lurker list -> show rules
+// /lurker set     -> modal to create rule
+// /lurker quick   -> create rule quickly (no modal)
+// /lurker stop    -> disable a rule (or all)
+// /lurker list    -> show rules
+// /lurker status  -> show config/health
 // ======================================================
 
 const {
@@ -11,7 +13,7 @@ const {
   TextInputBuilder,
   TextInputStyle,
   ActionRowBuilder,
-  EmbedBuilder
+  EmbedBuilder,
 } = require("discord.js");
 
 const { ensureLurkerSchema } = require("../services/lurker/schema");
@@ -32,6 +34,10 @@ function cleanLower(s) {
   return String(s || "").trim().toLowerCase();
 }
 
+function safeJsonParse(s) {
+  try { return JSON.parse(s); } catch { return null; }
+}
+
 module.exports = {
   data: new SlashCommandBuilder()
     .setName("lurker")
@@ -39,6 +45,33 @@ module.exports = {
     .addSubcommand(sc =>
       sc.setName("set")
         .setDescription("Create a Lurker rule (emerald popup)")
+    )
+    .addSubcommand(sc =>
+      sc.setName("quick")
+        .setDescription("Quick-create a rule (no popup)")
+        .addStringOption(o =>
+          o.setName("chain").setDescription("eth/base/ape").setRequired(true)
+            .addChoices(
+              { name: "base", value: "base" },
+              { name: "eth", value: "eth" },
+              { name: "ape", value: "ape" }
+            )
+        )
+        .addStringOption(o =>
+          o.setName("contract").setDescription("0x contract").setRequired(true)
+        )
+        .addIntegerOption(o =>
+          o.setName("rarity_max").setDescription("e.g. 100").setRequired(false)
+        )
+        .addStringOption(o =>
+          o.setName("traits_json").setDescription('JSON e.g. {"Hat":["Crown"]}').setRequired(false)
+        )
+        .addStringOption(o =>
+          o.setName("max_price_native").setDescription("e.g. 0.05").setRequired(false)
+        )
+        .addStringOption(o =>
+          o.setName("channel_id").setDescription("channel id for alerts (optional)").setRequired(false)
+        )
     )
     .addSubcommand(sc =>
       sc.setName("stop")
@@ -52,16 +85,48 @@ module.exports = {
     .addSubcommand(sc =>
       sc.setName("list")
         .setDescription("List your Lurker rules")
+    )
+    .addSubcommand(sc =>
+      sc.setName("status")
+        .setDescription("Show Lurker config/health")
     ),
 
   async execute(interaction, client) {
-    // For now: owner-only (recommended). Later we can allow admins.
+    // Owner-only for now
     if (!isOwner(interaction)) {
-      return interaction.reply({ content: "Owner-only for now.", ephemeral: true }).catch(() => null);
+      return interaction.reply({ content: "Owner-only for now (set BOT_OWNER_ID).", ephemeral: true }).catch(() => null);
     }
 
     const sub = interaction.options.getSubcommand();
     await requireSchema(client);
+
+    if (sub === "status") {
+      const pg = client.pg;
+      const enabled = String(process.env.LURKER_ENABLED || "0").trim() === "1";
+      const pollMs = Number(process.env.LURKER_POLL_MS || 15000);
+      const defCh = (process.env.LURKER_DEFAULT_CHANNEL_ID || "").trim();
+      const src = (process.env.LURKER_SOURCE || "reservoir").trim();
+      const owner = (process.env.BOT_OWNER_ID || "").trim();
+
+      const res = await pg.query(`SELECT COUNT(*)::int AS n FROM lurker_rules WHERE enabled=TRUE AND guild_id=$1`, [interaction.guildId]);
+      const n = res.rows?.[0]?.n ?? 0;
+
+      const embed = new EmbedBuilder()
+        .setColor(EMERALD)
+        .setTitle("🟢 Lurker Status")
+        .setDescription("Health + config snapshot")
+        .addFields(
+          { name: "Enabled", value: enabled ? "YES" : "NO", inline: true },
+          { name: "Poll", value: `${pollMs}ms`, inline: true },
+          { name: "Source", value: src, inline: true },
+          { name: "Owner Set", value: owner ? "YES" : "NO", inline: true },
+          { name: "Default Channel", value: defCh ? `<#${defCh}>` : "NOT SET", inline: true },
+          { name: "Active Rules (this server)", value: String(n), inline: true },
+        )
+        .setTimestamp(new Date());
+
+      return interaction.reply({ embeds: [embed], ephemeral: true }).catch(() => null);
+    }
 
     if (sub === "set") {
       const modal = new ModalBuilder()
@@ -73,7 +138,7 @@ module.exports = {
         .setLabel("Chain (eth/base/ape)")
         .setStyle(TextInputStyle.Short)
         .setRequired(true)
-        .setValue("eth");
+        .setValue("base");
 
       const contract = new TextInputBuilder()
         .setCustomId("contract")
@@ -110,6 +175,50 @@ module.exports = {
       return interaction.showModal(modal);
     }
 
+    if (sub === "quick") {
+      const chain = cleanLower(interaction.options.getString("chain"));
+      const contract = cleanLower(interaction.options.getString("contract"));
+      const rarityMax = interaction.options.getInteger("rarity_max");
+      const traitsJson = (interaction.options.getString("traits_json") || "").trim();
+      const maxPrice = (interaction.options.getString("max_price_native") || "").trim();
+      const channelId = (interaction.options.getString("channel_id") || "").trim() || (process.env.LURKER_DEFAULT_CHANNEL_ID || "").trim() || null;
+
+      if (!["eth", "base", "ape"].includes(chain)) {
+        return interaction.reply({ content: "Chain must be eth/base/ape", ephemeral: true }).catch(() => null);
+      }
+      if (!contract.startsWith("0x") || contract.length < 42) {
+        return interaction.reply({ content: "Contract address looks invalid.", ephemeral: true }).catch(() => null);
+      }
+      if (traitsJson && !safeJsonParse(traitsJson)) {
+        return interaction.reply({ content: "Traits JSON is invalid JSON.", ephemeral: true }).catch(() => null);
+      }
+
+      const pg = client.pg;
+      const ins = await pg.query(
+        `
+        INSERT INTO lurker_rules(guild_id, chain, contract, channel_id, rarity_max, traits_json, max_price_native, auto_buy, created_by)
+        VALUES($1,$2,$3,$4,$5,$6,$7,FALSE,$8)
+        RETURNING id
+        `,
+        [
+          interaction.guildId,
+          chain,
+          contract,
+          channelId,
+          rarityMax ?? null,
+          traitsJson || null,
+          maxPrice || null,
+          interaction.user?.id || null
+        ]
+      );
+
+      const id = ins.rows?.[0]?.id;
+      return interaction.reply({
+        content: `🟢 Lurker rule created: **#${id}**\nChain: **${chain}**\nContract: \`${contract}\`\nChannel: ${channelId ? `<#${channelId}>` : "(missing)"}`,
+        ephemeral: true
+      }).catch(() => null);
+    }
+
     if (sub === "stop") {
       const ruleId = interaction.options.getString("rule_id");
       const pg = client.pg;
@@ -141,12 +250,12 @@ module.exports = {
       const embed = new EmbedBuilder()
         .setColor(EMERALD)
         .setTitle("🟢 Lurker Rules")
-        .setDescription(rows.length ? "Your current Lurker rules:" : "No rules yet. Use `/lurker set`.")
+        .setDescription(rows.length ? "Your current Lurker rules:" : "No rules yet. Use `/lurker set` or `/lurker quick`.")
         .setTimestamp(new Date());
 
       for (const r of rows) {
         embed.addFields({
-          name: `Rule #${r.id} — ${r.chain.toUpperCase()} — ${String(r.contract).slice(0, 8)}…`,
+          name: `Rule #${r.id} — ${String(r.chain || "").toUpperCase()} — ${String(r.contract).slice(0, 8)}…`,
           value: [
             `Enabled: **${r.enabled ? "YES" : "NO"}**`,
             r.rarity_max != null ? `Rarity Max: **${r.rarity_max}**` : `Rarity Max: _none_`,
@@ -166,7 +275,7 @@ module.exports = {
     if (interaction.customId !== "lurker_modal_set") return false;
 
     if (!isOwner(interaction)) {
-      await interaction.reply({ content: "Owner-only for now.", ephemeral: true }).catch(() => null);
+      await interaction.reply({ content: "Owner-only for now (set BOT_OWNER_ID).", ephemeral: true }).catch(() => null);
       return true;
     }
 
@@ -186,11 +295,9 @@ module.exports = {
       await interaction.reply({ content: "Contract address looks invalid.", ephemeral: true }).catch(() => null);
       return true;
     }
-    if (traitsJson) {
-      try { JSON.parse(traitsJson); } catch {
-        await interaction.reply({ content: "Traits JSON is invalid JSON.", ephemeral: true }).catch(() => null);
-        return true;
-      }
+    if (traitsJson && !safeJsonParse(traitsJson)) {
+      await interaction.reply({ content: "Traits JSON is invalid JSON.", ephemeral: true }).catch(() => null);
+      return true;
     }
 
     const pg = client.pg;
@@ -205,7 +312,7 @@ module.exports = {
         interaction.guildId,
         chain,
         contract,
-        process.env.LURKER_DEFAULT_CHANNEL_ID || null,
+        (process.env.LURKER_DEFAULT_CHANNEL_ID || "").trim() || null,
         rarityMax ? Number(rarityMax) : null,
         traitsJson || null,
         maxPrice || null,
@@ -223,3 +330,4 @@ module.exports = {
     return true;
   }
 };
+
