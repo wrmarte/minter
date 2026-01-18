@@ -6,17 +6,27 @@ const fetch = require('node-fetch');
 const { getProvider } = require('../services/provider');
 const OpenAI = require('openai');
 
+/* ======================================================
+   LABEL/DEBUG HELPERS
+====================================================== */
+const IC_LABEL = '[IC]';
+const IC_DEBUG = String(process.env.IC_DEBUG || process.env.LURKER_DEBUG || '0').trim() === '1';
+function log(...args) { console.log(IC_LABEL, ...args); }
+function warn(...args) { console.warn(IC_LABEL, ...args); }
+function errlog(...args) { console.error(IC_LABEL, ...args); }
+
 /* ✅ NEW: LURKER interaction handlers (safe require) */
 let handleLurkerButton = null;
 try {
   const mod = require('../services/lurker/lurkerInteractions');
   if (mod && typeof mod.handleLurkerButton === 'function') {
     handleLurkerButton = mod.handleLurkerButton;
+    if (IC_DEBUG) log('[LURKER] lurkerInteractions loaded ✅');
   } else {
-    console.warn('⚠️ LURKER interactions loaded but missing handleLurkerButton()');
+    warn('⚠️ [LURKER] interactions loaded but missing handleLurkerButton()');
   }
 } catch (e) {
-  console.warn('⚠️ LURKER interactions module not found (safe): ../services/lurker/lurkerInteractions');
+  warn('⚠️ [LURKER] interactions module not found (safe): ../services/lurker/lurkerInteractions');
 }
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -31,6 +41,7 @@ module.exports = (client, pg) => {
        - Calls commands/lurker.js handleModal(interaction, client)
        ====================================================== */
     if (interaction.isModalSubmit() && String(interaction.customId || '') === 'lurker_modal_set') {
+      if (IC_DEBUG) log('[LURKER] modal submit received');
       try {
         const cmd = interaction.client.commands.get('lurker');
         if (cmd && typeof cmd.handleModal === 'function') {
@@ -39,8 +50,8 @@ module.exports = (client, pg) => {
         }
         // If not handled, still stop here to prevent fallthrough weirdness
         await interaction.reply({ content: '⚠️ Lurker modal handler not available.', ephemeral: true }).catch(() => null);
-      } catch (err) {
-        console.error('❌ LURKER modal error:', err);
+      } catch (error) {
+        errlog('❌ [LURKER] modal error:', error);
         try {
           if (interaction.deferred || interaction.replied) {
             await interaction.editReply('⚠️ Failed to process Lurker modal.');
@@ -62,8 +73,8 @@ module.exports = (client, pg) => {
           } else {
             await command.autocomplete(interaction);
           }
-        } catch (err) {
-          console.error(`❌ Autocomplete error for ${interaction.commandName}:`, err);
+        } catch (error) {
+          errlog(`❌ Autocomplete error for ${interaction.commandName}:`, error);
         }
         return;
       }
@@ -79,10 +90,10 @@ module.exports = (client, pg) => {
       const safeRespond = async (choices) => {
         try {
           if (!interaction.responded) await interaction.respond(choices);
-        } catch (err) {
-          if (err.code === 10062) console.warn('⚠️ Autocomplete expired');
-          else if (err.code === 40060) console.warn('⚠️ Already acknowledged');
-          else console.error('❌ Autocomplete respond error:', err);
+        } catch (error) {
+          if (error.code === 10062) warn('⚠️ Autocomplete expired');
+          else if (error.code === 40060) warn('⚠️ Already acknowledged');
+          else errlog('❌ Autocomplete respond error:', error);
         }
       };
 
@@ -121,6 +132,9 @@ module.exports = (client, pg) => {
             const { address, network } = res.rows[0];
             const chain = (network || 'base').toLowerCase();
             let tokenIds = [];
+
+            // NOTE: This block still uses Reservoir for ETH token IDs. If Reservoir is blocked on Railway,
+            // you may want to swap this later to OpenSea/Moralis too. Not touching here to avoid breaking.
             if (chain === 'eth') {
               try {
                 const resv = await fetch(`https://api.reservoir.tools/tokens/v6?collection=${address}&limit=100&sortBy=floorAskPrice`, { headers: { 'x-api-key': process.env.RESERVOIR_API_KEY } });
@@ -136,6 +150,7 @@ module.exports = (client, pg) => {
                 tokenIds = Array.from({ length: Math.min(100, totalNum) }, (_, i) => (i + 1).toString());
               } catch { tokenIds = []; }
             }
+
             const filtered = tokenIds
               .filter(id => id.includes(focused.value))
               .slice(0, 25)
@@ -226,25 +241,63 @@ module.exports = (client, pg) => {
             .map(({ name, value }) => ({ name, value }));
           return await safeRespond(sorted);
         }
-      } catch (err) {
-        console.error('❌ Autocomplete error:', err);
+      } catch (error) {
+        errlog('❌ Autocomplete error:', error);
       }
+      return;
     }
 
     // BUTTON HANDLERS
 
     /* ======================================================
        ✅ LURKER: BUTTON ROUTER (Buy / Ignore)
+       - Primary: services/lurker/lurkerInteractions.js
+       - Fallback: inline DB markSeen (so it still works even if module missing)
        ====================================================== */
-    if (interaction.isButton() && (interaction.customId.startsWith('lurker_buy:') || interaction.customId.startsWith('lurker_ignore:'))) {
+    if (
+      interaction.isButton() &&
+      (interaction.customId.startsWith('lurker_buy:') || interaction.customId.startsWith('lurker_ignore:'))
+    ) {
+      if (IC_DEBUG) log('[LURKER] button:', interaction.customId);
       try {
         if (handleLurkerButton) {
           const handled = await handleLurkerButton(interaction, client);
           if (handled) return;
         }
-        await interaction.reply({ content: '⚠️ Lurker button handler not available.', ephemeral: true }).catch(() => null);
-      } catch (err) {
-        console.error('❌ Button handler error (lurker):', err);
+
+        // INLINE FALLBACK (no module found)
+        const parts = String(interaction.customId).split(':'); // lurker_ignore:ruleId:listingId
+        const action = parts[0];
+        const ruleId = Number(parts[1]);
+        const listingId = parts.slice(2).join(':'); // safe join
+
+        if (!ruleId || !listingId) {
+          await interaction.reply({ content: '⚠️ Invalid Lurker button payload.', ephemeral: true }).catch(() => null);
+          return;
+        }
+
+        // Mark seen to prevent repeats
+        const pgx = client.pg;
+        if (!pgx?.query) {
+          await interaction.reply({ content: '⚠️ DB not ready for Lurker.', ephemeral: true }).catch(() => null);
+          return;
+        }
+
+        await pgx.query(
+          `INSERT INTO lurker_seen(rule_id, listing_id) VALUES($1,$2) ON CONFLICT DO NOTHING`,
+          [ruleId, listingId]
+        );
+
+        if (action === 'lurker_ignore') {
+          await interaction.reply({ content: `🟢 Ignored listing (rule #${ruleId}).`, ephemeral: true }).catch(() => null);
+        } else {
+          await interaction.reply({
+            content: `🟢 Buy clicked (rule #${ruleId}).\nFor now: sim-only — execution wiring comes next.`,
+            ephemeral: true
+          }).catch(() => null);
+        }
+      } catch (error) {
+        errlog('❌ Button handler error (lurker):', error);
         try {
           if (interaction.deferred || interaction.replied) {
             await interaction.editReply('⚠️ Failed to process Lurker button.');
@@ -258,6 +311,7 @@ module.exports = (client, pg) => {
 
     // ✅ UntrackMintPlus button router (clickable Untrack buttons)
     if (interaction.isButton() && interaction.customId.startsWith('untrackmintplus:')) {
+      if (IC_DEBUG) log('[UNTRACKMINTPLUS] button:', interaction.customId);
       try {
         const mod = interaction.client.commands.get('untrackmintplus');
         if (mod && typeof mod.handleButton === 'function') {
@@ -265,8 +319,8 @@ module.exports = (client, pg) => {
         } else {
           await interaction.reply({ content: '⚠️ Button handler not available.', ephemeral: true });
         }
-      } catch (err) {
-        console.error('❌ Button handler error (untrackmintplus):', err);
+      } catch (error) {
+        errlog('❌ Button handler error (untrackmintplus):', error);
         try {
           if (interaction.deferred || interaction.replied) {
             await interaction.editReply('⚠️ Failed to process button.');
@@ -279,12 +333,12 @@ module.exports = (client, pg) => {
     }
 
     if (interaction.isButton() && interaction.customId === 'test_welcome_button') {
-      const pg = interaction.client.pg;
+      const pgx = interaction.client.pg;
       const guild = interaction.guild;
       const member = interaction.member;
 
       try {
-        const res = await pg.query(
+        const res = await pgx.query(
           'SELECT * FROM welcome_settings WHERE guild_id = $1 AND enabled = true',
           [guild.id]
         );
@@ -306,8 +360,8 @@ module.exports = (client, pg) => {
         await channel.send({ content: `🎉 Welcome <@${member.id}> (test)`, embeds: [embed] });
 
         await interaction.reply({ content: `✅ Test welcome sent to <#${channel.id}>`, ephemeral: true });
-      } catch (err) {
-        console.error('❌ Error sending test welcome:', err);
+      } catch (error) {
+        errlog('❌ Error sending test welcome:', error);
         await interaction.reply({ content: '❌ Failed to send test welcome.', ephemeral: true });
       }
       return;
@@ -321,6 +375,7 @@ module.exports = (client, pg) => {
     try {
       /* ✅ NEW: /lurker must receive (interaction, client) (NOT {pg}) */
       if (interaction.commandName === 'lurker') {
+        if (IC_DEBUG) log('[LURKER] slash command');
         await command.execute(interaction, client);
         return;
       }
@@ -329,12 +384,12 @@ module.exports = (client, pg) => {
       if (needsPg) await command.execute(interaction, { pg });
       else await command.execute(interaction);
     } catch (error) {
-      console.error(`❌ Error executing /${interaction.commandName}:`, error);
+      errlog(`❌ Error executing /${interaction.commandName}:`, error);
       try {
         if (interaction.deferred || interaction.replied) await interaction.editReply({ content: '⚠️ Something went wrong.' });
         else await interaction.reply({ content: '⚠️ Error executing command.', ephemeral: true });
       } catch (fallbackError) {
-        console.error('⚠️ Failed to send error message:', fallbackError.message);
+        errlog('⚠️ Failed to send error message:', fallbackError.message);
       }
     }
   });
@@ -344,9 +399,12 @@ module.exports = (client, pg) => {
     if (message.author.bot) return;
     const content = message.content.trim().toLowerCase();
     if (!content.startsWith('musclemb ')) return;
+
     const userMsg = message.content.slice('musclemb'.length).trim();
     if (!userMsg) return message.reply('💬 Say something for MuscleMB to chew on, bro.');
+
     await message.channel.sendTyping();
+
     try {
       let completion;
       try {
@@ -368,10 +426,11 @@ module.exports = (client, pg) => {
           temperature: 0.95,
         });
       }
+
       const aiReply = completion.choices[0].message.content;
       await message.reply(aiReply);
-    } catch (err) {
-      console.error('❌ MuscleMB (text trigger) error:', err.message);
+    } catch (error) {
+      errlog('❌ MuscleMB (text trigger) error:', error.message);
       await message.reply('⚠️ MuscleMB blacked out. Try again later.');
     }
   });
