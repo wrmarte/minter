@@ -1,10 +1,23 @@
-// interactionCreate.js FULL PATCHED + LABELS + UNTRACKMINTPLUS BUTTON ROUTER
+// interactionCreate.js FULL PATCHED + LABELS + UNTRACKMINTPLUS BUTTON ROUTER + LURKER MODAL/BUTTON ROUTER
 const { EmbedBuilder } = require('discord.js');
 const { flavorMap } = require('../utils/flavorMap');
 const { Contract } = require('ethers');
 const fetch = require('node-fetch');
 const { getProvider } = require('../services/provider');
 const OpenAI = require('openai');
+
+/* ✅ NEW: LURKER interaction handlers (safe require) */
+let handleLurkerButton = null;
+try {
+  const mod = require('../services/lurker/lurkerInteractions');
+  if (mod && typeof mod.handleLurkerButton === 'function') {
+    handleLurkerButton = mod.handleLurkerButton;
+  } else {
+    console.warn('⚠️ LURKER interactions loaded but missing handleLurkerButton()');
+  }
+} catch (e) {
+  console.warn('⚠️ LURKER interactions module not found (safe): ../services/lurker/lurkerInteractions');
+}
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -13,6 +26,32 @@ module.exports = (client, pg) => {
 
   // INTERACTION HANDLER
   client.on('interactionCreate', async interaction => {
+    /* ======================================================
+       ✅ LURKER: MODAL SUBMIT ROUTER (must be early)
+       - Calls commands/lurker.js handleModal(interaction, client)
+       ====================================================== */
+    if (interaction.isModalSubmit() && String(interaction.customId || '') === 'lurker_modal_set') {
+      try {
+        const cmd = interaction.client.commands.get('lurker');
+        if (cmd && typeof cmd.handleModal === 'function') {
+          const handled = await cmd.handleModal(interaction, client);
+          if (handled) return;
+        }
+        // If not handled, still stop here to prevent fallthrough weirdness
+        await interaction.reply({ content: '⚠️ Lurker modal handler not available.', ephemeral: true }).catch(() => null);
+      } catch (err) {
+        console.error('❌ LURKER modal error:', err);
+        try {
+          if (interaction.deferred || interaction.replied) {
+            await interaction.editReply('⚠️ Failed to process Lurker modal.');
+          } else {
+            await interaction.reply({ content: '⚠️ Failed to process Lurker modal.', ephemeral: true });
+          }
+        } catch {}
+      }
+      return;
+    }
+
     // BLOCK 1: Check if autocomplete command exists first (modular check)
     if (interaction.isAutocomplete()) {
       const command = client.commands.get(interaction.commandName);
@@ -193,6 +232,30 @@ module.exports = (client, pg) => {
     }
 
     // BUTTON HANDLERS
+
+    /* ======================================================
+       ✅ LURKER: BUTTON ROUTER (Buy / Ignore)
+       ====================================================== */
+    if (interaction.isButton() && (interaction.customId.startsWith('lurker_buy:') || interaction.customId.startsWith('lurker_ignore:'))) {
+      try {
+        if (handleLurkerButton) {
+          const handled = await handleLurkerButton(interaction, client);
+          if (handled) return;
+        }
+        await interaction.reply({ content: '⚠️ Lurker button handler not available.', ephemeral: true }).catch(() => null);
+      } catch (err) {
+        console.error('❌ Button handler error (lurker):', err);
+        try {
+          if (interaction.deferred || interaction.replied) {
+            await interaction.editReply('⚠️ Failed to process Lurker button.');
+          } else {
+            await interaction.reply({ content: '⚠️ Failed to process Lurker button.', ephemeral: true });
+          }
+        } catch {}
+      }
+      return; // ensure we don’t fall through
+    }
+
     // ✅ UntrackMintPlus button router (clickable Untrack buttons)
     if (interaction.isButton() && interaction.customId.startsWith('untrackmintplus:')) {
       try {
@@ -256,6 +319,12 @@ module.exports = (client, pg) => {
     if (!command) return;
 
     try {
+      /* ✅ NEW: /lurker must receive (interaction, client) (NOT {pg}) */
+      if (interaction.commandName === 'lurker') {
+        await command.execute(interaction, client);
+        return;
+      }
+
       const needsPg = command.execute.length > 1;
       if (needsPg) await command.execute(interaction, { pg });
       else await command.execute(interaction);
@@ -307,7 +376,3 @@ module.exports = (client, pg) => {
     }
   });
 };
-
-
-
-
