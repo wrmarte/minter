@@ -1,54 +1,115 @@
 // services/lurker/schema.js
 // ======================================================
-// LURKER: Schema bootstrap (no manual SQL needed)
+// LURKER DB schema (backward compatible)
+// - lurker_rules: rule configs
+// - lurker_seen: dedupe listings per rule
+// - lurker_rarity_meta: rarity build state per collection
+// - lurker_rarity_trait_stats: trait frequency counts
+// - lurker_rarity_tokens: per-token traits + score + rank
 // ======================================================
+
+function s(v) {
+  return String(v || "").trim();
+}
 
 async function ensureLurkerSchema(client) {
   try {
-    if (client.__lurkerSchemaReady) return true;
     const pg = client?.pg;
     if (!pg?.query) return false;
 
+    // Core tables
     await pg.query(`
       CREATE TABLE IF NOT EXISTS lurker_rules (
         id SERIAL PRIMARY KEY,
         guild_id TEXT NOT NULL,
-        chain TEXT NOT NULL,                 -- 'eth' | 'base' | 'ape'
-        contract TEXT NOT NULL,              -- lowercased
-        channel_id TEXT,                     -- where to post alerts (optional)
-        enabled BOOLEAN NOT NULL DEFAULT TRUE,
-
-        rarity_max INTEGER,                  -- e.g. 100
-        traits_json TEXT,                    -- JSON string: { "Hat": ["Beanie"], "Eyes": ["Laser"] }
-        max_price_native TEXT,               -- string to avoid float issues; interpret per chain native
-        auto_buy BOOLEAN NOT NULL DEFAULT FALSE,
-
+        chain TEXT NOT NULL,
+        contract TEXT NOT NULL,
+        channel_id TEXT,
+        rarity_max INTEGER,
+        traits_json TEXT,
+        max_price_native NUMERIC,
+        auto_buy BOOLEAN DEFAULT FALSE,
+        enabled BOOLEAN DEFAULT TRUE,
         created_by TEXT,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      );
-    `);
-
-    await pg.query(`
-      CREATE TABLE IF NOT EXISTS lurker_checkpoints (
-        rule_id INTEGER PRIMARY KEY REFERENCES lurker_rules(id) ON DELETE CASCADE,
-        cursor TEXT,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        created_at TIMESTAMP DEFAULT NOW()
       );
     `);
 
     await pg.query(`
       CREATE TABLE IF NOT EXISTS lurker_seen (
-        rule_id INTEGER REFERENCES lurker_rules(id) ON DELETE CASCADE,
+        rule_id INTEGER NOT NULL,
         listing_id TEXT NOT NULL,
-        seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        PRIMARY KEY (rule_id, listing_id)
+        created_at TIMESTAMP DEFAULT NOW(),
+        PRIMARY KEY(rule_id, listing_id)
       );
     `);
 
-    client.__lurkerSchemaReady = true;
+    // Rarity build meta per collection
+    await pg.query(`
+      CREATE TABLE IF NOT EXISTS lurker_rarity_meta (
+        chain TEXT NOT NULL,
+        contract TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'idle', -- idle | building | ready | error
+        cursor TEXT,                         -- moralis cursor
+        processed_count INTEGER DEFAULT 0,
+        total_supply INTEGER,
+        last_error TEXT,
+        updated_at TIMESTAMP DEFAULT NOW(),
+        PRIMARY KEY(chain, contract)
+      );
+    `);
+
+    // Trait stats table
+    await pg.query(`
+      CREATE TABLE IF NOT EXISTS lurker_rarity_trait_stats (
+        chain TEXT NOT NULL,
+        contract TEXT NOT NULL,
+        trait_type TEXT NOT NULL,
+        trait_value TEXT NOT NULL,
+        trait_count INTEGER NOT NULL DEFAULT 0,
+        total_supply INTEGER,
+        updated_at TIMESTAMP DEFAULT NOW(),
+        PRIMARY KEY(chain, contract, trait_type, trait_value)
+      );
+    `);
+
+    // Token rarity table (store traits so we can score later)
+    await pg.query(`
+      CREATE TABLE IF NOT EXISTS lurker_rarity_tokens (
+        id BIGSERIAL PRIMARY KEY,
+        chain TEXT NOT NULL,
+        contract TEXT NOT NULL,
+        token_id TEXT NOT NULL,
+        traits_json JSONB,
+        score NUMERIC,
+        rank INTEGER,
+        updated_at TIMESTAMP DEFAULT NOW(),
+        UNIQUE(chain, contract, token_id)
+      );
+    `);
+
+    // Helpful indexes
+    await pg.query(`CREATE INDEX IF NOT EXISTS idx_lurker_rules_enabled ON lurker_rules(enabled);`);
+    await pg.query(`CREATE INDEX IF NOT EXISTS idx_lurker_rules_guild ON lurker_rules(guild_id);`);
+    await pg.query(`CREATE INDEX IF NOT EXISTS idx_lurker_seen_rule ON lurker_seen(rule_id);`);
+
+    await pg.query(`CREATE INDEX IF NOT EXISTS idx_lurker_rarity_meta_status ON lurker_rarity_meta(status);`);
+    await pg.query(`CREATE INDEX IF NOT EXISTS idx_lurker_rarity_tokens_cc ON lurker_rarity_tokens(chain, contract);`);
+    await pg.query(`CREATE INDEX IF NOT EXISTS idx_lurker_rarity_tokens_rank ON lurker_rarity_tokens(chain, contract, rank);`);
+
+    // Add columns safely if older table exists
+    await pg.query(`ALTER TABLE lurker_rules ADD COLUMN IF NOT EXISTS enabled BOOLEAN DEFAULT TRUE;`).catch(() => {});
+    await pg.query(`ALTER TABLE lurker_rules ADD COLUMN IF NOT EXISTS auto_buy BOOLEAN DEFAULT FALSE;`).catch(() => {});
+    await pg.query(`ALTER TABLE lurker_rules ADD COLUMN IF NOT EXISTS max_price_native NUMERIC;`).catch(() => {});
+    await pg.query(`ALTER TABLE lurker_rules ADD COLUMN IF NOT EXISTS traits_json TEXT;`).catch(() => {});
+    await pg.query(`ALTER TABLE lurker_rules ADD COLUMN IF NOT EXISTS rarity_max INTEGER;`).catch(() => {});
+    await pg.query(`ALTER TABLE lurker_rules ADD COLUMN IF NOT EXISTS channel_id TEXT;`).catch(() => {});
+    await pg.query(`ALTER TABLE lurker_rules ADD COLUMN IF NOT EXISTS created_by TEXT;`).catch(() => {});
+    await pg.query(`ALTER TABLE lurker_rules ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();`).catch(() => {});
+
     return true;
   } catch (e) {
-    console.log("[LURKER] ensureLurkerSchema error:", e?.message || e);
+    console.warn("[LURKER][schema] ensure failed:", e?.message || e);
     return false;
   }
 }
