@@ -1,22 +1,28 @@
 // services/lurker/lurkerService.js
 // ======================================================
 // LURKER: Background poller
-// - Loads enabled rules from DB
-// - Pulls listings from source adapter
-// - Filters by rarity/traits/max price
-// - Posts emerald alerts with Buy button
+// FIXES:
+// - Always fetch newest page (NO continuation/cursor for live polling)
+// - Uses lurker_seen for dedupe (already in DB)
+// - If rarityRank missing, fetch token rarity (rate-limited) before filtering
 // - Throttles repeated errors (prevents log spam)
 // ======================================================
 
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require("discord.js");
 const { ensureLurkerSchema } = require("./schema");
 
-const { fetchListings: reservoirFetchListings } = require("./sources/reservoir");
+const {
+  fetchListings: reservoirFetchListings,
+  fetchTokenRarity: reservoirFetchTokenRarity
+} = require("./sources/reservoir");
 
 const LURKER_COLOR = 0x00c853; // emerald
 
-// Error throttling per rule so we don't spam logs every 15s
+// Error throttling per rule
 const RULE_ERR_STATE = new Map(); // ruleId -> { lastLogMs, count }
+
+// Rate limit token rarity lookups (avoid hammering)
+let rarityLookupsThisTick = 0;
 
 function jparse(s, fallback) {
   try { return JSON.parse(s); } catch { return fallback; }
@@ -28,8 +34,6 @@ function numOrNull(v) {
 }
 
 function traitsMatch(ruleTraits, nftTraits) {
-  // ruleTraits: { "Hat": ["Beanie","Crown"], "Eyes": ["Laser"] }
-  // nftTraits:  { "Hat": ["Beanie"], "Eyes": ["Normal"] }
   if (!ruleTraits || typeof ruleTraits !== "object") return false;
 
   for (const [k, wantedList] of Object.entries(ruleTraits)) {
@@ -83,7 +87,7 @@ async function postAlert(client, rule, listing, why) {
         `**Contract:** \`${listing.contract}\``,
         listing.name ? `**Name:** ${listing.name}` : null,
         listing.priceNative != null ? `**Price:** ${listing.priceNative} ${listing.priceCurrency || ""}`.trim() : null,
-        listing.rarityRank != null ? `**Rarity Rank:** **${listing.rarityRank}**` : `**Rarity Rank:** \`N/A\` (source didn’t return rank)`,
+        listing.rarityRank != null ? `**Rarity Rank:** **${listing.rarityRank}**` : `**Rarity Rank:** \`N/A\``,
         `**Trigger:** ${why}`,
         url ? `**Link:** ${url}` : null,
       ].filter(Boolean).join("\n")
@@ -117,25 +121,6 @@ async function getEnabledRules(client) {
   return res.rows || [];
 }
 
-async function getCursor(client, ruleId) {
-  const pg = client.pg;
-  const r = await pg.query(`SELECT cursor FROM lurker_checkpoints WHERE rule_id=$1`, [ruleId]);
-  return r.rows?.[0]?.cursor || null;
-}
-
-async function setCursor(client, ruleId, cursor) {
-  const pg = client.pg;
-  await pg.query(
-    `
-    INSERT INTO lurker_checkpoints(rule_id, cursor, updated_at)
-    VALUES($1, $2, NOW())
-    ON CONFLICT (rule_id)
-    DO UPDATE SET cursor=EXCLUDED.cursor, updated_at=NOW()
-    `,
-    [ruleId, cursor || null]
-  );
-}
-
 async function markSeen(client, ruleId, listingId) {
   const pg = client.pg;
   await pg.query(
@@ -153,17 +138,16 @@ async function isSeen(client, ruleId, listingId) {
   return (r.rowCount || 0) > 0;
 }
 
-async function fetchFromSource(rule, cursor) {
+async function fetchFromSource(rule) {
   const source = String(process.env.LURKER_SOURCE || "reservoir").toLowerCase();
   if (source === "reservoir") {
     return reservoirFetchListings({
       chain: rule.chain,
       contract: rule.contract,
-      cursor,
       limit: 20,
     });
   }
-  return { listings: [], nextCursor: null };
+  return { listings: [] };
 }
 
 function throttleRuleError(ruleId, err) {
@@ -171,7 +155,6 @@ function throttleRuleError(ruleId, err) {
   const st = RULE_ERR_STATE.get(ruleId) || { lastLogMs: 0, count: 0 };
   st.count += 1;
 
-  // Log at most once per 60s per rule, but include count
   if (now - st.lastLogMs > 60000) {
     st.lastLogMs = now;
     const msg = err?.message || String(err || "unknown error");
@@ -182,26 +165,56 @@ function throttleRuleError(ruleId, err) {
   RULE_ERR_STATE.set(ruleId, st);
 }
 
+async function ensureRarityIfNeeded(rule, listing) {
+  const rarityMax = rule.rarity_max != null ? Number(rule.rarity_max) : null;
+  if (!rarityMax || !Number.isFinite(rarityMax)) return listing;
+
+  if (listing.rarityRank != null) return listing;
+
+  // Rate limit these lookups hard
+  const maxPerTick = Number(process.env.LURKER_RARITY_LOOKUPS_PER_TICK || 5);
+  if (rarityLookupsThisTick >= maxPerTick) return listing;
+
+  try {
+    rarityLookupsThisTick += 1;
+    const rank = await reservoirFetchTokenRarity({
+      chain: listing.chain,
+      contract: listing.contract,
+      tokenId: listing.tokenId
+    });
+    if (rank != null) listing.rarityRank = rank;
+  } catch {
+    // ignore
+  }
+
+  return listing;
+}
+
 async function processRule(client, rule, debug) {
-  const cursor = await getCursor(client, rule.id);
-  const { listings, nextCursor } = await fetchFromSource(rule, cursor);
+  const { listings } = await fetchFromSource(rule);
 
   if (debug) {
-    console.log(`[LURKER] rule#${rule.id} chain=${rule.chain} contract=${String(rule.contract).slice(0, 10)}.. listings=${listings.length} cursor=${cursor ? "yes" : "no"}`);
+    console.log(`[LURKER] rule#${rule.id} chain=${rule.chain} contract=${String(rule.contract).slice(0, 10)}.. listings=${listings.length}`);
   }
 
   for (const listing of listings) {
     if (await isSeen(client, rule.id, listing.listingId)) continue;
 
+    // Mark as seen ONLY after we evaluate it (so we don't lose it before rarity fallback)
+    let evaluated = listing;
+
+    // If rarity rank missing but rule needs it, fetch it (rate-limited)
+    evaluated = await ensureRarityIfNeeded(rule, evaluated);
+
     const ruleTraits = jparse(rule.traits_json || "", null);
-    const traitHit = traitsMatch(ruleTraits, listing.traits);
+    const traitHit = traitsMatch(ruleTraits, evaluated.traits);
 
     const rarityMax = rule.rarity_max != null ? Number(rule.rarity_max) : null;
-    const rank = listing.rarityRank != null ? Number(listing.rarityRank) : null;
+    const rank = evaluated.rarityRank != null ? Number(evaluated.rarityRank) : null;
     const rarityHit = (rarityMax != null && rank != null && rank <= rarityMax);
 
-    if (!passesFilters(rule, listing)) {
-      await markSeen(client, rule.id, listing.listingId);
+    if (!passesFilters(rule, evaluated)) {
+      await markSeen(client, rule.id, evaluated.listingId);
       continue;
     }
 
@@ -209,12 +222,8 @@ async function processRule(client, rule, debug) {
       ? `Rarity rank **${rank}** ≤ **${rarityMax}**`
       : `Trait match (${Object.keys(ruleTraits || {}).length} configured)`;
 
-    await postAlert(client, rule, listing, why);
-    await markSeen(client, rule.id, listing.listingId);
-  }
-
-  if (nextCursor && nextCursor !== cursor) {
-    await setCursor(client, rule.id, nextCursor);
+    await postAlert(client, rule, evaluated, why);
+    await markSeen(client, rule.id, evaluated.listingId);
   }
 }
 
@@ -238,6 +247,8 @@ function startLurker(client) {
   const tick = async () => {
     if (running) return;
     running = true;
+    rarityLookupsThisTick = 0;
+
     try {
       const rules = await getEnabledRules(client);
       if (debug) console.log(`[LURKER] rules enabled=${rules.length}`);
