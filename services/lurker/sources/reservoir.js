@@ -4,6 +4,8 @@
 // - If RESERVOIR_PROXY_URL is set, ALL calls go through it
 // - Proxy uses: /reservoir?chain=<base|eth>&p=<encoded path+query>
 // - Secured with x-lurker-proxy-key (LURKER_PROXY_KEY)
+// - Supports Cloudflare Access Service Tokens:
+//     CF_ACCESS_CLIENT_ID / CF_ACCESS_CLIENT_SECRET
 // ======================================================
 
 const fetch = require("node-fetch");
@@ -36,18 +38,29 @@ async function fetchJson({ chain, urlPathWithQuery }) {
   const proxy = s(process.env.RESERVOIR_PROXY_URL);
   if (proxy) {
     const key = s(process.env.LURKER_PROXY_KEY);
+
+    // Cloudflare Access service token headers (optional)
+    const cfId = s(process.env.CF_ACCESS_CLIENT_ID);
+    const cfSecret = s(process.env.CF_ACCESS_CLIENT_SECRET);
+
     const proxUrl =
       proxy.replace(/\/+$/, "") +
       `/reservoir?chain=${encodeURIComponent(c)}&p=${encodeURIComponent(urlPathWithQuery)}`;
 
     if (debugOn()) {
-      console.log(`[LURKER][reservoir] viaProxy=${proxy} key=${key ? "set" : "missing"}`);
+      console.log(
+        `[LURKER][reservoir] viaProxy=${proxy} key=${key ? "set" : "missing"} cfAccess=${(cfId && cfSecret) ? "set" : "missing"}`
+      );
     }
 
     const res = await fetch(proxUrl, {
       headers: {
         accept: "application/json",
         ...(key ? { "x-lurker-proxy-key": key } : {}),
+        ...(cfId && cfSecret ? {
+          "CF-Access-Client-Id": cfId,
+          "CF-Access-Client-Secret": cfSecret
+        } : {}),
       },
       timeout: 15000
     });
@@ -56,6 +69,7 @@ async function fetchJson({ chain, urlPathWithQuery }) {
       const txt = await res.text().catch(() => "");
       throw new Error(`Proxy ${res.status}: ${txt.slice(0, 220)}`);
     }
+
     return await res.json();
   }
 
