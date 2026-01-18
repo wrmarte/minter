@@ -1,82 +1,16 @@
 // services/lurker/sources/reservoir.js
 // ======================================================
-// LURKER: Reservoir source adapter (listings + token rarity)
-// FIX:
-// - Base should NOT default to api-base.reservoir.tools (DNS ENOTFOUND in some envs)
-// - Default Base host: https://api.reservoir.tools with Base headers (x-chain-id=8453)
-// - api-base can still be used ONLY if you force it via RESERVOIR_BASE_BASEURL
-// - Logs baseUsed when LURKER_DEBUG=1 so you can verify runtime behavior
+// LURKER: Reservoir adapter with Railway-safe proxy support
+// - If RESERVOIR_PROXY_URL is set, ALL calls go through it
+// - Proxy uses: /reservoir?chain=<base|eth>&p=<encoded path+query>
+// - Secured with x-lurker-proxy-key (LURKER_PROXY_KEY)
 // ======================================================
 
 const fetch = require("node-fetch");
 
-// Cache: last-known-good base URL per chain (so we stop hammering dead domains)
-const GOOD_BASE_BY_CHAIN = new Map();
-
-function s(v) {
-  return String(v || "").trim();
-}
-function chainNorm(v) {
-  return s(v).toLowerCase();
-}
-function debugOn() {
-  return String(process.env.LURKER_DEBUG || "0").trim() === "1";
-}
-
-function dedupe(arr) {
-  const out = [];
-  const seen = new Set();
-  for (const x of arr) {
-    const v = s(x).replace(/\/+$/, "");
-    if (!v) continue;
-    if (seen.has(v)) continue;
-    seen.add(v);
-    out.push(v);
-  }
-  return out;
-}
-
-// Candidates per chain (env overrides are first)
-function candidateBaseUrls(chain) {
-  const c = chainNorm(chain);
-
-  const envEth = s(process.env.RESERVOIR_ETH_BASEURL);
-  const envBase = s(process.env.RESERVOIR_BASE_BASEURL);
-  const envApe = s(process.env.RESERVOIR_APE_BASEURL);
-
-  // IMPORTANT:
-  // You were failing on `api-base.reservoir.tools` (ENOTFOUND).
-  // So Base must default to `api.reservoir.tools` with Base headers.
-  if (c === "base") {
-    const list = [];
-    if (envBase) list.push(envBase);
-
-    // safest default
-    list.push("https://api.reservoir.tools");
-
-    // NOTE: we DO NOT include api-base by default anymore.
-    // If you REALLY want to try api-base, you must set:
-    // RESERVOIR_BASE_BASEURL=https://api-base.reservoir.tools
-    return dedupe(list);
-  }
-
-  if (c === "eth") {
-    const list = [];
-    if (envEth) list.push(envEth);
-    list.push("https://api.reservoir.tools");
-    return dedupe(list);
-  }
-
-  if (c === "ape") {
-    // Placeholder until you decide marketplace/indexer for ApeChain
-    const list = [];
-    if (envApe) list.push(envApe);
-    return dedupe(list);
-  }
-
-  // default
-  return dedupe(["https://api.reservoir.tools"]);
-}
+function s(v) { return String(v || "").trim(); }
+function chainNorm(v) { return s(v).toLowerCase(); }
+function debugOn() { return String(process.env.LURKER_DEBUG || "0").trim() === "1"; }
 
 function headersForChain(chain) {
   const h = { accept: "application/json" };
@@ -85,7 +19,6 @@ function headersForChain(chain) {
 
   const c = chainNorm(chain);
   if (c === "base") {
-    // Base routing headers
     h["x-chain-id"] = "8453";
     h["x-chain"] = "base";
     h["x-reservoir-chain"] = "base";
@@ -94,70 +27,69 @@ function headersForChain(chain) {
     h["x-chain"] = "ethereum";
     h["x-reservoir-chain"] = "ethereum";
   }
-
   return h;
 }
 
-// Try each host until success; cache the winner
-async function fetchJsonWithFallback({ chain, urlPathWithQuery }) {
+async function fetchJson({ chain, urlPathWithQuery }) {
   const c = chainNorm(chain);
 
-  const cachedGood = GOOD_BASE_BY_CHAIN.get(c);
-  const candidates = cachedGood
-    ? dedupe([cachedGood, ...candidateBaseUrls(c)])
-    : candidateBaseUrls(c);
+  const proxy = s(process.env.RESERVOIR_PROXY_URL);
+  if (proxy) {
+    const key = s(process.env.LURKER_PROXY_KEY);
+    const proxUrl =
+      proxy.replace(/\/+$/, "") +
+      `/reservoir?chain=${encodeURIComponent(c)}&p=${encodeURIComponent(urlPathWithQuery)}`;
 
-  let lastErr = null;
+    if (debugOn()) console.log(`[LURKER][reservoir] viaProxy=${proxy}`);
 
-  for (const base of candidates) {
-    try {
-      const fullUrl = base.replace(/\/+$/, "") + urlPathWithQuery;
+    const res = await fetch(proxUrl, {
+      headers: {
+        accept: "application/json",
+        ...(key ? { "x-lurker-proxy-key": key } : {}),
+      },
+      timeout: 15000
+    });
 
-      const res = await fetch(fullUrl, {
-        headers: headersForChain(c),
-        timeout: 12000
-      });
-
-      if (!res.ok) {
-        const txt = await res.text().catch(() => "");
-        throw new Error(`Reservoir ${res.status}: ${txt.slice(0, 220)}`);
-      }
-
-      const data = await res.json();
-      GOOD_BASE_BY_CHAIN.set(c, base);
-
-      if (debugOn()) {
-        console.log(`[LURKER][reservoir] chain=${c} baseUsed=${base}`);
-      }
-
-      return { data, baseUsed: base };
-    } catch (e) {
-      lastErr = e;
-      continue;
+    if (!res.ok) {
+      const txt = await res.text().catch(() => "");
+      throw new Error(`Proxy ${res.status}: ${txt.slice(0, 220)}`);
     }
+    return await res.json();
   }
 
-  if (debugOn()) {
-    console.log(`[LURKER][reservoir] chain=${c} ALL_HOSTS_FAILED candidates=${JSON.stringify(candidates)}`);
-  }
+  // Direct mode (will fail on Railway if Reservoir is blocked)
+  const base = "https://api.reservoir.tools";
+  const fullUrl = base + urlPathWithQuery;
 
-  throw lastErr || new Error("Reservoir: all base URLs failed");
+  if (debugOn()) console.log(`[LURKER][reservoir] direct baseUsed=${base}`);
+
+  const res = await fetch(fullUrl, {
+    headers: headersForChain(c),
+    timeout: 12000
+  });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Reservoir ${res.status}: ${txt.slice(0, 220)}`);
+  }
+  return await res.json();
 }
 
-// Fetch newest asks (no continuation here — live poller should always grab newest page)
 async function fetchListings({ chain, contract, limit = 20 }) {
   const c = chainNorm(chain);
+  const contractL = s(contract).toLowerCase();
 
   const qs = [];
-  qs.push(`contracts=${encodeURIComponent(String(contract || "").toLowerCase())}`);
+  qs.push(`contracts=${encodeURIComponent(contractL)}`);
   qs.push(`sortBy=createdAt`);
   qs.push(`limit=${encodeURIComponent(String(limit))}`);
   qs.push(`includeMetadata=true`);
 
   const path = `/orders/asks/v5?${qs.join("&")}`;
-  const { data } = await fetchJsonWithFallback({ chain: c, urlPathWithQuery: path });
+  const data = await fetchJson({ chain: c, urlPathWithQuery: path });
 
   const orders = Array.isArray(data?.orders) ? data.orders : [];
+
   const listings = orders.map((o) => {
     const token = o?.token || {};
     const price = o?.price || {};
@@ -177,7 +109,7 @@ async function fetchListings({ chain, contract, limit = 20 }) {
     return {
       source: "reservoir",
       chain: c,
-      contract: String(contract || "").toLowerCase(),
+      contract: contractL,
       listingId: s(o?.id || o?.orderId || o?.order?.id),
       tokenId: s(token?.tokenId),
       name: s(meta?.name),
@@ -195,13 +127,12 @@ async function fetchListings({ chain, contract, limit = 20 }) {
   return { listings };
 }
 
-// Fallback: fetch token details to get rarityRank if asks feed doesn't include it
 async function fetchTokenRarity({ chain, contract, tokenId }) {
   const c = chainNorm(chain);
-  const token = `${String(contract || "").toLowerCase()}:${String(tokenId || "")}`;
+  const token = `${s(contract).toLowerCase()}:${s(tokenId)}`;
 
   const path = `/tokens/v6?tokens=${encodeURIComponent(token)}&includeTopBid=false&includeAttributes=true`;
-  const { data } = await fetchJsonWithFallback({ chain: c, urlPathWithQuery: path });
+  const data = await fetchJson({ chain: c, urlPathWithQuery: path });
 
   const t = Array.isArray(data?.tokens) ? data.tokens[0] : null;
   const md = t?.token?.metadata || {};
@@ -211,4 +142,5 @@ async function fetchTokenRarity({ chain, contract, tokenId }) {
 }
 
 module.exports = { fetchListings, fetchTokenRarity };
+
 
