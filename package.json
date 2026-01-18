@@ -8,7 +8,8 @@
     "start": "node index.js",
     "deploy": "node registerCommands.js",
     "build": "npm install",
-    "preinstall": "npm config set legacy-peer-deps true"
+    "preinstall": "npm config set legacy-peer-deps true",
+    "start:proxy": "node proxy/index.js"
   },
   "engines": {
     "node": ">=20 <23"
@@ -19,6 +20,7 @@
     "discord.js": "^14.14.1",
     "dotenv": "^16.3.1",
     "ethers": "^6.10.0",
+    "express": "^4.19.2",
     "fs-extra": "^11.2.0",
     "graphql-request": "^6.1.0",
     "node-cache": "^5.1.2",
@@ -28,6 +30,7 @@
     "qrcode": "^1.5.1"
   }
 }
+
 
 
 
