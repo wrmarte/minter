@@ -44,6 +44,19 @@ try {
   console.warn('⚠️ Gift schema module not found (safe): ./services/gift/ensureGiftSchema');
 }
 
+/* ✅ NEW: LURKER (NFT listing watcher) — safe require */
+let startLurker = null;
+try {
+  const mod = require('./services/lurker/lurkerService');
+  if (mod && typeof mod.startLurker === 'function') {
+    startLurker = mod.startLurker;
+  } else {
+    console.warn('⚠️ LURKER module loaded but missing startLurker()');
+  }
+} catch (e) {
+  console.warn('⚠️ LURKER module not found (safe): ./services/lurker/lurkerService');
+}
+
 // ---------- Auto-integrate PG knobs ----------
 process.env.PGSSL_DISABLE      ??= '0';
 process.env.PG_POOL_MAX        ??= '5';
@@ -460,6 +473,23 @@ async function onClientReady() {
     console.warn('⚠️ channel ticker:', e?.message || e);
   }
 
+  // ✅ NEW: LURKER (NFT listing watcher)
+  try {
+    const enabled = String(process.env.LURKER_ENABLED || '0').trim() === '1';
+    if (enabled) {
+      if (startLurker) {
+        startLurker(client);
+        console.log('✅ LURKER started');
+      } else {
+        console.warn('⚠️ LURKER enabled but startLurker() not available');
+      }
+    } else {
+      console.log('🟢 LURKER disabled (LURKER_ENABLED!=1)');
+    }
+  } catch (e) {
+    console.warn('⚠️ LURKER failed to start:', e?.message || e);
+  }
+
   // ✅ Digest DB sanity snapshot to Railway logs (optional)
   try {
     await runDigestDbDebugOnBoot();
@@ -498,3 +528,4 @@ async function gracefulShutdown(sig) {
 
 process.once('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.once('SIGINT', () => gracefulShutdown('SIGINT'));
+
