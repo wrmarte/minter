@@ -96,6 +96,9 @@ async function ensureLurkerSchema(client) {
     await pg.query(`CREATE INDEX IF NOT EXISTS idx_lurker_rarity_meta_status ON lurker_rarity_meta(status);`);
     await pg.query(`CREATE INDEX IF NOT EXISTS idx_lurker_rarity_tokens_cc ON lurker_rarity_tokens(chain, contract);`);
     await pg.query(`CREATE INDEX IF NOT EXISTS idx_lurker_rarity_tokens_rank ON lurker_rarity_tokens(chain, contract, rank);`);
+    await pg.query(`CREATE INDEX IF NOT EXISTS idx_lurker_rarity_tokens_tokenid ON lurker_rarity_tokens(chain, contract, token_id);`);
+
+    await pg.query(`CREATE INDEX IF NOT EXISTS idx_lurker_rarity_trait_stats_cc ON lurker_rarity_trait_stats(chain, contract);`);
 
     // Add columns safely if older table exists
     await pg.query(`ALTER TABLE lurker_rules ADD COLUMN IF NOT EXISTS enabled BOOLEAN DEFAULT TRUE;`).catch(() => {});
@@ -115,3 +118,4 @@ async function ensureLurkerSchema(client) {
 }
 
 module.exports = { ensureLurkerSchema };
+
