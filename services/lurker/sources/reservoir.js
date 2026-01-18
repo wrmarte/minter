@@ -40,7 +40,9 @@ async function fetchJson({ chain, urlPathWithQuery }) {
       proxy.replace(/\/+$/, "") +
       `/reservoir?chain=${encodeURIComponent(c)}&p=${encodeURIComponent(urlPathWithQuery)}`;
 
-    if (debugOn()) console.log(`[LURKER][reservoir] viaProxy=${proxy}`);
+    if (debugOn()) {
+      console.log(`[LURKER][reservoir] viaProxy=${proxy} key=${key ? "set" : "missing"}`);
+    }
 
     const res = await fetch(proxUrl, {
       headers: {
