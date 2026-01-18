@@ -8,10 +8,14 @@
 //   OPENSEA_API_KEY=... (recommended)
 //   OPENSEA_BASE_URL=https://api.opensea.io (optional override)
 //
-//   OPTIONAL (new; safe defaults):
-//   OPENSEA_TIMEOUT_MS=10000
-//   OPENSEA_RETRIES=3
-//   OPENSEA_RETRY_BASE_MS=500
+//   OPTIONAL (safe defaults):
+//   OPENSEA_TIMEOUT_MS=25000
+//   OPENSEA_RETRIES=2
+//   OPENSEA_RETRY_BASE_MS=600
+//
+//   CIRCUIT BREAKER (prevents spam + hammering when OpenSea is down/blocked):
+//   OPENSEA_FAILS_TO_OPEN=3
+//   OPENSEA_CIRCUIT_OPEN_MS=180000
 // ======================================================
 
 const fetch = require("node-fetch");
@@ -27,7 +31,6 @@ function osBase() {
 function osHeaders() {
   const h = {
     accept: "application/json",
-    // A real UA can reduce weird edge behavior
     "user-agent": "MuscleMB-LURKER/1.0 (+https://railway.app)"
   };
   const key = s(process.env.OPENSEA_API_KEY);
@@ -45,13 +48,30 @@ function num(v, d) {
 }
 
 function jitter(ms) {
-  // +/- 15% jitter to avoid thundering herd
   const j = ms * 0.15;
   return Math.max(0, Math.floor(ms + (Math.random() * 2 - 1) * j));
 }
 
+function isAbortErr(e) {
+  const msg = String(e?.message || e || "").toLowerCase();
+  const name = String(e?.name || "").toLowerCase();
+  return name.includes("abort") || msg.includes("aborted") || msg.includes("abort");
+}
+
+// --- Circuit breaker state (per URL) ---
+const FAIL_STATE = new Map(); // url -> { fails, openUntilMs, lastErr }
+
+function circuitGet(url) {
+  return FAIL_STATE.get(url) || { fails: 0, openUntilMs: 0, lastErr: "" };
+}
+function circuitSet(url, st) {
+  FAIL_STATE.set(url, st);
+}
+function circuitReset(url) {
+  FAIL_STATE.set(url, { fails: 0, openUntilMs: 0, lastErr: "" });
+}
+
 async function fetchWithAbort(url, opts, timeoutMs) {
-  // Hard timeout using AbortController (works with node-fetch v2/v3)
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -63,20 +83,35 @@ async function fetchWithAbort(url, opts, timeoutMs) {
 }
 
 async function fetchJsonRetry(url, opts = {}) {
-  const timeoutMs = num(process.env.OPENSEA_TIMEOUT_MS, 10000);
-  const retries = Math.max(1, Math.min(6, num(process.env.OPENSEA_RETRIES, 3)));
-  const baseBackoff = Math.max(150, num(process.env.OPENSEA_RETRY_BASE_MS, 500));
+  const timeoutMs = Math.max(5000, num(process.env.OPENSEA_TIMEOUT_MS, 25000));
+  const retries = Math.max(1, Math.min(6, num(process.env.OPENSEA_RETRIES, 2)));
+  const baseBackoff = Math.max(150, num(process.env.OPENSEA_RETRY_BASE_MS, 600));
+
+  const failsToOpen = Math.max(1, Math.min(20, num(process.env.OPENSEA_FAILS_TO_OPEN, 3)));
+  const openMs = Math.max(30000, Math.min(30 * 60 * 1000, num(process.env.OPENSEA_CIRCUIT_OPEN_MS, 180000)));
+
+  // Circuit breaker check
+  const now = Date.now();
+  const st0 = circuitGet(url);
+  if (st0.openUntilMs && st0.openUntilMs > now) {
+    const left = st0.openUntilMs - now;
+    throw new Error(`OpenSea circuit open (${Math.ceil(left / 1000)}s remaining) — lastErr: ${st0.lastErr || "unknown"}`);
+  }
 
   let lastErr = null;
 
   for (let i = 0; i < retries; i++) {
     try {
-      const res = await fetchWithAbort(url, opts, timeoutMs);
+      // Progressive timeout per attempt (gives OpenSea a bit more time on later retries)
+      const attemptTimeout = Math.min(45000, timeoutMs + i * 5000);
 
-      // Rate limit / service busy handling
+      const res = await fetchWithAbort(url, opts, attemptTimeout);
+
       if (res.status === 429 || res.status === 503 || res.status === 502 || res.status === 504) {
         const ra = s(res.headers.get("retry-after"));
-        const waitMs = ra ? Math.min(30000, Math.max(500, Math.floor(Number(ra) * 1000))) : jitter(baseBackoff * Math.pow(2, i));
+        const waitMs = ra
+          ? Math.min(30000, Math.max(500, Math.floor(Number(ra) * 1000)))
+          : jitter(baseBackoff * Math.pow(2, i));
         const txt = await res.text().catch(() => "");
         throw new Error(`OpenSea ${res.status} (retry in ${waitMs}ms): ${txt.slice(0, 180)}`);
       }
@@ -86,13 +121,34 @@ async function fetchJsonRetry(url, opts = {}) {
         throw new Error(`OpenSea ${res.status}: ${txt.slice(0, 220)}`);
       }
 
-      return await res.json();
+      const json = await res.json();
+
+      // Success: reset circuit breaker
+      circuitReset(url);
+
+      return json;
     } catch (e) {
       lastErr = e;
 
-      // AbortError or network error: backoff & retry
+      // Update circuit breaker state
+      const st = circuitGet(url);
+      st.fails += 1;
+      st.lastErr = String(e?.message || e || "unknown").slice(0, 160);
+
+      // If repeated aborts/timeouts (or repeated failures), open circuit
+      if (st.fails >= failsToOpen) {
+        st.openUntilMs = Date.now() + openMs;
+        circuitSet(url, st);
+        throw new Error(`OpenSea circuit opened for ${Math.ceil(openMs / 1000)}s — ${st.lastErr}`);
+      }
+
+      circuitSet(url, st);
+
       const waitMs = jitter(baseBackoff * Math.pow(2, i));
-      if (debugOn()) console.log(`[LURKER][opensea] retry ${i + 1}/${retries} in ${waitMs}ms — ${e?.message || e}`);
+      if (debugOn()) {
+        const tag = isAbortErr(e) ? "abort" : "err";
+        console.log(`[LURKER][opensea] retry ${i + 1}/${retries} in ${waitMs}ms — (${tag}) ${e?.message || e}`);
+      }
       if (i < retries - 1) await sleep(waitMs);
     }
   }
@@ -120,8 +176,6 @@ async function fetchListings({ chain, contract, limit = 20 }) {
   const c = chainNorm(chain);
   const contractL = s(contract).toLowerCase();
 
-  // OpenSea v1 events endpoint (widely used historically)
-  // NOTE: For Base, OpenSea coverage depends on collection support.
   const qs = [];
   qs.push(`event_type=created`);
   qs.push(`asset_contract_address=${encodeURIComponent(contractL)}`);
@@ -146,7 +200,6 @@ async function fetchListings({ chain, contract, limit = 20 }) {
       `${contractL}:${tokenId}:${ev?.created_date || ""}`
     );
 
-    // price fields vary; use starting_price if present
     const priceNative = ev?.starting_price != null ? weiToEthStr(ev.starting_price) : null;
 
     const payment = ev?.payment_token || {};
@@ -156,13 +209,10 @@ async function fetchListings({ chain, contract, limit = 20 }) {
     const name = s(asset?.name);
     const openseaUrl = s(asset?.permalink);
 
-    // Traits sometimes come through as "traits" array, but unreliable -> we fetch via Moralis later
     let traits = {};
     if (asset?.traits && typeof asset.traits === "object" && !Array.isArray(asset.traits)) {
-      // sometimes returns object map
       traits = asset.traits;
     } else if (Array.isArray(asset?.traits)) {
-      // array of {trait_type, value}
       for (const t of asset.traits) {
         const k = s(t?.trait_type);
         const v = s(t?.value);
@@ -184,7 +234,7 @@ async function fetchListings({ chain, contract, limit = 20 }) {
       image,
       openseaUrl,
       seller,
-      rarityRank: null, // computed later
+      rarityRank: null,
       rarityScore: null,
       traits,
       priceNative: priceNative != null ? priceNative : null,
