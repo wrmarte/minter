@@ -6,7 +6,7 @@
 // - Secured with x-lurker-proxy-key (LURKER_PROXY_KEY)
 // - Supports Cloudflare Access Service Tokens:
 //     CF_ACCESS_CLIENT_ID / CF_ACCESS_CLIENT_SECRET
-// ======================================================
+// =======================================================
 
 const fetch = require("node-fetch");
 
