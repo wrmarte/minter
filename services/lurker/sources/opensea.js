@@ -9,13 +9,20 @@
 //   OPENSEA_BASE_URL=https://api.opensea.io (optional override)
 //
 //   OPTIONAL (safe defaults):
-//   OPENSEA_TIMEOUT_MS=25000
+//   OPENSEA_TIMEOUT_MS=30000
 //   OPENSEA_RETRIES=2
-//   OPENSEA_RETRY_BASE_MS=600
+//   OPENSEA_RETRY_BASE_MS=650
+//
+//   RESPONSE CACHE (reduces hammering for multiple rules):
+//   OPENSEA_CACHE_MS=8000
 //
 //   CIRCUIT BREAKER (prevents spam + hammering when OpenSea is down/blocked):
 //   OPENSEA_FAILS_TO_OPEN=3
 //   OPENSEA_CIRCUIT_OPEN_MS=180000
+//
+// IMPORTANT PATCH:
+// - Abort/timeouts are treated as "soft" errors (DO NOT open circuit).
+//   This fixes the repeated "The user aborted a request." -> circuit open loop.
 // ======================================================
 
 const fetch = require("node-fetch");
@@ -59,16 +66,42 @@ function isAbortErr(e) {
 }
 
 // --- Circuit breaker state (per URL) ---
-const FAIL_STATE = new Map(); // url -> { fails, openUntilMs, lastErr }
-
+// NOTE: abort/timeouts are tracked separately as "softFails" and do NOT open the circuit.
+const FAIL_STATE = new Map(); // url -> { fails, softFails, openUntilMs, lastErr }
 function circuitGet(url) {
-  return FAIL_STATE.get(url) || { fails: 0, openUntilMs: 0, lastErr: "" };
+  return FAIL_STATE.get(url) || { fails: 0, softFails: 0, openUntilMs: 0, lastErr: "" };
 }
 function circuitSet(url, st) {
   FAIL_STATE.set(url, st);
 }
 function circuitReset(url) {
-  FAIL_STATE.set(url, { fails: 0, openUntilMs: 0, lastErr: "" });
+  FAIL_STATE.set(url, { fails: 0, softFails: 0, openUntilMs: 0, lastErr: "" });
+}
+
+// --- Small response cache (reduces repeated offset=0 requests) ---
+const CACHE = new Map(); // cacheKey -> { ts, data }
+function cacheKeyFor(url) {
+  return url;
+}
+function cacheGet(url) {
+  const ms = Math.max(0, num(process.env.OPENSEA_CACHE_MS, 8000));
+  if (!ms) return null;
+  const k = cacheKeyFor(url);
+  const it = CACHE.get(k);
+  if (!it) return null;
+  if (Date.now() - it.ts > ms) return null;
+  return it.data || null;
+}
+function cacheSet(url, data) {
+  const ms = Math.max(0, num(process.env.OPENSEA_CACHE_MS, 8000));
+  if (!ms) return;
+  const k = cacheKeyFor(url);
+  CACHE.set(k, { ts: Date.now(), data });
+  // bound cache size
+  if (CACHE.size > 250) {
+    const firstKey = CACHE.keys().next().value;
+    if (firstKey) CACHE.delete(firstKey);
+  }
 }
 
 async function fetchWithAbort(url, opts, timeoutMs) {
@@ -83,34 +116,41 @@ async function fetchWithAbort(url, opts, timeoutMs) {
 }
 
 async function fetchJsonRetry(url, opts = {}) {
-  const timeoutMs = Math.max(5000, num(process.env.OPENSEA_TIMEOUT_MS, 25000));
+  // Cache hit (bypasses circuit + retries)
+  const cached = cacheGet(url);
+  if (cached) return cached;
+
+  const timeoutMs = Math.max(8000, num(process.env.OPENSEA_TIMEOUT_MS, 30000));
   const retries = Math.max(1, Math.min(6, num(process.env.OPENSEA_RETRIES, 2)));
-  const baseBackoff = Math.max(150, num(process.env.OPENSEA_RETRY_BASE_MS, 600));
+  const baseBackoff = Math.max(200, num(process.env.OPENSEA_RETRY_BASE_MS, 650));
 
   const failsToOpen = Math.max(1, Math.min(20, num(process.env.OPENSEA_FAILS_TO_OPEN, 3)));
   const openMs = Math.max(30000, Math.min(30 * 60 * 1000, num(process.env.OPENSEA_CIRCUIT_OPEN_MS, 180000)));
 
-  // Circuit breaker check
+  // Circuit breaker check (ONLY for "hard fails")
   const now = Date.now();
   const st0 = circuitGet(url);
   if (st0.openUntilMs && st0.openUntilMs > now) {
     const left = st0.openUntilMs - now;
-    throw new Error(`OpenSea circuit open (${Math.ceil(left / 1000)}s remaining) — lastErr: ${st0.lastErr || "unknown"}`);
+    const err = new Error(`OpenSea circuit open (${Math.ceil(left / 1000)}s remaining) — lastErr: ${st0.lastErr || "unknown"}`);
+    err.code = "OPENSEA_CIRCUIT_OPEN";
+    throw err;
   }
 
   let lastErr = null;
 
   for (let i = 0; i < retries; i++) {
     try {
-      // Progressive timeout per attempt (gives OpenSea a bit more time on later retries)
-      const attemptTimeout = Math.min(45000, timeoutMs + i * 5000);
+      // Progressive timeout per attempt (more patience on later tries)
+      const attemptTimeout = Math.min(60000, timeoutMs + i * 8000);
 
       const res = await fetchWithAbort(url, opts, attemptTimeout);
 
+      // Backoff statuses
       if (res.status === 429 || res.status === 503 || res.status === 502 || res.status === 504) {
         const ra = s(res.headers.get("retry-after"));
         const waitMs = ra
-          ? Math.min(30000, Math.max(500, Math.floor(Number(ra) * 1000)))
+          ? Math.min(45000, Math.max(1000, Math.floor(Number(ra) * 1000)))
           : jitter(baseBackoff * Math.pow(2, i));
         const txt = await res.text().catch(() => "");
         throw new Error(`OpenSea ${res.status} (retry in ${waitMs}ms): ${txt.slice(0, 180)}`);
@@ -123,32 +163,44 @@ async function fetchJsonRetry(url, opts = {}) {
 
       const json = await res.json();
 
-      // Success: reset circuit breaker
+      // Success: reset circuit breaker + store cache
       circuitReset(url);
+      cacheSet(url, json);
 
       return json;
     } catch (e) {
       lastErr = e;
 
-      // Update circuit breaker state
+      const abort = isAbortErr(e);
+
+      // Update circuit breaker state:
+      // - Abort/timeouts are "softFails" and do NOT open the circuit.
+      // - Only "hard" errors (429/5xx/4xx/network non-abort) open the circuit.
       const st = circuitGet(url);
-      st.fails += 1;
       st.lastErr = String(e?.message || e || "unknown").slice(0, 160);
 
-      // If repeated aborts/timeouts (or repeated failures), open circuit
-      if (st.fails >= failsToOpen) {
-        st.openUntilMs = Date.now() + openMs;
+      if (abort) {
+        st.softFails += 1;
         circuitSet(url, st);
-        throw new Error(`OpenSea circuit opened for ${Math.ceil(openMs / 1000)}s — ${st.lastErr}`);
+      } else {
+        st.fails += 1;
+        // Open circuit only on hard fails
+        if (st.fails >= failsToOpen) {
+          st.openUntilMs = Date.now() + openMs;
+          circuitSet(url, st);
+          const err = new Error(`OpenSea circuit opened for ${Math.ceil(openMs / 1000)}s — ${st.lastErr}`);
+          err.code = "OPENSEA_CIRCUIT_OPENED";
+          throw err;
+        }
+        circuitSet(url, st);
       }
-
-      circuitSet(url, st);
 
       const waitMs = jitter(baseBackoff * Math.pow(2, i));
       if (debugOn()) {
-        const tag = isAbortErr(e) ? "abort" : "err";
+        const tag = abort ? "abort/timeout" : "hard";
         console.log(`[LURKER][opensea] retry ${i + 1}/${retries} in ${waitMs}ms — (${tag}) ${e?.message || e}`);
       }
+
       if (i < retries - 1) await sleep(waitMs);
     }
   }
@@ -185,6 +237,7 @@ async function fetchListings({ chain, contract, limit = 20 }) {
 
   const url = `${osBase()}/api/v1/events?${qs.join("&")}`;
 
+  // NOTE: we only log the URL when we actually try to fetch (cache may bypass)
   if (debugOn()) console.log(`[LURKER][opensea] url=${url}`);
 
   const data = await fetchJsonRetry(url, { headers: osHeaders() });
@@ -248,3 +301,4 @@ async function fetchListings({ chain, contract, limit = 20 }) {
 }
 
 module.exports = { fetchListings };
+
