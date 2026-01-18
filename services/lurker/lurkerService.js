@@ -1,12 +1,11 @@
 // services/lurker/lurkerService.js
 // ======================================================
 // LURKER: Background poller (OpenSea + Moralis + Local Rarity)
-// FIXES/UPGRADES:
-// - Source: OpenSea listings (no Reservoir dependency)
-// - Traits: Moralis token metadata fetch (reliable)
-// - Rarity: local OpenRarity-style build + DB rank/score
-// - Starts rarity builder automatically
-// - Throttles errors per rule (prevents spam)
+//
+// Optional LEADER LOCK (prevents multi-instance polling):
+//   LURKER_LEADER_LOCK=1 (default 0)
+//   LURKER_LOCK_KEY=98234123 (optional int)
+//
 // ======================================================
 
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require("discord.js");
@@ -168,21 +167,29 @@ async function isSeen(client, ruleId, listingId) {
   return (r.rowCount || 0) > 0;
 }
 
-async function fetchFromSource(rule) {
+async function fetchFromSource(rule, tickCache) {
   const source = String(process.env.LURKER_SOURCE || "opensea").toLowerCase();
+
+  const key = `${String(rule.chain || "").toLowerCase()}:${String(rule.contract || "").toLowerCase()}:${source}`;
+  if (tickCache && tickCache.has(key)) return tickCache.get(key);
+
+  let out;
   if (source === "opensea") {
-    return openseaFetchListings({
+    out = await openseaFetchListings({
+      chain: rule.chain,
+      contract: rule.contract,
+      limit: 25,
+    });
+  } else {
+    out = await openseaFetchListings({
       chain: rule.chain,
       contract: rule.contract,
       limit: 25,
     });
   }
-  // default to opensea for safety
-  return openseaFetchListings({
-    chain: rule.chain,
-    contract: rule.contract,
-    limit: 25,
-  });
+
+  if (tickCache) tickCache.set(key, out);
+  return out;
 }
 
 function throttleRuleError(ruleId, err) {
@@ -231,29 +238,6 @@ async function ensureTraitsIfNeeded(rule, listing) {
   return listing;
 }
 
-async function ensureRarityFromDb(rule, listing) {
-  const rarityMax = rule.rarity_max != null ? Number(rule.rarity_max) : null;
-  if (!rarityMax || !Number.isFinite(rarityMax)) return listing;
-
-  // If already present, keep
-  if (listing.rarityRank != null) return listing;
-
-  try {
-    const r = await getTokenRarity(listing.client || listing._client || rule._client || null, {
-      chain: listing.chain,
-      contract: listing.contract,
-      tokenId: listing.tokenId,
-    });
-    // (we pass client properly below; this is just defensive)
-    if (r && r.rank != null) listing.rarityRank = r.rank;
-    if (r && r.score != null) listing.rarityScore = r.score;
-  } catch {
-    // ignore
-  }
-
-  return listing;
-}
-
 async function fillRarity(client, rule, listing) {
   const rarityMax = rule.rarity_max != null ? Number(rule.rarity_max) : null;
   if (!rarityMax || !Number.isFinite(rarityMax)) return listing;
@@ -280,8 +264,8 @@ async function fillRarity(client, rule, listing) {
   return listing;
 }
 
-async function processRule(client, rule, debug) {
-  const out = await fetchFromSource(rule);
+async function processRule(client, rule, debug, tickCache) {
+  const out = await fetchFromSource(rule, tickCache);
   const listings = Array.isArray(out?.listings) ? out.listings : [];
 
   if (debug) {
@@ -331,6 +315,59 @@ async function processRule(client, rule, debug) {
   }
 }
 
+// --- Optional leader lock (prevents multi-instance polling) ---
+async function acquireLeaderLock(client) {
+  const enabled = String(process.env.LURKER_LEADER_LOCK || "0").trim() === "1";
+  if (!enabled) return true;
+
+  const pg = client?.pg;
+  if (!pg || typeof pg.connect !== "function") {
+    console.log("[LURKER] leader lock requested but client.pg.connect missing — continuing without lock");
+    return true;
+  }
+
+  if (client.__lurkerLockClient) return true;
+
+  const key = Number(process.env.LURKER_LOCK_KEY || "98234123");
+  if (!Number.isFinite(key)) return true;
+
+  try {
+    const lockClient = await pg.connect();
+    const res = await lockClient.query("SELECT pg_try_advisory_lock($1) AS ok", [key]);
+    const ok = !!res?.rows?.[0]?.ok;
+
+    if (!ok) {
+      lockClient.release?.();
+      console.log("[LURKER] leader lock NOT acquired — another instance is running; lurker will not start here.");
+      return false;
+    }
+
+    client.__lurkerLockClient = lockClient;
+    client.__lurkerLockKey = key;
+
+    const release = async () => {
+      try {
+        if (client.__lurkerLockClient) {
+          await client.__lurkerLockClient.query("SELECT pg_advisory_unlock($1)", [client.__lurkerLockKey]);
+          client.__lurkerLockClient.release?.();
+        }
+      } catch {}
+      client.__lurkerLockClient = null;
+      client.__lurkerLockKey = null;
+    };
+
+    process.once("SIGTERM", release);
+    process.once("SIGINT", release);
+    process.once("exit", release);
+
+    console.log("[LURKER] leader lock acquired ✅");
+    return true;
+  } catch (e) {
+    console.log("[LURKER] leader lock error — continuing without lock:", e?.message || e);
+    return true;
+  }
+}
+
 function startLurker(client) {
   const enabled = String(process.env.LURKER_ENABLED || "0").trim() === "1";
   if (!enabled) {
@@ -351,7 +388,7 @@ function startLurker(client) {
     console.warn("[LURKER] rarityBuilder failed to start:", e?.message || e);
   }
 
-  console.log(`🟢 [LURKER] started pollMs=${pollMs}`);
+  console.log(`🟢 [LURKER] starting... pollMs=${pollMs}`);
 
   let running = false;
 
@@ -360,13 +397,16 @@ function startLurker(client) {
     running = true;
     metadataLookupsThisTick = 0;
 
+    // per-tick shared cache (so multiple rules for same contract don't spam OpenSea)
+    const tickCache = new Map();
+
     try {
       const rules = await getEnabledRules(client);
       if (debug) console.log(`[LURKER] rules enabled=${rules.length}`);
 
       for (const r of rules) {
         try {
-          await processRule(client, r, debug);
+          await processRule(client, r, debug, tickCache);
         } catch (e) {
           throttleRuleError(r.id, e);
         }
@@ -378,9 +418,17 @@ function startLurker(client) {
     }
   };
 
-  setTimeout(tick, 2500);
-  setInterval(tick, pollMs);
+  // leader lock gate (async start)
+  (async () => {
+    const ok = await acquireLeaderLock(client);
+    if (!ok) return;
+
+    setTimeout(tick, 2500);
+    setInterval(tick, pollMs);
+    console.log(`🟢 [LURKER] started pollMs=${pollMs}`);
+  })().catch(() => null);
 }
 
 module.exports = { startLurker };
+
 
