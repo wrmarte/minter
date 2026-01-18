@@ -4,7 +4,7 @@
 // - If RESERVOIR_PROXY_URL is set, ALL calls go through it
 // - Proxy uses: /reservoir?chain=<base|eth>&p=<encoded path+query>
 // - Secured with x-lurker-proxy-key (LURKER_PROXY_KEY)
-// ======================================================
+// =======================================================
 
 const fetch = require("node-fetch");
 
