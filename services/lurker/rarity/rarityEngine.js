@@ -11,7 +11,9 @@ function s(v) { return String(v || "").trim(); }
 function chainNorm(v) { return s(v).toLowerCase(); }
 
 async function getTokenRarity(client, { chain, contract, tokenId }) {
-  await ensureLurkerSchema(client);
+  const ok = await ensureLurkerSchema(client);
+  if (!ok) return { score: null, rank: null };
+
   const pg = client.pg;
 
   const c = chainNorm(chain);
@@ -40,17 +42,20 @@ async function getTokenRarity(client, { chain, contract, tokenId }) {
 }
 
 async function getBuildStatus(client, { chain, contract }) {
-  await ensureLurkerSchema(client);
+  const ok = await ensureLurkerSchema(client);
+  if (!ok) return null;
+
   const pg = client.pg;
 
   const c = chainNorm(chain);
   const addr = s(contract).toLowerCase();
 
   const r = await pg.query(
-    `SELECT status, processed_count, total_supply, last_error FROM lurker_rarity_meta WHERE chain=$1 AND contract=$2`,
+    `SELECT status, processed_count, total_supply, last_error, updated_at FROM lurker_rarity_meta WHERE chain=$1 AND contract=$2`,
     [c, addr]
   );
   return r.rows?.[0] || null;
 }
 
 module.exports = { getTokenRarity, getBuildStatus };
+
