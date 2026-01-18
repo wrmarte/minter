@@ -5,6 +5,7 @@
 // - Pulls listings from source adapter
 // - Filters by rarity/traits/max price
 // - Posts emerald alerts with Buy button
+// - Throttles repeated errors (prevents log spam)
 // ======================================================
 
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require("discord.js");
@@ -13,6 +14,9 @@ const { ensureLurkerSchema } = require("./schema");
 const { fetchListings: reservoirFetchListings } = require("./sources/reservoir");
 
 const LURKER_COLOR = 0x00c853; // emerald
+
+// Error throttling per rule so we don't spam logs every 15s
+const RULE_ERR_STATE = new Map(); // ruleId -> { lastLogMs, count }
 
 function jparse(s, fallback) {
   try { return JSON.parse(s); } catch { return fallback; }
@@ -49,7 +53,6 @@ function passesFilters(rule, listing) {
 
   const rarityHit = (rarityMax != null && Number.isFinite(rarityMax) && rank != null && Number.isFinite(rank) && rank <= rarityMax);
 
-  // If no rarity data exists from the source, rarityHit will be false — traits can still trigger.
   const allow = rarityHit || traitHit;
   if (!allow) return false;
 
@@ -69,7 +72,7 @@ async function postAlert(client, rule, listing, why) {
   if (!ch) return;
 
   const title = `🟢 LURKER HIT — ${listing.contract.slice(0, 6)}… #${listing.tokenId}`;
-  const url = listing.openseaUrl || listing.externalUrl || null;
+  const url = listing.openseaUrl || null;
 
   const embed = new EmbedBuilder()
     .setColor(LURKER_COLOR)
@@ -160,13 +163,32 @@ async function fetchFromSource(rule, cursor) {
       limit: 20,
     });
   }
-  // Future: opensea, magiceden, custom indexer
   return { listings: [], nextCursor: null };
 }
 
-async function processRule(client, rule) {
+function throttleRuleError(ruleId, err) {
+  const now = Date.now();
+  const st = RULE_ERR_STATE.get(ruleId) || { lastLogMs: 0, count: 0 };
+  st.count += 1;
+
+  // Log at most once per 60s per rule, but include count
+  if (now - st.lastLogMs > 60000) {
+    st.lastLogMs = now;
+    const msg = err?.message || String(err || "unknown error");
+    console.log(`[LURKER] rule#${ruleId} error (x${st.count}): ${msg}`);
+    st.count = 0;
+  }
+
+  RULE_ERR_STATE.set(ruleId, st);
+}
+
+async function processRule(client, rule, debug) {
   const cursor = await getCursor(client, rule.id);
   const { listings, nextCursor } = await fetchFromSource(rule, cursor);
+
+  if (debug) {
+    console.log(`[LURKER] rule#${rule.id} chain=${rule.chain} contract=${String(rule.contract).slice(0, 10)}.. listings=${listings.length} cursor=${cursor ? "yes" : "no"}`);
+  }
 
   for (const listing of listings) {
     if (await isSeen(client, rule.id, listing.listingId)) continue;
@@ -219,11 +241,12 @@ function startLurker(client) {
     try {
       const rules = await getEnabledRules(client);
       if (debug) console.log(`[LURKER] rules enabled=${rules.length}`);
+
       for (const r of rules) {
         try {
-          await processRule(client, r);
+          await processRule(client, r, debug);
         } catch (e) {
-          console.log(`[LURKER] rule#${r.id} error:`, e?.message || e);
+          throttleRuleError(r.id, e);
         }
       }
     } catch (e) {
@@ -233,9 +256,9 @@ function startLurker(client) {
     }
   };
 
-  // run once soon, then interval
-  setTimeout(tick, 2000);
+  setTimeout(tick, 2500);
   setInterval(tick, pollMs);
 }
 
 module.exports = { startLurker };
+
