@@ -1,12 +1,13 @@
 // services/lurker/lurkerService.js
 // ======================================================
 // LURKER: Background poller (OpenSea + Moralis + Local Rarity)
-//
 // FIXES/UPGRADES:
-// - OpenSea v2 support via rule.opensea_slug (slug/url in UI)
-// - Per-rule metadata cache to avoid repeated Moralis calls for same tokenId
-// - Per-tick listing de-dupe to avoid redundant work
-// - Keeps your rarity builder + filters intact
+// - OpenSea v2 feed via opensea_slug when present
+// - Traits: Moralis token metadata fetch (reliable)
+// - Rarity: local OpenRarity-style build + DB rank/score
+// - Starts rarity builder automatically
+// - Throttles errors per rule (prevents spam)
+// - NEW: per-tick metadata cache to prevent duplicate Moralis calls
 // ======================================================
 
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require("discord.js");
@@ -25,6 +26,9 @@ const RULE_ERR_STATE = new Map(); // ruleId -> { lastLogMs, count }
 
 // Rate limit Moralis token metadata fetches per tick
 let metadataLookupsThisTick = 0;
+
+// Per-tick metadata cache: key = chain:contract:tokenId -> {name,image,traits}
+let META_CACHE = new Map();
 
 function jparse(s, fallback) {
   try { return JSON.parse(s); } catch { return fallback; }
@@ -169,22 +173,21 @@ async function isSeen(client, ruleId, listingId) {
 }
 
 async function fetchFromSource(rule) {
+  // We pick source per-env, but OpenSea v2 uses opensea_slug when present.
   const source = String(process.env.LURKER_SOURCE || "opensea").toLowerCase();
-
   if (source === "opensea") {
     return openseaFetchListings({
       chain: rule.chain,
       contract: rule.contract,
-      osSlug: (rule.opensea_slug || "").trim() || null,
+      openseaSlug: rule.opensea_slug || null,
       limit: 25,
     });
   }
-
-  // default to opensea for safety
+  // default to opensea
   return openseaFetchListings({
     chain: rule.chain,
     contract: rule.contract,
-    osSlug: (rule.opensea_slug || "").trim() || null,
+    openseaSlug: rule.opensea_slug || null,
     limit: 25,
   });
 }
@@ -204,7 +207,7 @@ function throttleRuleError(ruleId, err) {
   RULE_ERR_STATE.set(ruleId, st);
 }
 
-async function ensureTraitsIfNeeded(rule, listing, mdCache) {
+async function ensureTraitsIfNeeded(rule, listing) {
   // Only fetch traits if:
   // - rule has traits filter OR rule has rarity_max (rarity requires traits in our system)
   const hasRuleTraits = Boolean((rule.traits_json || "").trim());
@@ -213,18 +216,17 @@ async function ensureTraitsIfNeeded(rule, listing, mdCache) {
   if (!hasRuleTraits && !needsRarity) return listing;
   if (listing?.traits && Object.keys(listing.traits).length) return listing;
 
-  // per-rule cache to prevent spam (tokenId repeats in v2 feed)
-  const cacheKey = `${listing.contract}:${listing.tokenId}`;
-  if (mdCache && mdCache.has(cacheKey)) {
-    const cached = mdCache.get(cacheKey);
-    if (cached?.traits) listing.traits = cached.traits;
-    if (!listing.name && cached?.name) listing.name = cached.name;
-    if (!listing.image && cached?.image) listing.image = cached.image;
-    return listing;
-  }
-
   const maxPerTick = Number(process.env.LURKER_METADATA_LOOKUPS_PER_TICK || 8);
   if (metadataLookupsThisTick >= maxPerTick) return listing;
+
+  const cacheKey = `${chainNorm(listing.chain)}:${s(listing.contract).toLowerCase()}:${s(listing.tokenId)}`;
+  const cached = META_CACHE.get(cacheKey);
+  if (cached) {
+    if (!listing.traits || !Object.keys(listing.traits).length) listing.traits = cached.traits || listing.traits;
+    if (!listing.name && cached.name) listing.name = cached.name;
+    if (!listing.image && cached.image) listing.image = cached.image;
+    return listing;
+  }
 
   try {
     metadataLookupsThisTick += 1;
@@ -234,7 +236,7 @@ async function ensureTraitsIfNeeded(rule, listing, mdCache) {
       tokenId: listing.tokenId,
     });
 
-    if (mdCache) mdCache.set(cacheKey, md);
+    META_CACHE.set(cacheKey, md || {});
 
     if (md?.traits) listing.traits = md.traits;
     if (!listing.name && md?.name) listing.name = md.name;
@@ -262,7 +264,7 @@ async function fillRarity(client, rule, listing) {
 
   // Helpful debug if still missing
   if (listing.rarityRank == null && debugOn()) {
-    const st = await getBuildStatus(client, { chain: listing.chain, contract: listing.contract }).catch(() => null);
+    const st = await getBuildStatus(client, { chain: listing.chain, contract: listing.contract });
     const status = st?.status || "unknown";
     const pc = st?.processed_count ?? 0;
     const err = st?.last_error ? ` err=${String(st.last_error).slice(0, 80)}` : "";
@@ -274,45 +276,23 @@ async function fillRarity(client, rule, listing) {
 
 async function processRule(client, rule, debug) {
   const out = await fetchFromSource(rule);
-  const rawListings = Array.isArray(out?.listings) ? out.listings : [];
+  const listings = Array.isArray(out?.listings) ? out.listings : [];
 
-  // De-dupe within tick by listingId (and contract:tokenId) to avoid repeated Moralis calls
-  const uniq = [];
-  const seenLocal = new Set();
-  for (const L of rawListings) {
-    const lid = s(L?.listingId);
-    const keyA = lid ? `lid:${lid}` : null;
-    const keyB = (L?.contract && L?.tokenId) ? `ct:${lower(L.contract)}:${s(L.tokenId)}` : null;
-    const key = keyA || keyB;
-    if (!key) continue;
-    if (seenLocal.has(key)) continue;
-    seenLocal.add(key);
-    uniq.push(L);
-  }
-
-  const listings = uniq;
-
-  const os = s(rule.opensea_slug || "");
   if (debug) {
     console.log(
-      `[LURKER] rule#${rule.id} src=${process.env.LURKER_SOURCE || "opensea"} chain=${rule.chain} contract=${String(rule.contract).slice(0, 10)}.. listings=${listings.length}${os ? ` os=${os}` : ""}`
+      `[LURKER] rule#${rule.id} src=${process.env.LURKER_SOURCE || "opensea"} chain=${rule.chain} contract=${String(rule.contract).slice(0, 10)}.. listings=${listings.length}${rule.opensea_slug ? ` os=${rule.opensea_slug}` : ""}`
     );
   }
 
-  // Per-rule metadata cache (prevents token 375 spam)
-  const mdCache = new Map();
-
   for (const listing of listings) {
+    if (!listing?.listingId) continue;
     if (await isSeen(client, rule.id, listing.listingId)) continue;
 
     let evaluated = listing;
     evaluated.chain = chainNorm(evaluated.chain || rule.chain);
     evaluated.contract = s(evaluated.contract || rule.contract).toLowerCase();
 
-    // Ensure traits if needed (Moralis) with caching
-    evaluated = await ensureTraitsIfNeeded(rule, evaluated, mdCache);
-
-    // Ensure rarity from DB if needed
+    evaluated = await ensureTraitsIfNeeded(rule, evaluated);
     evaluated = await fillRarity(client, rule, evaluated);
 
     const ruleTraits = jparse(rule.traits_json || "", null);
@@ -363,15 +343,17 @@ function startLurker(client) {
     console.warn("[LURKER] rarityBuilder failed to start:", e?.message || e);
   }
 
-  const src = String(process.env.LURKER_SOURCE || "opensea").trim();
-  console.log(`🟢 [LURKER] started pollMs=${pollMs} source=${src}`);
+  console.log(`🟢 [LURKER] started pollMs=${pollMs}`);
 
   let running = false;
 
   const tick = async () => {
     if (running) return;
     running = true;
+
+    // Reset per-tick counters & cache
     metadataLookupsThisTick = 0;
+    META_CACHE = new Map();
 
     try {
       const rules = await getEnabledRules(client);
@@ -396,5 +378,4 @@ function startLurker(client) {
 }
 
 module.exports = { startLurker };
-
 
