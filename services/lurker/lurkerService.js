@@ -8,6 +8,12 @@
 // - Starts rarity builder automatically
 // - Throttles errors per rule (prevents spam)
 // - NEW: per-tick metadata cache to prevent duplicate Moralis calls
+//
+// ✅ PATCH (2026-01-18):
+// - Add per-rule tick summary (fetched/unseen/seen/hit/posted/skipped/wait)
+// - Log newest/oldest event timestamps + ids (detect stale feed)
+// - Optional: log every unseen listing + skip reason (LURKER_LOG_ALL_UNSEEN=1)
+// - Optional: dump listing keys/sample to discover timestamp fields (LURKER_DUMP_SAMPLE=1)
 // ======================================================
 
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require("discord.js");
@@ -23,6 +29,9 @@ const LURKER_COLOR = 0x00c853; // emerald
 
 // Error throttling per rule
 const RULE_ERR_STATE = new Map(); // ruleId -> { lastLogMs, count }
+
+// Per-rule feed movement state (in-memory)
+const RULE_FEED_STATE = new Map(); // ruleId -> { lastNewestId, lastNewestTsMs, sameNewestTicks, lastTickMs }
 
 // Rate limit Moralis token metadata fetches per tick
 let metadataLookupsThisTick = 0;
@@ -47,8 +56,82 @@ function debugOn() {
   return String(process.env.LURKER_DEBUG || "0").trim() === "1";
 }
 
+function logSummaryOn() {
+  const v = String(process.env.LURKER_LOG_SUMMARY || "").trim();
+  if (v === "0") return false;
+  // default: on when debug=1
+  return debugOn();
+}
+
+function logAllUnseenOn() {
+  return String(process.env.LURKER_LOG_ALL_UNSEEN || "0").trim() === "1";
+}
+
+function dumpSampleOn() {
+  return String(process.env.LURKER_DUMP_SAMPLE || "0").trim() === "1";
+}
+
+function staleWarnTicks() {
+  const n = Number(process.env.LURKER_STALE_WARN_TICKS || 3);
+  return Number.isFinite(n) && n > 0 ? n : 3;
+}
+
 function chainNorm(v) {
   return s(v).toLowerCase();
+}
+
+// Try to extract a timestamp from unknown listing shapes
+function extractTsMs(listing) {
+  if (!listing || typeof listing !== "object") return null;
+
+  const candidates = [
+    listing.eventTimestamp,
+    listing.event_timestamp,
+    listing.timestamp,
+    listing.createdAt,
+    listing.created_at,
+    listing.listedAt,
+    listing.listed_at,
+    listing.eventDate,
+    listing.event_date,
+    listing.time,
+    listing.date,
+  ];
+
+  for (const c of candidates) {
+    if (c == null) continue;
+
+    // If numeric and looks like ms or seconds
+    if (typeof c === "number") {
+      // > 10^12 likely ms, >10^9 likely seconds
+      if (c > 1e12) return c;
+      if (c > 1e9) return c * 1000;
+    }
+
+    // If string, parse date
+    if (typeof c === "string") {
+      const t = Date.parse(c);
+      if (!Number.isNaN(t)) return t;
+
+      // numeric string
+      const n = Number(c);
+      if (Number.isFinite(n)) {
+        if (n > 1e12) return n;
+        if (n > 1e9) return n * 1000;
+      }
+    }
+  }
+
+  return null;
+}
+
+function fmtTs(ms) {
+  if (!ms || !Number.isFinite(ms)) return "n/a";
+  try {
+    return new Date(ms).toISOString();
+  } catch {
+    return "n/a";
+  }
 }
 
 function traitsMatch(ruleTraits, nftTraits) {
@@ -93,10 +176,10 @@ function passesFilters(rule, listing) {
 
 async function postAlert(client, rule, listing, why) {
   const channelId = rule.channel_id || process.env.LURKER_DEFAULT_CHANNEL_ID;
-  if (!channelId) return;
+  if (!channelId) return false;
 
   const ch = await client.channels.fetch(channelId).catch(() => null);
-  if (!ch) return;
+  if (!ch) return false;
 
   const title = `🟢 LURKER HIT — ${listing.contract.slice(0, 6)}… #${listing.tokenId}`;
   const url = listing.openseaUrl || null;
@@ -143,6 +226,7 @@ async function postAlert(client, rule, listing, why) {
   const row = new ActionRowBuilder().addComponents(buyBtn, ignoreBtn);
 
   await ch.send({ embeds: [embed], components: [row] }).catch(() => null);
+  return true;
 }
 
 async function getEnabledRules(client) {
@@ -274,23 +358,139 @@ async function fillRarity(client, rule, listing) {
   return listing;
 }
 
+function updateFeedState(ruleId, listings) {
+  const st = RULE_FEED_STATE.get(ruleId) || {
+    lastNewestId: null,
+    lastNewestTsMs: null,
+    sameNewestTicks: 0,
+    lastTickMs: 0,
+  };
+
+  let newest = null;
+  let oldest = null;
+
+  for (const it of listings || []) {
+    if (!it) continue;
+    const t = extractTsMs(it);
+    const id = it.listingId || it.id || it.eventId || it.event_id || null;
+
+    const obj = { id, t };
+    if (!newest) newest = obj;
+    if (!oldest) oldest = obj;
+
+    // Newest: max timestamp when available, else first item
+    if (t != null && (newest.t == null || t > newest.t)) newest = obj;
+
+    // Oldest: min timestamp when available, else last item
+    if (t != null && (oldest.t == null || t < oldest.t)) oldest = obj;
+  }
+
+  const newestId = newest?.id || null;
+  const newestTs = newest?.t != null ? newest.t : null;
+
+  const changed =
+    (newestId && newestId !== st.lastNewestId) ||
+    (newestTs != null && st.lastNewestTsMs != null && newestTs !== st.lastNewestTsMs) ||
+    (newestTs != null && st.lastNewestTsMs == null);
+
+  if (changed) {
+    st.sameNewestTicks = 0;
+    st.lastNewestId = newestId;
+    st.lastNewestTsMs = newestTs;
+  } else {
+    st.sameNewestTicks += 1;
+  }
+
+  st.lastTickMs = Date.now();
+  RULE_FEED_STATE.set(ruleId, st);
+
+  return {
+    newestId,
+    newestTsMs: newestTs,
+    oldestId: oldest?.id || null,
+    oldestTsMs: oldest?.t != null ? oldest.t : null,
+    sameNewestTicks: st.sameNewestTicks,
+  };
+}
+
 async function processRule(client, rule, debug) {
+  const tickStart = Date.now();
+
+  // counters
+  const c = {
+    fetched: 0,
+    missingListingId: 0,
+    seen: 0,
+    unseen: 0,
+    waitRarity: 0,
+    filterFailMarked: 0,
+    hits: 0,
+    posted: 0,
+    markedSeenAfterPost: 0,
+  };
+
   const out = await fetchFromSource(rule);
   const listings = Array.isArray(out?.listings) ? out.listings : [];
+  c.fetched = listings.length;
+
+  // Feed movement info (newest/oldest)
+  const feed = updateFeedState(rule.id, listings);
 
   if (debug) {
     console.log(
       `[LURKER] rule#${rule.id} src=${process.env.LURKER_SOURCE || "opensea"} chain=${rule.chain} contract=${String(rule.contract).slice(0, 10)}.. listings=${listings.length}${rule.opensea_slug ? ` os=${rule.opensea_slug}` : ""}`
     );
+
+    if (logSummaryOn()) {
+      console.log(
+        `[LURKER][feed] rule#${rule.id} newest=${feed.newestId || "n/a"} @ ${fmtTs(feed.newestTsMs)} | oldest=${feed.oldestId || "n/a"} @ ${fmtTs(feed.oldestTsMs)} | sameNewestTicks=${feed.sameNewestTicks}`
+      );
+    }
+
+    if (feed.sameNewestTicks >= staleWarnTicks()) {
+      console.log(
+        `[LURKER][warn] rule#${rule.id} OpenSea feed looks STALE (newest unchanged for ${feed.sameNewestTicks} ticks). If you listed recently and don't see movement, OpenSea may not have indexed it yet OR you need cursor paging.`
+      );
+    }
+
+    if (dumpSampleOn() && listings[0]) {
+      const sample = listings[0];
+      const keys = Object.keys(sample || {});
+      console.log(`[LURKER][sample] rule#${rule.id} keys=${keys.join(",")}`);
+      try {
+        console.log(`[LURKER][sample] rule#${rule.id} sample=${JSON.stringify(sample).slice(0, 900)}`);
+      } catch {}
+    }
   }
 
   for (const listing of listings) {
-    if (!listing?.listingId) continue;
-    if (await isSeen(client, rule.id, listing.listingId)) continue;
+    if (!listing?.listingId) {
+      c.missingListingId += 1;
+      if (debug && logAllUnseenOn()) {
+        console.log(`[LURKER][skip] rule#${rule.id} missing listingId (keys=${Object.keys(listing || {}).join(",")})`);
+      }
+      continue;
+    }
+
+    const alreadySeen = await isSeen(client, rule.id, listing.listingId);
+    if (alreadySeen) {
+      c.seen += 1;
+      continue;
+    }
+
+    c.unseen += 1;
 
     let evaluated = listing;
     evaluated.chain = chainNorm(evaluated.chain || rule.chain);
     evaluated.contract = s(evaluated.contract || rule.contract).toLowerCase();
+
+    // Helpful per-unseen log
+    if (debug && logAllUnseenOn()) {
+      const ts = extractTsMs(evaluated);
+      console.log(
+        `[LURKER][unseen] rule#${rule.id} listing=${evaluated.listingId} token=#${evaluated.tokenId} ts=${fmtTs(ts)} price=${evaluated.priceNative ?? "?"} ${evaluated.priceCurrency || ""}`.trim()
+      );
+    }
 
     evaluated = await ensureTraitsIfNeeded(rule, evaluated);
     evaluated = await fillRarity(client, rule, evaluated);
@@ -305,11 +505,21 @@ async function processRule(client, rule, debug) {
     // If rule depends on rarity and we don't have rank yet, do NOT mark seen
     // (we want to catch it later once rarity builder finishes)
     if (rarityMax != null && rank == null && !traitHit) {
-      if (debug) console.log(`[LURKER] rule#${rule.id} wait rarity build — listing=${evaluated.listingId}`);
+      c.waitRarity += 1;
+      if (debug && logAllUnseenOn()) {
+        console.log(`[LURKER][wait] rule#${rule.id} wait rarity build — listing=${evaluated.listingId} token=#${evaluated.tokenId}`);
+      }
       continue;
     }
 
     if (!passesFilters(rule, evaluated)) {
+      c.filterFailMarked += 1;
+      if (debug && logAllUnseenOn()) {
+        const maxP = rule.max_price_native != null ? Number(rule.max_price_native) : null;
+        console.log(
+          `[LURKER][skip] rule#${rule.id} filters fail — listing=${evaluated.listingId} token=#${evaluated.tokenId} rank=${rank ?? "?"} rarityMax=${rarityMax ?? "n/a"} traitHit=${traitHit ? "yes" : "no"} maxPrice=${maxP ?? "n/a"} price=${evaluated.priceNative ?? "?"}`
+        );
+      }
       await markSeen(client, rule.id, evaluated.listingId);
       continue;
     }
@@ -318,8 +528,20 @@ async function processRule(client, rule, debug) {
       ? `Rarity rank **${rank}** ≤ **${rarityMax}**`
       : `Trait match (${Object.keys(ruleTraits || {}).length} configured)`;
 
-    await postAlert(client, rule, evaluated, why);
+    c.hits += 1;
+
+    const posted = await postAlert(client, rule, evaluated, why);
+    if (posted) c.posted += 1;
+
     await markSeen(client, rule.id, evaluated.listingId);
+    c.markedSeenAfterPost += 1;
+  }
+
+  if (debug && logSummaryOn()) {
+    const ms = Date.now() - tickStart;
+    console.log(
+      `[LURKER][sum] rule#${rule.id} fetched=${c.fetched} unseen=${c.unseen} seen=${c.seen} missingId=${c.missingListingId} waitRarity=${c.waitRarity} filterFailMarked=${c.filterFailMarked} hits=${c.hits} posted=${c.posted} ms=${ms}`
+    );
   }
 }
 
