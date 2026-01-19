@@ -14,6 +14,10 @@
 // - Log newest/oldest event timestamps + ids (detect stale feed)
 // - Optional: log every unseen listing + skip reason (LURKER_LOG_ALL_UNSEEN=1)
 // - Optional: dump listing keys/sample to discover timestamp fields (LURKER_DUMP_SAMPLE=1)
+//
+// ✅ PATCH FIX (IMPORTANT):
+// - postAlert() now returns TRUE only if message send succeeded
+// - logs the destination channel + send failures (so "posted=6" can't lie anymore)
 // ======================================================
 
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require("discord.js");
@@ -59,8 +63,7 @@ function debugOn() {
 function logSummaryOn() {
   const v = String(process.env.LURKER_LOG_SUMMARY || "").trim();
   if (v === "0") return false;
-  // default: on when debug=1
-  return debugOn();
+  return debugOn(); // default: on when debug=1
 }
 
 function logAllUnseenOn() {
@@ -101,19 +104,15 @@ function extractTsMs(listing) {
   for (const c of candidates) {
     if (c == null) continue;
 
-    // If numeric and looks like ms or seconds
     if (typeof c === "number") {
-      // > 10^12 likely ms, >10^9 likely seconds
       if (c > 1e12) return c;
       if (c > 1e9) return c * 1000;
     }
 
-    // If string, parse date
     if (typeof c === "string") {
       const t = Date.parse(c);
       if (!Number.isNaN(t)) return t;
 
-      // numeric string
       const n = Number(c);
       if (Number.isFinite(n)) {
         if (n > 1e12) return n;
@@ -176,10 +175,20 @@ function passesFilters(rule, listing) {
 
 async function postAlert(client, rule, listing, why) {
   const channelId = rule.channel_id || process.env.LURKER_DEFAULT_CHANNEL_ID;
-  if (!channelId) return false;
+  if (!channelId) {
+    if (debugOn()) console.warn(`[LURKER][post] rule#${rule.id} has no channel_id and no LURKER_DEFAULT_CHANNEL_ID`);
+    return false;
+  }
 
   const ch = await client.channels.fetch(channelId).catch(() => null);
-  if (!ch) return false;
+  if (!ch) {
+    console.warn(`[LURKER][post] rule#${rule.id} failed to fetch channelId=${channelId}`);
+    return false;
+  }
+
+  if (debugOn()) {
+    console.log(`[LURKER][post] rule#${rule.id} -> channel=${ch?.name || "unknown"} (${channelId})`);
+  }
 
   const title = `🟢 LURKER HIT — ${listing.contract.slice(0, 6)}… #${listing.tokenId}`;
   const url = listing.openseaUrl || null;
@@ -225,8 +234,13 @@ async function postAlert(client, rule, listing, why) {
 
   const row = new ActionRowBuilder().addComponents(buyBtn, ignoreBtn);
 
-  await ch.send({ embeds: [embed], components: [row] }).catch(() => null);
-  return true;
+  try {
+    await ch.send({ embeds: [embed], components: [row] });
+    return true;
+  } catch (e) {
+    console.warn(`[LURKER][post] send failed rule#${rule.id} channel=${channelId}: ${e?.message || e}`);
+    return false;
+  }
 }
 
 async function getEnabledRules(client) {
@@ -257,7 +271,6 @@ async function isSeen(client, ruleId, listingId) {
 }
 
 async function fetchFromSource(rule) {
-  // We pick source per-env, but OpenSea v2 uses opensea_slug when present.
   const source = String(process.env.LURKER_SOURCE || "opensea").toLowerCase();
   if (source === "opensea") {
     return openseaFetchListings({
@@ -267,7 +280,6 @@ async function fetchFromSource(rule) {
       limit: 25,
     });
   }
-  // default to opensea
   return openseaFetchListings({
     chain: rule.chain,
     contract: rule.contract,
@@ -292,8 +304,6 @@ function throttleRuleError(ruleId, err) {
 }
 
 async function ensureTraitsIfNeeded(rule, listing) {
-  // Only fetch traits if:
-  // - rule has traits filter OR rule has rarity_max (rarity requires traits in our system)
   const hasRuleTraits = Boolean((rule.traits_json || "").trim());
   const needsRarity = rule.rarity_max != null;
 
@@ -336,7 +346,6 @@ async function fillRarity(client, rule, listing) {
   const rarityMax = rule.rarity_max != null ? Number(rule.rarity_max) : null;
   if (!rarityMax || !Number.isFinite(rarityMax)) return listing;
 
-  // Query DB
   const r = await getTokenRarity(client, {
     chain: listing.chain,
     contract: listing.contract,
@@ -346,7 +355,6 @@ async function fillRarity(client, rule, listing) {
   if (r.rank != null) listing.rarityRank = r.rank;
   if (r.score != null) listing.rarityScore = r.score;
 
-  // Helpful debug if still missing
   if (listing.rarityRank == null && debugOn()) {
     const st = await getBuildStatus(client, { chain: listing.chain, contract: listing.contract });
     const status = st?.status || "unknown";
@@ -378,10 +386,7 @@ function updateFeedState(ruleId, listings) {
     if (!newest) newest = obj;
     if (!oldest) oldest = obj;
 
-    // Newest: max timestamp when available, else first item
     if (t != null && (newest.t == null || t > newest.t)) newest = obj;
-
-    // Oldest: min timestamp when available, else last item
     if (t != null && (oldest.t == null || t < oldest.t)) oldest = obj;
   }
 
@@ -416,7 +421,6 @@ function updateFeedState(ruleId, listings) {
 async function processRule(client, rule, debug) {
   const tickStart = Date.now();
 
-  // counters
   const c = {
     fetched: 0,
     missingListingId: 0,
@@ -433,7 +437,6 @@ async function processRule(client, rule, debug) {
   const listings = Array.isArray(out?.listings) ? out.listings : [];
   c.fetched = listings.length;
 
-  // Feed movement info (newest/oldest)
   const feed = updateFeedState(rule.id, listings);
 
   if (debug) {
@@ -484,7 +487,6 @@ async function processRule(client, rule, debug) {
     evaluated.chain = chainNorm(evaluated.chain || rule.chain);
     evaluated.contract = s(evaluated.contract || rule.contract).toLowerCase();
 
-    // Helpful per-unseen log
     if (debug && logAllUnseenOn()) {
       const ts = extractTsMs(evaluated);
       console.log(
@@ -502,8 +504,6 @@ async function processRule(client, rule, debug) {
     const rank = evaluated.rarityRank != null ? Number(evaluated.rarityRank) : null;
     const rarityHit = (rarityMax != null && rank != null && rank <= rarityMax);
 
-    // If rule depends on rarity and we don't have rank yet, do NOT mark seen
-    // (we want to catch it later once rarity builder finishes)
     if (rarityMax != null && rank == null && !traitHit) {
       c.waitRarity += 1;
       if (debug && logAllUnseenOn()) {
@@ -530,8 +530,8 @@ async function processRule(client, rule, debug) {
 
     c.hits += 1;
 
-    const posted = await postAlert(client, rule, evaluated, why);
-    if (posted) c.posted += 1;
+    const ok = await postAlert(client, rule, evaluated, why);
+    if (ok) c.posted += 1;
 
     await markSeen(client, rule.id, evaluated.listingId);
     c.markedSeenAfterPost += 1;
@@ -558,7 +558,6 @@ function startLurker(client) {
   if (client.__lurkerStarted) return;
   client.__lurkerStarted = true;
 
-  // Start background rarity builder
   try {
     startRarityBuilder(client);
   } catch (e) {
@@ -573,7 +572,6 @@ function startLurker(client) {
     if (running) return;
     running = true;
 
-    // Reset per-tick counters & cache
     metadataLookupsThisTick = 0;
     META_CACHE = new Map();
 
@@ -600,4 +598,5 @@ function startLurker(client) {
 }
 
 module.exports = { startLurker };
+
 
