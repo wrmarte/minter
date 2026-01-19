@@ -2,28 +2,30 @@
 // ======================================================
 // LURKER: OpenSea listings source
 //
-// Supports:
-// - v2 (recommended): /api/v2/events/collection/{slug}?event_type=listing&limit=25
-// - v1 (fallback/legacy): /api/v1/events?event_type=created&asset_contract_address=...
+// PATCH:
+// - Supports OpenSea V2 events feed by collection slug (recommended)
+// - Falls back to legacy V1 events by contract ONLY if no slug provided
+// - Robust parsing across response shapes
 //
 // ENV:
 //   OPENSEA_API_KEY=... (recommended)
-//   OPENSEA_BASE_URL=https://api.opensea.io (optional override)
+//   OPENSEA_BASE_URL=https://api.opensea.io
 //
-//   OPTIONAL (safe defaults):
 //   OPENSEA_TIMEOUT_MS=25000
 //   OPENSEA_RETRIES=2
 //   OPENSEA_RETRY_BASE_MS=600
 //
-//   CIRCUIT BREAKER:
 //   OPENSEA_FAILS_TO_OPEN=3
 //   OPENSEA_CIRCUIT_OPEN_MS=180000
+//
+//   OPENSEA_V2_EVENT_TYPE=listing    (default listing; you can override)
 // ======================================================
 
 const fetch = require("node-fetch");
 
 function s(v) { return String(v || "").trim(); }
 function lower(v) { return s(v).toLowerCase(); }
+function chainNorm(v) { return lower(v); }
 function debugOn() { return String(process.env.LURKER_DEBUG || "0").trim() === "1"; }
 
 function osBase() {
@@ -36,15 +38,13 @@ function osHeaders() {
     "user-agent": "MuscleMB-LURKER/1.0 (+https://railway.app)"
   };
   const key = s(process.env.OPENSEA_API_KEY);
-  if (key) {
-    // OpenSea commonly accepts X-API-KEY; keep x-api-key too
-    h["X-API-KEY"] = key;
-    h["x-api-key"] = key;
-  }
+  if (key) h["x-api-key"] = key;
   return h;
 }
 
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
 
 function num(v, d) {
   const n = Number(v);
@@ -68,12 +68,17 @@ const FAIL_STATE = new Map(); // url -> { fails, openUntilMs, lastErr }
 function circuitGet(url) {
   return FAIL_STATE.get(url) || { fails: 0, openUntilMs: 0, lastErr: "" };
 }
-function circuitSet(url, st) { FAIL_STATE.set(url, st); }
-function circuitReset(url) { FAIL_STATE.set(url, { fails: 0, openUntilMs: 0, lastErr: "" }); }
+function circuitSet(url, st) {
+  FAIL_STATE.set(url, st);
+}
+function circuitReset(url) {
+  FAIL_STATE.set(url, { fails: 0, openUntilMs: 0, lastErr: "" });
+}
 
 async function fetchWithAbort(url, opts, timeoutMs) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
+
   try {
     return await fetch(url, { ...opts, signal: controller.signal });
   } finally {
@@ -101,7 +106,6 @@ async function fetchJsonRetry(url, opts = {}) {
 
   for (let i = 0; i < retries; i++) {
     try {
-      // Progressive timeout per attempt
       const attemptTimeout = Math.min(45000, timeoutMs + i * 5000);
 
       const res = await fetchWithAbort(url, opts, attemptTimeout);
@@ -120,16 +124,20 @@ async function fetchJsonRetry(url, opts = {}) {
         throw new Error(`OpenSea ${res.status}: ${txt.slice(0, 220)}`);
       }
 
-      const json = await res.json();
+      // Try json; if it fails, capture raw
+      let json = null;
+      try {
+        json = await res.json();
+      } catch (e) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(`OpenSea JSON parse failed: ${String(e?.message || e)} | body=${txt.slice(0, 220)}`);
+      }
 
-      // Success: reset circuit breaker
       circuitReset(url);
-
       return json;
     } catch (e) {
       lastErr = e;
 
-      // Update circuit breaker state
       const st = circuitGet(url);
       st.fails += 1;
       st.lastErr = String(e?.message || e || "unknown").slice(0, 160);
@@ -162,7 +170,6 @@ function weiToEthStr(weiStr) {
     const frac = w % 1000000000000000000n;
     if (frac === 0n) return whole.toString();
 
-    // trim to 6 decimals for display
     const fracStr = frac.toString().padStart(18, "0").slice(0, 6).replace(/0+$/, "");
     return fracStr ? `${whole}.${fracStr}` : whole.toString();
   } catch {
@@ -170,319 +177,254 @@ function weiToEthStr(weiStr) {
   }
 }
 
-function pick(obj, paths) {
-  for (const p of paths) {
-    let cur = obj;
-    const parts = p.split(".");
-    let ok = true;
-    for (const part of parts) {
-      if (!cur || typeof cur !== "object" || !(part in cur)) { ok = false; break; }
-      cur = cur[part];
-    }
-    if (ok && cur != null) return cur;
-  }
-  return null;
+function v2EventType() {
+  return lower(process.env.OPENSEA_V2_EVENT_TYPE || "listing");
 }
 
-function parseTokenIdFromEvent(ev) {
-  const id =
-    pick(ev, [
-      "nft.identifier",
-      "nft.token_id",
-      "asset.token_id",
-      "asset.tokenId",
-      "token_id",
-      "tokenId",
-      "item.nft_id", // sometimes includes contract/token
-    ]);
-
-  if (id == null) return null;
-  const raw = String(id);
-
-  // Some APIs put "contract:tokenId"
-  const parts = raw.split("/");
-  const last = parts[parts.length - 1];
-  const colon = last.split(":");
-  return colon[colon.length - 1].trim();
-}
-
-function parseContractFromEvent(ev, fallbackContract) {
-  const c =
-    pick(ev, [
-      "nft.contract",
-      "nft.contract_address",
-      "asset.asset_contract.address",
-      "asset_contract.address",
-      "contract_address",
-      "contractAddress",
-    ]);
-
-  const out = c ? lower(c) : lower(fallbackContract || "");
-  return out || null;
-}
-
-function parseImageFromEvent(ev) {
-  const url =
-    pick(ev, [
-      "nft.image_url",
-      "nft.imageUrl",
-      "asset.image_url",
-      "asset.image_preview_url",
-      "asset.image_thumbnail_url",
-      "asset.imageUrl",
-    ]);
-  return s(url);
-}
-
-function parseNameFromEvent(ev) {
-  const name =
-    pick(ev, [
-      "nft.name",
-      "asset.name",
-      "asset.title",
-      "name",
-    ]);
-  return s(name);
-}
-
-function parsePermalinkFromEvent(ev, chain, contract, tokenId) {
-  const direct =
-    pick(ev, [
-      "nft.opensea_url",
-      "nft.openseaUrl",
-      "asset.permalink",
-      "asset.opensea_url",
-      "opensea_url",
-      "permalink",
-    ]);
-
-  const d = s(direct);
-  if (d) return d;
-
-  // fallback
-  const c = lower(chain);
+function mkAssetUrl(chain, contract, tokenId) {
+  const c = chainNorm(chain);
   const addr = lower(contract);
   const tid = s(tokenId);
-  if (!addr || !tid) return null;
-
   if (c === "base") return `https://opensea.io/assets/base/${addr}/${tid}`;
   if (c === "eth" || c === "ethereum") return `https://opensea.io/assets/ethereum/${addr}/${tid}`;
   return `https://opensea.io/assets/${addr}/${tid}`;
 }
 
-function parsePrice(ev) {
-  // v2 often exposes payment.quantity + decimals; sometimes "price" already
-  const q =
-    pick(ev, [
-      "payment.quantity",
-      "payment_amount",
-      "listing.payment.quantity",
-      "listing.paymentAmount",
-      "starting_price",
-      "startingPrice",
-      "price",
-    ]);
+function pickArrayCandidates(data) {
+  // OpenSea has used different keys over time.
+  // We try the most common patterns:
+  if (Array.isArray(data?.asset_events)) return data.asset_events; // v1
+  if (Array.isArray(data?.events)) return data.events;            // v2 common
+  if (Array.isArray(data?.results)) return data.results;          // some paginated shapes
+  if (Array.isArray(data)) return data;
+  return [];
+}
 
-  const decimals =
-    pick(ev, [
-      "payment.decimals",
-      "listing.payment.decimals",
-    ]);
+function parseTraitsFromAny(obj) {
+  // OpenSea shapes may have traits/attributes arrays.
+  const traits = {};
 
-  const sym =
-    pick(ev, [
-      "payment.symbol",
-      "listing.payment.symbol",
-      "payment_token.symbol",
-      "payment_token_contract.symbol",
-    ]);
+  const attrs = Array.isArray(obj?.traits) ? obj.traits
+    : Array.isArray(obj?.attributes) ? obj.attributes
+    : [];
 
-  // If q is a large integer string, treat as wei unless decimals says otherwise
-  const qs = q != null ? String(q) : "";
-  if (!qs) return { priceNative: null, priceCurrency: null };
-
-  const dec = decimals != null ? Number(decimals) : 18;
-  let priceNative = null;
-
-  if (Number.isFinite(dec) && dec === 18) {
-    priceNative = weiToEthStr(qs);
-  } else if (Number.isFinite(dec) && dec > 0) {
-    // decimal shift
-    try {
-      const bi = BigInt(qs);
-      const base = BigInt(10) ** BigInt(dec);
-      const whole = bi / base;
-      const frac = bi % base;
-      const fracStr = frac.toString().padStart(dec, "0").slice(0, 6).replace(/0+$/, "");
-      priceNative = fracStr ? `${whole}.${fracStr}` : whole.toString();
-    } catch {
-      priceNative = null;
-    }
-  } else {
-    // maybe already decimal
-    priceNative = qs;
+  for (const a of attrs) {
+    const k = s(a?.trait_type || a?.type || a?.key);
+    const v = s(a?.value);
+    if (!k || !v) continue;
+    if (!traits[k]) traits[k] = [];
+    traits[k].push(v);
   }
 
-  const cur = sym ? String(sym).trim() : null;
-  return { priceNative, priceCurrency: cur };
+  // Some v2 shapes might already be {trait_type: value} objects; support lightly
+  if (!attrs.length && obj?.traits && typeof obj.traits === "object" && !Array.isArray(obj.traits)) {
+    for (const [k, v] of Object.entries(obj.traits)) {
+      const kk = s(k);
+      const vv = s(v);
+      if (!kk || !vv) continue;
+      if (!traits[kk]) traits[kk] = [];
+      traits[kk].push(vv);
+    }
+  }
+
+  return traits;
 }
 
-async function fetchListingsV2({ chain, contract, osSlug, limit = 25 }) {
-  const slug = lower(osSlug);
-  const qs = [];
-  qs.push(`event_type=listing`);
-  qs.push(`limit=${encodeURIComponent(String(Math.min(50, Math.max(1, limit))))}`);
+function normalizeV2Event(chain, fallbackContract, ev) {
+  // We’ll try multiple likely field locations
+  const nft = ev?.nft || ev?.asset || ev?.payload?.nft || ev?.payload?.asset || null;
 
-  const url = `${osBase()}/api/v2/events/collection/${encodeURIComponent(slug)}?${qs.join("&")}`;
+  const contract =
+    lower(nft?.contract || nft?.contract_address || nft?.asset_contract?.address || fallbackContract);
 
-  if (debugOn()) console.log(`[LURKER][opensea:v2] url=${url}`);
+  const tokenId =
+    s(nft?.identifier || nft?.token_id || nft?.tokenId || nft?.id);
 
-  const data = await fetchJsonRetry(url, { headers: osHeaders() });
+  const image =
+    s(nft?.image_url || nft?.image || nft?.image_url_original || nft?.image_preview_url || ev?.image_url);
 
-  // v2 commonly uses asset_events; be defensive
-  const events =
-    (Array.isArray(data?.asset_events) ? data.asset_events
-      : Array.isArray(data?.events) ? data.events
-      : Array.isArray(data?.assetEvents) ? data.assetEvents
-      : []);
+  const name =
+    s(nft?.name || ev?.item_name || ev?.name);
 
-  const listings = events.map(ev => {
-    const tokenId = parseTokenIdFromEvent(ev);
-    const contractAddr = parseContractFromEvent(ev, contract);
-    if (!tokenId || !contractAddr) return null;
+  const permalink =
+    s(nft?.opensea_url || nft?.permalink || ev?.permalink || ev?.item_url) || mkAssetUrl(chain, contract, tokenId);
 
-    const listingId = s(ev?.id || ev?.event_id || ev?.order_hash || ev?.transaction?.transaction_hash || ev?.transaction_hash)
-      || `${contractAddr}:${tokenId}:${s(ev?.event_timestamp || ev?.created_date || ev?.created_at || "")}`;
+  // listingId: stable dedupe key
+  const listingId = s(
+    ev?.id ||
+    ev?.event_id ||
+    ev?.order_hash ||
+    ev?.payload?.order_hash ||
+    ev?.transaction?.transaction_hash ||
+    `${contract}:${tokenId}:${ev?.event_timestamp || ev?.created_date || ""}`
+  );
 
-    const { priceNative, priceCurrency } = parsePrice(ev);
+  // price: v2 shapes vary heavily; we do best effort
+  // try wei-like strings
+  let priceNative = null;
+  let priceCurrency = null;
 
-    const image = parseImageFromEvent(ev);
-    const name = parseNameFromEvent(ev);
-    const openseaUrl = parsePermalinkFromEvent(ev, chain, contractAddr, tokenId);
+  const pay = ev?.payment || ev?.payment_token || ev?.payload?.payment || ev?.payload?.payment_token || null;
+  priceCurrency = s(pay?.symbol || pay?.token_symbol || "") || (chainNorm(chain) === "base" ? "ETH" : "ETH");
 
-    const seller = s(
-      pick(ev, [
-        "maker.address",
-        "maker",
-        "seller.address",
-        "seller",
-        "from_account.address",
-        "from_account",
-      ])
-    );
+  const weiLike =
+    ev?.starting_price ||
+    ev?.payload?.starting_price ||
+    ev?.payload?.price ||
+    ev?.price?.current?.value ||
+    ev?.price?.value ||
+    null;
 
-    // traits rarely present in v2 events; kept empty and filled via Moralis if needed
-    const traits = {};
+  if (weiLike != null && String(weiLike).match(/^\d+$/)) {
+    priceNative = weiToEthStr(String(weiLike));
+  } else if (weiLike != null) {
+    // maybe already decimal
+    const x = Number(weiLike);
+    if (Number.isFinite(x) && x > 0) priceNative = String(x);
+  }
 
-    return {
-      source: "opensea_v2",
-      chain: lower(chain),
-      contract: lower(contractAddr),
-      listingId,
-      tokenId: s(tokenId),
-      name,
-      image,
-      openseaUrl,
-      seller: seller || null,
-      rarityRank: null,
-      rarityScore: null,
-      traits,
-      priceNative: priceNative != null ? priceNative : null,
-      priceCurrency: priceCurrency || (lower(chain) === "base" ? "ETH" : "ETH"),
-      createdAt: s(ev?.event_timestamp || ev?.created_date || ev?.created_at || null) || null,
-      raw: ev,
-    };
-  }).filter(Boolean);
+  const seller =
+    s(ev?.seller || ev?.from_account?.address || ev?.maker || ev?.payload?.maker || nft?.owner) || null;
 
-  return { listings };
+  const traits = parseTraitsFromAny(nft || ev || {});
+
+  return {
+    source: "opensea_v2",
+    chain: chainNorm(chain),
+    contract,
+    listingId,
+    tokenId,
+    name: name || null,
+    image: image || null,
+    openseaUrl: permalink || null,
+    seller,
+    rarityRank: null,
+    rarityScore: null,
+    traits,
+    priceNative: priceNative != null ? priceNative : null,
+    priceCurrency: priceCurrency || null,
+    createdAt: ev?.event_timestamp || ev?.created_date || ev?.created_at || null,
+    raw: ev,
+  };
 }
 
-// Legacy v1 fallback (not great for Base, but kept for safety)
-async function fetchListingsV1({ chain, contract, limit = 20 }) {
+function normalizeV1Event(chain, contract, ev) {
+  const asset = ev?.asset || {};
+  const tokenId = s(asset?.token_id);
   const contractL = lower(contract);
 
+  const listingId = s(
+    ev?.id ||
+    ev?.order_hash ||
+    ev?.transaction?.transaction_hash ||
+    `${contractL}:${tokenId}:${ev?.created_date || ""}`
+  );
+
+  const priceNative = ev?.starting_price != null ? weiToEthStr(ev.starting_price) : null;
+
+  const payment = ev?.payment_token || {};
+  const currency = s(payment?.symbol) || (chainNorm(chain) === "base" ? "ETH" : "ETH");
+
+  const image = s(asset?.image_url || asset?.image_preview_url || asset?.image_thumbnail_url);
+  const name = s(asset?.name);
+  const openseaUrl = s(asset?.permalink) || mkAssetUrl(chain, contractL, tokenId);
+
+  let traits = {};
+  if (asset?.traits && typeof asset.traits === "object" && !Array.isArray(asset.traits)) {
+    traits = asset.traits;
+  } else if (Array.isArray(asset?.traits)) {
+    for (const t of asset.traits) {
+      const k = s(t?.trait_type);
+      const v = s(t?.value);
+      if (!k || !v) continue;
+      if (!traits[k]) traits[k] = [];
+      traits[k].push(v);
+    }
+  }
+
+  const seller = s(ev?.seller?.address || ev?.from_account?.address);
+
+  return {
+    source: "opensea_v1",
+    chain: chainNorm(chain),
+    contract: contractL,
+    listingId,
+    tokenId,
+    name,
+    image,
+    openseaUrl,
+    seller,
+    rarityRank: null,
+    rarityScore: null,
+    traits,
+    priceNative: priceNative != null ? priceNative : null,
+    priceCurrency: currency || null,
+    createdAt: ev?.created_date || ev?.created_at || null,
+    raw: ev,
+  };
+}
+
+async function fetchListings({ chain, contract, openseaSlug = null, limit = 20 }) {
+  const c = chainNorm(chain);
+  const contractL = lower(contract);
+  const lim = Math.min(50, Math.max(1, Number(limit) || 20));
+
+  // V2 path (preferred) if slug exists
+  const slug = lower(openseaSlug || "");
+  if (slug) {
+    const et = v2EventType();
+    const url = `${osBase()}/api/v2/events/collection/${encodeURIComponent(slug)}?event_type=${encodeURIComponent(et)}&limit=${encodeURIComponent(String(lim))}`;
+
+    if (debugOn()) console.log(`[LURKER][opensea:v2] url=${url}`);
+
+    const data = await fetchJsonRetry(url, { headers: osHeaders() });
+
+    if (debugOn()) {
+      const keys = data && typeof data === "object" ? Object.keys(data).slice(0, 12) : [];
+      console.log(`[LURKER][opensea:v2] respKeys=${keys.join(",") || "(none)"} type=${typeof data}`);
+    }
+
+    let events = pickArrayCandidates(data);
+
+    // If v2 returns 0, try a secondary event_type fallback automatically
+    if (!events.length && et !== "listing") {
+      // no-op; they customized it
+    } else if (!events.length && et === "listing") {
+      // Some environments use "listings" (rare but happens in wrappers)
+      const url2 = `${osBase()}/api/v2/events/collection/${encodeURIComponent(slug)}?event_type=listings&limit=${encodeURIComponent(String(lim))}`;
+      if (debugOn()) console.log(`[LURKER][opensea:v2] fallback url=${url2}`);
+      const data2 = await fetchJsonRetry(url2, { headers: osHeaders() });
+      events = pickArrayCandidates(data2);
+    }
+
+    const listings = events
+      .map(ev => normalizeV2Event(c, contractL, ev))
+      .filter(x => x.listingId && x.tokenId);
+
+    return { listings };
+  }
+
+  // V1 fallback (legacy) only if no slug
   const qs = [];
   qs.push(`event_type=created`);
   qs.push(`asset_contract_address=${encodeURIComponent(contractL)}`);
   qs.push(`only_opensea=false`);
   qs.push(`offset=0`);
-  qs.push(`limit=${encodeURIComponent(String(Math.min(50, Math.max(1, limit))))}`);
+  qs.push(`limit=${encodeURIComponent(String(lim))}`);
 
   const url = `${osBase()}/api/v1/events?${qs.join("&")}`;
 
   if (debugOn()) console.log(`[LURKER][opensea:v1] url=${url}`);
 
   const data = await fetchJsonRetry(url, { headers: osHeaders() });
-  const events = Array.isArray(data?.asset_events) ? data.asset_events : [];
+  const events = pickArrayCandidates(data);
 
-  const listings = events.map(ev => {
-    const asset = ev?.asset || {};
-    const tokenId = s(asset?.token_id);
-    const listingId = s(
-      ev?.id ||
-      ev?.order_hash ||
-      ev?.transaction?.transaction_hash ||
-      `${contractL}:${tokenId}:${ev?.created_date || ""}`
-    );
-
-    const priceNative = ev?.starting_price != null ? weiToEthStr(ev.starting_price) : null;
-
-    const payment = ev?.payment_token || {};
-    const currency = s(payment?.symbol) || (lower(chain) === "base" ? "ETH" : "ETH");
-
-    const image = s(asset?.image_url || asset?.image_preview_url || asset?.image_thumbnail_url);
-    const name = s(asset?.name);
-    const openseaUrl = s(asset?.permalink);
-
-    let traits = {};
-    if (asset?.traits && typeof asset.traits === "object" && !Array.isArray(asset.traits)) {
-      traits = asset.traits;
-    } else if (Array.isArray(asset?.traits)) {
-      for (const t of asset.traits) {
-        const k = s(t?.trait_type);
-        const v = s(t?.value);
-        if (!k || !v) continue;
-        if (!traits[k]) traits[k] = [];
-        traits[k].push(v);
-      }
-    }
-
-    const seller = s(ev?.seller?.address || ev?.from_account?.address);
-
-    return {
-      source: "opensea_v1",
-      chain: lower(chain),
-      contract: contractL,
-      listingId,
-      tokenId,
-      name,
-      image,
-      openseaUrl,
-      seller,
-      rarityRank: null,
-      rarityScore: null,
-      traits,
-      priceNative: priceNative != null ? priceNative : null,
-      priceCurrency: currency || null,
-      createdAt: ev?.created_date || ev?.created_at || null,
-      raw: ev,
-    };
-  }).filter(x => x.listingId && x.tokenId);
+  const listings = events
+    .map(ev => normalizeV1Event(c, contractL, ev))
+    .filter(x => x.listingId && x.tokenId);
 
   return { listings };
 }
 
-async function fetchListings({ chain, contract, limit = 25, osSlug = null }) {
-  const c = lower(chain);
-  const addr = lower(contract);
-
-  // Prefer v2 when slug is present
-  if (osSlug) {
-    return fetchListingsV2({ chain: c, contract: addr, osSlug, limit });
-  }
-
-  // fallback
-  return fetchListingsV1({ chain: c, contract: addr, limit });
-}
-
 module.exports = { fetchListings };
+
