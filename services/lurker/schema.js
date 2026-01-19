@@ -24,6 +24,7 @@ async function ensureLurkerSchema(client) {
         guild_id TEXT NOT NULL,
         chain TEXT NOT NULL,
         contract TEXT NOT NULL,
+        opensea_slug TEXT,
         channel_id TEXT,
         rarity_max INTEGER,
         traits_json TEXT,
@@ -31,9 +32,7 @@ async function ensureLurkerSchema(client) {
         auto_buy BOOLEAN DEFAULT FALSE,
         enabled BOOLEAN DEFAULT TRUE,
         created_by TEXT,
-        created_at TIMESTAMP DEFAULT NOW(),
-        os_url TEXT,
-        os_slug TEXT
+        created_at TIMESTAMP DEFAULT NOW()
       );
     `);
 
@@ -93,6 +92,7 @@ async function ensureLurkerSchema(client) {
     // Helpful indexes
     await pg.query(`CREATE INDEX IF NOT EXISTS idx_lurker_rules_enabled ON lurker_rules(enabled);`);
     await pg.query(`CREATE INDEX IF NOT EXISTS idx_lurker_rules_guild ON lurker_rules(guild_id);`);
+    await pg.query(`CREATE INDEX IF NOT EXISTS idx_lurker_rules_os ON lurker_rules(opensea_slug);`);
     await pg.query(`CREATE INDEX IF NOT EXISTS idx_lurker_seen_rule ON lurker_seen(rule_id);`);
 
     await pg.query(`CREATE INDEX IF NOT EXISTS idx_lurker_rarity_meta_status ON lurker_rarity_meta(status);`);
@@ -108,8 +108,7 @@ async function ensureLurkerSchema(client) {
     await pg.query(`ALTER TABLE lurker_rules ADD COLUMN IF NOT EXISTS channel_id TEXT;`).catch(() => {});
     await pg.query(`ALTER TABLE lurker_rules ADD COLUMN IF NOT EXISTS created_by TEXT;`).catch(() => {});
     await pg.query(`ALTER TABLE lurker_rules ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();`).catch(() => {});
-    await pg.query(`ALTER TABLE lurker_rules ADD COLUMN IF NOT EXISTS os_url TEXT;`).catch(() => {});
-    await pg.query(`ALTER TABLE lurker_rules ADD COLUMN IF NOT EXISTS os_slug TEXT;`).catch(() => {});
+    await pg.query(`ALTER TABLE lurker_rules ADD COLUMN IF NOT EXISTS opensea_slug TEXT;`).catch(() => {});
 
     return true;
   } catch (e) {
