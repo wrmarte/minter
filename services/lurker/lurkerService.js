@@ -1,8 +1,10 @@
 // services/lurker/lurkerService.js
 // ======================================================
-// LURKER: Background poller (OpenSea + Moralis + Local Rarity)
+// LURKER: Background poller (OpenSea + Moralis + Local Rarity + Approval Radar)
 // FIXES/UPGRADES:
-// - Source: OpenSea listings OR Inbox (DB-fed) (no Reservoir dependency)
+// - Source: OpenSea listings (when reachable)
+// - Source: Inbox (external lister -> DB) (when reachable)
+// - Source: Approvals (Railway-safe listing radar using on-chain Approval events)
 // - Traits: Moralis token metadata fetch (reliable)
 // - Rarity: local OpenRarity-style build + DB rank/score
 // - Starts rarity builder automatically
@@ -13,7 +15,9 @@ const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require("
 const { ensureLurkerSchema } = require("./schema");
 
 const { fetchListings: openseaFetchListings } = require("./sources/opensea");
-const { fetchListings: inboxFetchListings } = require("./sources/inbox"); // ✅ NEW
+const { fetchListings: inboxFetchListings } = require("./sources/inbox");
+const { fetchListings: approvalsFetchListings } = require("./sources/approvals");
+
 const { fetchTokenMetadata } = require("./metadata/moralis");
 
 const { startRarityBuilder } = require("./rarity/rarityBuilder");
@@ -108,6 +112,11 @@ async function postAlert(client, rule, listing, why) {
       ? `**Rarity Score:** \`${Number(listing.rarityScore).toFixed(2)}\``
       : null;
 
+  const sourceLine =
+    listing.source
+      ? `**Signal:** \`${String(listing.source).toUpperCase()}\``
+      : null;
+
   const embed = new EmbedBuilder()
     .setColor(LURKER_COLOR)
     .setTitle(title)
@@ -119,6 +128,8 @@ async function postAlert(client, rule, listing, why) {
         listing.priceNative != null ? `**Price:** ${listing.priceNative} ${listing.priceCurrency || ""}`.trim() : null,
         rarityLine,
         scoreLine,
+        sourceLine,
+        listing.seller ? `**Owner:** \`${listing.seller}\`` : null,
         `**Trigger:** ${why}`,
         url ? `**Link:** ${url}` : null,
       ].filter(Boolean).join("\n")
@@ -172,10 +183,6 @@ async function isSeen(client, ruleId, listingId) {
 async function fetchFromSource(client, rule) {
   const source = String(process.env.LURKER_SOURCE || "opensea").toLowerCase();
 
-  if (source === "inbox") {
-    return inboxFetchListings({ client, rule });
-  }
-
   if (source === "opensea") {
     return openseaFetchListings({
       chain: rule.chain,
@@ -184,12 +191,25 @@ async function fetchFromSource(client, rule) {
     });
   }
 
-  // default safe fallback
-  return openseaFetchListings({
-    chain: rule.chain,
-    contract: rule.contract,
-    limit: 25,
-  });
+  if (source === "inbox") {
+    return inboxFetchListings({
+      client,
+      rule,
+    });
+  }
+
+  // ✅ NEW: Approval-based listing radar (Railway-safe)
+  if (source === "approvals" || source === "approval") {
+    return approvalsFetchListings({
+      client,
+      chain: rule.chain,
+      contract: rule.contract,
+      limit: 25,
+    });
+  }
+
+  // default to inbox if unknown (safe)
+  return inboxFetchListings({ client, rule });
 }
 
 function throttleRuleError(ruleId, err) {
@@ -335,7 +355,8 @@ function startLurker(client) {
     console.warn("[LURKER] rarityBuilder failed to start:", e?.message || e);
   }
 
-  console.log(`🟢 [LURKER] started pollMs=${pollMs} source=${String(process.env.LURKER_SOURCE || "opensea")}`);
+  const src = String(process.env.LURKER_SOURCE || "opensea").trim();
+  console.log(`🟢 [LURKER] started pollMs=${pollMs} source=${src}`);
 
   let running = false;
 
