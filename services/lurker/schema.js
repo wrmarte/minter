@@ -6,10 +6,25 @@
 // - lurker_rarity_meta: rarity build state per collection
 // - lurker_rarity_trait_stats: trait frequency counts
 // - lurker_rarity_tokens: per-token traits + score + rank
+//
+// IMPORTANT FIX:
+// - Add new columns FIRST (ALTER TABLE ... ADD COLUMN)
+// - Only then create indexes that depend on those columns
+//   (otherwise Postgres throws "column does not exist")
 // ======================================================
 
 function s(v) {
   return String(v || "").trim();
+}
+
+async function safeQuery(pg, sql, params) {
+  try {
+    return await pg.query(sql, params);
+  } catch (e) {
+    // Never crash schema ensure — log and keep going
+    console.warn("[LURKER][schema] nonfatal:", (e?.message || e));
+    return null;
+  }
 }
 
 async function ensureLurkerSchema(client) {
@@ -17,7 +32,9 @@ async function ensureLurkerSchema(client) {
     const pg = client?.pg;
     if (!pg?.query) return false;
 
-    // Core tables
+    // ======================================================
+    // Core tables (create)
+    // ======================================================
     await pg.query(`
       CREATE TABLE IF NOT EXISTS lurker_rules (
         id SERIAL PRIMARY KEY,
@@ -45,7 +62,6 @@ async function ensureLurkerSchema(client) {
       );
     `);
 
-    // Rarity build meta per collection
     await pg.query(`
       CREATE TABLE IF NOT EXISTS lurker_rarity_meta (
         chain TEXT NOT NULL,
@@ -60,7 +76,6 @@ async function ensureLurkerSchema(client) {
       );
     `);
 
-    // Trait stats table
     await pg.query(`
       CREATE TABLE IF NOT EXISTS lurker_rarity_trait_stats (
         chain TEXT NOT NULL,
@@ -74,7 +89,6 @@ async function ensureLurkerSchema(client) {
       );
     `);
 
-    // Token rarity table (store traits so we can score later)
     await pg.query(`
       CREATE TABLE IF NOT EXISTS lurker_rarity_tokens (
         id BIGSERIAL PRIMARY KEY,
@@ -89,26 +103,30 @@ async function ensureLurkerSchema(client) {
       );
     `);
 
-    // Helpful indexes
-    await pg.query(`CREATE INDEX IF NOT EXISTS idx_lurker_rules_enabled ON lurker_rules(enabled);`);
-    await pg.query(`CREATE INDEX IF NOT EXISTS idx_lurker_rules_guild ON lurker_rules(guild_id);`);
-    await pg.query(`CREATE INDEX IF NOT EXISTS idx_lurker_rules_os ON lurker_rules(opensea_slug);`);
-    await pg.query(`CREATE INDEX IF NOT EXISTS idx_lurker_seen_rule ON lurker_seen(rule_id);`);
+    // ======================================================
+    // Backward-compatible ALTERs (must run BEFORE indexes)
+    // ======================================================
+    await safeQuery(pg, `ALTER TABLE lurker_rules ADD COLUMN IF NOT EXISTS enabled BOOLEAN DEFAULT TRUE;`);
+    await safeQuery(pg, `ALTER TABLE lurker_rules ADD COLUMN IF NOT EXISTS auto_buy BOOLEAN DEFAULT FALSE;`);
+    await safeQuery(pg, `ALTER TABLE lurker_rules ADD COLUMN IF NOT EXISTS max_price_native NUMERIC;`);
+    await safeQuery(pg, `ALTER TABLE lurker_rules ADD COLUMN IF NOT EXISTS traits_json TEXT;`);
+    await safeQuery(pg, `ALTER TABLE lurker_rules ADD COLUMN IF NOT EXISTS rarity_max INTEGER;`);
+    await safeQuery(pg, `ALTER TABLE lurker_rules ADD COLUMN IF NOT EXISTS channel_id TEXT;`);
+    await safeQuery(pg, `ALTER TABLE lurker_rules ADD COLUMN IF NOT EXISTS created_by TEXT;`);
+    await safeQuery(pg, `ALTER TABLE lurker_rules ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();`);
+    await safeQuery(pg, `ALTER TABLE lurker_rules ADD COLUMN IF NOT EXISTS opensea_slug TEXT;`);
 
-    await pg.query(`CREATE INDEX IF NOT EXISTS idx_lurker_rarity_meta_status ON lurker_rarity_meta(status);`);
-    await pg.query(`CREATE INDEX IF NOT EXISTS idx_lurker_rarity_tokens_cc ON lurker_rarity_tokens(chain, contract);`);
-    await pg.query(`CREATE INDEX IF NOT EXISTS idx_lurker_rarity_tokens_rank ON lurker_rarity_tokens(chain, contract, rank);`);
+    // ======================================================
+    // Helpful indexes (safe, won’t crash process)
+    // ======================================================
+    await safeQuery(pg, `CREATE INDEX IF NOT EXISTS idx_lurker_rules_enabled ON lurker_rules(enabled);`);
+    await safeQuery(pg, `CREATE INDEX IF NOT EXISTS idx_lurker_rules_guild ON lurker_rules(guild_id);`);
+    await safeQuery(pg, `CREATE INDEX IF NOT EXISTS idx_lurker_rules_os ON lurker_rules(opensea_slug);`);
+    await safeQuery(pg, `CREATE INDEX IF NOT EXISTS idx_lurker_seen_rule ON lurker_seen(rule_id);`);
 
-    // Add columns safely if older table exists
-    await pg.query(`ALTER TABLE lurker_rules ADD COLUMN IF NOT EXISTS enabled BOOLEAN DEFAULT TRUE;`).catch(() => {});
-    await pg.query(`ALTER TABLE lurker_rules ADD COLUMN IF NOT EXISTS auto_buy BOOLEAN DEFAULT FALSE;`).catch(() => {});
-    await pg.query(`ALTER TABLE lurker_rules ADD COLUMN IF NOT EXISTS max_price_native NUMERIC;`).catch(() => {});
-    await pg.query(`ALTER TABLE lurker_rules ADD COLUMN IF NOT EXISTS traits_json TEXT;`).catch(() => {});
-    await pg.query(`ALTER TABLE lurker_rules ADD COLUMN IF NOT EXISTS rarity_max INTEGER;`).catch(() => {});
-    await pg.query(`ALTER TABLE lurker_rules ADD COLUMN IF NOT EXISTS channel_id TEXT;`).catch(() => {});
-    await pg.query(`ALTER TABLE lurker_rules ADD COLUMN IF NOT EXISTS created_by TEXT;`).catch(() => {});
-    await pg.query(`ALTER TABLE lurker_rules ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();`).catch(() => {});
-    await pg.query(`ALTER TABLE lurker_rules ADD COLUMN IF NOT EXISTS opensea_slug TEXT;`).catch(() => {});
+    await safeQuery(pg, `CREATE INDEX IF NOT EXISTS idx_lurker_rarity_meta_status ON lurker_rarity_meta(status);`);
+    await safeQuery(pg, `CREATE INDEX IF NOT EXISTS idx_lurker_rarity_tokens_cc ON lurker_rarity_tokens(chain, contract);`);
+    await safeQuery(pg, `CREATE INDEX IF NOT EXISTS idx_lurker_rarity_tokens_rank ON lurker_rarity_tokens(chain, contract, rank);`);
 
     return true;
   } catch (e) {
