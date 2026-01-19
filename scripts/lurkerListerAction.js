@@ -3,20 +3,12 @@
 // GitHub Actions Lister: pulls OpenSea listing events and pushes into DB inbox
 // - No Discord client needed
 // - Reads enabled lurker_rules
-// - Uses OpenSea v1 events endpoint (same as your existing source)
-// - Writes into lurker_inbox for the bot (LURKER_SOURCE=inbox)
-//
-// ENV REQUIRED (GitHub Secrets):
-//   DATABASE_URL=postgresql://...
-//   OPENSEA_API_KEY=... (recommended)
-//
-// OPTIONAL:
-//   LISTER_LIMIT=25
-//   LISTER_DEBUG=1
+// - Uses OpenSea v1 events endpoint
+// - Writes into lurker_inbox (dedupe)
 // ======================================================
 
+require("dotenv").config();
 const { Pool } = require("pg");
-const fetch = require("node-fetch");
 const crypto = require("crypto");
 
 function s(v) { return String(v || "").trim(); }
@@ -25,7 +17,7 @@ function debugOn() { return s(process.env.LISTER_DEBUG) === "1"; }
 
 const DATABASE_URL = s(process.env.DATABASE_URL);
 if (!DATABASE_URL) {
-  console.error("❌ DATABASE_URL missing");
+  console.error("❌ DATABASE_URL missing (GitHub Actions secret DATABASE_URL not set)");
   process.exit(1);
 }
 
@@ -54,30 +46,57 @@ function osHeaders() {
 }
 
 async function ensureInboxSchema(pg) {
+  // Ensure lurker_rules exists (if bot already created it, this is harmless)
+  await pg.query(`
+    CREATE TABLE IF NOT EXISTS lurker_rules (
+      id SERIAL PRIMARY KEY,
+      guild_id TEXT NOT NULL,
+      chain TEXT NOT NULL,
+      contract TEXT NOT NULL,
+      channel_id TEXT,
+      rarity_max INTEGER,
+      traits_json TEXT,
+      max_price_native NUMERIC,
+      auto_buy BOOLEAN DEFAULT FALSE,
+      enabled BOOLEAN DEFAULT TRUE,
+      created_by TEXT,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+  `).catch(() => {});
+
+  // Ensure inbox exists with rule_id
   await pg.query(`
     CREATE TABLE IF NOT EXISTS lurker_inbox (
-      rule_id INTEGER NOT NULL,
+      rule_id INTEGER,
+      guild_id TEXT,
       listing_id TEXT NOT NULL,
       chain TEXT NOT NULL,
       contract TEXT NOT NULL,
       token_id TEXT NOT NULL,
       opensea_url TEXT,
       source TEXT DEFAULT 'opensea',
-      created_at TIMESTAMP DEFAULT NOW(),
-      PRIMARY KEY(rule_id, listing_id)
+      created_at TIMESTAMP DEFAULT NOW()
     );
   `);
 
-  await pg.query(`CREATE INDEX IF NOT EXISTS idx_lurker_inbox_cc ON lurker_inbox(chain, contract);`);
-  await pg.query(`CREATE INDEX IF NOT EXISTS idx_lurker_inbox_created ON lurker_inbox(created_at);`);
+  await pg.query(`ALTER TABLE lurker_inbox ADD COLUMN IF NOT EXISTS rule_id INTEGER;`).catch(() => {});
+  await pg.query(`ALTER TABLE lurker_inbox ADD COLUMN IF NOT EXISTS guild_id TEXT;`).catch(() => {});
+  await pg.query(`ALTER TABLE lurker_inbox ADD COLUMN IF NOT EXISTS listing_id TEXT;`).catch(() => {});
+  await pg.query(`ALTER TABLE lurker_inbox ADD COLUMN IF NOT EXISTS chain TEXT;`).catch(() => {});
+  await pg.query(`ALTER TABLE lurker_inbox ADD COLUMN IF NOT EXISTS contract TEXT;`).catch(() => {});
+  await pg.query(`ALTER TABLE lurker_inbox ADD COLUMN IF NOT EXISTS token_id TEXT;`).catch(() => {});
+  await pg.query(`ALTER TABLE lurker_inbox ADD COLUMN IF NOT EXISTS opensea_url TEXT;`).catch(() => {});
+  await pg.query(`ALTER TABLE lurker_inbox ADD COLUMN IF NOT EXISTS source TEXT;`).catch(() => {});
+  await pg.query(`ALTER TABLE lurker_inbox ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();`).catch(() => {});
 
-  // Optional: add watch_url column for future (doesn't break anything)
-  await pg.query(`ALTER TABLE lurker_rules ADD COLUMN IF NOT EXISTS watch_url TEXT;`).catch(() => {});
+  // Best-effort index
+  await pg.query(`CREATE INDEX IF NOT EXISTS idx_lurker_inbox_created ON lurker_inbox(created_at);`).catch(() => {});
+  await pg.query(`CREATE INDEX IF NOT EXISTS idx_lurker_inbox_cc ON lurker_inbox(chain, contract);`).catch(() => {});
 }
 
 async function getEnabledRules(pg) {
   const r = await pg.query(`
-    SELECT id, chain, contract
+    SELECT id, guild_id, chain, contract
     FROM lurker_rules
     WHERE enabled=TRUE
     ORDER BY id DESC
@@ -103,8 +122,7 @@ async function fetchOpenSeaCreatedEvents(contractLower) {
   }
 
   const data = txt ? JSON.parse(txt) : {};
-  const events = Array.isArray(data?.asset_events) ? data.asset_events : [];
-  return events;
+  return Array.isArray(data?.asset_events) ? data.asset_events : [];
 }
 
 function parseEventsToListings(events, chain, contractLower) {
@@ -114,34 +132,37 @@ function parseEventsToListings(events, chain, contractLower) {
     if (!tokenId) return null;
 
     const permalink = s(asset?.permalink) || null;
-    const listingId = s(
+
+    const rawId = s(
       ev?.id ||
       ev?.order_hash ||
       ev?.transaction?.transaction_hash ||
       `${contractLower}:${tokenId}:${ev?.created_date || ""}`
     );
 
-    if (!listingId) return null;
+    if (!rawId) return null;
 
     return {
       chain: lower(chain || "base"),
       contract: contractLower,
       tokenId,
-      listingId: sha1(listingId), // normalize dedupe id
+      listingId: sha1(rawId),
       openseaUrl: permalink,
       createdAt: ev?.created_date || ev?.created_at || null,
     };
   }).filter(Boolean);
 }
 
-async function insertInbox(pg, ruleId, listing) {
+async function insertInbox(pg, rule, listing) {
   const q = `
-    INSERT INTO lurker_inbox(rule_id, listing_id, chain, contract, token_id, opensea_url, source)
-    VALUES($1,$2,$3,$4,$5,$6,'opensea')
+    INSERT INTO lurker_inbox(rule_id, guild_id, listing_id, chain, contract, token_id, opensea_url, source)
+    VALUES($1,$2,$3,$4,$5,$6,$7,'opensea')
     ON CONFLICT DO NOTHING
   `;
+
   const vals = [
-    Number(ruleId),
+    Number(rule.id),
+    s(rule.guild_id || ""),
     s(listing.listingId),
     s(listing.chain),
     s(listing.contract),
@@ -176,16 +197,16 @@ async function main() {
         let insertedThisRule = 0;
 
         for (const l of listings) {
-          const ok = await insertInbox(pg, rule.id, l);
+          const ok = await insertInbox(pg, rule, l);
           if (ok) {
             insertedThisRule++;
             totalInserted++;
           }
-          if (insertedThisRule >= 10) break; // cap per rule per run
+          if (insertedThisRule >= 10) break;
         }
 
         if (debugOn()) {
-          console.log(`[LISTER] rule#${rule.id} contract=${contract.slice(0,10)}.. events=${events.length} inserted=${insertedThisRule}`);
+          console.log(`[LISTER] rule#${rule.id} contract=${contract.slice(0, 10)}.. events=${events.length} inserted=${insertedThisRule}`);
         }
       } catch (e) {
         console.log(`[LISTER] rule#${rule.id} error: ${e?.message || e}`);
