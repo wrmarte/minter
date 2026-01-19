@@ -3,15 +3,11 @@
 // LURKER DB schema (backward compatible)
 // - lurker_rules: rule configs
 // - lurker_seen: dedupe listings per rule
-// - lurker_inbox: external lister -> bot inbox feed
+// - lurker_inbox: external lister -> bot inbox feed (supports old+new layouts)
 // - lurker_rarity_meta: rarity build state per collection
 // - lurker_rarity_trait_stats: trait frequency counts
 // - lurker_rarity_tokens: per-token traits + score + rank
 // ======================================================
-
-function s(v) {
-  return String(v || "").trim();
-}
 
 async function ensureLurkerSchema(client) {
   try {
@@ -45,20 +41,47 @@ async function ensureLurkerSchema(client) {
       );
     `);
 
-    // ✅ Inbox table for external listers (GitHub Actions / VPS / etc.)
+    // Inbox table (create in newest format)
     await pg.query(`
       CREATE TABLE IF NOT EXISTS lurker_inbox (
-        rule_id INTEGER NOT NULL,
+        rule_id INTEGER,
+        guild_id TEXT,
         listing_id TEXT NOT NULL,
         chain TEXT NOT NULL,
         contract TEXT NOT NULL,
         token_id TEXT NOT NULL,
         opensea_url TEXT,
         source TEXT DEFAULT 'inbox',
-        created_at TIMESTAMP DEFAULT NOW(),
-        PRIMARY KEY(rule_id, listing_id)
+        created_at TIMESTAMP DEFAULT NOW()
       );
     `);
+
+    // Ensure columns exist (safe migration)
+    await pg.query(`ALTER TABLE lurker_inbox ADD COLUMN IF NOT EXISTS rule_id INTEGER;`).catch(() => {});
+    await pg.query(`ALTER TABLE lurker_inbox ADD COLUMN IF NOT EXISTS guild_id TEXT;`).catch(() => {});
+    await pg.query(`ALTER TABLE lurker_inbox ADD COLUMN IF NOT EXISTS listing_id TEXT;`).catch(() => {});
+    await pg.query(`ALTER TABLE lurker_inbox ADD COLUMN IF NOT EXISTS chain TEXT;`).catch(() => {});
+    await pg.query(`ALTER TABLE lurker_inbox ADD COLUMN IF NOT EXISTS contract TEXT;`).catch(() => {});
+    await pg.query(`ALTER TABLE lurker_inbox ADD COLUMN IF NOT EXISTS token_id TEXT;`).catch(() => {});
+    await pg.query(`ALTER TABLE lurker_inbox ADD COLUMN IF NOT EXISTS opensea_url TEXT;`).catch(() => {});
+    await pg.query(`ALTER TABLE lurker_inbox ADD COLUMN IF NOT EXISTS source TEXT;`).catch(() => {});
+    await pg.query(`ALTER TABLE lurker_inbox ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();`).catch(() => {});
+
+    // Try to add a useful dedupe constraint (non-fatal if it fails due to old data/structure)
+    await pg.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conname = 'lurker_inbox_pk'
+        ) THEN
+          ALTER TABLE lurker_inbox
+          ADD CONSTRAINT lurker_inbox_pk PRIMARY KEY (listing_id);
+        END IF;
+      EXCEPTION WHEN others THEN
+        -- ignore
+      END$$;
+    `).catch(() => {});
 
     // Rarity build meta per collection
     await pg.query(`
@@ -109,8 +132,8 @@ async function ensureLurkerSchema(client) {
     await pg.query(`CREATE INDEX IF NOT EXISTS idx_lurker_rules_guild ON lurker_rules(guild_id);`);
     await pg.query(`CREATE INDEX IF NOT EXISTS idx_lurker_seen_rule ON lurker_seen(rule_id);`);
 
-    await pg.query(`CREATE INDEX IF NOT EXISTS idx_lurker_inbox_cc ON lurker_inbox(chain, contract);`);
-    await pg.query(`CREATE INDEX IF NOT EXISTS idx_lurker_inbox_created ON lurker_inbox(created_at);`);
+    await pg.query(`CREATE INDEX IF NOT EXISTS idx_lurker_inbox_cc ON lurker_inbox(chain, contract);`).catch(() => {});
+    await pg.query(`CREATE INDEX IF NOT EXISTS idx_lurker_inbox_created ON lurker_inbox(created_at);`).catch(() => {});
 
     await pg.query(`CREATE INDEX IF NOT EXISTS idx_lurker_rarity_meta_status ON lurker_rarity_meta(status);`);
     await pg.query(`CREATE INDEX IF NOT EXISTS idx_lurker_rarity_tokens_cc ON lurker_rarity_tokens(chain, contract);`);
@@ -135,4 +158,3 @@ async function ensureLurkerSchema(client) {
 }
 
 module.exports = { ensureLurkerSchema };
-
