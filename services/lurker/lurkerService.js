@@ -1,23 +1,6 @@
 // services/lurker/lurkerService.js
 // ======================================================
 // LURKER: Background poller (OpenSea + Moralis + Local Rarity)
-// FIXES/UPGRADES:
-// - OpenSea v2 feed via opensea_slug when present
-// - Traits: Moralis token metadata fetch (reliable)
-// - Rarity: local OpenRarity-style build + DB rank/score
-// - Starts rarity builder automatically
-// - Throttles errors per rule (prevents spam)
-// - NEW: per-tick metadata cache to prevent duplicate Moralis calls
-//
-// ✅ PATCH (2026-01-18):
-// - Add per-rule tick summary (fetched/unseen/seen/hit/posted/skipped/wait)
-// - Log newest/oldest event timestamps + ids (detect stale feed)
-// - Optional: log every unseen listing + skip reason (LURKER_LOG_ALL_UNSEEN=1)
-// - Optional: dump listing keys/sample to discover timestamp fields (LURKER_DUMP_SAMPLE=1)
-//
-// ✅ PATCH FIX (IMPORTANT):
-// - postAlert() now returns TRUE only if message send succeeded
-// - logs the destination channel + send failures (so "posted=6" can't lie anymore)
 // ======================================================
 
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require("discord.js");
@@ -37,11 +20,17 @@ const RULE_ERR_STATE = new Map(); // ruleId -> { lastLogMs, count }
 // Per-rule feed movement state (in-memory)
 const RULE_FEED_STATE = new Map(); // ruleId -> { lastNewestId, lastNewestTsMs, sameNewestTicks, lastTickMs }
 
-// Rate limit Moralis token metadata fetches per tick
+// Per-tick metadata rate limit
 let metadataLookupsThisTick = 0;
 
-// Per-tick metadata cache: key = chain:contract:tokenId -> {name,image,traits}
-let META_CACHE = new Map();
+// Per-tick metadata cache (fast)
+let META_CACHE_TICK = new Map();
+
+// Persistent metadata cache across ticks: key -> { tsMs, md }
+const META_CACHE_PERSIST = new Map();
+
+// Pending notified (in-memory): key = ruleId:listingId -> tsMs
+const PENDING_NOTIFIED = new Map();
 
 function jparse(s, fallback) {
   try { return JSON.parse(s); } catch { return fallback; }
@@ -56,6 +45,10 @@ function numOrNull(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+function chainNorm(v) {
+  return s(v).toLowerCase();
+}
+
 function debugOn() {
   return String(process.env.LURKER_DEBUG || "0").trim() === "1";
 }
@@ -63,15 +56,29 @@ function debugOn() {
 function logSummaryOn() {
   const v = String(process.env.LURKER_LOG_SUMMARY || "").trim();
   if (v === "0") return false;
-  return debugOn(); // default: on when debug=1
+  return debugOn(); // default ON when debug=1
+}
+
+function logFeedOn() {
+  const v = String(process.env.LURKER_LOG_FEED || "").trim();
+  if (v === "0") return false;
+  return debugOn(); // default ON when debug=1
 }
 
 function logAllUnseenOn() {
   return String(process.env.LURKER_LOG_ALL_UNSEEN || "0").trim() === "1";
 }
 
+function logWaitOn() {
+  return String(process.env.LURKER_LOG_WAIT || "0").trim() === "1";
+}
+
 function dumpSampleOn() {
   return String(process.env.LURKER_DUMP_SAMPLE || "0").trim() === "1";
+}
+
+function pendingAlertOn() {
+  return String(process.env.LURKER_PENDING_ALERT || "0").trim() === "1";
 }
 
 function staleWarnTicks() {
@@ -79,8 +86,14 @@ function staleWarnTicks() {
   return Number.isFinite(n) && n > 0 ? n : 3;
 }
 
-function chainNorm(v) {
-  return s(v).toLowerCase();
+function metaCacheTtlMs() {
+  const n = Number(process.env.LURKER_META_CACHE_TTL_MS || (30 * 60 * 1000)); // default 30m
+  return Number.isFinite(n) && n > 10_000 ? n : (30 * 60 * 1000);
+}
+
+function pendingTtlMs() {
+  const n = Number(process.env.LURKER_PENDING_TTL_MS || (6 * 60 * 60 * 1000)); // default 6h
+  return Number.isFinite(n) && n > 60_000 ? n : (6 * 60 * 60 * 1000);
 }
 
 // Try to extract a timestamp from unknown listing shapes
@@ -126,11 +139,7 @@ function extractTsMs(listing) {
 
 function fmtTs(ms) {
   if (!ms || !Number.isFinite(ms)) return "n/a";
-  try {
-    return new Date(ms).toISOString();
-  } catch {
-    return "n/a";
-  }
+  try { return new Date(ms).toISOString(); } catch { return "n/a"; }
 }
 
 function traitsMatch(ruleTraits, nftTraits) {
@@ -142,7 +151,7 @@ function traitsMatch(ruleTraits, nftTraits) {
 
     const got = Array.isArray(nftTraits?.[k]) ? nftTraits[k].map(x => String(x).toLowerCase()) : [];
     for (const w of wants) {
-      if (got.includes(w)) return true; // OR logic: any desired trait triggers
+      if (got.includes(w)) return true;
     }
   }
   return false;
@@ -165,7 +174,6 @@ function passesFilters(rule, listing) {
   const allow = rarityHit || traitHit;
   if (!allow) return false;
 
-  // Optional max price check (native)
   const maxPrice = rule.max_price_native ? numOrNull(rule.max_price_native) : null;
   const p = listing.priceNative != null ? numOrNull(listing.priceNative) : null;
   if (maxPrice != null && p != null && p > maxPrice) return false;
@@ -176,7 +184,7 @@ function passesFilters(rule, listing) {
 async function postAlert(client, rule, listing, why) {
   const channelId = rule.channel_id || process.env.LURKER_DEFAULT_CHANNEL_ID;
   if (!channelId) {
-    if (debugOn()) console.warn(`[LURKER][post] rule#${rule.id} has no channel_id and no LURKER_DEFAULT_CHANNEL_ID`);
+    if (debugOn()) console.warn(`[LURKER][post] rule#${rule.id} no channel_id and no LURKER_DEFAULT_CHANNEL_ID`);
     return false;
   }
 
@@ -184,10 +192,6 @@ async function postAlert(client, rule, listing, why) {
   if (!ch) {
     console.warn(`[LURKER][post] rule#${rule.id} failed to fetch channelId=${channelId}`);
     return false;
-  }
-
-  if (debugOn()) {
-    console.log(`[LURKER][post] rule#${rule.id} -> channel=${ch?.name || "unknown"} (${channelId})`);
   }
 
   const title = `🟢 LURKER HIT — ${listing.contract.slice(0, 6)}… #${listing.tokenId}`;
@@ -243,13 +247,42 @@ async function postAlert(client, rule, listing, why) {
   }
 }
 
+async function postPending(client, rule, listing) {
+  const channelId = rule.channel_id || process.env.LURKER_DEFAULT_CHANNEL_ID;
+  if (!channelId) return false;
+
+  const ch = await client.channels.fetch(channelId).catch(() => null);
+  if (!ch) return false;
+
+  const embed = new EmbedBuilder()
+    .setColor(0xffc107)
+    .setTitle(`🟡 Listing detected — rarity building`)
+    .setDescription(
+      [
+        `**Chain:** \`${listing.chain}\``,
+        `**Contract:** \`${listing.contract}\``,
+        `**Token:** #${listing.tokenId}`,
+        listing.openseaUrl ? `**Link:** ${listing.openseaUrl}` : null,
+        `**Note:** rarity ranks are still building for this collection. LURKER will re-check and alert if it becomes a hit.`,
+      ].filter(Boolean).join("\n")
+    )
+    .setTimestamp(new Date());
+
+  if (listing.image) embed.setThumbnail(listing.image);
+
+  try {
+    await ch.send({ embeds: [embed] });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function getEnabledRules(client) {
   const ok = await ensureLurkerSchema(client);
   if (!ok) return [];
   const pg = client.pg;
-  const res = await pg.query(
-    `SELECT * FROM lurker_rules WHERE enabled = TRUE ORDER BY id DESC`
-  );
+  const res = await pg.query(`SELECT * FROM lurker_rules WHERE enabled = TRUE ORDER BY id DESC`);
   return res.rows || [];
 }
 
@@ -263,10 +296,7 @@ async function markSeen(client, ruleId, listingId) {
 
 async function isSeen(client, ruleId, listingId) {
   const pg = client.pg;
-  const r = await pg.query(
-    `SELECT 1 FROM lurker_seen WHERE rule_id=$1 AND listing_id=$2`,
-    [ruleId, listingId]
-  );
+  const r = await pg.query(`SELECT 1 FROM lurker_seen WHERE rule_id=$1 AND listing_id=$2`, [ruleId, listingId]);
   return (r.rowCount || 0) > 0;
 }
 
@@ -303,6 +333,39 @@ function throttleRuleError(ruleId, err) {
   RULE_ERR_STATE.set(ruleId, st);
 }
 
+function getCachedMeta(cacheKey) {
+  const now = Date.now();
+
+  // tick cache
+  const tick = META_CACHE_TICK.get(cacheKey);
+  if (tick) return tick;
+
+  // persistent cache
+  const persisted = META_CACHE_PERSIST.get(cacheKey);
+  if (persisted && (now - persisted.tsMs) <= metaCacheTtlMs()) {
+    META_CACHE_TICK.set(cacheKey, persisted.md);
+    return persisted.md;
+  }
+
+  // expired cleanup
+  if (persisted) META_CACHE_PERSIST.delete(cacheKey);
+  return null;
+}
+
+function setCachedMeta(cacheKey, md) {
+  const now = Date.now();
+  META_CACHE_TICK.set(cacheKey, md || {});
+  META_CACHE_PERSIST.set(cacheKey, { tsMs: now, md: md || {} });
+}
+
+function gcPendingNotified() {
+  const now = Date.now();
+  const ttl = pendingTtlMs();
+  for (const [k, ts] of PENDING_NOTIFIED.entries()) {
+    if ((now - ts) > ttl) PENDING_NOTIFIED.delete(k);
+  }
+}
+
 async function ensureTraitsIfNeeded(rule, listing) {
   const hasRuleTraits = Boolean((rule.traits_json || "").trim());
   const needsRarity = rule.rarity_max != null;
@@ -314,7 +377,7 @@ async function ensureTraitsIfNeeded(rule, listing) {
   if (metadataLookupsThisTick >= maxPerTick) return listing;
 
   const cacheKey = `${chainNorm(listing.chain)}:${s(listing.contract).toLowerCase()}:${s(listing.tokenId)}`;
-  const cached = META_CACHE.get(cacheKey);
+  const cached = getCachedMeta(cacheKey);
   if (cached) {
     if (!listing.traits || !Object.keys(listing.traits).length) listing.traits = cached.traits || listing.traits;
     if (!listing.name && cached.name) listing.name = cached.name;
@@ -330,8 +393,7 @@ async function ensureTraitsIfNeeded(rule, listing) {
       tokenId: listing.tokenId,
     });
 
-    META_CACHE.set(cacheKey, md || {});
-
+    setCachedMeta(cacheKey, md || {});
     if (md?.traits) listing.traits = md.traits;
     if (!listing.name && md?.name) listing.name = md.name;
     if (!listing.image && md?.image) listing.image = md.image;
@@ -431,6 +493,7 @@ async function processRule(client, rule, debug) {
     hits: 0,
     posted: 0,
     markedSeenAfterPost: 0,
+    pendingPosted: 0,
   };
 
   const out = await fetchFromSource(rule);
@@ -439,39 +502,28 @@ async function processRule(client, rule, debug) {
 
   const feed = updateFeedState(rule.id, listings);
 
-  if (debug) {
+  if (debug && logFeedOn()) {
     console.log(
-      `[LURKER] rule#${rule.id} src=${process.env.LURKER_SOURCE || "opensea"} chain=${rule.chain} contract=${String(rule.contract).slice(0, 10)}.. listings=${listings.length}${rule.opensea_slug ? ` os=${rule.opensea_slug}` : ""}`
+      `[LURKER][feed] rule#${rule.id} newest=${feed.newestId || "n/a"} @ ${fmtTs(feed.newestTsMs)} | oldest=${feed.oldestId || "n/a"} @ ${fmtTs(feed.oldestTsMs)} | sameNewestTicks=${feed.sameNewestTicks}`
     );
-
-    if (logSummaryOn()) {
-      console.log(
-        `[LURKER][feed] rule#${rule.id} newest=${feed.newestId || "n/a"} @ ${fmtTs(feed.newestTsMs)} | oldest=${feed.oldestId || "n/a"} @ ${fmtTs(feed.oldestTsMs)} | sameNewestTicks=${feed.sameNewestTicks}`
-      );
-    }
-
     if (feed.sameNewestTicks >= staleWarnTicks()) {
       console.log(
-        `[LURKER][warn] rule#${rule.id} OpenSea feed looks STALE (newest unchanged for ${feed.sameNewestTicks} ticks). If you listed recently and don't see movement, OpenSea may not have indexed it yet OR you need cursor paging.`
+        `[LURKER][warn] rule#${rule.id} feed looks stale (newest unchanged for ${feed.sameNewestTicks} ticks).`
       );
     }
-
-    if (dumpSampleOn() && listings[0]) {
-      const sample = listings[0];
-      const keys = Object.keys(sample || {});
-      console.log(`[LURKER][sample] rule#${rule.id} keys=${keys.join(",")}`);
-      try {
-        console.log(`[LURKER][sample] rule#${rule.id} sample=${JSON.stringify(sample).slice(0, 900)}`);
-      } catch {}
-    }
   }
+
+  if (debug && dumpSampleOn() && listings[0]) {
+    const sample = listings[0];
+    console.log(`[LURKER][sample] rule#${rule.id} keys=${Object.keys(sample || {}).join(",")}`);
+  }
+
+  // prune pending notified occasionally
+  if (pendingAlertOn()) gcPendingNotified();
 
   for (const listing of listings) {
     if (!listing?.listingId) {
       c.missingListingId += 1;
-      if (debug && logAllUnseenOn()) {
-        console.log(`[LURKER][skip] rule#${rule.id} missing listingId (keys=${Object.keys(listing || {}).join(",")})`);
-      }
       continue;
     }
 
@@ -490,7 +542,7 @@ async function processRule(client, rule, debug) {
     if (debug && logAllUnseenOn()) {
       const ts = extractTsMs(evaluated);
       console.log(
-        `[LURKER][unseen] rule#${rule.id} listing=${evaluated.listingId} token=#${evaluated.tokenId} ts=${fmtTs(ts)} price=${evaluated.priceNative ?? "?"} ${evaluated.priceCurrency || ""}`.trim()
+        `[LURKER][unseen] rule#${rule.id} listing=${evaluated.listingId} token=#${evaluated.tokenId} ts=${fmtTs(ts)}`
       );
     }
 
@@ -502,28 +554,33 @@ async function processRule(client, rule, debug) {
 
     const rarityMax = rule.rarity_max != null ? Number(rule.rarity_max) : null;
     const rank = evaluated.rarityRank != null ? Number(evaluated.rarityRank) : null;
-    const rarityHit = (rarityMax != null && rank != null && rank <= rarityMax);
 
+    // Waiting for rarity build
     if (rarityMax != null && rank == null && !traitHit) {
       c.waitRarity += 1;
-      if (debug && logAllUnseenOn()) {
+
+      // Optional: one-time "pending" heads-up (deduped in memory)
+      if (pendingAlertOn()) {
+        const pk = `${rule.id}:${evaluated.listingId}`;
+        if (!PENDING_NOTIFIED.has(pk)) {
+          PENDING_NOTIFIED.set(pk, Date.now());
+          const ok = await postPending(client, rule, evaluated);
+          if (ok) c.pendingPosted += 1;
+        }
+      } else if (debug && logWaitOn()) {
         console.log(`[LURKER][wait] rule#${rule.id} wait rarity build — listing=${evaluated.listingId} token=#${evaluated.tokenId}`);
       }
+
       continue;
     }
 
     if (!passesFilters(rule, evaluated)) {
       c.filterFailMarked += 1;
-      if (debug && logAllUnseenOn()) {
-        const maxP = rule.max_price_native != null ? Number(rule.max_price_native) : null;
-        console.log(
-          `[LURKER][skip] rule#${rule.id} filters fail — listing=${evaluated.listingId} token=#${evaluated.tokenId} rank=${rank ?? "?"} rarityMax=${rarityMax ?? "n/a"} traitHit=${traitHit ? "yes" : "no"} maxPrice=${maxP ?? "n/a"} price=${evaluated.priceNative ?? "?"}`
-        );
-      }
       await markSeen(client, rule.id, evaluated.listingId);
       continue;
     }
 
+    const rarityHit = (rarityMax != null && rank != null && rank <= rarityMax);
     const why = rarityHit
       ? `Rarity rank **${rank}** ≤ **${rarityMax}**`
       : `Trait match (${Object.keys(ruleTraits || {}).length} configured)`;
@@ -540,7 +597,7 @@ async function processRule(client, rule, debug) {
   if (debug && logSummaryOn()) {
     const ms = Date.now() - tickStart;
     console.log(
-      `[LURKER][sum] rule#${rule.id} fetched=${c.fetched} unseen=${c.unseen} seen=${c.seen} missingId=${c.missingListingId} waitRarity=${c.waitRarity} filterFailMarked=${c.filterFailMarked} hits=${c.hits} posted=${c.posted} ms=${ms}`
+      `[LURKER][sum] rule#${rule.id} fetched=${c.fetched} unseen=${c.unseen} seen=${c.seen} waitRarity=${c.waitRarity} filterFailMarked=${c.filterFailMarked} hits=${c.hits} posted=${c.posted} pending=${c.pendingPosted} ms=${ms}`
     );
   }
 }
@@ -553,7 +610,7 @@ function startLurker(client) {
   }
 
   const pollMs = Number(process.env.LURKER_POLL_MS || 15000);
-  const debug = String(process.env.LURKER_DEBUG || "0").trim() === "1";
+  const debug = debugOn();
 
   if (client.__lurkerStarted) return;
   client.__lurkerStarted = true;
@@ -573,11 +630,11 @@ function startLurker(client) {
     running = true;
 
     metadataLookupsThisTick = 0;
-    META_CACHE = new Map();
+    META_CACHE_TICK = new Map();
 
     try {
       const rules = await getEnabledRules(client);
-      if (debug) console.log(`[LURKER] rules enabled=${rules.length}`);
+      if (debug && logSummaryOn()) console.log(`[LURKER] rules enabled=${rules.length}`);
 
       for (const r of rules) {
         try {
@@ -598,5 +655,6 @@ function startLurker(client) {
 }
 
 module.exports = { startLurker };
+
 
 
