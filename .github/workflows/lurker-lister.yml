@@ -2,7 +2,6 @@ name: Lurker Lister (OpenSea -> Inbox)
 
 on:
   schedule:
-    # every 5 minutes (GitHub may drift slightly)
     - cron: "*/5 * * * *"
   workflow_dispatch: {}
 
@@ -19,8 +18,15 @@ jobs:
         with:
           node-version: "20"
 
+      - name: Quick sanity (show files)
+        run: |
+          node -v
+          ls -la
+          ls -la scripts || true
+          ls -la services || true
+
       - name: Install deps
-        run: npm ci
+        run: npm install
 
       - name: Run lister
         env:
