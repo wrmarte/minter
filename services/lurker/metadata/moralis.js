@@ -3,47 +3,17 @@
 // LURKER: Moralis metadata + traits fetcher
 // - Fetch token metadata (name/image/attributes)
 // - Fetch collection NFTs for rarity builder (paginated)
+// - Fetch wallet's tokenIds for a specific contract (for ApprovalForAll listing radar)
 //
 // ENV:
 //   MORALIS_API_KEY=...
-//
-// OPTIONAL:
-//   MORALIS_TIMEOUT_MS=30000
-//   MORALIS_RETRIES=2
-//   MORALIS_RETRY_BASE_MS=800
-//   MORALIS_IPFS_GATEWAY=https://ipfs.io/ipfs/   (or your preferred gateway)
 // ======================================================
 
-let fetchFn = null;
-try {
-  fetchFn = global.fetch ? global.fetch.bind(global) : require("node-fetch");
-} catch {
-  fetchFn = require("node-fetch");
-}
+const fetch = require("node-fetch");
 
 function s(v) { return String(v || "").trim(); }
 function chainNorm(v) { return s(v).toLowerCase(); }
 function debugOn() { return String(process.env.LURKER_DEBUG || "0").trim() === "1"; }
-
-function num(v, d) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : d;
-}
-
-function sleep(ms) {
-  return new Promise(r => setTimeout(r, ms));
-}
-
-function jitter(ms) {
-  const j = ms * 0.15;
-  return Math.max(0, Math.floor(ms + (Math.random() * 2 - 1) * j));
-}
-
-function isAbortErr(e) {
-  const msg = String(e?.message || e || "").toLowerCase();
-  const name = String(e?.name || "").toLowerCase();
-  return name.includes("abort") || msg.includes("aborted") || msg.includes("abort");
-}
 
 function moralisBase() {
   // Moralis commonly exposes v2.2
@@ -65,91 +35,24 @@ function moralisChain(chain) {
   return c;
 }
 
-function ipfsToHttp(u) {
-  const url = s(u);
-  if (!url) return null;
-
-  // ipfs://CID/... -> gateway/CID/...
-  if (url.startsWith("ipfs://")) {
-    const gw = s(process.env.MORALIS_IPFS_GATEWAY || "https://ipfs.io/ipfs/").replace(/\/+$/, "") + "/";
-    return gw + url.replace("ipfs://", "").replace(/^ipfs\//, "");
-  }
-
-  // ipfs://ipfs/CID -> gateway/CID
-  if (url.startsWith("ipfs://ipfs/")) {
-    const gw = s(process.env.MORALIS_IPFS_GATEWAY || "https://ipfs.io/ipfs/").replace(/\/+$/, "") + "/";
-    return gw + url.replace("ipfs://ipfs/", "");
-  }
-
-  return url;
-}
-
-// Pull traits from multiple common schemas
 function parseTraitsFromMetadata(md) {
-  let meta = md;
-
   // md may be object, or stringified json
+  let meta = md;
   if (typeof meta === "string") {
     try { meta = JSON.parse(meta); } catch { meta = null; }
   }
-
   if (!meta || typeof meta !== "object") return { name: null, image: null, traits: {} };
 
   const name = s(meta?.name);
+  const image = s(meta?.image || meta?.image_url || meta?.imageUrl);
 
-  // image field variants
-  const imageRaw =
-    meta?.image ||
-    meta?.image_url ||
-    meta?.imageUrl ||
-    meta?.imageURI ||
-    meta?.image_uri ||
-    null;
-
-  const image = ipfsToHttp(imageRaw);
-
-  // attributes variants:
-  // - attributes: [{trait_type,value}]
-  // - traits: [{trait_type,value}] or object
-  // - properties: { ... }
-  let attrs = [];
-
-  if (Array.isArray(meta?.attributes)) attrs = meta.attributes;
-  else if (Array.isArray(meta?.traits)) attrs = meta.traits;
-  else if (Array.isArray(meta?.properties)) attrs = meta.properties;
+  const attrs = Array.isArray(meta?.attributes) ? meta.attributes
+    : Array.isArray(meta?.traits) ? meta.traits
+    : [];
 
   const traits = {};
-
-  // object-based traits: { "Hat": "Crown" } or { "Hat": ["Crown"] }
-  if (!attrs.length && meta?.traits && typeof meta.traits === "object" && !Array.isArray(meta.traits)) {
-    for (const [kRaw, vRaw] of Object.entries(meta.traits)) {
-      const k = s(kRaw);
-      if (!k) continue;
-      const arr = Array.isArray(vRaw) ? vRaw : [vRaw];
-      for (const v of arr) {
-        const vv = s(v);
-        if (!vv) continue;
-        if (!traits[k]) traits[k] = [];
-        traits[k].push(vv);
-      }
-    }
-  }
-
-  // properties object
-  if (meta?.properties && typeof meta.properties === "object" && !Array.isArray(meta.properties)) {
-    for (const [kRaw, vRaw] of Object.entries(meta.properties)) {
-      const k = s(kRaw);
-      if (!k) continue;
-      const vv = s(vRaw?.value ?? vRaw);
-      if (!vv) continue;
-      if (!traits[k]) traits[k] = [];
-      traits[k].push(vv);
-    }
-  }
-
-  // array-based attributes
   for (const a of attrs) {
-    const k = s(a?.trait_type || a?.key || a?.type || a?.name);
+    const k = s(a?.trait_type || a?.key || a?.type);
     const v = s(a?.value);
     if (!k || !v) continue;
     if (!traits[k]) traits[k] = [];
@@ -157,60 +60,6 @@ function parseTraitsFromMetadata(md) {
   }
 
   return { name: name || null, image: image || null, traits };
-}
-
-async function fetchWithAbort(url, opts, timeoutMs) {
-  const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetchFn(url, { ...opts, signal: controller.signal });
-    return res;
-  } finally {
-    clearTimeout(t);
-  }
-}
-
-async function fetchJsonRetry(url, opts = {}) {
-  const timeoutMs = Math.max(8000, num(process.env.MORALIS_TIMEOUT_MS, 30000));
-  const retries = Math.max(1, Math.min(6, num(process.env.MORALIS_RETRIES, 2)));
-  const baseBackoff = Math.max(250, num(process.env.MORALIS_RETRY_BASE_MS, 800));
-
-  let lastErr = null;
-
-  for (let i = 0; i < retries; i++) {
-    try {
-      const attemptTimeout = Math.min(90000, timeoutMs + i * 10000);
-      const res = await fetchWithAbort(url, opts, attemptTimeout);
-
-      if (res.status === 429 || res.status === 500 || res.status === 502 || res.status === 503 || res.status === 504) {
-        const ra = s(res.headers.get("retry-after"));
-        const waitMs = ra
-          ? Math.min(45000, Math.max(1000, Math.floor(Number(ra) * 1000)))
-          : jitter(baseBackoff * Math.pow(2, i));
-        const txt = await res.text().catch(() => "");
-        throw new Error(`Moralis ${res.status} (retry in ${waitMs}ms): ${txt.slice(0, 200)}`);
-      }
-
-      if (!res.ok) {
-        const txt = await res.text().catch(() => "");
-        throw new Error(`Moralis ${res.status}: ${txt.slice(0, 220)}`);
-      }
-
-      return await res.json();
-    } catch (e) {
-      lastErr = e;
-
-      const waitMs = jitter(baseBackoff * Math.pow(2, i));
-      if (debugOn()) {
-        const tag = isAbortErr(e) ? "abort/timeout" : "err";
-        console.log(`[LURKER][moralis] retry ${i + 1}/${retries} in ${waitMs}ms — (${tag}) ${e?.message || e}`);
-      }
-
-      if (i < retries - 1) await sleep(waitMs);
-    }
-  }
-
-  throw lastErr || new Error("Moralis fetch failed");
 }
 
 async function fetchTokenMetadata({ chain, contract, tokenId }) {
@@ -222,20 +71,19 @@ async function fetchTokenMetadata({ chain, contract, tokenId }) {
 
   if (debugOn()) console.log(`[LURKER][moralis] token url=${url}`);
 
-  const data = await fetchJsonRetry(url, { headers: moralisHeaders() });
+  const res = await fetch(url, { headers: moralisHeaders(), timeout: 20000 });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Moralis ${res.status}: ${txt.slice(0, 220)}`);
+  }
 
+  const data = await res.json();
   // fields vary; prefer normalized_metadata when present
   const md = data?.normalized_metadata ?? data?.metadata ?? null;
   const out = parseTraitsFromMetadata(md);
 
   // Some responses include media/image separately
-  const fallbackImg = ipfsToHttp(
-    data?.media?.original_media_url ||
-    data?.media?.media_collection?.high?.url ||
-    data?.image ||
-    data?.image_url ||
-    ""
-  );
+  const fallbackImg = s(data?.media?.original_media_url || data?.media?.media_collection?.high?.url || "");
   if (!out.image && fallbackImg) out.image = fallbackImg;
 
   const fallbackName = s(data?.name || "");
@@ -259,32 +107,82 @@ async function fetchCollectionPage({ chain, contract, limit = 100, cursor = null
 
   if (debugOn()) console.log(`[LURKER][moralis] collection url=${url}`);
 
-  const data = await fetchJsonRetry(url, { headers: moralisHeaders() });
+  const res = await fetch(url, { headers: moralisHeaders(), timeout: 25000 });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Moralis ${res.status}: ${txt.slice(0, 220)}`);
+  }
 
+  const data = await res.json();
   const result = Array.isArray(data?.result) ? data.result : [];
   const next = data?.cursor ? String(data.cursor) : null;
 
   const tokens = result.map(r => {
     const tokenId = s(r?.token_id);
-
-    // fields vary; prefer normalized_metadata when present
     const md = r?.normalized_metadata ?? r?.metadata ?? null;
     const parsed = parseTraitsFromMetadata(md);
-
-    // sometimes Moralis puts image/name on root
-    const fallbackImg = ipfsToHttp(r?.media?.original_media_url || r?.image || r?.image_url || "");
-    const fallbackName = s(r?.name || "");
-
     return {
       tokenId,
       traits: parsed.traits || {},
-      name: parsed.name || fallbackName || null,
-      image: parsed.image || fallbackImg || null,
+      name: parsed.name || null,
+      image: parsed.image || null,
     };
   }).filter(t => t.tokenId);
 
   return { tokens, cursor: next };
 }
 
-module.exports = { fetchTokenMetadata, fetchCollectionPage };
+/**
+ * Fetch token IDs owned by a wallet for a given contract.
+ * Used by ApprovalForAll listing radar to produce tokenIds for rarity filtering.
+ *
+ * ENV knobs:
+ *   LURKER_APPROVAL_WALLET_PAGE_LIMIT=100
+ *   LURKER_APPROVAL_WALLET_PAGES_MAX=2
+ */
+async function fetchWalletContractTokenIds({ chain, wallet, contract }) {
+  const c = moralisChain(chain);
+  const w = s(wallet).toLowerCase();
+  const addr = s(contract).toLowerCase();
 
+  const pageLimit = Math.min(100, Math.max(1, Number(process.env.LURKER_APPROVAL_WALLET_PAGE_LIMIT || 100)));
+  const pagesMax = Math.min(5, Math.max(1, Number(process.env.LURKER_APPROVAL_WALLET_PAGES_MAX || 2)));
+
+  let cursor = null;
+  const out = [];
+
+  for (let i = 0; i < pagesMax; i++) {
+    const qs = [];
+    qs.push(`chain=${encodeURIComponent(c)}`);
+    qs.push(`format=decimal`);
+    qs.push(`limit=${encodeURIComponent(String(pageLimit))}`);
+    qs.push(`token_addresses=${encodeURIComponent(addr)}`); // filter to this collection
+    if (cursor) qs.push(`cursor=${encodeURIComponent(cursor)}`);
+
+    const url = `${moralisBase()}/${w}/nft?${qs.join("&")}`;
+
+    if (debugOn()) console.log(`[LURKER][moralis] walletNFT url=${url}`);
+
+    const res = await fetch(url, { headers: moralisHeaders(), timeout: 25000 });
+    if (!res.ok) {
+      const txt = await res.text().catch(() => "");
+      throw new Error(`Moralis ${res.status}: ${txt.slice(0, 220)}`);
+    }
+
+    const data = await res.json();
+    const result = Array.isArray(data?.result) ? data.result : [];
+    for (const r of result) {
+      const tokenId = s(r?.token_id);
+      if (tokenId) out.push(tokenId);
+    }
+
+    cursor = data?.cursor ? String(data.cursor) : null;
+    if (!cursor) break;
+  }
+
+  // de-dupe
+  const uniq = Array.from(new Set(out));
+  return uniq;
+}
+
+module.exports = { fetchTokenMetadata, fetchCollectionPage, fetchWalletContractTokenIds };
