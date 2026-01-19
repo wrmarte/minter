@@ -1,10 +1,8 @@
 // services/lurker/lurkerService.js
 // ======================================================
-// LURKER: Background poller (OpenSea + Moralis + Local Rarity + Approval Radar)
+// LURKER: Background poller (OpenSea + Moralis + Local Rarity)
 // FIXES/UPGRADES:
-// - Source: OpenSea listings (when reachable)
-// - Source: Inbox (external lister -> DB) (when reachable)
-// - Source: Approvals (Railway-safe listing radar using on-chain Approval events)
+// - Source: OpenSea listings (v2 slug if provided, fallback v1)
 // - Traits: Moralis token metadata fetch (reliable)
 // - Rarity: local OpenRarity-style build + DB rank/score
 // - Starts rarity builder automatically
@@ -15,9 +13,6 @@ const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require("
 const { ensureLurkerSchema } = require("./schema");
 
 const { fetchListings: openseaFetchListings } = require("./sources/opensea");
-const { fetchListings: inboxFetchListings } = require("./sources/inbox");
-const { fetchListings: approvalsFetchListings } = require("./sources/approvals");
-
 const { fetchTokenMetadata } = require("./metadata/moralis");
 
 const { startRarityBuilder } = require("./rarity/rarityBuilder");
@@ -112,11 +107,6 @@ async function postAlert(client, rule, listing, why) {
       ? `**Rarity Score:** \`${Number(listing.rarityScore).toFixed(2)}\``
       : null;
 
-  const sourceLine =
-    listing.source
-      ? `**Signal:** \`${String(listing.source).toUpperCase()}\``
-      : null;
-
   const embed = new EmbedBuilder()
     .setColor(LURKER_COLOR)
     .setTitle(title)
@@ -128,8 +118,6 @@ async function postAlert(client, rule, listing, why) {
         listing.priceNative != null ? `**Price:** ${listing.priceNative} ${listing.priceCurrency || ""}`.trim() : null,
         rarityLine,
         scoreLine,
-        sourceLine,
-        listing.seller ? `**Owner:** \`${listing.seller}\`` : null,
         `**Trigger:** ${why}`,
         url ? `**Link:** ${url}` : null,
       ].filter(Boolean).join("\n")
@@ -180,36 +168,27 @@ async function isSeen(client, ruleId, listingId) {
   return (r.rowCount || 0) > 0;
 }
 
-async function fetchFromSource(client, rule) {
+async function fetchFromSource(rule) {
   const source = String(process.env.LURKER_SOURCE || "opensea").toLowerCase();
 
   if (source === "opensea") {
+    const osSlugOrUrl = (rule.os_slug || rule.os_url || "").trim() || null;
     return openseaFetchListings({
       chain: rule.chain,
       contract: rule.contract,
       limit: 25,
+      osSlugOrUrl
     });
   }
 
-  if (source === "inbox") {
-    return inboxFetchListings({
-      client,
-      rule,
-    });
-  }
-
-  // ✅ NEW: Approval-based listing radar (Railway-safe)
-  if (source === "approvals" || source === "approval") {
-    return approvalsFetchListings({
-      client,
-      chain: rule.chain,
-      contract: rule.contract,
-      limit: 25,
-    });
-  }
-
-  // default to inbox if unknown (safe)
-  return inboxFetchListings({ client, rule });
+  // default to opensea for safety
+  const osSlugOrUrl = (rule.os_slug || rule.os_url || "").trim() || null;
+  return openseaFetchListings({
+    chain: rule.chain,
+    contract: rule.contract,
+    limit: 25,
+    osSlugOrUrl
+  });
 }
 
 function throttleRuleError(ruleId, err) {
@@ -251,7 +230,6 @@ async function ensureTraitsIfNeeded(rule, listing) {
     if (!listing.name && md?.name) listing.name = md.name;
     if (!listing.image && md?.image) listing.image = md.image;
   } catch (e) {
-    // ignore (Moralis may not support chain)
     if (debugOn()) console.log(`[LURKER][traits] fetch failed: ${e?.message || e}`);
   }
 
@@ -262,7 +240,6 @@ async function fillRarity(client, rule, listing) {
   const rarityMax = rule.rarity_max != null ? Number(rule.rarity_max) : null;
   if (!rarityMax || !Number.isFinite(rarityMax)) return listing;
 
-  // Query DB
   const r = await getTokenRarity(client, {
     chain: listing.chain,
     contract: listing.contract,
@@ -272,7 +249,6 @@ async function fillRarity(client, rule, listing) {
   if (r.rank != null) listing.rarityRank = r.rank;
   if (r.score != null) listing.rarityScore = r.score;
 
-  // Helpful debug if still missing
   if (listing.rarityRank == null && debugOn()) {
     const st = await getBuildStatus(client, { chain: listing.chain, contract: listing.contract });
     const status = st?.status || "unknown";
@@ -285,26 +261,25 @@ async function fillRarity(client, rule, listing) {
 }
 
 async function processRule(client, rule, debug) {
-  const out = await fetchFromSource(client, rule);
+  const out = await fetchFromSource(rule);
   const listings = Array.isArray(out?.listings) ? out.listings : [];
 
   if (debug) {
+    const src = process.env.LURKER_SOURCE || "opensea";
+    const os = (rule.os_slug || rule.os_url || "").trim();
     console.log(
-      `[LURKER] rule#${rule.id} src=${process.env.LURKER_SOURCE || "opensea"} chain=${rule.chain} contract=${String(rule.contract).slice(0, 10)}.. listings=${listings.length}`
+      `[LURKER] rule#${rule.id} src=${src} chain=${rule.chain} contract=${String(rule.contract).slice(0, 10)}.. listings=${listings.length}${os ? ` os=${os}` : ""}`
     );
   }
 
   for (const listing of listings) {
     if (await isSeen(client, rule.id, listing.listingId)) continue;
 
-    // Ensure traits if needed (Moralis)
     let evaluated = listing;
     evaluated.chain = chainNorm(evaluated.chain || rule.chain);
     evaluated.contract = s(evaluated.contract || rule.contract).toLowerCase();
 
     evaluated = await ensureTraitsIfNeeded(rule, evaluated);
-
-    // Ensure rarity from DB if needed
     evaluated = await fillRarity(client, rule, evaluated);
 
     const ruleTraits = jparse(rule.traits_json || "", null);
@@ -315,7 +290,6 @@ async function processRule(client, rule, debug) {
     const rarityHit = (rarityMax != null && rank != null && rank <= rarityMax);
 
     // If rule depends on rarity and we don't have rank yet, do NOT mark seen
-    // (we want to catch it later once rarity builder finishes)
     if (rarityMax != null && rank == null && !traitHit) {
       if (debug) console.log(`[LURKER] rule#${rule.id} wait rarity build — listing=${evaluated.listingId}`);
       continue;
@@ -348,15 +322,13 @@ function startLurker(client) {
   if (client.__lurkerStarted) return;
   client.__lurkerStarted = true;
 
-  // Start background rarity builder
   try {
     startRarityBuilder(client);
   } catch (e) {
     console.warn("[LURKER] rarityBuilder failed to start:", e?.message || e);
   }
 
-  const src = String(process.env.LURKER_SOURCE || "opensea").trim();
-  console.log(`🟢 [LURKER] started pollMs=${pollMs} source=${src}`);
+  console.log(`🟢 [LURKER] started pollMs=${pollMs} source=${process.env.LURKER_SOURCE || "opensea"}`);
 
   let running = false;
 
