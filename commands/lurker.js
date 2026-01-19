@@ -4,7 +4,12 @@
 // /lurker quick   -> create rule quickly (no modal)
 // /lurker stop    -> disable a rule (or all)
 // /lurker list    -> show rules
-// /lurker status  -> show config/health + rarity build status
+// /lurker status  -> show config/health
+//
+// PATCH:
+// - Adds opensea (url or slug) field for v2 listing feed
+// - Stores into lurker_rules.opensea_slug
+// - Lists rule slug in /lurker list
 // ======================================================
 
 const {
@@ -17,14 +22,6 @@ const {
 } = require("discord.js");
 
 const { ensureLurkerSchema } = require("../services/lurker/schema");
-
-// Optional (status shows build info if available)
-let getBuildStatus = null;
-try {
-  ({ getBuildStatus } = require("../services/lurker/rarity/rarityEngine"));
-} catch {
-  getBuildStatus = null;
-}
 
 const EMERALD = 0x00c853;
 
@@ -56,17 +53,22 @@ function extractOpenSeaSlug(input) {
   const raw = String(input || "").trim();
   if (!raw) return null;
 
-  // If user passes just "cryptopimps-1"
-  if (!raw.includes("/") && !raw.includes("?") && raw.length <= 120) {
-    return cleanLower(raw);
+  // If it's already a simple slug
+  if (!raw.includes("/") && !raw.includes(" ")) return raw.toLowerCase();
+
+  // If it's a URL like https://opensea.io/collection/<slug>
+  try {
+    const u = new URL(raw);
+    const parts = (u.pathname || "").split("/").filter(Boolean);
+    const idx = parts.findIndex(p => p.toLowerCase() === "collection");
+    if (idx >= 0 && parts[idx + 1]) return String(parts[idx + 1]).toLowerCase();
+  } catch {
+    // not a URL, fall through
   }
 
-  // URL forms:
-  // https://opensea.io/collection/<slug>...
-  // https://opensea.io/collection/<slug>
-  // https://opensea.io/collection/<slug>?sortBy=...
-  const m = raw.match(/opensea\.io\/collection\/([^/?#]+)/i);
-  if (m && m[1]) return cleanLower(m[1]);
+  // If they pasted something like "collection/slug"
+  const m = raw.toLowerCase().match(/collection\/([a-z0-9-_.]+)/i);
+  if (m && m[1]) return m[1].toLowerCase();
 
   return null;
 }
@@ -94,7 +96,7 @@ module.exports = {
           o.setName("contract").setDescription("0x contract").setRequired(true)
         )
         .addStringOption(o =>
-          o.setName("opensea").setDescription("OpenSea slug or URL (recommended for v2 listings)").setRequired(false)
+          o.setName("opensea").setDescription("OpenSea collection URL or slug (recommended)").setRequired(false)
         )
         .addIntegerOption(o =>
           o.setName("rarity_max").setDescription("e.g. 100").setRequired(false)
@@ -146,10 +148,7 @@ module.exports = {
       const src = (process.env.LURKER_SOURCE || "opensea").trim();
       const owner = (process.env.BOT_OWNER_ID || "").trim();
 
-      const res = await pg.query(
-        `SELECT COUNT(*)::int AS n FROM lurker_rules WHERE enabled=TRUE AND guild_id=$1`,
-        [interaction.guildId]
-      );
+      const res = await pg.query(`SELECT COUNT(*)::int AS n FROM lurker_rules WHERE enabled=TRUE AND guild_id=$1`, [interaction.guildId]);
       const n = res.rows?.[0]?.n ?? 0;
 
       const embed = new EmbedBuilder()
@@ -165,38 +164,6 @@ module.exports = {
           { name: "Active Rules (this server)", value: String(n), inline: true },
         )
         .setTimestamp(new Date());
-
-      // Rarity build status per active contract (best-effort)
-      if (typeof getBuildStatus === "function") {
-        try {
-          const rr = await pg.query(
-            `SELECT DISTINCT chain, contract
-             FROM lurker_rules
-             WHERE guild_id=$1 AND enabled=TRUE`,
-            [interaction.guildId]
-          );
-          const rows = rr.rows || [];
-          for (const row of rows.slice(0, 6)) {
-            const chain = cleanLower(row.chain);
-            const contract = cleanLower(row.contract);
-
-            const st = await getBuildStatus(client, { chain, contract }).catch(() => null);
-            if (!st) continue;
-
-            const status = String(st.status || "unknown");
-            const pc = st.processed_count != null ? String(st.processed_count) : "?";
-            const ts = st.total_supply != null ? String(st.total_supply) : "?";
-
-            embed.addFields({
-              name: `Rarity Build — ${chain.toUpperCase()} ${contract.slice(0, 8)}…`,
-              value: `Status: **${status}** | processed: **${pc}** | supply: **${ts}**`,
-              inline: false
-            });
-          }
-        } catch {
-          // ignore
-        }
-      }
 
       return interaction.reply({ embeds: [embed], ephemeral: true }).catch(() => null);
     }
@@ -221,7 +188,7 @@ module.exports = {
 
       const opensea = new TextInputBuilder()
         .setCustomId("opensea")
-        .setLabel("OpenSea slug or URL (recommended)")
+        .setLabel("OpenSea Collection URL or Slug (recommended)")
         .setStyle(TextInputStyle.Short)
         .setRequired(false);
 
@@ -258,8 +225,8 @@ module.exports = {
     if (sub === "quick") {
       const chain = cleanLower(interaction.options.getString("chain"));
       const contract = cleanLower(interaction.options.getString("contract"));
-      const openseaRaw = (interaction.options.getString("opensea") || "").trim();
-      const osSlug = extractOpenSeaSlug(openseaRaw);
+      const osInput = (interaction.options.getString("opensea") || "").trim();
+      const openseaSlug = extractOpenSeaSlug(osInput);
 
       const rarityMax = interaction.options.getInteger("rarity_max");
       const traitsJson = (interaction.options.getString("traits_json") || "").trim();
@@ -274,14 +241,11 @@ module.exports = {
       if (!contract.startsWith("0x") || contract.length < 42) {
         return interaction.reply({ content: "Contract address looks invalid.", ephemeral: true }).catch(() => null);
       }
+      if (osInput && !openseaSlug) {
+        return interaction.reply({ content: "OpenSea field must be a slug or a /collection/<slug> URL.", ephemeral: true }).catch(() => null);
+      }
       if (traitsJson && !safeJsonParse(traitsJson)) {
         return interaction.reply({ content: "Traits JSON is invalid JSON.", ephemeral: true }).catch(() => null);
-      }
-      if (openseaRaw && !osSlug) {
-        return interaction.reply({
-          content: "OpenSea value must be a slug like `cryptopimps-1` or a URL like `https://opensea.io/collection/cryptopimps-1`.",
-          ephemeral: true
-        }).catch(() => null);
       }
 
       const pg = client.pg;
@@ -295,7 +259,7 @@ module.exports = {
           interaction.guildId,
           chain,
           contract,
-          osSlug || null,
+          openseaSlug || null,
           channelId,
           rarityMax ?? null,
           traitsJson || null,
@@ -306,12 +270,13 @@ module.exports = {
 
       const id = ins.rows?.[0]?.id;
       return interaction.reply({
-        content:
-          `🟢 Lurker rule created: **#${id}**\n` +
-          `Chain: **${chain}**\n` +
-          `Contract: \`${contract}\`\n` +
-          (osSlug ? `OpenSea: **${osSlug}**\n` : `OpenSea: _(not set — may fallback to v1)_\n`) +
-          `Channel: ${channelId ? `<#${channelId}>` : "(missing)"}`,
+        content: [
+          `🟢 Lurker rule created: **#${id}**`,
+          `Chain: **${chain}**`,
+          `Contract: \`${contract}\``,
+          openseaSlug ? `OpenSea: **${openseaSlug}**` : `OpenSea: _(not set — v2 recommended)_`,
+          `Channel: ${channelId ? `<#${channelId}>` : "(missing)"}`
+        ].join("\n"),
         ephemeral: true
       }).catch(() => null);
     }
@@ -355,7 +320,7 @@ module.exports = {
           name: `Rule #${r.id} — ${String(r.chain || "").toUpperCase()} — ${String(r.contract).slice(0, 8)}…`,
           value: [
             `Enabled: **${r.enabled ? "YES" : "NO"}**`,
-            r.opensea_slug ? `OpenSea: **${String(r.opensea_slug)}**` : `OpenSea: _none_`,
+            r.opensea_slug ? `OpenSea: **${r.opensea_slug}**` : `OpenSea: _none_`,
             r.rarity_max != null ? `Rarity Max: **${r.rarity_max}**` : `Rarity Max: _none_`,
             r.max_price_native ? `Max Price: **${r.max_price_native}**` : `Max Price: _none_`,
             `AutoBuy: **${r.auto_buy ? "YES" : "NO"}**`,
@@ -371,7 +336,6 @@ module.exports = {
   // Modal submit handler (call this from your interactionCreate router)
   async handleModal(interaction, ctx) {
     const client = resolveClient(ctx, interaction);
-
     if (interaction.customId !== "lurker_modal_set") return false;
 
     if (!isOwner(interaction)) {
@@ -383,8 +347,8 @@ module.exports = {
 
     const chain = cleanLower(interaction.fields.getTextInputValue("chain"));
     const contract = cleanLower(interaction.fields.getTextInputValue("contract"));
-    const openseaRaw = (interaction.fields.getTextInputValue("opensea") || "").trim();
-    const osSlug = extractOpenSeaSlug(openseaRaw);
+    const openseaIn = (interaction.fields.getTextInputValue("opensea") || "").trim();
+    const openseaSlug = extractOpenSeaSlug(openseaIn);
 
     const rarityMax = (interaction.fields.getTextInputValue("rarity_max") || "").trim();
     const traitsJson = (interaction.fields.getTextInputValue("traits_json") || "").trim();
@@ -398,15 +362,12 @@ module.exports = {
       await interaction.reply({ content: "Contract address looks invalid.", ephemeral: true }).catch(() => null);
       return true;
     }
-    if (traitsJson && !safeJsonParse(traitsJson)) {
-      await interaction.reply({ content: "Traits JSON is invalid JSON.", ephemeral: true }).catch(() => null);
+    if (openseaIn && !openseaSlug) {
+      await interaction.reply({ content: "OpenSea field must be a slug or a /collection/<slug> URL.", ephemeral: true }).catch(() => null);
       return true;
     }
-    if (openseaRaw && !osSlug) {
-      await interaction.reply({
-        content: "OpenSea must be a slug like `cryptopimps-1` or a URL like `https://opensea.io/collection/cryptopimps-1`.",
-        ephemeral: true
-      }).catch(() => null);
+    if (traitsJson && !safeJsonParse(traitsJson)) {
+      await interaction.reply({ content: "Traits JSON is invalid JSON.", ephemeral: true }).catch(() => null);
       return true;
     }
 
@@ -422,7 +383,7 @@ module.exports = {
         interaction.guildId,
         chain,
         contract,
-        osSlug || null,
+        openseaSlug || null,
         (process.env.LURKER_DEFAULT_CHANNEL_ID || "").trim() || null,
         rarityMax ? Number(rarityMax) : null,
         traitsJson || null,
@@ -434,11 +395,12 @@ module.exports = {
     const id = ins.rows?.[0]?.id;
 
     await interaction.reply({
-      content:
-        `🟢 Lurker rule created: **#${id}**\n` +
-        `Chain: **${chain}**\n` +
-        `Contract: \`${contract}\`\n` +
-        (osSlug ? `OpenSea: **${osSlug}**` : `OpenSea: _(not set — may fallback to v1)_`),
+      content: [
+        `🟢 Lurker rule created: **#${id}**`,
+        `Chain: **${chain}**`,
+        `Contract: \`${contract}\``,
+        openseaSlug ? `OpenSea: **${openseaSlug}**` : `OpenSea: _(not set)_`,
+      ].join("\n"),
       ephemeral: true
     }).catch(() => null);
 
