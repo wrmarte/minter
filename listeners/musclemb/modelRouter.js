@@ -3,14 +3,18 @@
 // Model Router (optional)
 // - If enabled: tries Groq (via groqWithDiscovery) first,
 //   then OpenAI, then Grok (OpenAI-compatible endpoint).
-// - If disabled: your listener uses groqWithDiscovery directly.
 // - Safe defaults: OFF, never crashes the bot.
 // ======================================================
 
 const Config = require('./config');
 const { groqWithDiscovery } = require('./groq');
 
-const fetchFn = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
+// ✅ PATCH: node-fetch v3 is ESM; use dynamic import correctly
+async function fetchOpen(url, options) {
+  const mod = await import('node-fetch');
+  const fetch = mod.default;
+  return fetch(url, options);
+}
 
 function isEnabled() {
   return Boolean(Config.MB_MODEL_ROUTER_ENABLED);
@@ -30,7 +34,6 @@ function buildMessages(system, user, extraMessages = []) {
   const msgs = [];
   if (system) msgs.push({ role: 'system', content: safeStr(system, 3500) });
 
-  // extraMessages is already OpenAI style (user/assistant)
   if (Array.isArray(extraMessages) && extraMessages.length) {
     for (const m of extraMessages) {
       const role = (m?.role === 'assistant') ? 'assistant' : 'user';
@@ -61,7 +64,8 @@ async function tryOpenAICompat({ baseUrl, apiKey, model, system, user, temperatu
   };
 
   try {
-    const res = await fetchFn()(url, { method: 'POST', headers, body: JSON.stringify(body) });
+    // ✅ PATCH: correct fetch usage
+    const res = await fetchOpen(url, { method: 'POST', headers, body: JSON.stringify(body) });
     const text = await res.text();
 
     if (!res.ok) {
@@ -86,21 +90,17 @@ async function tryOpenAICompat({ baseUrl, apiKey, model, system, user, temperatu
 // Public: generate()
 // ======================================================
 async function generate({ client, system, user, temperature = 0.7, extraMessages = [], cacheKey = '' }) {
-  // 1) Always try Groq first (fast / free tier)
+  // 1) Always try Groq first
   try {
     const groqTry = await groqWithDiscovery(system, user, { temperature, extraMessages, cacheKey });
 
-    if (groqTry && groqTry.res?.ok) {
-      let data = null;
-      try { data = JSON.parse(groqTry.bodyText); } catch { data = null; }
-      const t = data?.choices?.[0]?.message?.content?.trim() || '';
-      if (t) {
-        debugLog('Groq OK', groqTry.model);
-        return { ok: true, text: safeStr(t, 2200), provider: 'groq', model: groqTry.model };
-      }
-    } else {
-      debugLog('Groq failed', groqTry?.res?.status, groqTry?.model);
+    // ✅ PATCH: groqWithDiscovery already returns .text when successful
+    if (groqTry && groqTry.text && String(groqTry.text).trim().length) {
+      debugLog('Groq OK', groqTry.model);
+      return { ok: true, text: safeStr(groqTry.text, 2200), provider: 'groq', model: groqTry.model };
     }
+
+    debugLog('Groq failed', groqTry?.res?.status, groqTry?.model, groqTry?.error?.message || '');
   } catch (e) {
     debugLog('Groq throw', e?.message || e);
   }
@@ -122,7 +122,7 @@ async function generate({ client, system, user, temperature = 0.7, extraMessages
     }
   }
 
-  // 3) Grok fallback (optional, OpenAI-compatible)
+  // 3) Grok fallback (optional)
   if (Config.GROK_API_KEY && Config.GROK_BASE_URL) {
     const r = await tryOpenAICompat({
       baseUrl: Config.GROK_BASE_URL,
@@ -146,5 +146,3 @@ module.exports = {
   isEnabled,
   generate,
 };
-
-
