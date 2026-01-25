@@ -1,189 +1,150 @@
 // listeners/musclemb/modelRouter.js
 // ======================================================
-// Model Router
-// - Groq -> OpenAI -> Grok (optional)
-// - OpenAI/Grok use OpenAI-compatible /chat/completions
+// Model Router (optional)
+// - If enabled: tries Groq (via groqWithDiscovery) first,
+//   then OpenAI, then Grok (OpenAI-compatible endpoint).
+// - If disabled: your listener uses groqWithDiscovery directly.
+// - Safe defaults: OFF, never crashes the bot.
 // ======================================================
 
 const Config = require('./config');
 const { groqWithDiscovery } = require('./groq');
 
-const CACHE = new Map(); // cacheKey -> { ts, text }
-const CACHE_TTL_MS = 12_000;
+const fetchFn = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
 
 function isEnabled() {
   return Boolean(Config.MB_MODEL_ROUTER_ENABLED);
 }
 
-function nowMs() { return Date.now(); }
-
-function getCached(cacheKey) {
-  if (!cacheKey) return null;
-  const hit = CACHE.get(cacheKey);
-  if (!hit) return null;
-  if (nowMs() - hit.ts > CACHE_TTL_MS) {
-    CACHE.delete(cacheKey);
-    return null;
-  }
-  return hit.text || null;
+function debugLog(...args) {
+  if (Config.MB_MODEL_ROUTER_DEBUG) console.log('[MB_ROUTER]', ...args);
 }
 
-function setCached(cacheKey, text) {
-  if (!cacheKey || !text) return;
-  CACHE.set(cacheKey, { ts: nowMs(), text: String(text) });
-  // simple bound
-  if (CACHE.size > 500) {
-    const first = CACHE.keys().next().value;
-    if (first) CACHE.delete(first);
-  }
+function safeStr(s, max = 4000) {
+  const t = String(s || '').trim();
+  if (!t) return '';
+  return t.length > max ? t.slice(0, max - 1) + '…' : t;
 }
 
-function joinUrl(base, path) {
-  const b = String(base || '').replace(/\/+$/, '');
-  const p = String(path || '').replace(/^\/+/, '');
-  return `${b}/${p}`;
+function buildMessages(system, user, extraMessages = []) {
+  const msgs = [];
+  if (system) msgs.push({ role: 'system', content: safeStr(system, 3500) });
+
+  // extraMessages is already OpenAI style (user/assistant)
+  if (Array.isArray(extraMessages) && extraMessages.length) {
+    for (const m of extraMessages) {
+      const role = (m?.role === 'assistant') ? 'assistant' : 'user';
+      const content = safeStr(m?.content, 900);
+      if (content) msgs.push({ role, content });
+    }
+  }
+
+  if (user) msgs.push({ role: 'user', content: safeStr(user, 1500) });
+  return msgs;
 }
 
-async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 18_000) {
-  const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), timeoutMs);
+async function tryOpenAICompat({ baseUrl, apiKey, model, system, user, temperature, extraMessages }) {
+  if (!apiKey || apiKey.trim().length < 10) return { ok: false, hint: 'missing api key' };
+  if (!baseUrl || baseUrl.trim().length < 8) return { ok: false, hint: 'missing base url' };
 
-  try {
-    const res = await fetch(url, { ...options, signal: controller.signal });
-    const text = await res.text().catch(() => '');
-    let json = null;
-    try { json = JSON.parse(text); } catch {}
-    return { ok: res.ok, status: res.status, text, json };
-  } catch (e) {
-    return { ok: false, status: 0, text: '', json: null, error: e };
-  } finally {
-    clearTimeout(t);
-  }
-}
+  const url = baseUrl.replace(/\/+$/, '') + '/chat/completions';
 
-async function callOpenAICompatible({ baseUrl, apiKey, model, messages, temperature }) {
-  if (!apiKey || String(apiKey).trim().length < 10) {
-    return { ok: false, hint: 'Missing API key.' };
-  }
-  if (!baseUrl || String(baseUrl).trim().length < 8) {
-    return { ok: false, hint: 'Missing base URL.' };
-  }
-
-  const url = joinUrl(baseUrl, 'chat/completions');
-  const payload = {
-    model,
-    temperature,
-    messages,
+  const body = {
+    model: model || 'gpt-4o-mini',
+    temperature: typeof temperature === 'number' ? temperature : 0.7,
+    messages: buildMessages(system, user, extraMessages),
   };
 
-  const r = await fetchJsonWithTimeout(
-    url,
-    {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(payload),
-    },
-    18_000
-  );
+  const headers = {
+    'content-type': 'application/json',
+    'authorization': `Bearer ${apiKey}`,
+  };
 
-  if (!r.ok) {
-    const msg = r?.json?.error?.message || r.text?.slice(0, 180) || `HTTP ${r.status}`;
-    return { ok: false, hint: msg, status: r.status };
+  try {
+    const res = await fetchFn()(url, { method: 'POST', headers, body: JSON.stringify(body) });
+    const text = await res.text();
+
+    if (!res.ok) {
+      debugLog('OpenAI-compat HTTP', res.status, text.slice(0, 200));
+      return { ok: false, hint: `http ${res.status}` };
+    }
+
+    let data = null;
+    try { data = JSON.parse(text); } catch { data = null; }
+    const out = data?.choices?.[0]?.message?.content;
+    const finalText = safeStr(out, 2200);
+
+    if (!finalText) return { ok: false, hint: 'empty response' };
+    return { ok: true, text: finalText };
+  } catch (e) {
+    debugLog('OpenAI-compat error', e?.message || e);
+    return { ok: false, hint: 'network error' };
   }
-
-  const out = r.json?.choices?.[0]?.message?.content;
-  if (!out || !String(out).trim()) {
-    return { ok: false, hint: 'Empty completion.' };
-  }
-
-  return { ok: true, text: String(out).trim() };
 }
 
+// ======================================================
+// Public: generate()
+// ======================================================
 async function generate({ client, system, user, temperature = 0.7, extraMessages = [], cacheKey = '' }) {
+  // 1) Always try Groq first (fast / free tier)
   try {
-    // cache
-    const cached = getCached(cacheKey);
-    if (cached) return { ok: true, text: cached, provider: 'cache' };
-
-    // 1) Groq first
     const groqTry = await groqWithDiscovery(system, user, { temperature, extraMessages, cacheKey });
-    if (groqTry && !groqTry.error && groqTry.res?.ok) {
+
+    if (groqTry && groqTry.res?.ok) {
       let data = null;
-      try { data = JSON.parse(groqTry.bodyText); } catch {}
-      const text = data?.choices?.[0]?.message?.content?.trim();
-      if (text) {
-        setCached(cacheKey, text);
-        return { ok: true, text, provider: `groq:${groqTry.model || 'auto'}` };
+      try { data = JSON.parse(groqTry.bodyText); } catch { data = null; }
+      const t = data?.choices?.[0]?.message?.content?.trim() || '';
+      if (t) {
+        debugLog('Groq OK', groqTry.model);
+        return { ok: true, text: safeStr(t, 2200), provider: 'groq', model: groqTry.model };
       }
+    } else {
+      debugLog('Groq failed', groqTry?.res?.status, groqTry?.model);
     }
-
-    // 2) OpenAI (optional)
-    const hasOpenAI = Config.OPENAI_API_KEY && String(Config.OPENAI_API_KEY).trim().length > 10;
-    if (hasOpenAI) {
-      const messages = [
-        { role: 'system', content: String(system || '') },
-        ...(Array.isArray(extraMessages) ? extraMessages : []),
-        { role: 'user', content: String(user || '') }
-      ];
-
-      const r = await callOpenAICompatible({
-        baseUrl: Config.OPENAI_BASE_URL,
-        apiKey: Config.OPENAI_API_KEY,
-        model: Config.OPENAI_MODEL,
-        messages,
-        temperature,
-      });
-
-      if (r.ok) {
-        setCached(cacheKey, r.text);
-        return { ok: true, text: r.text, provider: 'openai' };
-      }
-
-      if (Config.MB_MODEL_ROUTER_DEBUG) {
-        console.warn('[MB_ROUTER] OpenAI failed:', r.hint || r.status);
-      }
-    }
-
-    // 3) Grok/xAI (optional, OpenAI-compatible)
-    const hasGrok = Config.GROK_API_KEY && String(Config.GROK_API_KEY).trim().length > 10
-      && Config.GROK_BASE_URL && String(Config.GROK_BASE_URL).trim().length > 8;
-
-    if (hasGrok) {
-      const messages = [
-        { role: 'system', content: String(system || '') },
-        ...(Array.isArray(extraMessages) ? extraMessages : []),
-        { role: 'user', content: String(user || '') }
-      ];
-
-      const r = await callOpenAICompatible({
-        baseUrl: Config.GROK_BASE_URL,
-        apiKey: Config.GROK_API_KEY,
-        model: Config.GROK_MODEL,
-        messages,
-        temperature,
-      });
-
-      if (r.ok) {
-        setCached(cacheKey, r.text);
-        return { ok: true, text: r.text, provider: 'grok' };
-      }
-
-      if (Config.MB_MODEL_ROUTER_DEBUG) {
-        console.warn('[MB_ROUTER] Grok failed:', r.hint || r.status);
-      }
-    }
-
-    return { ok: false, hint: '⚠️ All model providers failed (Groq/OpenAI/Grok).' };
   } catch (e) {
-    return { ok: false, hint: e?.message || 'Router crashed.' };
+    debugLog('Groq throw', e?.message || e);
   }
+
+  // 2) OpenAI fallback (optional)
+  if (Config.OPENAI_API_KEY) {
+    const r = await tryOpenAICompat({
+      baseUrl: Config.OPENAI_BASE_URL,
+      apiKey: Config.OPENAI_API_KEY,
+      model: Config.OPENAI_MODEL,
+      system,
+      user,
+      temperature,
+      extraMessages,
+    });
+    if (r.ok) {
+      debugLog('OpenAI OK', Config.OPENAI_MODEL);
+      return { ok: true, text: r.text, provider: 'openai', model: Config.OPENAI_MODEL };
+    }
+  }
+
+  // 3) Grok fallback (optional, OpenAI-compatible)
+  if (Config.GROK_API_KEY && Config.GROK_BASE_URL) {
+    const r = await tryOpenAICompat({
+      baseUrl: Config.GROK_BASE_URL,
+      apiKey: Config.GROK_API_KEY,
+      model: Config.GROK_MODEL,
+      system,
+      user,
+      temperature,
+      extraMessages,
+    });
+    if (r.ok) {
+      debugLog('Grok OK', Config.GROK_MODEL);
+      return { ok: true, text: r.text, provider: 'grok', model: Config.GROK_MODEL };
+    }
+  }
+
+  return { ok: false, hint: 'All models failed (Groq/OpenAI/Grok)' };
 }
 
 module.exports = {
   isEnabled,
   generate,
 };
+
 
