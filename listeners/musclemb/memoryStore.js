@@ -4,9 +4,18 @@
 // - Opt-in state for awareness pings
 // - Last active tracking
 // - Per-guild daily cap tracking for awareness pings
+//
+// ✅ Backward compatible with newer modules:
+// - trackActivity(client, message)
+// - userIsOptedIn(client, guildId, userId)
+// - getInactiveOptedInUsers(client, guildId, inactiveMs, limit)
 // ======================================================
 
 function nowMs() { return Date.now(); }
+
+function isPlausibleId(s) {
+  return typeof s === 'string' && /^\d{6,30}$/.test(s);
+}
 
 async function ensureSchema(client) {
   if (client?.__mbMemorySchemaReady) return true;
@@ -44,12 +53,17 @@ async function ensureSchema(client) {
   }
 }
 
-async function touchActivity(client, guildId, userId, ts = nowMs()) {
+async function touchActivity(client, guildId, userId, ts = nowMs(), channelId = null) {
   const pg = client?.pg;
   if (!pg?.query) return false;
   if (!guildId || !userId) return false;
 
+  const g = String(guildId);
+  const u = String(userId);
+  if (!isPlausibleId(g) || !isPlausibleId(u)) return false;
+
   try {
+    // NOTE: channelId is not stored in current schema; kept as a param for future extension.
     await pg.query(
       `
       INSERT INTO mb_user_state (guild_id, user_id, last_active_ts, updated_at)
@@ -57,7 +71,7 @@ async function touchActivity(client, guildId, userId, ts = nowMs()) {
       ON CONFLICT (guild_id, user_id)
       DO UPDATE SET last_active_ts = EXCLUDED.last_active_ts, updated_at = NOW()
       `,
-      [guildId, userId, Number(ts)]
+      [g, u, Number(ts)]
     );
     return true;
   } catch (e) {
@@ -71,6 +85,10 @@ async function setOptIn(client, guildId, userId, optedIn) {
   if (!pg?.query) return false;
   if (!guildId || !userId) return false;
 
+  const g = String(guildId);
+  const u = String(userId);
+  if (!isPlausibleId(g) || !isPlausibleId(u)) return false;
+
   try {
     await pg.query(
       `
@@ -79,7 +97,7 @@ async function setOptIn(client, guildId, userId, optedIn) {
       ON CONFLICT (guild_id, user_id)
       DO UPDATE SET opted_in = EXCLUDED.opted_in, updated_at = NOW()
       `,
-      [guildId, userId, Boolean(optedIn)]
+      [g, u, Boolean(optedIn)]
     );
     return true;
   } catch (e) {
@@ -88,14 +106,35 @@ async function setOptIn(client, guildId, userId, optedIn) {
   }
 }
 
+async function userIsOptedIn(client, guildId, userId) {
+  const pg = client?.pg;
+  if (!pg?.query) return false;
+  if (!guildId || !userId) return false;
+
+  const g = String(guildId);
+  const u = String(userId);
+  if (!isPlausibleId(g) || !isPlausibleId(u)) return false;
+
+  try {
+    const r = await pg.query(
+      `SELECT opted_in FROM mb_user_state WHERE guild_id=$1 AND user_id=$2 LIMIT 1`,
+      [g, u]
+    );
+    return Boolean(r.rows?.[0]?.opted_in);
+  } catch {
+    return false;
+  }
+}
+
 async function getGuildDailyCount(client, guildId) {
   const pg = client?.pg;
   if (!pg?.query) return { dayDate: null, count: 0 };
+  if (!guildId) return { dayDate: null, count: 0 };
 
   try {
     const r = await pg.query(
       `SELECT day_date, count FROM mb_awareness_guild_daily WHERE guild_id=$1 LIMIT 1`,
-      [guildId]
+      [String(guildId)]
     );
     const row = r.rows?.[0] || null;
     return { dayDate: row?.day_date || null, count: Number(row?.count || 0) };
@@ -107,6 +146,7 @@ async function getGuildDailyCount(client, guildId) {
 async function incrementGuildDaily(client, guildId, dateISO /* yyyy-mm-dd */) {
   const pg = client?.pg;
   if (!pg?.query) return { ok: false, count: 0 };
+  if (!guildId) return { ok: false, count: 0 };
 
   try {
     // Upsert day row; reset count if date changed
@@ -123,7 +163,7 @@ async function incrementGuildDaily(client, guildId, dateISO /* yyyy-mm-dd */) {
         day_date = EXCLUDED.day_date,
         updated_at = NOW()
       `,
-      [guildId, dateISO]
+      [String(guildId), dateISO]
     );
 
     // increment
@@ -134,7 +174,7 @@ async function incrementGuildDaily(client, guildId, dateISO /* yyyy-mm-dd */) {
       WHERE guild_id=$1
       RETURNING count
       `,
-      [guildId]
+      [String(guildId)]
     );
 
     const count = Number(r2.rows?.[0]?.count || 0);
@@ -148,15 +188,18 @@ async function incrementGuildDaily(client, guildId, dateISO /* yyyy-mm-dd */) {
 async function markPinged(client, guildId, userId, ts = nowMs()) {
   const pg = client?.pg;
   if (!pg?.query) return false;
+  if (!guildId || !userId) return false;
 
   try {
+    // Ensure row exists, then update
     await pg.query(
       `
-      UPDATE mb_user_state
-      SET last_ping_ts=$3, updated_at=NOW()
-      WHERE guild_id=$1 AND user_id=$2
+      INSERT INTO mb_user_state (guild_id, user_id, last_ping_ts, updated_at)
+      VALUES ($1, $2, $3, NOW())
+      ON CONFLICT (guild_id, user_id)
+      DO UPDATE SET last_ping_ts = EXCLUDED.last_ping_ts, updated_at = NOW()
       `,
-      [guildId, userId, Number(ts)]
+      [String(guildId), String(userId), Number(ts)]
     );
     return true;
   } catch (e) {
@@ -168,6 +211,7 @@ async function markPinged(client, guildId, userId, ts = nowMs()) {
 async function getInactiveOptedInCandidates(client, guildId, now, inactiveMs, pingCooldownMs, limit = 25) {
   const pg = client?.pg;
   if (!pg?.query) return [];
+  if (!guildId) return [];
 
   const nowN = Number(now);
   const inactiveCutoff = nowN - Number(inactiveMs);
@@ -186,7 +230,7 @@ async function getInactiveOptedInCandidates(client, guildId, now, inactiveMs, pi
       ORDER BY last_active_ts ASC
       LIMIT $4
       `,
-      [guildId, inactiveCutoff, pingCutoff, Math.max(1, Math.min(100, Number(limit) || 25))]
+      [String(guildId), inactiveCutoff, pingCutoff, Math.max(1, Math.min(100, Number(limit) || 25))]
     );
 
     return (r.rows || []).map(row => ({
@@ -200,12 +244,53 @@ async function getInactiveOptedInCandidates(client, guildId, now, inactiveMs, pi
   }
 }
 
+/* ======================================================
+   ✅ Compatibility wrappers expected by newer modules
+====================================================== */
+
+async function trackActivity(client, message) {
+  try {
+    const guildId = message?.guild?.id;
+    const userId = message?.author?.id;
+    const channelId = message?.channel?.id || null;
+    if (!guildId || !userId) return false;
+
+    const ok = await ensureSchema(client);
+    if (!ok) return false;
+
+    return await touchActivity(client, guildId, userId, nowMs(), channelId);
+  } catch {
+    return false;
+  }
+}
+
+// Older modules expect "getInactiveOptedInUsers(client, guildId, inactiveMs, limit)"
+// This wrapper uses your query logic but supplies defaults for ping cooldown.
+async function getInactiveOptedInUsers(client, guildId, inactiveMs, limit = 25, pingCooldownMs = (5 * 24 * 60 * 60 * 1000)) {
+  const now = nowMs();
+  const rows = await getInactiveOptedInCandidates(client, guildId, now, inactiveMs, pingCooldownMs, limit);
+  return rows.map(r => ({
+    userId: String(r.userId),
+    lastSeenTs: Number(r.lastActiveTs || 0),
+    lastChannelId: null, // not stored in schema (kept for compatibility)
+  }));
+}
+
 module.exports = {
+  // schema
   ensureSchema,
+
+  // core functions (your originals)
   touchActivity,
   setOptIn,
   getGuildDailyCount,
   incrementGuildDaily,
   markPinged,
   getInactiveOptedInCandidates,
+
+  // compatibility (newer modules)
+  trackActivity,
+  userIsOptedIn,
+  getInactiveOptedInUsers,
 };
+
