@@ -86,6 +86,21 @@ const GROK_MODEL = envStr('GROK_MODEL', 'grok-2');
 const GROK_BASE_URL = envStr('GROK_BASE_URL', '');
 
 // ======================================================
+// ✅ NEW: Profile Memory (admin/owner curated “who is who”)
+// - Stores key facts + timestamped notes in Postgres
+// - Used ONLY if enabled (safe default OFF)
+// ======================================================
+const MB_PROFILE_MEMORY_ENABLED = envBool('MB_PROFILE_MEMORY_ENABLED', '0'); // default OFF
+// If 1: MB will only use memory for users who opted in (paranoid mode)
+const MB_PROFILE_REQUIRE_OPTIN = envBool('MB_PROFILE_REQUIRE_OPTIN', '0');
+// Maximum number of fact keys injected into prompt per user
+const MB_PROFILE_MAX_KEYS = Math.max(2, Math.min(12, envNum('MB_PROFILE_MAX_KEYS', 6)));
+// Maximum number of notes injected into prompt per user
+const MB_PROFILE_MAX_NOTES = Math.max(1, Math.min(10, envNum('MB_PROFILE_MAX_NOTES', 4)));
+// Debug logs
+const MB_PROFILE_DEBUG = envBool('MB_PROFILE_DEBUG', '0');
+
+// ======================================================
 // Warnings (boot-time)
 // ======================================================
 if (!GROQ_API_KEY || GROQ_API_KEY.trim().length < 10) {
@@ -103,6 +118,10 @@ if (MB_MODEL_ROUTER_ENABLED) {
 
 if (MB_AWARENESS_ENABLED && !BOT_OWNER_ID) {
   console.warn('⚠️ MB_AWARENESS_ENABLED=1 but BOT_OWNER_ID is empty. (Not fatal) Consider setting BOT_OWNER_ID for better controls.');
+}
+
+if (MB_PROFILE_MEMORY_ENABLED && !BOT_OWNER_ID) {
+  console.warn('⚠️ MB_PROFILE_MEMORY_ENABLED=1 but BOT_OWNER_ID is empty. (Not fatal) Owner/admin controls still work, but owner-only commands may rely on BOT_OWNER_ID.');
 }
 
 module.exports = {
@@ -136,7 +155,7 @@ module.exports = {
   FEMALE_TRIGGERS,
   BOT_OWNER_ID,
 
-  // ✅ NEW exports
+  // ✅ Awareness exports
   MB_AWARENESS_ENABLED,
   MB_AWARENESS_CHANCE,
   MB_AWARENESS_INACTIVE_MS,
@@ -144,6 +163,7 @@ module.exports = {
   MB_AWARENESS_MAX_PER_GUILD_PER_DAY,
   MB_AWARENESS_DEBUG,
 
+  // ✅ Model router exports
   MB_MODEL_ROUTER_ENABLED,
   MB_MODEL_ROUTER_DEBUG,
   OPENAI_API_KEY,
@@ -152,4 +172,11 @@ module.exports = {
   GROK_API_KEY,
   GROK_MODEL,
   GROK_BASE_URL,
+
+  // ✅ Profile memory exports
+  MB_PROFILE_MEMORY_ENABLED,
+  MB_PROFILE_REQUIRE_OPTIN,
+  MB_PROFILE_MAX_KEYS,
+  MB_PROFILE_MAX_NOTES,
+  MB_PROFILE_DEBUG,
 };
