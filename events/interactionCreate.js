@@ -31,6 +31,10 @@ try {
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
+// ✅ Legacy MuscleMB text trigger gate (default OFF — modular listener should own this)
+const MUSCLEMB_LEGACY_TEXT_TRIGGER = String(process.env.MUSCLEMB_LEGACY_TEXT_TRIGGER || '0').trim() === '1';
+const OPENAI_MODEL = (process.env.OPENAI_MODEL || 'gpt-4o-mini').trim();
+
 module.exports = (client, pg) => {
   const guildNameCache = new Map();
 
@@ -394,44 +398,53 @@ module.exports = (client, pg) => {
     }
   });
 
-  // MUSCLEMB TEXT TRIGGER BLOCK
+  // ======================================================
+  // ✅ LEGACY MUSCLEMB TEXT TRIGGER (OPTIONAL)
+  // Default OFF. Your true brain is listeners/musclemb.js.
+  // Enable only if you explicitly want this old behavior:
+  //   MUSCLEMB_LEGACY_TEXT_TRIGGER=1
+  // ======================================================
   client.on('messageCreate', async (message) => {
+    if (!MUSCLEMB_LEGACY_TEXT_TRIGGER) return;
+
     if (message.author.bot) return;
-    const content = message.content.trim().toLowerCase();
-    if (!content.startsWith('musclemb ')) return;
+    if (!message.guild) return;
 
-    const userMsg = message.content.slice('musclemb'.length).trim();
-    if (!userMsg) return message.reply('💬 Say something for MuscleMB to chew on, bro.');
+    const content = (message.content || '').trim();
+    const lowered = content.toLowerCase();
+    if (!lowered.startsWith('musclemb ')) return;
 
-    await message.channel.sendTyping();
+    const userMsg = content.slice('musclemb'.length).trim();
+    if (!userMsg) {
+      try { await message.reply({ content: '💬 Say something for MuscleMB to chew on, bro.', allowedMentions: { parse: [] } }); } catch {}
+      return;
+    }
+
+    try { await message.channel.sendTyping(); } catch {}
 
     try {
-      let completion;
-      try {
-        completion = await openai.chat.completions.create({
-          model: 'gpt-4',
-          messages: [
-            { role: 'system', content: 'You are MuscleMB — savage crypto bro style bot.' },
-            { role: 'user', content: userMsg },
-          ],
-          temperature: 0.95,
-        });
-      } catch {
-        completion = await openai.chat.completions.create({
-          model: 'gpt-3.5-turbo',
-          messages: [
-            { role: 'system', content: 'You are MuscleMB — savage crypto bro style bot.' },
-            { role: 'user', content: userMsg },
-          ],
-          temperature: 0.95,
-        });
+      const apiKey = (process.env.OPENAI_API_KEY || '').trim();
+      if (!apiKey) {
+        await message.reply({ content: '⚠️ OPENAI_API_KEY missing. Legacy trigger disabled unless key is set.', allowedMentions: { parse: [] } });
+        return;
       }
 
-      const aiReply = completion.choices[0].message.content;
-      await message.reply(aiReply);
+      const completion = await openai.chat.completions.create({
+        model: OPENAI_MODEL,
+        messages: [
+          { role: 'system', content: 'You are MuscleMB — savage crypto bro style bot.' },
+          { role: 'user', content: userMsg },
+        ],
+        temperature: 0.95,
+      });
+
+      const aiReply = completion?.choices?.[0]?.message?.content || '';
+      const safe = String(aiReply).slice(0, 1800).trim();
+
+      await message.reply({ content: safe || '⚠️ MuscleMB returned no text.', allowedMentions: { parse: [] } });
     } catch (error) {
-      errlog('❌ MuscleMB (text trigger) error:', error.message);
-      await message.reply('⚠️ MuscleMB blacked out. Try again later.');
+      errlog('❌ MuscleMB (legacy text trigger) error:', error?.message || String(error));
+      try { await message.reply({ content: '⚠️ MuscleMB blacked out. Try again later.', allowedMentions: { parse: [] } }); } catch {}
     }
   });
 };
