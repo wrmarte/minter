@@ -1,237 +1,264 @@
 // listeners/musclemb/profileStore.js
 // ======================================================
-// ProfileStore — admin-curated profile memory for MuscleMB
-// - Facts: key/value pairs per guild+user (e.g., "role=young dev")
-// - Notes: timestamped short notes per guild+user
-// - Safe schema init (idempotent)
-// - Formatting helpers to inject into AI system prompt
+// MuscleMB Profile Store (PG)
+// - Admin-curated facts about users ("wassa = young dev")
+// - Timestamped notes ("2026-01-25: shipping v5 router")
+// - Safe + small: hard limits, no surprises, no auto-invention
 //
-// Tables:
-// 1) mb_profile_facts(guild_id, user_id, key, value, created_at, updated_at, created_by, updated_by)
-// 2) mb_profile_notes(guild_id, user_id, note_id, note, created_at, created_by)
-//
-// IMPORTANT:
-// - This is "trusted memory" only (written by admin/owner commands).
-// - You should NOT auto-store user claims here.
+// Used by MuscleMBListener to inject "Trusted User Memory" into prompt.
 // ======================================================
 
-function cleanStr(v, max = 200) {
-  if (v == null) return '';
-  const s = String(v).trim();
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function safeKey(k, max = 32) {
+  const s = String(k || '').trim().toLowerCase();
   if (!s) return '';
-  return s.length > max ? s.slice(0, max) : s;
+  // allow letters, numbers, underscore, dash, dot
+  const cleaned = s.replace(/[^a-z0-9_.-]/g, '').slice(0, max);
+  return cleaned;
 }
 
-function cleanKey(v, max = 48) {
-  const s = cleanStr(v, max).toLowerCase();
-  // allow letters/numbers/_/-
-  return s.replace(/[^a-z0-9_\-]/g, '').slice(0, max);
+function safeText(v, max = 240) {
+  const s = String(v || '').trim();
+  if (!s) return '';
+  return s.length > max ? s.slice(0, max - 1) + '…' : s;
 }
 
-function isPlausibleId(s) {
-  return typeof s === 'string' && /^\d{6,30}$/.test(s);
+function safeTag(v, max = 32) {
+  const s = String(v || '').trim().toLowerCase();
+  if (!s) return '';
+  return s.replace(/[^a-z0-9_.-]/g, '').slice(0, max);
 }
 
 async function ensureSchema(client) {
   const pg = client?.pg;
   if (!pg?.query) return false;
+  if (client.__mbProfileSchemaReady) return true;
 
-  // one-time guard (but safe if called multiple times)
-  if (client.__mbProfileStoreSchemaReady) return true;
+  try {
+    await pg.query(`
+      CREATE TABLE IF NOT EXISTS mb_profiles (
+        guild_id TEXT NOT NULL,
+        user_id  TEXT NOT NULL,
+        facts    JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_by TEXT,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (guild_id, user_id)
+      );
+    `);
 
-  await pg.query(`
-    CREATE TABLE IF NOT EXISTS mb_profile_facts (
-      guild_id   TEXT NOT NULL,
-      user_id    TEXT NOT NULL,
-      key        TEXT NOT NULL,
-      value      TEXT NOT NULL,
-      created_at TIMESTAMP DEFAULT NOW(),
-      updated_at TIMESTAMP DEFAULT NOW(),
-      created_by TEXT,
-      updated_by TEXT,
-      PRIMARY KEY (guild_id, user_id, key)
-    );
-  `);
+    await pg.query(`
+      CREATE TABLE IF NOT EXISTS mb_profile_notes (
+        id BIGSERIAL PRIMARY KEY,
+        guild_id TEXT NOT NULL,
+        user_id  TEXT NOT NULL,
+        note TEXT NOT NULL,
+        tag  TEXT,
+        created_by TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
 
-  await pg.query(`
-    CREATE TABLE IF NOT EXISTS mb_profile_notes (
-      guild_id   TEXT NOT NULL,
-      user_id    TEXT NOT NULL,
-      note_id    BIGSERIAL PRIMARY KEY,
-      note       TEXT NOT NULL,
-      created_at TIMESTAMP DEFAULT NOW(),
-      created_by TEXT
-    );
-  `);
+    await pg.query(`
+      CREATE INDEX IF NOT EXISTS mb_profile_notes_guild_user_created_idx
+      ON mb_profile_notes (guild_id, user_id, created_at DESC);
+    `);
 
-  // Helpful indexes
-  await pg.query(`CREATE INDEX IF NOT EXISTS mb_profile_notes_g_u_idx ON mb_profile_notes (guild_id, user_id, created_at DESC);`);
-
-  client.__mbProfileStoreSchemaReady = true;
-  return true;
-}
-
-async function setFact(client, guildId, userId, key, value, actorId = null) {
-  const pg = client?.pg;
-  if (!pg?.query) return { ok: false, error: 'pg_not_ready' };
-
-  if (!isPlausibleId(String(guildId || '')) || !isPlausibleId(String(userId || ''))) {
-    return { ok: false, error: 'bad_ids' };
+    client.__mbProfileSchemaReady = true;
+    return true;
+  } catch (e) {
+    console.warn('⚠️ [MB][profileStore] ensureSchema failed:', e?.message || String(e));
+    return false;
   }
-
-  const k = cleanKey(key);
-  const v = cleanStr(value, 180);
-
-  if (!k) return { ok: false, error: 'bad_key' };
-  if (!v) return { ok: false, error: 'bad_value' };
-
-  await ensureSchema(client);
-
-  await pg.query(
-    `
-    INSERT INTO mb_profile_facts (guild_id, user_id, key, value, created_by, updated_by)
-    VALUES ($1,$2,$3,$4,$5,$5)
-    ON CONFLICT (guild_id, user_id, key)
-    DO UPDATE SET value = EXCLUDED.value, updated_at = NOW(), updated_by = EXCLUDED.updated_by
-    `,
-    [String(guildId), String(userId), k, v, actorId ? String(actorId) : null]
-  );
-
-  return { ok: true, key: k, value: v };
-}
-
-async function deleteFact(client, guildId, userId, key) {
-  const pg = client?.pg;
-  if (!pg?.query) return { ok: false, error: 'pg_not_ready' };
-
-  const k = cleanKey(key);
-  if (!k) return { ok: false, error: 'bad_key' };
-
-  await ensureSchema(client);
-
-  const res = await pg.query(
-    `DELETE FROM mb_profile_facts WHERE guild_id=$1 AND user_id=$2 AND key=$3`,
-    [String(guildId), String(userId), k]
-  );
-
-  return { ok: true, deleted: res.rowCount || 0 };
 }
 
 async function getFacts(client, guildId, userId) {
   const pg = client?.pg;
-  if (!pg?.query) return [];
+  if (!pg?.query) return {};
+  if (!guildId || !userId) return {};
 
-  await ensureSchema(client);
-
-  const res = await pg.query(
-    `SELECT key, value FROM mb_profile_facts WHERE guild_id=$1 AND user_id=$2 ORDER BY key ASC`,
-    [String(guildId), String(userId)]
-  );
-
-  return (res.rows || [])
-    .map(r => ({ key: String(r.key || ''), value: String(r.value || '') }))
-    .filter(r => r.key && r.value);
-}
-
-async function addNote(client, guildId, userId, note, actorId = null) {
-  const pg = client?.pg;
-  if (!pg?.query) return { ok: false, error: 'pg_not_ready' };
-
-  const n = cleanStr(note, 220);
-  if (!n) return { ok: false, error: 'bad_note' };
-
-  await ensureSchema(client);
-
-  const res = await pg.query(
-    `INSERT INTO mb_profile_notes (guild_id, user_id, note, created_by) VALUES ($1,$2,$3,$4) RETURNING note_id`,
-    [String(guildId), String(userId), n, actorId ? String(actorId) : null]
-  );
-
-  return { ok: true, note_id: res.rows?.[0]?.note_id || null, note: n };
-}
-
-async function deleteNote(client, guildId, userId, noteId) {
-  const pg = client?.pg;
-  if (!pg?.query) return { ok: false, error: 'pg_not_ready' };
-
-  const id = Number(noteId);
-  if (!Number.isFinite(id) || id <= 0) return { ok: false, error: 'bad_note_id' };
-
-  await ensureSchema(client);
-
-  const res = await pg.query(
-    `DELETE FROM mb_profile_notes WHERE guild_id=$1 AND user_id=$2 AND note_id=$3`,
-    [String(guildId), String(userId), id]
-  );
-
-  return { ok: true, deleted: res.rowCount || 0 };
-}
-
-async function getNotes(client, guildId, userId, limit = 5) {
-  const pg = client?.pg;
-  if (!pg?.query) return [];
-
-  await ensureSchema(client);
-
-  const lim = Math.max(0, Math.min(25, Number(limit) || 5));
-
-  const res = await pg.query(
-    `
-    SELECT note_id, note, created_at
-    FROM mb_profile_notes
-    WHERE guild_id=$1 AND user_id=$2
-    ORDER BY created_at DESC
-    LIMIT $3
-    `,
-    [String(guildId), String(userId), lim]
-  );
-
-  return (res.rows || []).map(r => ({
-    note_id: r.note_id,
-    note: String(r.note || ''),
-    created_at: r.created_at
-  })).filter(x => x.note);
-}
-
-function formatFactsInline(facts, maxKeys = 6) {
-  const arr = Array.isArray(facts) ? facts : [];
-  const m = Math.max(0, Math.min(12, Number(maxKeys) || 6));
-  const sliced = arr.slice(0, m);
-
-  const parts = [];
-  for (const f of sliced) {
-    const k = cleanKey(f?.key || '');
-    const v = cleanStr(f?.value || '', 120);
-    if (!k || !v) continue;
-    parts.push(`${k}=${v}`);
+  try {
+    const r = await pg.query(
+      `SELECT facts FROM mb_profiles WHERE guild_id=$1 AND user_id=$2 LIMIT 1`,
+      [String(guildId), String(userId)]
+    );
+    const facts = r.rows?.[0]?.facts;
+    return (facts && typeof facts === 'object') ? facts : {};
+  } catch {
+    return {};
   }
-
-  // keep it readable
-  return parts.join(' | ');
 }
 
-function formatNotesInline(notes, maxNotes = 4) {
-  const arr = Array.isArray(notes) ? notes : [];
-  const m = Math.max(0, Math.min(10, Number(maxNotes) || 4));
-  const sliced = arr.slice(0, m);
+async function setFact(client, guildId, userId, key, value, updatedBy = null) {
+  const pg = client?.pg;
+  if (!pg?.query) return { ok: false, reason: 'no_pg' };
+  if (!guildId || !userId) return { ok: false, reason: 'missing_ids' };
 
-  const parts = [];
-  for (const n of sliced) {
-    const note = cleanStr(n?.note || '', 140);
-    if (!note) continue;
-    parts.push(`"${note}"`);
+  const k = safeKey(key);
+  const v = safeText(value, 220);
+  if (!k || !v) return { ok: false, reason: 'bad_key_or_value' };
+
+  try {
+    await pg.query(
+      `
+      INSERT INTO mb_profiles (guild_id, user_id, facts, updated_by, updated_at)
+      VALUES ($1, $2, jsonb_build_object($3, $4), $5, NOW())
+      ON CONFLICT (guild_id, user_id)
+      DO UPDATE SET
+        facts = mb_profiles.facts || jsonb_build_object($3, $4),
+        updated_by = $5,
+        updated_at = NOW()
+      `,
+      [String(guildId), String(userId), k, v, updatedBy ? String(updatedBy) : null]
+    );
+    return { ok: true };
+  } catch (e) {
+    console.warn('⚠️ [MB][profileStore] setFact failed:', e?.message || String(e));
+    return { ok: false, reason: 'db_error' };
   }
-  return parts.join(' ');
+}
+
+async function deleteFact(client, guildId, userId, key, updatedBy = null) {
+  const pg = client?.pg;
+  if (!pg?.query) return { ok: false, reason: 'no_pg' };
+  if (!guildId || !userId) return { ok: false, reason: 'missing_ids' };
+
+  const k = safeKey(key);
+  if (!k) return { ok: false, reason: 'bad_key' };
+
+  try {
+    await pg.query(
+      `
+      INSERT INTO mb_profiles (guild_id, user_id, facts, updated_by, updated_at)
+      VALUES ($1, $2, '{}'::jsonb, $4, NOW())
+      ON CONFLICT (guild_id, user_id)
+      DO UPDATE SET
+        facts = (mb_profiles.facts - $3),
+        updated_by = $4,
+        updated_at = NOW()
+      `,
+      [String(guildId), String(userId), k, updatedBy ? String(updatedBy) : null]
+    );
+    return { ok: true };
+  } catch (e) {
+    console.warn('⚠️ [MB][profileStore] deleteFact failed:', e?.message || String(e));
+    return { ok: false, reason: 'db_error' };
+  }
+}
+
+async function addNote(client, guildId, userId, note, createdBy = null, tag = null) {
+  const pg = client?.pg;
+  if (!pg?.query) return { ok: false, reason: 'no_pg' };
+  if (!guildId || !userId) return { ok: false, reason: 'missing_ids' };
+
+  const n = safeText(note, 240);
+  const t = tag ? safeTag(tag, 32) : null;
+  if (!n) return { ok: false, reason: 'empty_note' };
+
+  try {
+    await pg.query(
+      `
+      INSERT INTO mb_profile_notes (guild_id, user_id, note, tag, created_by)
+      VALUES ($1, $2, $3, $4, $5)
+      `,
+      [String(guildId), String(userId), n, t || null, createdBy ? String(createdBy) : null]
+    );
+    return { ok: true };
+  } catch (e) {
+    console.warn('⚠️ [MB][profileStore] addNote failed:', e?.message || String(e));
+    return { ok: false, reason: 'db_error' };
+  }
+}
+
+async function getNotes(client, guildId, userId, limit = 4) {
+  const pg = client?.pg;
+  if (!pg?.query) return [];
+  if (!guildId || !userId) return [];
+
+  const lim = Math.max(0, Math.min(20, Number(limit) || 4));
+  if (!lim) return [];
+
+  try {
+    const r = await pg.query(
+      `
+      SELECT note, tag, created_at
+      FROM mb_profile_notes
+      WHERE guild_id=$1 AND user_id=$2
+      ORDER BY created_at DESC
+      LIMIT $3
+      `,
+      [String(guildId), String(userId), lim]
+    );
+
+    return (r.rows || []).map(x => ({
+      note: String(x.note || ''),
+      tag: x.tag ? String(x.tag) : null,
+      createdAt: x.created_at ? new Date(x.created_at).toISOString() : nowIso(),
+    }));
+  } catch {
+    return [];
+  }
+}
+
+// ------------------------------------------------------
+// Formatting helpers for prompt injection
+// ------------------------------------------------------
+
+function formatFactsInline(factsObj, maxKeys = 6) {
+  try {
+    const facts = factsObj && typeof factsObj === 'object' ? factsObj : {};
+    const keys = Object.keys(facts).slice(0, Math.max(0, Math.min(12, Number(maxKeys) || 6)));
+    const parts = [];
+
+    for (const k of keys) {
+      const v = safeText(facts[k], 120);
+      const kk = safeKey(k, 32);
+      if (!kk || !v) continue;
+      parts.push(`${kk}=${v}`);
+    }
+
+    return parts.join(' • ');
+  } catch {
+    return '';
+  }
+}
+
+function formatNotesInline(notesArr, maxNotes = 3) {
+  try {
+    const notes = Array.isArray(notesArr) ? notesArr : [];
+    const sliced = notes.slice(0, Math.max(0, Math.min(8, Number(maxNotes) || 3)));
+    const out = [];
+
+    for (const n of sliced) {
+      const note = safeText(n?.note || '', 120);
+      if (!note) continue;
+
+      // keep timestamp super light
+      const ts = n?.createdAt ? String(n.createdAt).slice(0, 10) : '';
+      const tag = n?.tag ? safeTag(n.tag, 20) : '';
+
+      const prefix = tag ? `[${tag}] ` : '';
+      out.push(`${prefix}${note}${ts ? ` (${ts})` : ''}`);
+    }
+
+    return out.join(' | ');
+  } catch {
+    return '';
+  }
 }
 
 module.exports = {
   ensureSchema,
+  getFacts,
   setFact,
   deleteFact,
-  getFacts,
   addNote,
-  deleteNote,
   getNotes,
+
+  // formatting helpers
   formatFactsInline,
   formatNotesInline,
 };
