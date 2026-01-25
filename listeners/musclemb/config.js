@@ -4,7 +4,11 @@ const envNum = (k, d) => {
   const v = Number(envStr(k, String(d)));
   return Number.isFinite(v) ? v : Number(d);
 };
-const envBool = (k, d = '0') => envStr(k, d) === '1';
+// ✅ PATCH: accept 1/true/yes/on (case-insensitive)
+const envBool = (k, d = '0') => {
+  const v = envStr(k, d).toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes' || v === 'on';
+};
 
 const GROQ_API_KEY = envStr('GROQ_API_KEY', '');
 const GROQ_MODEL_ENV = envStr('GROQ_MODEL', '');
@@ -25,6 +29,10 @@ const NICE_PING_EVERY_MS = 4 * 60 * 60 * 1000;
 const NICE_SCAN_EVERY_MS = 60 * 60 * 1000;
 const NICE_ACTIVE_WINDOW_MS = 45 * 60 * 1000;
 const NICE_ANALYZE_LIMIT = envNum('NICE_ANALYZE_LIMIT', 40);
+
+// ✅ NEW: Nice ping anti-repeat knobs (used by nicePings.js, safe defaults)
+const NICE_HISTORY_MAX = Math.max(10, Math.min(500, envNum('NICE_HISTORY_MAX', 50)));
+const NICE_HISTORY_TTL_MS = Math.max(60_000, envNum('NICE_HISTORY_TTL_MS', 6 * 60 * 60 * 1000)); // 6h
 
 const SWEEP_TRIGGERS = ['sweeppower', 'enginesweep', 'sweep-power'];
 const SWEEP_COOLDOWN_MS = envNum('SWEEP_READER_COOLDOWN_MS', 8000);
@@ -60,7 +68,7 @@ const FEMALE_TRIGGERS = ['mbella', 'mb ella', 'lady mb', 'queen mb', 'bella'];
 const BOT_OWNER_ID = envStr('BOT_OWNER_ID', '');
 
 // ======================================================
-// ✅ NEW: Awareness (opt-in mentions) settings
+// ✅ Awareness (opt-in mentions) settings
 // ======================================================
 const MB_AWARENESS_ENABLED = envBool('MB_AWARENESS_ENABLED', '0'); // default OFF
 const MB_AWARENESS_CHANCE = Math.max(0, Math.min(1, envNum('MB_AWARENESS_CHANCE', 0.18))); // 18%
@@ -70,7 +78,7 @@ const MB_AWARENESS_MAX_PER_GUILD_PER_DAY = Math.max(0, envNum('MB_AWARENESS_MAX_
 const MB_AWARENESS_DEBUG = envBool('MB_AWARENESS_DEBUG', '0');
 
 // ======================================================
-// ✅ NEW: Model Router (Groq -> OpenAI -> Grok) settings
+// ✅ Model Router (Groq -> OpenAI -> Grok) settings
 // ======================================================
 const MB_MODEL_ROUTER_ENABLED = envBool('MB_MODEL_ROUTER_ENABLED', '0'); // default OFF
 const MB_MODEL_ROUTER_DEBUG = envBool('MB_MODEL_ROUTER_DEBUG', '0');
@@ -86,18 +94,12 @@ const GROK_MODEL = envStr('GROK_MODEL', 'grok-2');
 const GROK_BASE_URL = envStr('GROK_BASE_URL', '');
 
 // ======================================================
-// ✅ NEW: Profile Memory (admin/owner curated “who is who”)
-// - Stores key facts + timestamped notes in Postgres
-// - Used ONLY if enabled (safe default OFF)
+// ✅ Profile Memory (admin/owner curated “who is who”)
 // ======================================================
 const MB_PROFILE_MEMORY_ENABLED = envBool('MB_PROFILE_MEMORY_ENABLED', '0'); // default OFF
-// If 1: MB will only use memory for users who opted in (paranoid mode)
 const MB_PROFILE_REQUIRE_OPTIN = envBool('MB_PROFILE_REQUIRE_OPTIN', '0');
-// Maximum number of fact keys injected into prompt per user
 const MB_PROFILE_MAX_KEYS = Math.max(2, Math.min(12, envNum('MB_PROFILE_MAX_KEYS', 6)));
-// Maximum number of notes injected into prompt per user
 const MB_PROFILE_MAX_NOTES = Math.max(1, Math.min(10, envNum('MB_PROFILE_MAX_NOTES', 4)));
-// Debug logs
 const MB_PROFILE_DEBUG = envBool('MB_PROFILE_DEBUG', '0');
 
 // ======================================================
@@ -139,6 +141,11 @@ module.exports = {
   NICE_SCAN_EVERY_MS,
   NICE_ACTIVE_WINDOW_MS,
   NICE_ANALYZE_LIMIT,
+
+  // ✅ exports for nicePings anti-repeat
+  NICE_HISTORY_MAX,
+  NICE_HISTORY_TTL_MS,
+
   SWEEP_TRIGGERS,
   SWEEP_COOLDOWN_MS,
   ADRIAN_CHART_TRIGGERS,
@@ -180,3 +187,4 @@ module.exports = {
   MB_PROFILE_MAX_NOTES,
   MB_PROFILE_DEBUG,
 };
+
