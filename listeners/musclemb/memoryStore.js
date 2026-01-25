@@ -154,7 +154,6 @@ async function incrementGuildDaily(client, guildId, dateISO /* yyyy-mm-dd */) {
   if (!pg?.query) return { ok: false, count: 0 };
 
   try {
-    // Upsert day row; reset count if date changed
     await pg.query(
       `
       INSERT INTO mb_awareness_guild_daily (guild_id, day_date, count, updated_at)
@@ -171,7 +170,6 @@ async function incrementGuildDaily(client, guildId, dateISO /* yyyy-mm-dd */) {
       [guildId, dateISO]
     );
 
-    // increment
     const r2 = await pg.query(
       `
       UPDATE mb_awareness_guild_daily
@@ -195,11 +193,13 @@ async function markPinged(client, guildId, userId, ts = nowMs()) {
   if (!pg?.query) return false;
 
   try {
+    // ✅ PATCH: upsert so we never “update 0 rows”
     await pg.query(
       `
-      UPDATE mb_user_state
-      SET last_ping_ts=$3, updated_at=NOW()
-      WHERE guild_id=$1 AND user_id=$2
+      INSERT INTO mb_user_state (guild_id, user_id, last_ping_ts, updated_at)
+      VALUES ($1, $2, $3, NOW())
+      ON CONFLICT (guild_id, user_id)
+      DO UPDATE SET last_ping_ts = EXCLUDED.last_ping_ts, updated_at = NOW()
       `,
       [guildId, userId, Number(ts)]
     );
