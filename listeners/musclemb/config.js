@@ -59,8 +59,50 @@ const FEMALE_TRIGGERS = ['mbella', 'mb ella', 'lady mb', 'queen mb', 'bella'];
 
 const BOT_OWNER_ID = envStr('BOT_OWNER_ID', '');
 
+// ======================================================
+// ✅ NEW: Awareness (opt-in mentions) settings
+// ======================================================
+const MB_AWARENESS_ENABLED = envBool('MB_AWARENESS_ENABLED', '0'); // default OFF
+const MB_AWARENESS_CHANCE = Math.max(0, Math.min(1, envNum('MB_AWARENESS_CHANCE', 0.18))); // 18%
+const MB_AWARENESS_INACTIVE_MS = Math.max(60_000, envNum('MB_AWARENESS_INACTIVE_MS', 3 * 24 * 60 * 60 * 1000)); // 3d
+const MB_AWARENESS_PING_COOLDOWN_MS = Math.max(60_000, envNum('MB_AWARENESS_PING_COOLDOWN_MS', 5 * 24 * 60 * 60 * 1000)); // 5d
+const MB_AWARENESS_MAX_PER_GUILD_PER_DAY = Math.max(0, envNum('MB_AWARENESS_MAX_PER_GUILD_PER_DAY', 2));
+const MB_AWARENESS_DEBUG = envBool('MB_AWARENESS_DEBUG', '0');
+
+// ======================================================
+// ✅ NEW: Model Router (Groq -> OpenAI -> Grok) settings
+// ======================================================
+const MB_MODEL_ROUTER_ENABLED = envBool('MB_MODEL_ROUTER_ENABLED', '0'); // default OFF
+const MB_MODEL_ROUTER_DEBUG = envBool('MB_MODEL_ROUTER_DEBUG', '0');
+
+// OpenAI (optional)
+const OPENAI_API_KEY = envStr('OPENAI_API_KEY', '');
+const OPENAI_MODEL = envStr('OPENAI_MODEL', 'gpt-4o-mini');
+const OPENAI_BASE_URL = envStr('OPENAI_BASE_URL', 'https://api.openai.com/v1');
+
+// Grok/xAI (optional, OpenAI-compatible shape)
+const GROK_API_KEY = envStr('GROK_API_KEY', '');
+const GROK_MODEL = envStr('GROK_MODEL', 'grok-2');
+const GROK_BASE_URL = envStr('GROK_BASE_URL', '');
+
+// ======================================================
+// Warnings (boot-time)
+// ======================================================
 if (!GROQ_API_KEY || GROQ_API_KEY.trim().length < 10) {
   console.warn('⚠️ GROQ_API_KEY is missing or too short. Verify Railway env.');
+}
+
+if (MB_MODEL_ROUTER_ENABLED) {
+  const hasOpenAI = OPENAI_API_KEY && OPENAI_API_KEY.trim().length > 10;
+  const hasGrok = GROK_API_KEY && GROK_API_KEY.trim().length > 10 && GROK_BASE_URL && GROK_BASE_URL.trim().length > 8;
+
+  if (!hasOpenAI && !hasGrok) {
+    console.warn('⚠️ MB_MODEL_ROUTER_ENABLED=1 but OPENAI_API_KEY and GROK_API_KEY/BASE_URL are missing. Router will still try Groq first only.');
+  }
+}
+
+if (MB_AWARENESS_ENABLED && !BOT_OWNER_ID) {
+  console.warn('⚠️ MB_AWARENESS_ENABLED=1 but BOT_OWNER_ID is empty. (Not fatal) Consider setting BOT_OWNER_ID for better controls.');
 }
 
 module.exports = {
@@ -93,4 +135,21 @@ module.exports = {
   TRIGGERS,
   FEMALE_TRIGGERS,
   BOT_OWNER_ID,
+
+  // ✅ NEW exports
+  MB_AWARENESS_ENABLED,
+  MB_AWARENESS_CHANCE,
+  MB_AWARENESS_INACTIVE_MS,
+  MB_AWARENESS_PING_COOLDOWN_MS,
+  MB_AWARENESS_MAX_PER_GUILD_PER_DAY,
+  MB_AWARENESS_DEBUG,
+
+  MB_MODEL_ROUTER_ENABLED,
+  MB_MODEL_ROUTER_DEBUG,
+  OPENAI_API_KEY,
+  OPENAI_MODEL,
+  OPENAI_BASE_URL,
+  GROK_API_KEY,
+  GROK_MODEL,
+  GROK_BASE_URL,
 };
