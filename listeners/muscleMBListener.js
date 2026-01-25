@@ -7,6 +7,7 @@
 // - ✅ Profile memory injection (admin-curated facts + timestamped notes)
 // - ✅ Safe attach guard (prevents duplicate event listeners if required twice)
 // - ✅ Profile schema guard (prevents repeated CREATE TABLE checks)
+// - ✅ WebhookAuto-aware context (treats MuscleMB webhook posts as assistant)
 // ======================================================
 
 const { EmbedBuilder } = require('discord.js');
@@ -100,6 +101,7 @@ async function buildProfileMemoryBlock(client, message) {
   try {
     if (!Config.MB_PROFILE_MEMORY_ENABLED) return '';
     if (!client?.pg?.query) return '';
+    if (!message?.guild?.id || !message?.author?.id) return '';
 
     const guildId = message.guild.id;
 
@@ -122,10 +124,12 @@ async function buildProfileMemoryBlock(client, message) {
     // Mentioned user (optional — only if exactly 1 other user mentioned)
     let mentionedBlock = null;
     try {
-      const mentionedOthers = (message.mentions?.users || new Map())
-        .filter(u => u.id !== message.client.user.id);
+      const usersCol = message.mentions?.users;
+      const mentionedOthers = (usersCol && typeof usersCol.filter === 'function')
+        ? usersCol.filter(u => u && u.id !== message.client.user.id && u.id !== message.author.id)
+        : null;
 
-      if (mentionedOthers.size === 1) {
+      if (mentionedOthers && mentionedOthers.size === 1) {
         const u = [...mentionedOthers.values()][0];
 
         // If require opt-in, also require it for mentioned user
@@ -211,7 +215,8 @@ module.exports = (client) => {
     const byGuild = new Map(); // guildId -> [{channelId, ts}]
 
     for (const [key, info] of State.lastActiveByUser.entries()) {
-      const [guildId] = key.split(':');
+      const [guildId] = String(key).split(':');
+      if (!guildId) continue;
       if (!byGuild.has(guildId)) byGuild.set(guildId, []);
       byGuild.get(guildId).push({ channelId: info.channelId, ts: info.ts });
     }
@@ -223,7 +228,10 @@ module.exports = (client) => {
       const lastPingTs = State.lastNicePingByGuild.get(guildId) || 0;
       if (now - lastPingTs < Config.NICE_PING_EVERY_MS) continue;
 
-      const active = entries.filter(e => now - e.ts <= Config.NICE_ACTIVE_WINDOW_MS);
+      const active = entries
+        .filter(e => now - e.ts <= Config.NICE_ACTIVE_WINDOW_MS)
+        .sort((a, b) => (b.ts || 0) - (a.ts || 0));
+
       if (!active.length) continue;
 
       const preferredChannel = active[0]?.channelId || null;
@@ -263,12 +271,17 @@ module.exports = (client) => {
       // normal quote path (original behavior)
       const last = State.lastQuoteByGuild.get(guildId) || null;
 
+      // ✅ PATCH: rely on smartPick deterministic default + stronger no-repeat
       const { text, category, meta } = smartPick({
         guildId,
-        seed: `${guildId}:${now}:${Math.random()}`,
+        channelId: channel.id,
+        userId: '', // quotes are “server voice”
         avoidText: last?.text,
         avoidCategory: last?.category,
-        moodMultipliers: mood.multipliers
+        moodMultipliers: mood.multipliers,
+        scope: 'guild',
+        noRepeat: true,
+        returnMood: false,
       });
 
       const outLine = formatNiceLine(Config.MB_NICE_STYLE, { category, meta, moodTags: mood.tags }, text);
@@ -382,7 +395,10 @@ module.exports = (client) => {
 
     // Mention handling + “roast the bot” detection
     const mentionedUsersAll = message.mentions.users || new Map();
-    const mentionedOthers = mentionedUsersAll.filter(u => u.id !== client.user.id);
+    const mentionedOthers = (mentionedUsersAll && typeof mentionedUsersAll.filter === 'function')
+      ? mentionedUsersAll.filter(u => u && u.id !== client.user.id)
+      : new Map();
+
     const shouldRoastOthers = (hasTriggerWord || botMentioned) && mentionedOthers.size > 0;
 
     const roastKeywords = /\b(roast|trash|garbage|suck|weak|clown|noob|dumb|stupid|lame)\b|😂|🤣|💀/i;
@@ -447,8 +463,8 @@ module.exports = (client) => {
       let systemPrompt = '';
       if (shouldRoastOthers) {
         systemPrompt =
-          `You are MuscleMB — a savage roastmaster. Ruthlessly roast these tagged degens: ${roastTargets}. ` +
-          `Keep it short, witty, and funny. Avoid slurs or harassment; punch up with humor. Use spicy emojis. 💀🔥`;
+          `You are MuscleMB — a savage roastmaster. Roast these tagged degens: ${roastTargets}. ` +
+          `Keep it short, witty, and funny. Avoid slurs or harassment; keep it playful. Use spicy emojis. 💀🔥`;
       } else if (isRoastingBot) {
         systemPrompt =
           `You are MuscleMB — unstoppable gym-bro AI. Someone tried to roast you; clap back with confident swagger, ` +
@@ -488,6 +504,9 @@ module.exports = (client) => {
       // ======================================================
       // ✅ Pass real Discord chat context via extraMessages
       // Also "humanize" mentions so LLM sees @names (not <@id>)
+      // ✅ WebhookAuto-aware assistant detection:
+      //    - bot messages (client.user.id)
+      //    - MuscleMB webhook messages (username match)
       // ======================================================
       let extraMessages = [];
       try {
@@ -498,9 +517,7 @@ module.exports = (client) => {
           const cleaned = arr
             .filter(m => m && m.id !== message.id)
             .filter(m => typeof m.content === 'string' && m.content.trim().length > 0)
-            // drop other bots (but keep our own bot messages)
-            .filter(m => (!m.author?.bot) || (m.author.id === client.user.id))
-            // drop MBella webhook posts
+            // drop MBella webhook posts (never feed those back)
             .filter(m => {
               const isWebhookBella = Boolean(m.webhookId) &&
                 typeof m.author?.username === 'string' &&
@@ -515,7 +532,11 @@ module.exports = (client) => {
             .sort((a, b) => (a.createdTimestamp || 0) - (b.createdTimestamp || 0))
             // map to OpenAI-style messages
             .map(m => {
-              const isAssistant = (m.author?.id === client.user.id);
+              const isMuscleWebhook = Boolean(m.webhookId) &&
+                typeof m.author?.username === 'string' &&
+                m.author.username.toLowerCase() === String(Config.MUSCLEMB_WEBHOOK_NAME || 'musclemb').toLowerCase();
+
+              const isAssistant = (m.author?.id === client.user.id) || isMuscleWebhook;
               const role = isAssistant ? 'assistant' : 'user';
 
               const prefix = isAssistant ? '' : `${m.author?.username || 'User'}: `;
@@ -684,4 +705,5 @@ module.exports = (client) => {
     }
   });
 };
+
 
