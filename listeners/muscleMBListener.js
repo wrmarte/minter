@@ -7,7 +7,6 @@
 // - ✅ Profile memory injection (admin-curated facts + timestamped notes)
 // - ✅ Safe attach guard (prevents duplicate event listeners if required twice)
 // - ✅ Profile schema guard (prevents repeated CREATE TABLE checks)
-// - ✅ WebhookAuto-aware context (treats MuscleMB webhook posts as assistant)
 // ======================================================
 
 const { EmbedBuilder } = require('discord.js');
@@ -101,7 +100,6 @@ async function buildProfileMemoryBlock(client, message) {
   try {
     if (!Config.MB_PROFILE_MEMORY_ENABLED) return '';
     if (!client?.pg?.query) return '';
-    if (!message?.guild?.id || !message?.author?.id) return '';
 
     const guildId = message.guild.id;
 
@@ -124,12 +122,10 @@ async function buildProfileMemoryBlock(client, message) {
     // Mentioned user (optional — only if exactly 1 other user mentioned)
     let mentionedBlock = null;
     try {
-      const usersCol = message.mentions?.users;
-      const mentionedOthers = (usersCol && typeof usersCol.filter === 'function')
-        ? usersCol.filter(u => u && u.id !== message.client.user.id && u.id !== message.author.id)
-        : null;
+      const mentionedOthers = (message.mentions?.users || new Map())
+        .filter(u => u.id !== message.client.user.id);
 
-      if (mentionedOthers && mentionedOthers.size === 1) {
+      if (mentionedOthers.size === 1) {
         const u = [...mentionedOthers.values()][0];
 
         // If require opt-in, also require it for mentioned user
@@ -191,6 +187,28 @@ module.exports = (client) => {
   }
   client.__muscleMBListenerAttached = true;
 
+  // ======================================================
+  // ✅ FIX: Always reply as MUSCLEMB identity (never MBella relay default)
+  // - If your messaging layer uses webhookAuto, it may "default" to MBella.
+  // - Passing username/avatar here forces MuscleMB persona consistently.
+  // ======================================================
+  async function safeReplyAsMuscleMB(message, payload = {}) {
+    try {
+      const finalPayload = {
+        ...payload,
+        allowedMentions: payload.allowedMentions || { parse: [] },
+
+        // 👇 force MB identity on replies
+        username: Config.MUSCLEMB_WEBHOOK_NAME,
+        avatarURL: Config.MUSCLEMB_WEBHOOK_AVATAR || undefined,
+      };
+
+      return await safeReplyMessage(client, message, finalPayload);
+    } catch {
+      return false;
+    }
+  }
+
   /** 🔎 MBella-post detector: suppress MuscleMB in that channel for ~11s */
   client.on('messageCreate', (m) => {
     try {
@@ -215,8 +233,7 @@ module.exports = (client) => {
     const byGuild = new Map(); // guildId -> [{channelId, ts}]
 
     for (const [key, info] of State.lastActiveByUser.entries()) {
-      const [guildId] = String(key).split(':');
-      if (!guildId) continue;
+      const [guildId] = key.split(':');
       if (!byGuild.has(guildId)) byGuild.set(guildId, []);
       byGuild.get(guildId).push({ channelId: info.channelId, ts: info.ts });
     }
@@ -228,10 +245,7 @@ module.exports = (client) => {
       const lastPingTs = State.lastNicePingByGuild.get(guildId) || 0;
       if (now - lastPingTs < Config.NICE_PING_EVERY_MS) continue;
 
-      const active = entries
-        .filter(e => now - e.ts <= Config.NICE_ACTIVE_WINDOW_MS)
-        .sort((a, b) => (b.ts || 0) - (a.ts || 0));
-
+      const active = entries.filter(e => now - e.ts <= Config.NICE_ACTIVE_WINDOW_MS);
       if (!active.length) continue;
 
       const preferredChannel = active[0]?.channelId || null;
@@ -271,17 +285,12 @@ module.exports = (client) => {
       // normal quote path (original behavior)
       const last = State.lastQuoteByGuild.get(guildId) || null;
 
-      // ✅ PATCH: rely on smartPick deterministic default + stronger no-repeat
       const { text, category, meta } = smartPick({
         guildId,
-        channelId: channel.id,
-        userId: '', // quotes are “server voice”
+        seed: `${guildId}:${now}:${Math.random()}`,
         avoidText: last?.text,
         avoidCategory: last?.category,
-        moodMultipliers: mood.multipliers,
-        scope: 'guild',
-        noRepeat: true,
-        returnMood: false,
+        moodMultipliers: mood.multipliers
       });
 
       const outLine = formatNiceLine(Config.MB_NICE_STYLE, { category, meta, moodTags: mood.tags }, text);
@@ -395,10 +404,7 @@ module.exports = (client) => {
 
     // Mention handling + “roast the bot” detection
     const mentionedUsersAll = message.mentions.users || new Map();
-    const mentionedOthers = (mentionedUsersAll && typeof mentionedUsersAll.filter === 'function')
-      ? mentionedUsersAll.filter(u => u && u.id !== client.user.id)
-      : new Map();
-
+    const mentionedOthers = mentionedUsersAll.filter(u => u.id !== client.user.id);
     const shouldRoastOthers = (hasTriggerWord || botMentioned) && mentionedOthers.size > 0;
 
     const roastKeywords = /\b(roast|trash|garbage|suck|weak|clown|noob|dumb|stupid|lame)\b|😂|🤣|💀/i;
@@ -463,8 +469,8 @@ module.exports = (client) => {
       let systemPrompt = '';
       if (shouldRoastOthers) {
         systemPrompt =
-          `You are MuscleMB — a savage roastmaster. Roast these tagged degens: ${roastTargets}. ` +
-          `Keep it short, witty, and funny. Avoid slurs or harassment; keep it playful. Use spicy emojis. 💀🔥`;
+          `You are MuscleMB — a savage roastmaster. Ruthlessly roast these tagged degens: ${roastTargets}. ` +
+          `Keep it short, witty, and funny. Avoid slurs or harassment; punch up with humor. Use spicy emojis. 💀🔥`;
       } else if (isRoastingBot) {
         systemPrompt =
           `You are MuscleMB — unstoppable gym-bro AI. Someone tried to roast you; clap back with confident swagger, ` +
@@ -504,9 +510,6 @@ module.exports = (client) => {
       // ======================================================
       // ✅ Pass real Discord chat context via extraMessages
       // Also "humanize" mentions so LLM sees @names (not <@id>)
-      // ✅ WebhookAuto-aware assistant detection:
-      //    - bot messages (client.user.id)
-      //    - MuscleMB webhook messages (username match)
       // ======================================================
       let extraMessages = [];
       try {
@@ -517,7 +520,9 @@ module.exports = (client) => {
           const cleaned = arr
             .filter(m => m && m.id !== message.id)
             .filter(m => typeof m.content === 'string' && m.content.trim().length > 0)
-            // drop MBella webhook posts (never feed those back)
+            // drop other bots (but keep our own bot messages)
+            .filter(m => (!m.author?.bot) || (m.author.id === client.user.id))
+            // drop MBella webhook posts
             .filter(m => {
               const isWebhookBella = Boolean(m.webhookId) &&
                 typeof m.author?.username === 'string' &&
@@ -532,11 +537,7 @@ module.exports = (client) => {
             .sort((a, b) => (a.createdTimestamp || 0) - (b.createdTimestamp || 0))
             // map to OpenAI-style messages
             .map(m => {
-              const isMuscleWebhook = Boolean(m.webhookId) &&
-                typeof m.author?.username === 'string' &&
-                m.author.username.toLowerCase() === String(Config.MUSCLEMB_WEBHOOK_NAME || 'musclemb').toLowerCase();
-
-              const isAssistant = (m.author?.id === client.user.id) || isMuscleWebhook;
+              const isAssistant = (m.author?.id === client.user.id);
               const role = isAssistant ? 'assistant' : 'user';
 
               const prefix = isAssistant ? '' : `${m.author?.username || 'User'}: `;
@@ -578,7 +579,7 @@ module.exports = (client) => {
 
         if (!routed?.ok) {
           const hint = routed?.hint || '⚠️ MB lag spike. One rep at a time—try again in a sec. ⏱️';
-          try { await safeReplyMessage(client, message, { content: hint, allowedMentions: { parse: [] } }); } catch {}
+          try { await safeReplyAsMuscleMB(message, { content: hint, allowedMentions: { parse: [] } }); } catch {}
           return;
         }
 
@@ -594,7 +595,7 @@ module.exports = (client) => {
         if (!groqTry || groqTry.error) {
           console.error('❌ Groq fetch/network error (all models):', groqTry?.error?.message || 'unknown');
           try {
-            await safeReplyMessage(client, message, {
+            await safeReplyAsMuscleMB(message, {
               content: '⚠️ MB lag spike. One rep at a time—try again in a sec. ⏱️',
               allowedMentions: { parse: [] }
             });
@@ -618,7 +619,7 @@ module.exports = (client) => {
             hint = '⚠️ MB cloud cramps (server error). One more try soon. ☁️';
           }
           console.error(`❌ Groq HTTP ${groqTry.res.status} on "${groqTry.model}": ${groqTry.bodyText?.slice(0, 400)}`);
-          try { await safeReplyMessage(client, message, { content: hint, allowedMentions: { parse: [] } }); } catch {}
+          try { await safeReplyAsMuscleMB(message, { content: hint, allowedMentions: { parse: [] } }); } catch {}
           return;
         }
 
@@ -629,7 +630,7 @@ module.exports = (client) => {
         if (!groqData) {
           console.error('❌ Groq returned non-JSON/empty:', groqTry.bodyText?.slice(0, 300));
           try {
-            await safeReplyMessage(client, message, {
+            await safeReplyAsMuscleMB(message, {
               content: '⚠️ MB static noise… say that again or keep it simple. 📻',
               allowedMentions: { parse: [] }
             });
@@ -642,7 +643,7 @@ module.exports = (client) => {
           const hint = (message.author.id === Config.BOT_OWNER_ID)
             ? `⚠️ Groq error: ${groqData.error?.message || 'unknown'}. Check model access & payload size.`
             : '⚠️ MB slipped on a banana peel (API error). One sec. 🍌';
-          try { await safeReplyMessage(client, message, { content: hint, allowedMentions: { parse: [] } }); } catch {}
+          try { await safeReplyAsMuscleMB(message, { content: hint, allowedMentions: { parse: [] } }); } catch {}
           return;
         }
 
@@ -679,14 +680,15 @@ module.exports = (client) => {
         await new Promise(resolve => setTimeout(resolve, delayMs));
 
         try {
-          await safeReplyMessage(client, message, { embeds: [embed], allowedMentions: { parse: [] } });
+          // ✅ FORCE MB identity on the actual reply (fixes "Bella relay" problem)
+          await safeReplyAsMuscleMB(message, { embeds: [embed], allowedMentions: { parse: [] } });
         } catch (err) {
           console.warn('❌ MuscleMB embed reply error:', err.message);
-          try { await safeReplyMessage(client, message, { content: aiReply, allowedMentions: { parse: [] } }); } catch {}
+          try { await safeReplyAsMuscleMB(message, { content: aiReply, allowedMentions: { parse: [] } }); } catch {}
         }
       } else {
         try {
-          await safeReplyMessage(client, message, {
+          await safeReplyAsMuscleMB(message, {
             content: '💬 (silent set) MB heard you but returned no sauce. Try again with fewer words.',
             allowedMentions: { parse: [] }
           });
@@ -695,7 +697,7 @@ module.exports = (client) => {
     } catch (err) {
       console.error('❌ MuscleMB error:', err?.stack || err?.message || String(err));
       try {
-        await safeReplyMessage(client, message, {
+        await safeReplyAsMuscleMB(message, {
           content: '⚠️ MuscleMB pulled a hammy 🦵. Try again soon.',
           allowedMentions: { parse: [] }
         });
@@ -705,5 +707,3 @@ module.exports = (client) => {
     }
   });
 };
-
-
