@@ -1,20 +1,26 @@
 // listeners/musclemb/context.js
+// ======================================================
+// Context helper
+// - Returns a short system-safe block (guild/channel/user) for grounding.
+// - Keep minimal; no message history here (history is handled in listener).
+// ======================================================
+
+function safeStr(s, max = 200) {
+  const t = String(s || '').trim();
+  if (!t) return '';
+  return t.length > max ? t.slice(0, max - 1) + '…' : t;
+}
+
 async function getRecentContext(message) {
   try {
-    const fetched = await message.channel.messages.fetch({ limit: 8 });
-    const lines = [];
-    for (const [, m] of fetched) {
-      if (m.id === message.id) continue;
-      if (m.author?.bot) continue;
-      const txt = (m.content || '').trim();
-      if (!txt) continue;
-      const oneLine = txt.replace(/\s+/g, ' ').slice(0, 200);
-      lines.push(`${m.author.username}: ${oneLine}`);
-      if (lines.length >= 6) break;
-    }
-    if (!lines.length) return '';
-    const joined = lines.join('\n');
-    return `Recent context:\n${joined}`.slice(0, 1200);
+    if (!message?.guild) return '';
+
+    const guildName = safeStr(message.guild.name, 80);
+    const channelName = safeStr(message.channel?.name || 'channel', 60);
+    const authorName = safeStr(message.member?.displayName || message.author?.username || 'user', 60);
+
+    // very small grounding string
+    return `Context: guild="${guildName}", channel="#${channelName}", author="${authorName}".`;
   } catch {
     return '';
   }
