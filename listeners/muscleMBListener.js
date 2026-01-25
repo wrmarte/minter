@@ -1,9 +1,10 @@
-// listeners/musclemb.js
+// listeners/musclemMBListener.js
 // ======================================================
 // MuscleMB Listener (TRUE MODULAR VERSION)
 // - Behavior preserved
 // - Logic split into small editable modules
-// - ✅ NEW: DB memory + awareness pings + multi-model routing (optional)
+// - ✅ DB memory + awareness pings + multi-model routing (optional)
+// - ✅ NEW: profile memory injection (admin-curated facts + timestamped notes)
 // ======================================================
 
 const { EmbedBuilder } = require('discord.js'); // ✅ FIX: needed in this file
@@ -24,10 +25,13 @@ const { analyzeChannelMood, smartPick, optimizeQuoteText, formatNiceLine } = req
 const AdrianChart = require('./musclemb/adrianChart');
 const SweepReader = require('./musclemb/sweepReader');
 
-// ✅ NEW: Memory + Awareness (opt-in mentions) + Model router (optional)
+// ✅ Memory + Awareness + Model router
 const MemoryStore = require('./musclemb/memoryStore');
 const Awareness = require('./musclemb/awarenessEngine');
 const ModelRouter = require('./musclemb/modelRouter');
+
+// ✅ NEW: Profile Memory (facts + timestamped notes)
+const ProfileStore = require('./musclemb/profileStore');
 
 // ===== Optional Groq "awareness" context (Discord message history) =====
 const MB_GROQ_HISTORY_LIMIT = Math.max(0, Math.min(25, Number(process.env.MB_GROQ_HISTORY_LIMIT || '12'))); // fetch this many
@@ -79,6 +83,73 @@ function humanizeMentions(text, msg) {
   return out;
 }
 
+// ======================================================
+// ✅ Build profile memory block to inject into system prompt
+// - Author profile + (optional) one mentioned user's profile
+// - Hard-limited to avoid token bloat
+// ======================================================
+async function buildProfileMemoryBlock(client, message) {
+  try {
+    if (!Config.MB_PROFILE_MEMORY_ENABLED) return '';
+    if (!client?.pg?.query) return '';
+
+    const guildId = message.guild.id;
+
+    // Ensure tables exist (safe)
+    await ProfileStore.ensureSchema(client);
+
+    // Optional: require opt-in before using memory (paranoid mode)
+    if (Config.MB_PROFILE_REQUIRE_OPTIN) {
+      const ok = await MemoryStore.userIsOptedIn(client, guildId, message.author.id);
+      if (!ok) return '';
+    }
+
+    // Author profile + notes
+    const authorFacts = await ProfileStore.getFacts(client, guildId, message.author.id);
+    const authorNotes = await ProfileStore.getNotes(client, guildId, message.author.id, Config.MB_PROFILE_MAX_NOTES);
+
+    // Mentioned user (optional — only if exactly 1 other user mentioned)
+    let mentionedBlock = null;
+    try {
+      const mentionedOthers = (message.mentions?.users || new Map()).filter(u => u.id !== message.client.user.id);
+      if (mentionedOthers.size === 1) {
+        const u = [...mentionedOthers.values()][0];
+        const mf = await ProfileStore.getFacts(client, guildId, u.id);
+        const mn = await ProfileStore.getNotes(client, guildId, u.id, Math.min(2, Config.MB_PROFILE_MAX_NOTES));
+        mentionedBlock = { userId: u.id, username: u.username, facts: mf, notes: mn };
+      }
+    } catch {}
+
+    const parts = [];
+
+    const authorName = message.member?.displayName || message.author?.username || 'User';
+    const authorSummary = ProfileStore.formatFactsInline(authorFacts, Config.MB_PROFILE_MAX_KEYS);
+    const authorNotesTxt = ProfileStore.formatNotesInline(authorNotes, Config.MB_PROFILE_MAX_NOTES);
+
+    if (authorSummary || authorNotesTxt) {
+      parts.push(`Trusted User Memory (admin-curated; keep short; do not invent):`);
+      if (authorSummary) parts.push(`- ${authorName}: ${authorSummary}`);
+      if (authorNotesTxt) parts.push(`- ${authorName} recent notes: ${authorNotesTxt}`);
+    }
+
+    if (mentionedBlock) {
+      const mSummary = ProfileStore.formatFactsInline(mentionedBlock.facts, Math.min(4, Config.MB_PROFILE_MAX_KEYS));
+      const mNotes = ProfileStore.formatNotesInline(mentionedBlock.notes, 2);
+      if (mSummary || mNotes) {
+        const mName = mentionedBlock.username || `user-${String(mentionedBlock.userId).slice(-4)}`;
+        parts.push(`- Mentioned: ${mName}: ${mSummary || ''}${mNotes ? ` | notes: ${mNotes}` : ''}`.trim());
+      }
+    }
+
+    return parts.length ? parts.join('\n') : '';
+  } catch (e) {
+    if (Config.MB_PROFILE_DEBUG) {
+      console.warn('⚠️ [MB_PROFILE] build block failed:', e?.message || String(e));
+    }
+    return '';
+  }
+}
+
 module.exports = (client) => {
   /** 🔎 MBella-post detector: suppress MuscleMB in that channel for ~11s */
   client.on('messageCreate', (m) => {
@@ -128,8 +199,7 @@ module.exports = (client) => {
       let mood = { multipliers: {}, tags: [] };
       try { mood = await analyzeChannelMood(channel); } catch {}
 
-      // ✅ NEW: awareness ping (opt-in only) sometimes replaces quote
-      // - won’t run if not enabled / no pg / no opted-in users
+      // ✅ awareness ping (opt-in only) sometimes replaces quote
       let didAwareness = false;
       if (Awareness.isEnabled()) {
         try {
@@ -137,13 +207,14 @@ module.exports = (client) => {
           if (awareness?.content) {
             const ok = await safeSendChannel(client, channel, {
               content: awareness.content,
-              // allow ping ONLY for that user (opt-in)
               allowedMentions: awareness.allowedMentions || { parse: [] },
               username: Config.MUSCLEMB_WEBHOOK_NAME,
               avatarURL: Config.MUSCLEMB_WEBHOOK_AVATAR || undefined,
             });
 
             if (ok) {
+              // ✅ IMPORTANT: mark it so cooldowns + caps work
+              try { await Awareness.markAwarenessSent(client, guildId, awareness.userId); } catch {}
               State.lastNicePingByGuild.set(guildId, now);
               didAwareness = true;
             }
@@ -186,8 +257,8 @@ module.exports = (client) => {
   client.on('messageCreate', async (message) => {
     if (message.author.bot || !message.guild) return;
 
-    // ✅ NEW: lightweight memory log (won’t crash if pg missing)
-    try { MemoryStore.trackActivity(client, message); } catch {}
+    // ✅ lightweight memory log (won’t crash if pg missing)
+    try { await MemoryStore.trackActivity(client, message); } catch {}
 
     // Track activity (existing in-memory tracker)
     State.lastActiveByUser.set(`${message.guild.id}:${message.author.id}`, {
@@ -364,7 +435,11 @@ module.exports = (client) => {
 
       const softGuard =
         'Be kind by default, avoid insults unless explicitly roasting. No private data. Keep it 1–2 short sentences.';
-      const fullSystemPrompt = [systemPrompt, softGuard, recentContext].filter(Boolean).join('\n\n');
+
+      // ✅ NEW: Inject profile memory block (admin-curated) if enabled
+      const profileBlock = await buildProfileMemoryBlock(client, message);
+
+      const fullSystemPrompt = [systemPrompt, softGuard, profileBlock, recentContext].filter(Boolean).join('\n\n');
 
       let temperature = 0.7;
       if (currentMode === 'villain') temperature = 0.5;
@@ -427,10 +502,7 @@ module.exports = (client) => {
 
       const cacheKey = `${message.guild.id}:${message.channel.id}:${message.author.id}`;
 
-      // ======================================================
-      // ✅ NEW: multi-model router (Groq -> OpenAI -> Grok)
-      // If disabled, falls back to original groqWithDiscovery path
-      // ======================================================
+      // ✅ multi-model router (if enabled)
       const useRouter = ModelRouter.isEnabled();
 
       let aiReplyRaw = null;
@@ -446,11 +518,8 @@ module.exports = (client) => {
         });
 
         if (!routed?.ok) {
-          // Router failed everywhere (still return a friendly message)
           const hint = routed?.hint || '⚠️ MB lag spike. One rep at a time—try again in a sec. ⏱️';
-          try {
-            await safeReplyMessage(client, message, { content: hint, allowedMentions: { parse: [] } });
-          } catch {}
+          try { await safeReplyMessage(client, message, { content: hint, allowedMentions: { parse: [] } }); } catch {}
           return;
         }
 
