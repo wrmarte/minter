@@ -1,13 +1,15 @@
-// listeners/musclemMBListener.js
+// listeners/muscleMBListener.js
 // ======================================================
 // MuscleMB Listener (TRUE MODULAR VERSION)
 // - Behavior preserved
 // - Logic split into small editable modules
 // - ✅ DB memory + awareness pings + multi-model routing (optional)
-// - ✅ NEW: profile memory injection (admin-curated facts + timestamped notes)
+// - ✅ Profile memory injection (admin-curated facts + timestamped notes)
+// - ✅ Safe attach guard (prevents duplicate event listeners if required twice)
+// - ✅ Profile schema guard (prevents repeated CREATE TABLE checks)
 // ======================================================
 
-const { EmbedBuilder } = require('discord.js'); // ✅ FIX: needed in this file
+const { EmbedBuilder } = require('discord.js');
 
 const Config = require('./musclemb/config');
 const State = require('./musclemb/state');
@@ -20,7 +22,12 @@ const { isOwnerOrAdmin } = require('./musclemb/permissions');
 
 const { groqWithDiscovery } = require('./musclemb/groq');
 
-const { analyzeChannelMood, smartPick, optimizeQuoteText, formatNiceLine } = require('./musclemb/nicePings');
+const {
+  analyzeChannelMood,
+  smartPick,
+  optimizeQuoteText,
+  formatNiceLine
+} = require('./musclemb/nicePings');
 
 const AdrianChart = require('./musclemb/adrianChart');
 const SweepReader = require('./musclemb/sweepReader');
@@ -30,7 +37,7 @@ const MemoryStore = require('./musclemb/memoryStore');
 const Awareness = require('./musclemb/awarenessEngine');
 const ModelRouter = require('./musclemb/modelRouter');
 
-// ✅ NEW: Profile Memory (facts + timestamped notes)
+// ✅ Profile Memory (facts + timestamped notes)
 const ProfileStore = require('./musclemb/profileStore');
 
 // ===== Optional Groq "awareness" context (Discord message history) =====
@@ -87,6 +94,7 @@ function humanizeMentions(text, msg) {
 // ✅ Build profile memory block to inject into system prompt
 // - Author profile + (optional) one mentioned user's profile
 // - Hard-limited to avoid token bloat
+// - ✅ Schema guard so we don't do CREATE TABLE checks repeatedly
 // ======================================================
 async function buildProfileMemoryBlock(client, message) {
   try {
@@ -95,8 +103,11 @@ async function buildProfileMemoryBlock(client, message) {
 
     const guildId = message.guild.id;
 
-    // Ensure tables exist (safe)
-    await ProfileStore.ensureSchema(client);
+    // Ensure tables exist (safe) — do once per process
+    if (!client.__mbProfileSchemaReady) {
+      await ProfileStore.ensureSchema(client);
+      client.__mbProfileSchemaReady = true;
+    }
 
     // Optional: require opt-in before using memory (paranoid mode)
     if (Config.MB_PROFILE_REQUIRE_OPTIN) {
@@ -111,12 +122,27 @@ async function buildProfileMemoryBlock(client, message) {
     // Mentioned user (optional — only if exactly 1 other user mentioned)
     let mentionedBlock = null;
     try {
-      const mentionedOthers = (message.mentions?.users || new Map()).filter(u => u.id !== message.client.user.id);
+      const mentionedOthers = (message.mentions?.users || new Map())
+        .filter(u => u.id !== message.client.user.id);
+
       if (mentionedOthers.size === 1) {
         const u = [...mentionedOthers.values()][0];
-        const mf = await ProfileStore.getFacts(client, guildId, u.id);
-        const mn = await ProfileStore.getNotes(client, guildId, u.id, Math.min(2, Config.MB_PROFILE_MAX_NOTES));
-        mentionedBlock = { userId: u.id, username: u.username, facts: mf, notes: mn };
+
+        // If require opt-in, also require it for mentioned user
+        if (Config.MB_PROFILE_REQUIRE_OPTIN) {
+          const ok2 = await MemoryStore.userIsOptedIn(client, guildId, u.id);
+          if (!ok2) {
+            mentionedBlock = null;
+          } else {
+            const mf = await ProfileStore.getFacts(client, guildId, u.id);
+            const mn = await ProfileStore.getNotes(client, guildId, u.id, Math.min(2, Config.MB_PROFILE_MAX_NOTES));
+            mentionedBlock = { userId: u.id, username: u.username, facts: mf, notes: mn };
+          }
+        } else {
+          const mf = await ProfileStore.getFacts(client, guildId, u.id);
+          const mn = await ProfileStore.getNotes(client, guildId, u.id, Math.min(2, Config.MB_PROFILE_MAX_NOTES));
+          mentionedBlock = { userId: u.id, username: u.username, facts: mf, notes: mn };
+        }
       }
     } catch {}
 
@@ -151,6 +177,16 @@ async function buildProfileMemoryBlock(client, message) {
 }
 
 module.exports = (client) => {
+  // ======================================================
+  // ✅ Attach guard: if this listener file is required twice,
+  // it will NOT register duplicate messageCreate handlers.
+  // ======================================================
+  if (client.__muscleMBListenerAttached) {
+    console.log('🟣 [MuscleMB] listener already attached — skipping duplicate attach');
+    return;
+  }
+  client.__muscleMBListenerAttached = true;
+
   /** 🔎 MBella-post detector: suppress MuscleMB in that channel for ~11s */
   client.on('messageCreate', (m) => {
     try {
@@ -436,10 +472,12 @@ module.exports = (client) => {
       const softGuard =
         'Be kind by default, avoid insults unless explicitly roasting. No private data. Keep it 1–2 short sentences.';
 
-      // ✅ NEW: Inject profile memory block (admin-curated) if enabled
+      // ✅ Inject profile memory block (admin-curated) if enabled
       const profileBlock = await buildProfileMemoryBlock(client, message);
 
-      const fullSystemPrompt = [systemPrompt, softGuard, profileBlock, recentContext].filter(Boolean).join('\n\n');
+      const fullSystemPrompt = [systemPrompt, softGuard, profileBlock, recentContext]
+        .filter(Boolean)
+        .join('\n\n');
 
       let temperature = 0.7;
       if (currentMode === 'villain') temperature = 0.5;
