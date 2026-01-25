@@ -3,6 +3,7 @@
 // MuscleMB Listener (TRUE MODULAR VERSION)
 // - Behavior preserved
 // - Logic split into small editable modules
+// - ✅ NEW: DB memory + awareness pings + multi-model routing (optional)
 // ======================================================
 
 const { EmbedBuilder } = require('discord.js'); // ✅ FIX: needed in this file
@@ -22,6 +23,11 @@ const { analyzeChannelMood, smartPick, optimizeQuoteText, formatNiceLine } = req
 
 const AdrianChart = require('./musclemb/adrianChart');
 const SweepReader = require('./musclemb/sweepReader');
+
+// ✅ NEW: Memory + Awareness (opt-in mentions) + Model router (optional)
+const MemoryStore = require('./musclemb/memoryStore');
+const Awareness = require('./musclemb/awarenessEngine');
+const ModelRouter = require('./musclemb/modelRouter');
 
 // ===== Optional Groq "awareness" context (Discord message history) =====
 const MB_GROQ_HISTORY_LIMIT = Math.max(0, Math.min(25, Number(process.env.MB_GROQ_HISTORY_LIMIT || '12'))); // fetch this many
@@ -59,7 +65,6 @@ function humanizeMentions(text, msg) {
 
   // user mentions
   out = out.replace(/<@!?(\d+)>/g, (m, id) => {
-    // Try: message mentions -> guild member cache -> user cache
     const u =
       msg?.mentions?.users?.get?.(id) ||
       msg?.client?.users?.cache?.get?.(id) ||
@@ -93,7 +98,7 @@ module.exports = (client) => {
     } catch {}
   });
 
-  /** Periodic nice pings */
+  /** Periodic nice pings (✅ now can also do awareness pings, opt-in only) */
   setInterval(async () => {
     const now = Date.now();
     const byGuild = new Map(); // guildId -> [{channelId, ts}]
@@ -123,6 +128,32 @@ module.exports = (client) => {
       let mood = { multipliers: {}, tags: [] };
       try { mood = await analyzeChannelMood(channel); } catch {}
 
+      // ✅ NEW: awareness ping (opt-in only) sometimes replaces quote
+      // - won’t run if not enabled / no pg / no opted-in users
+      let didAwareness = false;
+      if (Awareness.isEnabled()) {
+        try {
+          const awareness = await Awareness.buildAwarenessPing(client, guild, channel);
+          if (awareness?.content) {
+            const ok = await safeSendChannel(client, channel, {
+              content: awareness.content,
+              // allow ping ONLY for that user (opt-in)
+              allowedMentions: awareness.allowedMentions || { parse: [] },
+              username: Config.MUSCLEMB_WEBHOOK_NAME,
+              avatarURL: Config.MUSCLEMB_WEBHOOK_AVATAR || undefined,
+            });
+
+            if (ok) {
+              State.lastNicePingByGuild.set(guildId, now);
+              didAwareness = true;
+            }
+          }
+        } catch {}
+      }
+
+      if (didAwareness) continue;
+
+      // normal quote path (original behavior)
       const last = State.lastQuoteByGuild.get(guildId) || null;
 
       const { text, category, meta } = smartPick({
@@ -155,7 +186,10 @@ module.exports = (client) => {
   client.on('messageCreate', async (message) => {
     if (message.author.bot || !message.guild) return;
 
-    // Track activity
+    // ✅ NEW: lightweight memory log (won’t crash if pg missing)
+    try { MemoryStore.trackActivity(client, message); } catch {}
+
+    // Track activity (existing in-memory tracker)
     State.lastActiveByUser.set(`${message.guild.id}:${message.author.id}`, {
       ts: Date.now(),
       channelId: message.channel.id,
@@ -339,8 +373,8 @@ module.exports = (client) => {
       if (isRoastingBot) temperature = 0.75;
 
       // ======================================================
-      // ✅ NEW: Pass real Discord chat context via extraMessages
-      // Also "humanize" mentions so Groq sees @names (not <@id>)
+      // ✅ Pass real Discord chat context via extraMessages
+      // Also "humanize" mentions so LLM sees @names (not <@id>)
       // ======================================================
       let extraMessages = [];
       try {
@@ -374,9 +408,7 @@ module.exports = (client) => {
               const prefix = isAssistant ? '' : `${m.author?.username || 'User'}: `;
               const raw = `${prefix}${m.content || ''}`.trim().slice(0, MB_GROQ_HISTORY_MAX_CHARS);
 
-              // ✅ convert <@id> etc into readable @names before sending to Groq
               const text = humanizeMentions(raw, m);
-
               return { role, content: text };
             });
 
@@ -393,76 +425,104 @@ module.exports = (client) => {
         extraMessages = [];
       }
 
-      // Optional cacheKey (safe even if your groq.js ignores it)
       const cacheKey = `${message.guild.id}:${message.channel.id}:${message.author.id}`;
 
-      // ✅ IMPORTANT: call groqWithDiscovery with an options object
-      const groqTry = await groqWithDiscovery(fullSystemPrompt, cleanedInput, {
-        temperature,
-        extraMessages,
-        cacheKey,
-      });
+      // ======================================================
+      // ✅ NEW: multi-model router (Groq -> OpenAI -> Grok)
+      // If disabled, falls back to original groqWithDiscovery path
+      // ======================================================
+      const useRouter = ModelRouter.isEnabled();
 
-      if (!groqTry || groqTry.error) {
-        console.error('❌ Groq fetch/network error (all models):', groqTry?.error?.message || 'unknown');
-        try {
-          await safeReplyMessage(client, message, {
-            content: '⚠️ MB lag spike. One rep at a time—try again in a sec. ⏱️',
-            allowedMentions: { parse: [] }
-          });
-        } catch {}
-        return;
-      }
+      let aiReplyRaw = null;
 
-      if (!groqTry.res.ok) {
-        let hint = '⚠️ MB jammed the reps rack (API). Try again shortly. 🏋️';
-        if (groqTry.res.status === 401 || groqTry.res.status === 403) {
-          hint = (message.author.id === Config.BOT_OWNER_ID)
-            ? '⚠️ MB auth error with Groq (401/403). Verify GROQ_API_KEY & project permissions.'
-            : '⚠️ MB auth blip. Coach is reloading plates. 🏋️';
-        } else if (groqTry.res.status === 429) {
-          hint = '⚠️ Rate limited. Short breather—then we rip again. ⏱️';
-        } else if (groqTry.res.status === 400 || groqTry.res.status === 404) {
-          hint = (message.author.id === Config.BOT_OWNER_ID)
-            ? `⚠️ Model issue (${groqTry.res.status}). Set GROQ_MODEL in Railway or rely on auto-discovery.`
-            : '⚠️ MB switched plates. One more shot. 🏋️';
-        } else if (groqTry.res.status >= 500) {
-          hint = '⚠️ MB cloud cramps (server error). One more try soon. ☁️';
+      if (useRouter) {
+        const routed = await ModelRouter.generate({
+          client,
+          system: fullSystemPrompt,
+          user: cleanedInput,
+          temperature,
+          extraMessages,
+          cacheKey,
+        });
+
+        if (!routed?.ok) {
+          // Router failed everywhere (still return a friendly message)
+          const hint = routed?.hint || '⚠️ MB lag spike. One rep at a time—try again in a sec. ⏱️';
+          try {
+            await safeReplyMessage(client, message, { content: hint, allowedMentions: { parse: [] } });
+          } catch {}
+          return;
         }
-        console.error(`❌ Groq HTTP ${groqTry.res.status} on "${groqTry.model}": ${groqTry.bodyText?.slice(0, 400)}`);
-        try { await safeReplyMessage(client, message, { content: hint, allowedMentions: { parse: [] } }); } catch {}
-        return;
+
+        aiReplyRaw = String(routed.text || '').trim();
+      } else {
+        // Original behavior: Groq discovery only
+        const groqTry = await groqWithDiscovery(fullSystemPrompt, cleanedInput, {
+          temperature,
+          extraMessages,
+          cacheKey,
+        });
+
+        if (!groqTry || groqTry.error) {
+          console.error('❌ Groq fetch/network error (all models):', groqTry?.error?.message || 'unknown');
+          try {
+            await safeReplyMessage(client, message, {
+              content: '⚠️ MB lag spike. One rep at a time—try again in a sec. ⏱️',
+              allowedMentions: { parse: [] }
+            });
+          } catch {}
+          return;
+        }
+
+        if (!groqTry.res.ok) {
+          let hint = '⚠️ MB jammed the reps rack (API). Try again shortly. 🏋️';
+          if (groqTry.res.status === 401 || groqTry.res.status === 403) {
+            hint = (message.author.id === Config.BOT_OWNER_ID)
+              ? '⚠️ MB auth error with Groq (401/403). Verify GROQ_API_KEY & project permissions.'
+              : '⚠️ MB auth blip. Coach is reloading plates. 🏋️';
+          } else if (groqTry.res.status === 429) {
+            hint = '⚠️ Rate limited. Short breather—then we rip again. ⏱️';
+          } else if (groqTry.res.status === 400 || groqTry.res.status === 404) {
+            hint = (message.author.id === Config.BOT_OWNER_ID)
+              ? `⚠️ Model issue (${groqTry.res.status}). Set GROQ_MODEL in Railway or rely on auto-discovery.`
+              : '⚠️ MB switched plates. One more shot. 🏋️';
+          } else if (groqTry.res.status >= 500) {
+            hint = '⚠️ MB cloud cramps (server error). One more try soon. ☁️';
+          }
+          console.error(`❌ Groq HTTP ${groqTry.res.status} on "${groqTry.model}": ${groqTry.bodyText?.slice(0, 400)}`);
+          try { await safeReplyMessage(client, message, { content: hint, allowedMentions: { parse: [] } }); } catch {}
+          return;
+        }
+
+        const groqData = (() => {
+          try { return JSON.parse(groqTry.bodyText); } catch { return null; }
+        })();
+
+        if (!groqData) {
+          console.error('❌ Groq returned non-JSON/empty:', groqTry.bodyText?.slice(0, 300));
+          try {
+            await safeReplyMessage(client, message, {
+              content: '⚠️ MB static noise… say that again or keep it simple. 📻',
+              allowedMentions: { parse: [] }
+            });
+          } catch {}
+          return;
+        }
+
+        if (groqData.error) {
+          console.error('❌ Groq API error:', groqData.error);
+          const hint = (message.author.id === Config.BOT_OWNER_ID)
+            ? `⚠️ Groq error: ${groqData.error?.message || 'unknown'}. Check model access & payload size.`
+            : '⚠️ MB slipped on a banana peel (API error). One sec. 🍌';
+          try { await safeReplyMessage(client, message, { content: hint, allowedMentions: { parse: [] } }); } catch {}
+          return;
+        }
+
+        aiReplyRaw = groqData.choices?.[0]?.message?.content?.trim() || '';
       }
-
-      const groqData = (() => {
-        try { return JSON.parse(groqTry.bodyText); } catch { return null; }
-      })();
-
-      if (!groqData) {
-        console.error('❌ Groq returned non-JSON/empty:', groqTry.bodyText?.slice(0, 300));
-        try {
-          await safeReplyMessage(client, message, {
-            content: '⚠️ MB static noise… say that again or keep it simple. 📻',
-            allowedMentions: { parse: [] }
-          });
-        } catch {}
-        return;
-      }
-
-      if (groqData.error) {
-        console.error('❌ Groq API error:', groqData.error);
-        const hint = (message.author.id === Config.BOT_OWNER_ID)
-          ? `⚠️ Groq error: ${groqData.error?.message || 'unknown'}. Check model access & payload size.`
-          : '⚠️ MB slipped on a banana peel (API error). One sec. 🍌';
-        try { await safeReplyMessage(client, message, { content: hint, allowedMentions: { parse: [] } }); } catch {}
-        return;
-      }
-
-      const aiReplyRaw = groqData.choices?.[0]?.message?.content?.trim();
 
       // ✅ Convert <@id> to readable @names (no ping), also blocks @everyone/@here
       const aiReplyHuman = humanizeMentions(aiReplyRaw || '', message);
-
       const aiReply = (aiReplyHuman || '').slice(0, 1800).trim();
 
       if (aiReply?.length) {
