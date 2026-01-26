@@ -143,6 +143,15 @@ function buildEditModal({ modalId, targetUsername }) {
   return modal;
 }
 
+/**
+ * ✅ PATCHED: applyEdits now uses ProfileStore bulk helpers when available:
+ * - replace tags: ProfileStore.replaceTags()
+ * - add tags: ProfileStore.addTagsBulk()
+ * - set facts: ProfileStore.setFactsBulk()
+ *
+ * Also: counts are based on requested items, not DB success booleans,
+ * so your summary stays accurate even when some items are rejected by cleaners.
+ */
 async function applyEdits({ client, guildId, targetId, actingId, factsBlob, tagsBlobRaw, noteTextRaw }) {
   const facts = parseFactsBlob(factsBlob, 12);
 
@@ -157,37 +166,97 @@ async function applyEdits({ client, guildId, targetId, actingId, factsBlob, tags
   }
 
   const tags = parseTagsBlob(tagsBlob, 20);
-
   const noteText = String(noteTextRaw || '').trim();
 
-  const ops = [];
-
-  // tags
-  if (tags.length) {
-    if (replaceTags) ops.push(ProfileStore.clearTags(client, guildId, targetId));
-    for (const t of tags) ops.push(ProfileStore.addTag(client, guildId, targetId, t, actingId));
+  // nothing to do
+  if (!facts.length && !tags.length && !noteText) {
+    return {
+      ok: true,
+      changed: false,
+      replaceTags,
+      factsCount: 0,
+      tagsCount: 0,
+      noteCount: 0,
+      okCount: 0,
+      failCount: 0,
+      summary: 'no changes',
+    };
   }
-
-  // facts
-  if (facts.length) {
-    for (const p of facts) ops.push(ProfileStore.setFact(client, guildId, targetId, p.key, p.value, actingId));
-  }
-
-  // note
-  if (noteText) ops.push(ProfileStore.addNote(client, guildId, targetId, noteText, actingId));
-
-  const results = ops.length ? await Promise.allSettled(ops) : [];
-  const okCount = results.filter(r => r.status === 'fulfilled' && r.value === true).length;
-  const failCount = results.length - okCount;
 
   const summaryBits = [];
   if (facts.length) summaryBits.push(`facts: **${facts.length}**`);
   if (tags.length) summaryBits.push(`tags: **${tags.length}**${replaceTags ? ' (replaced)' : ' (added)'}`);
   if (noteText) summaryBits.push(`note: **1**`);
 
+  let okCount = 0;
+  let failCount = 0;
+
+  // ---- TAGS ----
+  if (tags.length) {
+    try {
+      if (replaceTags && typeof ProfileStore.replaceTags === 'function') {
+        const r = await ProfileStore.replaceTags(client, guildId, targetId, tags, actingId, 30);
+        if (r?.cleared) okCount += 1; // count the clear as 1 logical op
+        okCount += Number(r?.ok || 0);
+        failCount += Number(r?.fail || 0);
+      } else if (!replaceTags && typeof ProfileStore.addTagsBulk === 'function') {
+        const r = await ProfileStore.addTagsBulk(client, guildId, targetId, tags, actingId, 30);
+        okCount += Number(r?.ok || 0);
+        failCount += Number(r?.fail || 0);
+      } else {
+        // fallback: old path
+        if (replaceTags) {
+          const cleared = await ProfileStore.clearTags(client, guildId, targetId);
+          if (cleared) okCount += 1;
+          else failCount += 1;
+        }
+        for (const t of tags) {
+          // eslint-disable-next-line no-await-in-loop
+          const ok = await ProfileStore.addTag(client, guildId, targetId, t, actingId);
+          if (ok) okCount += 1;
+          else failCount += 1;
+        }
+      }
+    } catch {
+      // if bulk blows up, treat as all failed for safety
+      failCount += tags.length + (replaceTags ? 1 : 0);
+    }
+  }
+
+  // ---- FACTS ----
+  if (facts.length) {
+    try {
+      if (typeof ProfileStore.setFactsBulk === 'function') {
+        const r = await ProfileStore.setFactsBulk(client, guildId, targetId, facts, actingId, 24);
+        okCount += Number(r?.ok || 0);
+        failCount += Number(r?.fail || 0);
+      } else {
+        for (const p of facts) {
+          // eslint-disable-next-line no-await-in-loop
+          const ok = await ProfileStore.setFact(client, guildId, targetId, p.key, p.value, actingId);
+          if (ok) okCount += 1;
+          else failCount += 1;
+        }
+      }
+    } catch {
+      failCount += facts.length;
+    }
+  }
+
+  // ---- NOTE ----
+  if (noteText) {
+    try {
+      const ok = await ProfileStore.addNote(client, guildId, targetId, noteText, actingId);
+      if (ok) okCount += 1;
+      else failCount += 1;
+    } catch {
+      failCount += 1;
+    }
+  }
+
   return {
     ok: failCount === 0,
-    changed: Boolean(facts.length || tags.length || noteText),
+    changed: true,
     replaceTags,
     factsCount: facts.length,
     tagsCount: tags.length,
@@ -235,6 +304,14 @@ module.exports = {
         .addUserOption(o => o.setName('user').setDescription('Target user (default: you)').setRequired(false))
         .addIntegerOption(o => o.setName('notes').setDescription('Notes to show (1-10)').setRequired(false))
         .addBooleanOption(o => o.setName('public').setDescription('Show publicly (default: private)').setRequired(false))
+    )
+
+    // ✅ NEW: admin-only purge (ultimate safety valve)
+    .addSubcommand(sc =>
+      sc.setName('purge')
+        .setDescription('ADMIN: wipe all MB profile memory for a user in this guild (facts/tags/notes)')
+        .addUserOption(o => o.setName('user').setDescription('Target user').setRequired(true))
+        .addBooleanOption(o => o.setName('confirm').setDescription('Must be true to confirm').setRequired(true))
     )
 
     .addSubcommandGroup(g =>
@@ -324,6 +401,34 @@ module.exports = {
       const group = interaction.options.getSubcommandGroup(false);
       const sub = interaction.options.getSubcommand(false);
       const guildId = String(interaction.guildId);
+
+      // =============== ULTIMATE: PURGE ===============
+      if (!group && sub === 'purge') {
+        if (!admin) {
+          await interaction.reply({ content: '⛔ Admin/Owner only.', ephemeral: true });
+          return;
+        }
+        const target = interaction.options.getUser('user', true);
+        const confirm = Boolean(interaction.options.getBoolean('confirm', true));
+        if (!confirm) {
+          await interaction.reply({ content: '⚠️ Confirm must be **true** to purge.', ephemeral: true });
+          return;
+        }
+
+        if (typeof ProfileStore.purgeUser !== 'function') {
+          await interaction.reply({ content: '⚠️ purgeUser() not available. Update profileStore.js first.', ephemeral: true });
+          return;
+        }
+
+        const r = await ProfileStore.purgeUser(client, guildId, String(target.id));
+        await interaction.reply({
+          content: r?.ok
+            ? `🧹 Purged MB profile memory for <@${target.id}> in this guild.`
+            : `⚠️ Purge failed.`,
+          ephemeral: true
+        });
+        return;
+      }
 
       // =============== ULTIMATE: PANEL ===============
       if (!group && sub === 'panel') {
@@ -431,7 +536,7 @@ module.exports = {
 
             await submitted.reply({
               content: res.changed
-                ? `✅ Saved for <@${targetId}> — ${res.summary}${res.failCount ? `\n⚠️ Some items failed: ${res.failCount}/${res.okCount + res.failCount}` : ''}`
+                ? `✅ Saved for <@${targetId}> — ${res.summary}${res.failCount ? `\n⚠️ Some items failed/rejected: ${res.failCount} (ok=${res.okCount})` : ''}`
                 : '⚠️ No changes detected. (Fill at least one field.)',
               ephemeral: true
             }).catch(() => {});
@@ -459,7 +564,6 @@ module.exports = {
 
           // VIEW
           if (kind === 'mbmem_btn_view') {
-            // we just call the same logic by sending an ephemeral card here
             try {
               const noteLimit = 4;
 
@@ -577,7 +681,7 @@ module.exports = {
 
         await submitted.reply({
           content: res.changed
-            ? `✅ Saved for <@${targetId}> — ${res.summary}${res.failCount ? `\n⚠️ Some items failed: ${res.failCount}/${res.okCount + res.failCount}` : ''}`
+            ? `✅ Saved for <@${targetId}> — ${res.summary}${res.failCount ? `\n⚠️ Some items failed/rejected: ${res.failCount} (ok=${res.okCount})` : ''}`
             : '⚠️ No changes detected. (Fill at least one field.)',
           ephemeral: true
         });
@@ -630,7 +734,7 @@ module.exports = {
 
         await interaction.reply({
           content: res.changed
-            ? `✅ Saved for <@${targetId}> — ${res.summary}${res.failCount ? `\n⚠️ Some items failed: ${res.failCount}/${res.okCount + res.failCount}` : ''}`
+            ? `✅ Saved for <@${targetId}> — ${res.summary}${res.failCount ? `\n⚠️ Some items failed/rejected: ${res.failCount} (ok=${res.okCount})` : ''}`
             : '⚠️ No changes detected.',
           ephemeral: true
         });
