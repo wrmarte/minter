@@ -4,17 +4,20 @@
 // - Caches per-channel webhook
 // - Prefers bot-owned webhook
 // - Can use a manually-created webhook IF we can fetch token (ManageWebhooks)
-// - ✅ NEW: DB/ENV fallback to send via WebhookClient even WITHOUT ManageWebhooks
-// - ✅ NEW: Supports "reply-like" behavior via messageReference when provided
+// - ✅ Supports DB/ENV fallback to send via WebhookClient even WITHOUT ManageWebhooks
+// - ✅ Supports "reply-like" behavior via messageReference when provided
+// - ✅ PATCH: NEVER edits webhook identity (name/avatar) — avoids persona cross-talk
+// - ✅ PATCH: Injects username/avatarURL per-message payload (correct identity every send)
+// - ✅ PATCH: Cache key includes persona name to avoid shared-state collisions
 // - Retries once if webhook is stale/deleted/rotated
 // ======================================================
 
 const { PermissionsBitField, WebhookClient } = require("discord.js");
 
-// Per-channel cache (channelId -> Webhook|WebhookClient)
+// Per-channel cache (cacheKey -> Webhook|WebhookClient)
 const channelWebhookCache = new Map();
 
-// Prevent race conditions (channelId -> Promise<Webhook|WebhookClient|null>)
+// Prevent race conditions (cacheKey -> Promise<Webhook|WebhookClient|null>)
 const inflight = new Map();
 
 const DEBUG = String(process.env.WEBHOOKAUTO_DEBUG || "").trim() === "1";
@@ -65,11 +68,9 @@ async function fetchWebhookUrlFromDb(channel) {
     const pg = client?.pg;
     if (!pg?.query) return "";
 
-    // Prefer exact channel match; if not found, fall back to guild default row.
     const guildId = String(channel.guild.id);
     const channelId = String(channel.id);
 
-    // 1) exact match
     const r1 = await pg.query(
       `SELECT webhook_url FROM guild_webhooks WHERE guild_id = $1 AND channel_id = $2 LIMIT 1`,
       [guildId, channelId]
@@ -77,7 +78,6 @@ async function fetchWebhookUrlFromDb(channel) {
     const u1 = String(r1?.rows?.[0]?.webhook_url || "").trim();
     if (u1) return u1;
 
-    // 2) guild default (any channel_id)
     const r2 = await pg.query(
       `SELECT webhook_url FROM guild_webhooks WHERE guild_id = $1 LIMIT 1`,
       [guildId]
@@ -101,11 +101,9 @@ function pickBestWebhook(hooks, clientUserId, desiredName) {
     if (!hooks) return null;
     const arr = Array.isArray(hooks) ? hooks : [...hooks.values()];
 
-    // 1) bot-owned
     const owned = arr.find((h) => h?.owner?.id === clientUserId);
     if (owned) return owned;
 
-    // 2) name match (manual)
     const dn = String(desiredName || "").trim().toLowerCase();
     if (dn) {
       const named = arr.find(
@@ -114,7 +112,6 @@ function pickBestWebhook(hooks, clientUserId, desiredName) {
       if (named) return named;
     }
 
-    // 3) any tokened webhook
     const tokened = arr.find((h) => Boolean(h?.token));
     if (tokened) return tokened;
 
@@ -131,10 +128,10 @@ async function validateCachedWebhook(hookOrClient) {
   try {
     if (!hookOrClient) return null;
 
-    // WebhookClient: no fetch(); if it exists, assume valid
+    // WebhookClient: no fetch(); assume valid
     if (hookOrClient instanceof WebhookClient) return hookOrClient;
 
-    // Webhook (from fetchWebhooks/createWebhook): can fetch itself
+    // Webhook: can fetch itself
     if (typeof hookOrClient.fetch === "function") {
       const fresh = await hookOrClient.fetch().catch(() => null);
       return fresh || hookOrClient;
@@ -147,10 +144,24 @@ async function validateCachedWebhook(hookOrClient) {
 }
 
 /**
+ * Cache key includes persona name so inflight/cache don't collide across MB/Bella.
+ * Note: We do NOT create separate webhooks per persona by default.
+ * The key separation prevents race/collision in resolver state, and since we no longer
+ * edit the webhook identity, using one bot-owned webhook is safe.
+ */
+function cacheKeyFor(channel, desiredName) {
+  const cid = String(channel?.id || "");
+  const name = String(desiredName || "").trim().toLowerCase() || "default";
+  return `${cid}:${name}`;
+}
+
+/**
  * Get or create a webhook sender for a channel.
  * Returns either:
  * - discord.js Webhook (preferred when ManageWebhooks)
  * - discord.js WebhookClient (DB/ENV fallback)
+ *
+ * ✅ PATCH: never edits webhook name/avatar — identity is per-message payload now.
  */
 async function getOrCreateWebhook(
   channel,
@@ -159,25 +170,26 @@ async function getOrCreateWebhook(
   try {
     if (!channel || !channel.guild) return null;
 
-    // If we already have an in-flight resolver for this channel, await it
-    if (inflight.has(channel.id)) {
+    const key = cacheKeyFor(channel, name);
+
+    if (inflight.has(key)) {
       try {
-        return await inflight.get(channel.id);
+        return await inflight.get(key);
       } catch {
         return null;
       }
     }
 
     const p = (async () => {
-      // 1) Cached first
-      const cached = channelWebhookCache.get(channel.id);
+      // 1) Cache first (by persona key)
+      const cached = channelWebhookCache.get(key);
       if (cached) {
         const validated = await validateCachedWebhook(cached);
         if (validated) {
-          channelWebhookCache.set(channel.id, validated);
+          channelWebhookCache.set(key, validated);
           return validated;
         }
-        channelWebhookCache.delete(channel.id);
+        channelWebhookCache.delete(key);
       }
 
       const clientUserId = channel?.client?.user?.id;
@@ -185,53 +197,37 @@ async function getOrCreateWebhook(
 
       const hasPerms = canManageWebhooks(channel);
 
-      // ✅ If we can't manage webhooks, try DB/ENV fallback (WebhookClient)
+      // If no ManageWebhooks: try DB/ENV fallback (WebhookClient)
       if (!hasPerms) {
-        if (DEBUG)
+        if (DEBUG) {
           dlog(
             `No ManageWebhooks in channel=${channel.id} guild=${channel.guild.id} -> trying DB/ENV webhook_url fallback`
           );
+        }
 
-        // 1) DB (guild_webhooks table)
         const dbUrl = await fetchWebhookUrlFromDb(channel);
         const urlToUse = dbUrl || ENV_WEBHOOK_URL;
 
         if (urlToUse) {
           const wc = makeWebhookClient(urlToUse);
           if (wc) {
-            channelWebhookCache.set(channel.id, wc);
+            channelWebhookCache.set(key, wc);
             if (DEBUG) dlog(`Using WebhookClient fallback for channel=${channel.id} (url=${dbUrl ? "DB" : "ENV"})`);
             return wc;
           }
         }
 
-        // No fallback available => caller should fall back to normal send
         return null;
       }
 
-      // 2) Fetch existing webhooks in channel
+      // 2) Fetch existing webhooks
       const hooks = await channel.fetchWebhooks().catch(() => null);
       let hook = pickBestWebhook(hooks, clientUserId, name);
 
-      // If bot-owned, standardize name/avatar (safe)
-      if (hook && hook.owner?.id === clientUserId) {
-        try {
-          await hook.edit({
-            name,
-            avatar: avatarURL || undefined,
-          });
-        } catch (e) {
-          if (DEBUG) dlog(`hook.edit failed: ${e?.message || e}`);
-        }
-      }
-
-      // If manual webhook, only use if token present
+      // If manual webhook and token missing, ignore
       if (hook && hook.owner?.id !== clientUserId) {
         if (!hook.token) {
-          if (DEBUG)
-            dlog(
-              `Found manual webhook "${hook.name}" but token missing; will create our own.`
-            );
+          if (DEBUG) dlog(`Found manual webhook "${hook.name}" but token missing; will create our own.`);
           hook = null;
         } else if (DEBUG) {
           dlog(`Using manual webhook "${hook.name}" in channel=${channel.id}`);
@@ -242,7 +238,7 @@ async function getOrCreateWebhook(
       if (!hook) {
         hook = await channel
           .createWebhook({
-            name,
+            name, // initial name only; we will not keep editing it
             avatar: avatarURL || undefined,
           })
           .catch((e) => {
@@ -250,16 +246,14 @@ async function getOrCreateWebhook(
             return null;
           });
 
-        if (hook && DEBUG) {
-          dlog(`Created webhook "${name}" in channel=${channel.id}`);
-        }
+        if (hook && DEBUG) dlog(`Created webhook "${name}" in channel=${channel.id}`);
       }
 
-      if (hook) channelWebhookCache.set(channel.id, hook);
+      if (hook) channelWebhookCache.set(key, hook);
       return hook || null;
     })();
 
-    inflight.set(channel.id, p);
+    inflight.set(key, p);
 
     const out = await p.catch(() => null);
     return out;
@@ -267,20 +261,32 @@ async function getOrCreateWebhook(
     return null;
   } finally {
     try {
-      if (channel?.id) inflight.delete(channel.id);
+      const key = cacheKeyFor(channel, name);
+      inflight.delete(key);
     } catch {}
   }
 }
 
 /**
  * Clear cached webhook for a channel (force re-fetch / re-create next send)
+ * Supports either channelId only or channelId:persona keys.
  */
-function clearChannelCache(channelId) {
+function clearChannelCache(channelIdOrKey) {
+  const k = String(channelIdOrKey || "");
   try {
-    channelWebhookCache.delete(String(channelId));
-  } catch {}
-  try {
-    inflight.delete(String(channelId));
+    // If they pass raw channelId, clear all persona keys for that channel
+    if (/^\d+$/.test(k)) {
+      for (const key of [...channelWebhookCache.keys()]) {
+        if (String(key).startsWith(`${k}:`)) channelWebhookCache.delete(key);
+      }
+      for (const key of [...inflight.keys()]) {
+        if (String(key).startsWith(`${k}:`)) inflight.delete(key);
+      }
+      return;
+    }
+
+    channelWebhookCache.delete(k);
+    inflight.delete(k);
   } catch {}
 }
 
@@ -288,21 +294,13 @@ function clearChannelCache(channelId) {
  * Clear all cached webhooks (force re-discovery)
  */
 function clearAllCache() {
-  try {
-    channelWebhookCache.clear();
-  } catch {}
-  try {
-    inflight.clear();
-  } catch {}
+  try { channelWebhookCache.clear(); } catch {}
+  try { inflight.clear(); } catch {}
 }
 
 /**
  * Normalize payload for webhook send.
  * ✅ Adds "reply-like" support if payload.messageReference is provided.
- *
- * Usage from caller:
- *  payload.messageReference = { messageId: "<id>" }
- *  OR payload.messageReference = "<id>"
  */
 function normalizeSendPayload(payload = {}) {
   const safePayload = {
@@ -310,26 +308,59 @@ function normalizeSendPayload(payload = {}) {
     allowedMentions: payload?.allowedMentions || { parse: [] },
   };
 
-  // allow shorthand: messageReference: "123"
   if (typeof safePayload.messageReference === "string") {
     safePayload.messageReference = { messageId: safePayload.messageReference };
   }
 
-  // Some discord.js versions only accept `messageReference` inside MessagePayload,
-  // but Webhook#send passes it through. If Discord ignores it, it will just send normally.
   return safePayload;
 }
 
 /**
+ * Ensure per-message identity is applied.
+ * ✅ PATCH: THIS is the real persona fix — identity must be on payload each send.
+ */
+function applyIdentityToPayload(payload, opts = {}) {
+  const out = { ...payload };
+
+  // Respect payload identity first
+  const username =
+    (typeof out.username === "string" && out.username.trim())
+      ? out.username.trim()
+      : (typeof opts?.name === "string" && opts.name.trim())
+        ? opts.name.trim()
+        : undefined;
+
+  const avatarURL =
+    (typeof out.avatarURL === "string" && out.avatarURL.trim())
+      ? out.avatarURL.trim()
+      : (typeof opts?.avatarURL === "string" && opts.avatarURL.trim())
+        ? opts.avatarURL.trim()
+        : undefined;
+
+  if (username) out.username = username;
+  if (avatarURL) out.avatarURL = avatarURL;
+
+  // Never allow mass pings
+  out.allowedMentions = out.allowedMentions || { parse: [] };
+  if (!out.allowedMentions.parse) out.allowedMentions.parse = [];
+
+  return out;
+}
+
+/**
  * Send a message via auto webhook.
- * - Returns true/false (keeps your existing callers)
+ * - Returns true/false
  * - Retries once if cached webhook is stale (deleted/rotated)
  */
 async function sendViaWebhook(channel, payload, opts = {}) {
-  const safePayload = normalizeSendPayload(payload);
+  const desiredName = String(opts?.name || payload?.username || "MB Relay");
+  const desiredAvatar = String(opts?.avatarURL || payload?.avatarURL || "") || null;
+
+  const safePayload0 = normalizeSendPayload(payload);
+  const safePayload = applyIdentityToPayload(safePayload0, { name: desiredName, avatarURL: desiredAvatar });
 
   // 1) acquire hook/client
-  let hook = await getOrCreateWebhook(channel, opts);
+  let hook = await getOrCreateWebhook(channel, { name: desiredName, avatarURL: desiredAvatar });
   if (!hook) return false;
 
   // 2) attempt send
@@ -339,12 +370,12 @@ async function sendViaWebhook(channel, payload, opts = {}) {
   } catch (e1) {
     if (DEBUG) dlog(`hook.send failed (1st try): ${e1?.message || e1}`);
 
-    // If webhook got deleted/rotated, clear cache and retry once
+    // Clear cache for this persona in this channel and retry once
     try {
-      clearChannelCache(channel.id);
+      clearChannelCache(cacheKeyFor(channel, desiredName));
     } catch {}
 
-    hook = await getOrCreateWebhook(channel, opts);
+    hook = await getOrCreateWebhook(channel, { name: desiredName, avatarURL: desiredAvatar });
     if (!hook) return false;
 
     try {
