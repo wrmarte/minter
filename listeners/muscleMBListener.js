@@ -4,7 +4,8 @@
 // - Behavior preserved
 // - Logic split into small editable modules
 // - ✅ DB memory + awareness pings + multi-model routing (optional)
-// - ✅ Profile memory injection (admin-curated facts + timestamped notes)
+// - ✅ Profile memory injection (admin-curated facts + timestamped notes + tags)
+// - ✅ Injects opt-in + last active snapshot (lightweight)
 // - ✅ Safe attach guard (prevents duplicate event listeners if required twice)
 // - ✅ Profile schema guard (prevents repeated CREATE TABLE checks)
 // ======================================================
@@ -37,7 +38,7 @@ const MemoryStore = require('./musclemb/memoryStore');
 const Awareness = require('./musclemb/awarenessEngine');
 const ModelRouter = require('./musclemb/modelRouter');
 
-// ✅ Profile Memory (facts + timestamped notes)
+// ✅ Profile Memory (facts + notes + tags)
 const ProfileStore = require('./musclemb/profileStore');
 
 // ===== Optional Groq "awareness" context (Discord message history) =====
@@ -100,8 +101,35 @@ function humanizeMentions(text, msg) {
 }
 
 // ======================================================
+// ✅ Compact state line for memory prompt injection
+// ======================================================
+function fmtRel(ts) {
+  try {
+    const n = Number(ts);
+    if (!Number.isFinite(n) || n <= 0) return '';
+    const sec = Math.floor(n / 1000);
+    return `<t:${sec}:R>`;
+  } catch {
+    return '';
+  }
+}
+
+function safeNameFromMessage(message, userId, fallback = null) {
+  try {
+    const member = message?.guild?.members?.cache?.get?.(userId);
+    if (member?.displayName) return member.displayName;
+  } catch {}
+  try {
+    const u = message?.client?.users?.cache?.get?.(userId);
+    if (u?.username) return u.username;
+  } catch {}
+  return fallback || (userId ? `user-${String(userId).slice(-4)}` : 'User');
+}
+
+// ======================================================
 // ✅ Build profile memory block to inject into system prompt
 // - Author profile + (optional) one mentioned user's profile
+// - Now includes: facts + notes + tags + opt-in/last active snapshot
 // - Hard-limited to avoid token bloat
 // - ✅ Schema guard so we don't do CREATE TABLE checks repeatedly
 // ======================================================
@@ -124,9 +152,19 @@ async function buildProfileMemoryBlock(client, message) {
       if (!ok) return '';
     }
 
-    // Author profile + notes
-    const authorFacts = await ProfileStore.getFacts(client, guildId, message.author.id);
-    const authorNotes = await ProfileStore.getNotes(client, guildId, message.author.id, Config.MB_PROFILE_MAX_NOTES);
+    // ----- Author data -----
+    const authorId = message.author.id;
+
+    const [authorFacts, authorNotes, authorTags, authorState] = await Promise.all([
+      ProfileStore.getFacts(client, guildId, authorId),
+      ProfileStore.getNotes(client, guildId, authorId, Config.MB_PROFILE_MAX_NOTES),
+      (typeof ProfileStore.getTags === 'function')
+        ? ProfileStore.getTags(client, guildId, authorId, 20)
+        : Promise.resolve([]),
+      (typeof MemoryStore.getUserState === 'function')
+        ? MemoryStore.getUserState(client, guildId, authorId)
+        : Promise.resolve(null),
+    ]);
 
     // Mentioned user (optional — only if exactly 1 other user mentioned)
     let mentionedBlock = null;
@@ -143,37 +181,89 @@ async function buildProfileMemoryBlock(client, message) {
           if (!ok2) {
             mentionedBlock = null;
           } else {
-            const mf = await ProfileStore.getFacts(client, guildId, u.id);
-            const mn = await ProfileStore.getNotes(client, guildId, u.id, Math.min(2, Config.MB_PROFILE_MAX_NOTES));
-            mentionedBlock = { userId: u.id, username: u.username, facts: mf, notes: mn };
+            const [mf, mn, mt, ms] = await Promise.all([
+              ProfileStore.getFacts(client, guildId, u.id),
+              ProfileStore.getNotes(client, guildId, u.id, Math.min(2, Config.MB_PROFILE_MAX_NOTES)),
+              (typeof ProfileStore.getTags === 'function')
+                ? ProfileStore.getTags(client, guildId, u.id, 20)
+                : Promise.resolve([]),
+              (typeof MemoryStore.getUserState === 'function')
+                ? MemoryStore.getUserState(client, guildId, u.id)
+                : Promise.resolve(null),
+            ]);
+            mentionedBlock = { userId: u.id, username: u.username, facts: mf, notes: mn, tags: mt, state: ms };
           }
         } else {
-          const mf = await ProfileStore.getFacts(client, guildId, u.id);
-          const mn = await ProfileStore.getNotes(client, guildId, u.id, Math.min(2, Config.MB_PROFILE_MAX_NOTES));
-          mentionedBlock = { userId: u.id, username: u.username, facts: mf, notes: mn };
+          const [mf, mn, mt, ms] = await Promise.all([
+            ProfileStore.getFacts(client, guildId, u.id),
+            ProfileStore.getNotes(client, guildId, u.id, Math.min(2, Config.MB_PROFILE_MAX_NOTES)),
+            (typeof ProfileStore.getTags === 'function')
+              ? ProfileStore.getTags(client, guildId, u.id, 20)
+              : Promise.resolve([]),
+            (typeof MemoryStore.getUserState === 'function')
+              ? MemoryStore.getUserState(client, guildId, u.id)
+              : Promise.resolve(null),
+          ]);
+          mentionedBlock = { userId: u.id, username: u.username, facts: mf, notes: mn, tags: mt, state: ms };
         }
       }
     } catch {}
 
     const parts = [];
 
-    const authorName = message.member?.displayName || message.author?.username || 'User';
+    const authorName = safeNameFromMessage(message, authorId, message.author?.username || 'User');
     const authorSummary = ProfileStore.formatFactsInline(authorFacts, Config.MB_PROFILE_MAX_KEYS);
     const authorNotesTxt = ProfileStore.formatNotesInline(authorNotes, Config.MB_PROFILE_MAX_NOTES);
 
-    if (authorSummary || authorNotesTxt) {
-      parts.push(`Trusted User Memory (admin-curated; keep short; do not invent):`);
-      if (authorSummary) parts.push(`- ${authorName}: ${authorSummary}`);
-      if (authorNotesTxt) parts.push(`- ${authorName} recent notes: ${authorNotesTxt}`);
+    const authorTagsTxt = (typeof ProfileStore.formatTagsInline === 'function')
+      ? ProfileStore.formatTagsInline(authorTags, 10)
+      : '';
+
+    const authorOpt = authorState?.opted_in != null ? Boolean(authorState.opted_in) : null;
+    const authorLast = authorState?.last_active_ts ? fmtRel(authorState.last_active_ts) : '';
+
+    // Build author line(s)
+    const authorLines = [];
+    if (authorSummary) authorLines.push(authorSummary);
+    if (authorTagsTxt) authorLines.push(`tags=[${authorTagsTxt}]`);
+    if (authorOpt !== null || authorLast) {
+      const bits = [];
+      if (authorOpt !== null) bits.push(`optin=${authorOpt ? 'on' : 'off'}`);
+      if (authorLast) bits.push(`last_active=${authorLast}`);
+      if (bits.length) authorLines.push(bits.join(', '));
     }
 
+    if (authorLines.length || authorNotesTxt) {
+      parts.push(`Trusted User Memory (admin-curated; keep short; do not invent):`);
+      if (authorLines.length) parts.push(`- ${authorName}: ${authorLines.join(' | ')}`);
+      if (authorNotesTxt) parts.push(`- ${authorName} notes: ${authorNotesTxt}`);
+    }
+
+    // Mentioned block
     if (mentionedBlock) {
+      const mName = mentionedBlock.username || safeNameFromMessage(message, mentionedBlock.userId, null);
       const mSummary = ProfileStore.formatFactsInline(mentionedBlock.facts, Math.min(4, Config.MB_PROFILE_MAX_KEYS));
       const mNotes = ProfileStore.formatNotesInline(mentionedBlock.notes, 2);
-      if (mSummary || mNotes) {
-        const mName = mentionedBlock.username || `user-${String(mentionedBlock.userId).slice(-4)}`;
-        parts.push(`- Mentioned: ${mName}: ${mSummary || ''}${mNotes ? ` | notes: ${mNotes}` : ''}`.trim());
+
+      const mTagsTxt = (typeof ProfileStore.formatTagsInline === 'function')
+        ? ProfileStore.formatTagsInline(mentionedBlock.tags, 8)
+        : '';
+
+      const mOpt = mentionedBlock.state?.opted_in != null ? Boolean(mentionedBlock.state.opted_in) : null;
+      const mLast = mentionedBlock.state?.last_active_ts ? fmtRel(mentionedBlock.state.last_active_ts) : '';
+
+      const mLines = [];
+      if (mSummary) mLines.push(mSummary);
+      if (mTagsTxt) mLines.push(`tags=[${mTagsTxt}]`);
+      if (mOpt !== null || mLast) {
+        const bits = [];
+        if (mOpt !== null) bits.push(`optin=${mOpt ? 'on' : 'off'}`);
+        if (mLast) bits.push(`last_active=${mLast}`);
+        if (bits.length) mLines.push(bits.join(', '));
       }
+
+      if (mLines.length) parts.push(`- Mentioned: ${mName}: ${mLines.join(' | ')}`);
+      if (mNotes) parts.push(`- Mentioned notes: ${mNotes}`);
     }
 
     return parts.length ? parts.join('\n') : '';
@@ -689,7 +779,6 @@ module.exports = (client) => {
 
         // ✅ PATCH: send immediately (no pre-send artificial delay)
         try {
-          // ✅ FORCE MB identity on the actual reply (fixes "Bella relay" problem)
           await safeReplyAsMuscleMB(message, { embeds: [embed], allowedMentions: { parse: [] } });
         } catch (err) {
           console.warn('❌ MuscleMB embed reply error:', err.message);
