@@ -104,6 +104,11 @@ function parseTagsBlob(input, maxTags = 20) {
   return out;
 }
 
+/**
+ * ✅ Modal ID format:
+ * mbmem_modal:<guildId>:<targetId>:<actorId>:<stamp>
+ * This lets a global router (interactionCreate) handle modal submits reliably.
+ */
 function makeModalId(guildId, targetId, actorId) {
   const stamp = Date.now().toString(36);
   return `mbmem_modal:${guildId}:${targetId}:${actorId}:${stamp}`;
@@ -355,6 +360,11 @@ module.exports = {
         )
     ),
 
+  // ✅ export applyEdits so global router can call it
+  applyEdits,
+  makeModalId,
+  buildEditModal,
+
   async execute(interaction, { pg } = {}) {
     try {
       if (!interaction?.guildId) {
@@ -378,7 +388,7 @@ module.exports = {
       const sub = interaction.options.getSubcommand(false);
       const guildId = String(interaction.guildId);
 
-      // ===================== PANEL (FIXED) =====================
+      // ===================== PANEL =====================
       if (!group && sub === 'panel') {
         const target = interaction.options.getUser('user') || interaction.user;
         const targetId = String(target.id);
@@ -408,24 +418,25 @@ module.exports = {
           )
           .setFooter({ text: 'Tip: In modal, start tags with ! to replace all tags.' });
 
+        const ownerUserId = String(interaction.user.id);
+
         const btnEdit = new ButtonBuilder()
-          .setCustomId(`mbmem_btn_edit:${guildId}:${targetId}:${interaction.user.id}`)
+          .setCustomId(`mbmem_btn_edit:${guildId}:${targetId}:${ownerUserId}`)
           .setLabel('Edit (Modal)')
           .setStyle(ButtonStyle.Primary);
 
         const btnOpt = new ButtonBuilder()
-          .setCustomId(`mbmem_btn_opt:${guildId}:${targetId}:${interaction.user.id}`)
+          .setCustomId(`mbmem_btn_opt:${guildId}:${targetId}:${ownerUserId}`)
           .setLabel('Toggle Opt-in')
           .setStyle(ButtonStyle.Secondary);
 
         const btnView = new ButtonBuilder()
-          .setCustomId(`mbmem_btn_view:${guildId}:${targetId}:${interaction.user.id}`)
+          .setCustomId(`mbmem_btn_view:${guildId}:${targetId}:${ownerUserId}`)
           .setLabel('View Card')
           .setStyle(ButtonStyle.Success);
 
         const row = new ActionRowBuilder().addComponents(btnEdit, btnOpt, btnView);
 
-        // ✅ CRITICAL FIX: fetchReply:true so we reliably get a message to attach collector
         const panelMsg = await interaction.reply({
           embeds: [embed],
           components: [row],
@@ -435,9 +446,6 @@ module.exports = {
 
         if (!panelMsg) return;
 
-        // ✅ Collector instead of blocking while-loop
-        const ownerUserId = String(interaction.user.id);
-
         const collector = panelMsg.createMessageComponentCollector({
           componentType: ComponentType.Button,
           time: 60000,
@@ -445,79 +453,37 @@ module.exports = {
 
         collector.on('collect', async (btn) => {
           try {
-            // Always respond to clicks (avoid "interaction failed")
             if (!btn?.customId || !btn.customId.startsWith('mbmem_btn_')) {
               await btn.reply({ content: '⚠️ Unknown button.', ephemeral: true }).catch(() => {});
               return;
             }
 
             const parts = String(btn.customId).split(':');
-            const kind = parts[0]; // mbmem_btn_edit / opt / view
+            const kind = parts[0];
             const gid = parts[1] || '';
             const tid = parts[2] || '';
             const owner = parts[3] || '';
 
-            // Wrong panel / guild / target
             if (gid !== guildId || tid !== targetId || owner !== ownerUserId) {
-              await btn.reply({
-                content: `⛔ This panel belongs to <@${ownerUserId}>.`,
-                ephemeral: true
-              }).catch(() => {});
+              await btn.reply({ content: `⛔ This panel belongs to <@${ownerUserId}>.`, ephemeral: true }).catch(() => {});
               return;
             }
 
-            // Not the user who opened panel
             if (String(btn.user.id) !== ownerUserId) {
-              await btn.reply({
-                content: `⛔ Only <@${ownerUserId}> can use these buttons.`,
-                ephemeral: true
-              }).catch(() => {});
+              await btn.reply({ content: `⛔ Only <@${ownerUserId}> can use these buttons.`, ephemeral: true }).catch(() => {});
               return;
             }
 
-            // EDIT -> show modal immediately (fast response path)
             if (kind === 'mbmem_btn_edit') {
+              // ✅ ONLY show modal here. Submit is handled globally (interactionCreate).
               const modalId = makeModalId(guildId, targetId, ownerUserId);
               const modal = buildEditModal({ modalId, targetUsername: target.username });
-
-              // ✅ Respond instantly by showing modal
               await btn.showModal(modal).catch(async () => {
                 await btn.reply({ content: '⚠️ Could not open modal.', ephemeral: true }).catch(() => {});
               });
-
-              // Wait for modal submit (separate interaction)
-              const submitted = await btn.awaitModalSubmit({
-                time: 60000,
-                filter: (m) => m.user.id === ownerUserId && m.customId === modalId,
-              }).catch(() => null);
-
-              if (!submitted) return;
-
-              const factsBlob = submitted.fields.getTextInputValue('facts') || '';
-              const tagsBlob = submitted.fields.getTextInputValue('tags') || '';
-              const noteText = submitted.fields.getTextInputValue('note') || '';
-
-              const res = await applyEdits({
-                client,
-                guildId,
-                targetId,
-                actingId: ownerUserId,
-                factsBlob,
-                tagsBlobRaw: tagsBlob,
-                noteTextRaw: noteText,
-              });
-
-              await submitted.reply({
-                content: res.changed
-                  ? `✅ Saved for <@${targetId}> — ${res.summary}${res.failCount ? `\n⚠️ Some items failed: ${res.failCount}/${res.okCount + res.failCount}` : ''}`
-                  : '⚠️ No changes detected. (Fill at least one field.)',
-                ephemeral: true
-              }).catch(() => {});
-
               return;
             }
 
-            // TOGGLE OPT-IN (ack fast)
             if (kind === 'mbmem_btn_opt') {
               await btn.deferReply({ ephemeral: true }).catch(() => {});
               try {
@@ -535,7 +501,6 @@ module.exports = {
               return;
             }
 
-            // VIEW (ack fast)
             if (kind === 'mbmem_btn_view') {
               await btn.deferReply({ ephemeral: true }).catch(() => {});
               try {
@@ -580,7 +545,7 @@ module.exports = {
         return;
       }
 
-      // ===================== DIRECT MODAL (kept) =====================
+      // ===================== DIRECT MODAL =====================
       if (!group && sub === 'edit') {
         const target = interaction.options.getUser('user') || interaction.user;
         const targetId = String(target.id);
@@ -594,40 +559,12 @@ module.exports = {
         const modalId = makeModalId(guildId, targetId, interaction.user.id);
         const modal = buildEditModal({ modalId, targetUsername: target.username });
 
+        // ✅ show modal; submit handled globally
         await interaction.showModal(modal);
-
-        const submitted = await interaction.awaitModalSubmit({
-          time: 60000,
-          filter: (m) => m.user.id === interaction.user.id && m.customId === modalId,
-        }).catch(() => null);
-
-        if (!submitted) return;
-
-        const factsBlob = submitted.fields.getTextInputValue('facts') || '';
-        const tagsBlob = submitted.fields.getTextInputValue('tags') || '';
-        const noteText = submitted.fields.getTextInputValue('note') || '';
-
-        const res = await applyEdits({
-          client,
-          guildId,
-          targetId,
-          actingId: interaction.user.id,
-          factsBlob,
-          tagsBlobRaw: tagsBlob,
-          noteTextRaw: noteText,
-        });
-
-        await submitted.reply({
-          content: res.changed
-            ? `✅ Saved for <@${targetId}> — ${res.summary}${res.failCount ? `\n⚠️ Some items failed: ${res.failCount}/${res.okCount + res.failCount}` : ''}`
-            : '⚠️ No changes detected. (Fill at least one field.)',
-          ephemeral: true
-        });
-
         return;
       }
 
-      // ===================== ONE-SHOT SET (kept) =====================
+      // ===================== ONE-SHOT SET =====================
       if (!group && sub === 'set') {
         const target = interaction.options.getUser('user') || interaction.user;
         const targetId = String(target.id);
@@ -678,7 +615,7 @@ module.exports = {
         return;
       }
 
-      // ===================== VIEW (kept) =====================
+      // ===================== VIEW =====================
       if (!group && sub === 'view') {
         const target = interaction.options.getUser('user') || interaction.user;
         const targetId = String(target.id);
@@ -708,7 +645,7 @@ module.exports = {
         return;
       }
 
-      // ===================== EXISTING MANAGEMENT (kept) =====================
+      // ===================== EXISTING MANAGEMENT =====================
       const targetUser = interaction.options.getUser('user') || interaction.user;
       const targetId = String(targetUser.id);
       const actingId = String(interaction.user.id);
@@ -719,7 +656,6 @@ module.exports = {
         return true;
       };
 
-      // FACT
       if (group === 'fact' && sub === 'set') {
         if (!requireAdminIfOther()) {
           await interaction.reply({ content: '⛔ Admin only to edit other users.', ephemeral: true });
@@ -745,7 +681,6 @@ module.exports = {
         return;
       }
 
-      // NOTE
       if (group === 'note' && sub === 'add') {
         if (!requireAdminIfOther()) {
           await interaction.reply({ content: '⛔ Admin only to add notes for other users.', ephemeral: true });
@@ -770,7 +705,6 @@ module.exports = {
         return;
       }
 
-      // TAG
       if (group === 'tag' && sub === 'add') {
         if (!requireAdminIfOther()) {
           await interaction.reply({ content: '⛔ Admin only to tag other users.', ephemeral: true });
@@ -805,7 +739,6 @@ module.exports = {
         return;
       }
 
-      // OPTIN
       if (group === 'optin' && sub === 'set') {
         const enabled = Boolean(interaction.options.getBoolean('enabled', true));
         if (!managingSelf && !admin) {
