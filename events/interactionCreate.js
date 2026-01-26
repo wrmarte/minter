@@ -1,5 +1,5 @@
-// interactionCreate.js FULL PATCHED + LABELS + UNTRACKMINTPLUS BUTTON ROUTER + LURKER MODAL/BUTTON ROUTER
-const { EmbedBuilder } = require('discord.js');
+// interactionCreate.js FULL PATCHED + LABELS + UNTRACKMINTPLUS BUTTON ROUTER + LURKER MODAL/BUTTON ROUTER + ✅ MBMEM MODAL ROUTER
+const { EmbedBuilder, PermissionsBitField } = require('discord.js');
 const { flavorMap } = require('../utils/flavorMap');
 const { Contract } = require('ethers');
 const fetch = require('node-fetch');
@@ -65,6 +65,99 @@ module.exports = (client, pg) => {
         } catch {}
       }
       return;
+    }
+
+    /* ======================================================
+       ✅ MBMEM: MODAL SUBMIT ROUTER (must be early)
+       - FIXES "Interaction failed" by ACK'ing immediately
+       - Handles customId like: mbmem_modal:<guildId>:<targetId>:<actorId>:<stamp>
+       - Calls commands/mbmem.js applyEdits(...)
+       ====================================================== */
+    if (interaction.isModalSubmit() && String(interaction.customId || '').startsWith('mbmem_modal:')) {
+      const cid = String(interaction.customId || '');
+      if (IC_DEBUG) log('[MBMEM] modal submit received:', cid);
+
+      // ✅ ACK FAST (this is the key fix)
+      await interaction.deferReply({ ephemeral: true }).catch(() => null);
+
+      try {
+        const parts = cid.split(':'); // mbmem_modal:guild:target:actor:stamp
+        const guildId = parts[1] || '';
+        const targetId = parts[2] || '';
+        const actorId = parts[3] || '';
+
+        if (!guildId || !targetId || !actorId) {
+          await interaction.editReply('⚠️ Invalid MBMEM modal payload. Re-open `/mbmem panel`.').catch(() => null);
+          return;
+        }
+
+        if (String(interaction.guildId) !== String(guildId)) {
+          await interaction.editReply('⚠️ Guild mismatch. Re-open `/mbmem panel`.').catch(() => null);
+          return;
+        }
+
+        if (String(interaction.user?.id) !== String(actorId)) {
+          await interaction.editReply(`⛔ Only <@${actorId}> can submit this modal.`).catch(() => null);
+          return;
+        }
+
+        const ownerId = String(process.env.BOT_OWNER_ID || '').trim();
+        const isOwner = ownerId && String(interaction.user.id) === ownerId;
+        const isAdmin = Boolean(interaction.memberPermissions?.has?.(PermissionsBitField.Flags.Administrator));
+        const managingSelf = String(targetId) === String(interaction.user.id);
+
+        if (!managingSelf && !(isOwner || isAdmin)) {
+          await interaction.editReply('⛔ Admin only to edit memory for other users.').catch(() => null);
+          return;
+        }
+
+        const pgx = client?.pg || pg;
+        if (!pgx?.query) {
+          await interaction.editReply('⚠️ DB not ready. Try again in a moment.').catch(() => null);
+          return;
+        }
+
+        const factsBlob = interaction.fields.getTextInputValue('facts') || '';
+        const tagsBlobRaw = interaction.fields.getTextInputValue('tags') || '';
+        const noteTextRaw = interaction.fields.getTextInputValue('note') || '';
+
+        // ✅ Safe require to avoid crash if path changes
+        let mbmem = null;
+        try {
+          mbmem = require('../commands/mbmem');
+        } catch (e) {
+          mbmem = null;
+        }
+
+        if (!mbmem || typeof mbmem.applyEdits !== 'function') {
+          await interaction.editReply('⚠️ MBMEM handler not available (applyEdits missing).').catch(() => null);
+          return;
+        }
+
+        const res = await mbmem.applyEdits({
+          client,
+          guildId,
+          targetId,
+          actingId: actorId,
+          factsBlob,
+          tagsBlobRaw,
+          noteTextRaw,
+        });
+
+        await interaction.editReply(
+          res.changed
+            ? `✅ Saved for <@${targetId}> — ${res.summary}${res.failCount ? `\n⚠️ Some items failed: ${res.failCount}/${res.okCount + res.failCount}` : ''}`
+            : '⚠️ No changes detected. (Fill at least one field.)'
+        ).catch(() => null);
+
+      } catch (error) {
+        errlog('❌ [MBMEM] modal error:', error);
+        try {
+          await interaction.editReply('⚠️ Failed to process MBMEM modal.').catch(() => null);
+        } catch {}
+      }
+
+      return; // ✅ prevent fallthrough
     }
 
     // BLOCK 1: Check if autocomplete command exists first (modular check)
