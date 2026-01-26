@@ -16,17 +16,17 @@ const ProfileStore = require('../listeners/musclemb/profileStore');
 const MemoryStore = require('../listeners/musclemb/memoryStore');
 
 /* ======================================================
-   CONFIG LIMITS (prevents "Invalid string length")
+   CONFIG LIMITS + SAFETY
 ====================================================== */
+const MBMEM_NOTE_LIMIT_DEFAULT = 4;
+const MBMEM_HARD_STR_CAP = Number(process.env.MBMEM_HARD_STR_CAP || 6000);
 const MBMEM_MAX_FACTS_RENDER = Number(process.env.MBMEM_MAX_FACTS_RENDER || 40);
 const MBMEM_MAX_TAGS_RENDER  = Number(process.env.MBMEM_MAX_TAGS_RENDER  || 40);
-const MBMEM_NOTE_LIMIT_DEFAULT = 4;
-
-// Hard cap any incoming string BEFORE regex/trim to avoid huge allocations
-const MBMEM_HARD_STR_CAP = Number(process.env.MBMEM_HARD_STR_CAP || 6000);
-
-// Chunk max size for embed fields
 const MBMEM_CHUNK_MAX = 900;
+
+const MBMEM_DEBUG = String(process.env.MBMEM_DEBUG || '0').trim() === '1';
+function dlog(...a) { if (MBMEM_DEBUG) console.log('[MBMEM]', ...a); }
+function dwarn(...a) { console.warn('[MBMEM]', ...a); }
 
 function isOwnerOrAdmin(interaction) {
   try {
@@ -56,12 +56,12 @@ function fmtRelDate(d) {
 
 /**
  * Safe string normalizer:
- * - Caps the raw string BEFORE regex
+ * - Caps BEFORE regex
  * - Replaces whitespace
- * - Trims and final-length clamps
+ * - Trims + max clamp
  */
 function safeLine(s, max = 160) {
-  let t = String(s || '');
+  let t = String(s ?? '');
   if (!t) return '';
   if (t.length > MBMEM_HARD_STR_CAP) t = t.slice(0, MBMEM_HARD_STR_CAP);
   t = t.replace(/\s+/g, ' ').trim();
@@ -69,10 +69,6 @@ function safeLine(s, max = 160) {
   return t.length > max ? t.slice(0, max - 1) + '…' : t;
 }
 
-/**
- * Chunk lines without expensive repeated concatenations.
- * We track length numerically rather than repeatedly building big intermediate strings.
- */
 function chunk(lines, maxChars = MBMEM_CHUNK_MAX) {
   const out = [];
   let buf = [];
@@ -80,27 +76,25 @@ function chunk(lines, maxChars = MBMEM_CHUNK_MAX) {
 
   for (const line of lines) {
     const l = String(line || '');
-    const addLen = (buf.length ? 1 : 0) + l.length; // +1 for newline
+    const addLen = (buf.length ? 1 : 0) + l.length;
     if (len + addLen > maxChars) {
       if (buf.length) out.push(buf.join('\n'));
       buf = [l];
       len = l.length;
     } else {
-      if (buf.length) len += 1; // newline
+      if (buf.length) len += 1;
       buf.push(l);
       len += l.length;
     }
   }
-
   if (buf.length) out.push(buf.join('\n'));
   return out;
 }
 
-// Parse "k=v, k2=v2 | k3=v3" into [{key,value}]
+// Parse "k=v, k2=v2 | k3=v3"
 function parseFactsBlob(input, maxPairs = 12) {
   let raw = String(input || '').trim();
   if (!raw) return [];
-
   if (raw.length > MBMEM_HARD_STR_CAP) raw = raw.slice(0, MBMEM_HARD_STR_CAP);
 
   const parts = raw
@@ -121,11 +115,10 @@ function parseFactsBlob(input, maxPairs = 12) {
   return pairs;
 }
 
-// Parse "tag1, tag2 | tag3" into ["tag1","tag2"...]
+// Parse "tag1, tag2 | tag3"
 function parseTagsBlob(input, maxTags = 20) {
   let raw = String(input || '').trim();
   if (!raw) return [];
-
   if (raw.length > MBMEM_HARD_STR_CAP) raw = raw.slice(0, MBMEM_HARD_STR_CAP);
 
   const parts = raw
@@ -151,31 +144,43 @@ function makeModalId(guildId, targetId, actorId) {
   return `mbmem_modal:${guildId}:${targetId}:${actorId}:${stamp}`;
 }
 
+/**
+ * ✅ Hardcode ALL labels to tiny constants (never computed).
+ * This prevents any shapeshift String validator explosion.
+ */
+const LABEL_FACTS = 'Facts (key=value)';
+const LABEL_TAGS  = 'Tags (! to replace)';
+const LABEL_NOTE  = 'Add a note (optional)';
+
 function buildEditModal({ modalId, targetUsername }) {
+  // Title is the only dynamic string — keep it short and sanitized
+  const safeTitleUser = safeLine(targetUsername, 24) || 'User';
+  const title = `MB Memory Edit — ${safeTitleUser}`; // small
+
   const modal = new ModalBuilder()
-    .setCustomId(modalId)
-    .setTitle(`MB Memory Edit — ${safeLine(targetUsername, 32)}`);
+    .setCustomId(String(modalId || '').slice(0, 95)) // Discord customId max ~100
+    .setTitle(title.slice(0, 45)); // Discord title limit
 
   const facts = new TextInputBuilder()
     .setCustomId('facts')
-    .setLabel('Facts (key=value, comma or | separated)')
+    .setLabel(LABEL_FACTS)
     .setStyle(TextInputStyle.Paragraph)
     .setRequired(false)
     .setPlaceholder('role=mod, wallet=0xabc | timezone=EST');
 
   const tags = new TextInputBuilder()
     .setCustomId('tags')
-    .setLabel('Tags (comma or | separated). Use ! to REPLACE tags.')
+    .setLabel(LABEL_TAGS)
     .setStyle(TextInputStyle.Paragraph)
     .setRequired(false)
     .setPlaceholder('vip, builder  OR  !vip, whale');
 
   const note = new TextInputBuilder()
     .setCustomId('note')
-    .setLabel('Add one note (optional)')
+    .setLabel(LABEL_NOTE)
     .setStyle(TextInputStyle.Paragraph)
     .setRequired(false)
-    .setPlaceholder('Trusted helper. Great at onboarding new users.');
+    .setPlaceholder('Trusted helper. Great at onboarding.');
 
   modal.addComponents(
     new ActionRowBuilder().addComponents(facts),
@@ -184,6 +189,28 @@ function buildEditModal({ modalId, targetUsername }) {
   );
 
   return modal;
+}
+
+/**
+ * ✅ Never let modal creation crash the collector.
+ */
+async function safeShowModal(btnInteraction, modalFactoryFn) {
+  try {
+    const modal = modalFactoryFn();
+    await btnInteraction.showModal(modal);
+    return true;
+  } catch (e) {
+    dwarn('safeShowModal error:', e?.stack || e?.message || String(e));
+    try {
+      if (!btnInteraction.deferred && !btnInteraction.replied) {
+        await btnInteraction.reply({
+          content: '⚠️ Could not open the modal. (Builder error) Try `/mbmem edit` instead.',
+          ephemeral: true
+        });
+      }
+    } catch {}
+    return false;
+  }
 }
 
 async function applyEdits({ client, guildId, targetId, actingId, factsBlob, tagsBlobRaw, noteTextRaw }) {
@@ -206,18 +233,15 @@ async function applyEdits({ client, guildId, targetId, actingId, factsBlob, tags
 
   const ops = [];
 
-  // tags
   if (tags.length) {
     if (replaceTags) ops.push(ProfileStore.clearTags(client, guildId, targetId));
     for (const t of tags) ops.push(ProfileStore.addTag(client, guildId, targetId, t, actingId));
   }
 
-  // facts
   if (facts.length) {
     for (const p of facts) ops.push(ProfileStore.setFact(client, guildId, targetId, p.key, p.value, actingId));
   }
 
-  // note
   if (noteText) ops.push(ProfileStore.addNote(client, guildId, targetId, noteText, actingId));
 
   const results = ops.length ? await Promise.allSettled(ops) : [];
@@ -246,7 +270,7 @@ async function buildMemoryCardEmbed({ client, guildId, target, targetId, noteLim
   const [factsRaw, notesRaw, tagsRaw, state] = await Promise.all([
     ProfileStore.getFacts(client, guildId, targetId),
     ProfileStore.getNotes(client, guildId, targetId, noteLimit),
-    ProfileStore.getTags(client, guildId, targetId, 100), // fetch more but render capped
+    ProfileStore.getTags(client, guildId, targetId, 100),
     MemoryStore.getUserState(client, guildId, targetId),
   ]);
 
@@ -255,7 +279,7 @@ async function buildMemoryCardEmbed({ client, guildId, target, targetId, noteLim
   const lastPing = fmtRelMs(state?.last_ping_ts);
 
   const facts = Array.isArray(factsRaw) ? factsRaw.slice(0, MBMEM_MAX_FACTS_RENDER) : [];
-  const tags = Array.isArray(tagsRaw) ? tagsRaw.slice(0, MBMEM_MAX_TAGS_RENDER) : [];
+  const tags  = Array.isArray(tagsRaw)  ? tagsRaw.slice(0, MBMEM_MAX_TAGS_RENDER)  : [];
   const notes = Array.isArray(notesRaw) ? notesRaw : [];
 
   const factsOverflow = Math.max(0, (Array.isArray(factsRaw) ? factsRaw.length : 0) - facts.length);
@@ -308,132 +332,32 @@ async function buildMemoryCardEmbed({ client, guildId, target, targetId, noteLim
   return embed;
 }
 
-/**
- * ✅ Global modal handler (optional; your interactionCreate router may call applyEdits directly)
- */
-async function handleModalSubmit(interaction, client) {
-  try {
-    if (!interaction?.isModalSubmit?.()) return false;
-    const cid = String(interaction.customId || '');
-    if (!cid.startsWith('mbmem_modal:')) return false;
-
-    const parts = cid.split(':'); // mbmem_modal:guildId:targetId:actorId:stamp
-    const guildId = parts[1] || '';
-    const targetId = parts[2] || '';
-    const actorId = parts[3] || '';
-
-    if (!guildId || !targetId || !actorId) {
-      await interaction.reply({ content: '⚠️ Invalid modal payload.', ephemeral: true }).catch(() => {});
-      return true;
-    }
-
-    if (String(interaction.guildId || '') !== String(guildId)) {
-      await interaction.reply({ content: '⚠️ Guild mismatch. Re-open /mbmem panel.', ephemeral: true }).catch(() => {});
-      return true;
-    }
-
-    if (String(interaction.user?.id || '') !== String(actorId)) {
-      await interaction.reply({ content: '⛔ This modal is not yours. Re-open /mbmem.', ephemeral: true }).catch(() => {});
-      return true;
-    }
-
-    const admin = isOwnerOrAdmin(interaction);
-    const managingSelf = String(targetId) === String(actorId);
-    if (!managingSelf && !admin) {
-      await interaction.reply({ content: '⛔ Admin only to edit memory for other users.', ephemeral: true }).catch(() => {});
-      return true;
-    }
-
-    const factsBlob = interaction.fields.getTextInputValue('facts') || '';
-    const tagsBlob = interaction.fields.getTextInputValue('tags') || '';
-    const noteText = interaction.fields.getTextInputValue('note') || '';
-
-    await ProfileStore.ensureSchema(client);
-    await MemoryStore.ensureSchema(client);
-
-    const res = await applyEdits({
-      client,
-      guildId,
-      targetId,
-      actingId: actorId,
-      factsBlob,
-      tagsBlobRaw: tagsBlob,
-      noteTextRaw: noteText,
-    });
-
-    await interaction.reply({
-      content: res.changed
-        ? `✅ Saved for <@${targetId}> — ${res.summary}${res.failCount ? `\n⚠️ Some items failed: ${res.failCount}/${res.okCount + res.failCount}` : ''}`
-        : '⚠️ No changes detected. (Fill at least one field.)',
-      ephemeral: true
-    }).catch(() => {});
-
-    return true;
-  } catch (e) {
-    console.error('❌ mbmem handleModalSubmit error:', e?.stack || e?.message || String(e));
-    try {
-      if (interaction.deferred || interaction.replied) {
-        await interaction.editReply({ content: '⚠️ Failed to process memory modal.' }).catch(() => {});
-      } else {
-        await interaction.reply({ content: '⚠️ Failed to process memory modal.', ephemeral: true }).catch(() => {});
-      }
-    } catch {}
-    return true;
-  }
-}
-
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('mbmem')
     .setDescription('MuscleMB memory — view + manage profile facts/notes/tags/opt-in')
-
     .addSubcommand(sc =>
       sc.setName('panel')
         .setDescription('Open the MB Memory control panel (buttons + modal)')
         .addUserOption(o => o.setName('user').setDescription('Target user (default: you)').setRequired(false))
         .addBooleanOption(o => o.setName('public').setDescription('Panel publicly visible? (default: private)').setRequired(false))
     )
-
     .addSubcommand(sc =>
       sc.setName('edit')
         .setDescription('Open the memory editor modal (facts + tags + note)')
         .addUserOption(o => o.setName('user').setDescription('Target user (default: you)').setRequired(false))
     )
-
-    .addSubcommand(sc =>
-      sc.setName('set')
-        .setDescription('One-shot set: facts + tags + note (admin for others)')
-        .addUserOption(o => o.setName('user').setDescription('Target user (default: you)').setRequired(false))
-        .addStringOption(o => o.setName('facts').setDescription('Facts blob: role=mod, wallet=0xabc | timezone=EST').setRequired(false))
-        .addStringOption(o => o.setName('tags').setDescription('Tags blob: vip, whale, builder (use ! to replace)').setRequired(false))
-        .addStringOption(o => o.setName('note').setDescription('Add a single note (optional)').setRequired(false))
-        .addBooleanOption(o => o.setName('replace_tags').setDescription('Replace all tags (default: add)').setRequired(false))
-    )
-
     .addSubcommand(sc =>
       sc.setName('view')
         .setDescription('View a profile card (facts + notes + tags + activity)')
         .addUserOption(o => o.setName('user').setDescription('Target user (default: you)').setRequired(false))
         .addIntegerOption(o => o.setName('notes').setDescription('Notes to show (1-10)').setRequired(false))
         .addBooleanOption(o => o.setName('public').setDescription('Show publicly (default: private)').setRequired(false))
-    )
-
-    .addSubcommandGroup(g =>
-      g.setName('optin')
-        .setDescription('Awareness opt-in controls')
-        .addSubcommand(sc =>
-          sc.setName('set')
-            .setDescription('Set awareness opt-in (self or admin for others)')
-            .addUserOption(o => o.setName('user').setDescription('Target user (default: you)').setRequired(false))
-            .addBooleanOption(o => o.setName('enabled').setDescription('true/false').setRequired(true))
-        )
     ),
 
-  // exports used by router
   applyEdits,
   makeModalId,
   buildEditModal,
-  handleModalSubmit,
 
   async execute(interaction, { pg } = {}) {
     try {
@@ -444,25 +368,21 @@ module.exports = {
 
       const client = interaction.client;
       const db = pg || client?.pg;
-
       if (!db?.query) {
         await interaction.reply({ content: '⚠️ DB not ready. Try again in a moment.', ephemeral: true });
         return;
       }
-
-      // Make sure stores can use client.pg
       if (!client.pg) client.pg = db;
 
       await ProfileStore.ensureSchema(client);
       await MemoryStore.ensureSchema(client);
 
       const admin = isOwnerOrAdmin(interaction);
-      const group = interaction.options.getSubcommandGroup(false);
       const sub = interaction.options.getSubcommand(false);
       const guildId = String(interaction.guildId);
 
       // ===================== PANEL =====================
-      if (!group && sub === 'panel') {
+      if (sub === 'panel') {
         const target = interaction.options.getUser('user') || interaction.user;
         const targetId = String(target.id);
 
@@ -486,7 +406,6 @@ module.exports = {
             `Target: <@${targetId}>\n` +
             `${optedIn ? '🟢' : '⚪'} Awareness: **${optedIn ? 'ON' : 'OFF'}**\n\n` +
             `• **Edit** opens a modal for facts/tags/note\n` +
-            `• **Toggle Opt-in** flips awareness for the target\n` +
             `• **View Card** shows the current memory card`
           )
           .setFooter({ text: 'Tip: In modal, start tags with ! to replace all tags.' });
@@ -496,22 +415,16 @@ module.exports = {
 
         const btnEdit = new ButtonBuilder()
           .setCustomId(`mbmem_btn_edit:${token}`)
-          .setLabel('Edit (Modal)')
+          .setLabel('Edit')
           .setStyle(ButtonStyle.Primary);
-
-        const btnOpt = new ButtonBuilder()
-          .setCustomId(`mbmem_btn_opt:${token}`)
-          .setLabel('Toggle Opt-in')
-          .setStyle(ButtonStyle.Secondary);
 
         const btnView = new ButtonBuilder()
           .setCustomId(`mbmem_btn_view:${token}`)
-          .setLabel('View Card')
+          .setLabel('View')
           .setStyle(ButtonStyle.Success);
 
-        const row = new ActionRowBuilder().addComponents(btnEdit, btnOpt, btnView);
+        const row = new ActionRowBuilder().addComponents(btnEdit, btnView);
 
-        // ✅ Avoid deprecated fetchReply option
         await interaction.reply({ embeds: [embed], components: [row], ephemeral }).catch(() => {});
         const panelMsg = await interaction.fetchReply().catch(() => null);
         if (!panelMsg) return;
@@ -534,7 +447,6 @@ module.exports = {
               await btn.reply({ content: `⛔ This panel belongs to <@${ownerUserId}>.`, ephemeral: true }).catch(() => {});
               return;
             }
-
             if (String(btn.user?.id || '') !== ownerUserId) {
               await btn.reply({ content: `⛔ Only <@${ownerUserId}> can use these buttons.`, ephemeral: true }).catch(() => {});
               return;
@@ -542,23 +454,7 @@ module.exports = {
 
             if (kind === 'mbmem_btn_edit') {
               const modalId = makeModalId(guildId, targetId, ownerUserId);
-              const modal = buildEditModal({ modalId, targetUsername: target.username });
-              await btn.showModal(modal).catch(async () => {
-                await btn.reply({ content: '⚠️ Could not open modal.', ephemeral: true }).catch(() => {});
-              });
-              return;
-            }
-
-            if (kind === 'mbmem_btn_opt') {
-              await btn.deferReply({ ephemeral: true }).catch(() => {});
-              const cur = await MemoryStore.getUserState(client, guildId, targetId).catch(() => null);
-              const enabled = !(Boolean(cur?.opted_in));
-              const ok = await MemoryStore.setOptIn(client, guildId, targetId, enabled).catch(() => false);
-              await btn.editReply({
-                content: ok
-                  ? `✅ Awareness opt-in for <@${targetId}> is now **${enabled ? 'ON' : 'OFF'}**.`
-                  : '⚠️ Failed to toggle opt-in.',
-              }).catch(() => {});
+              await safeShowModal(btn, () => buildEditModal({ modalId, targetUsername: target.username }));
               return;
             }
 
@@ -576,10 +472,8 @@ module.exports = {
               await btn.editReply({ embeds: [embed2] }).catch(() => {});
               return;
             }
-
-            await btn.reply({ content: '⚠️ Unknown action.', ephemeral: true }).catch(() => {});
           } catch (e) {
-            console.warn('⚠️ /mbmem panel collector error:', e?.stack || e?.message || String(e));
+            dwarn('panel collector error:', e?.stack || e?.message || String(e));
             try {
               if (!btn.deferred && !btn.replied) {
                 await btn.reply({ content: '⚠️ Action failed.', ephemeral: true }).catch(() => {});
@@ -592,7 +486,6 @@ module.exports = {
           try {
             const disabledRow = new ActionRowBuilder().addComponents(
               ButtonBuilder.from(btnEdit).setDisabled(true),
-              ButtonBuilder.from(btnOpt).setDisabled(true),
               ButtonBuilder.from(btnView).setDisabled(true),
             );
             await interaction.editReply({ components: [disabledRow] }).catch(() => {});
@@ -603,7 +496,7 @@ module.exports = {
       }
 
       // ===================== DIRECT MODAL =====================
-      if (!group && sub === 'edit') {
+      if (sub === 'edit') {
         const target = interaction.options.getUser('user') || interaction.user;
         const targetId = String(target.id);
         const managingSelf = targetId === String(interaction.user.id);
@@ -619,59 +512,8 @@ module.exports = {
         return;
       }
 
-      // ===================== ONE-SHOT SET =====================
-      if (!group && sub === 'set') {
-        const target = interaction.options.getUser('user') || interaction.user;
-        const targetId = String(target.id);
-
-        const actingId = String(interaction.user.id);
-        const managingSelf = targetId === actingId;
-
-        const factsBlob = interaction.options.getString('facts', false);
-        const tagsBlobRaw = interaction.options.getString('tags', false);
-        const noteTextRaw = interaction.options.getString('note', false);
-        const replaceTagsFlag = Boolean(interaction.options.getBoolean('replace_tags') || false);
-
-        const hasAny = Boolean((factsBlob && factsBlob.trim()) || (tagsBlobRaw && tagsBlobRaw.trim()) || (noteTextRaw && noteTextRaw.trim()));
-        if (!hasAny) {
-          await interaction.reply({
-            content:
-              '⚠️ Nothing to set. Provide at least one of: `facts`, `tags`, or `note`.\n' +
-              'Example: `/mbmem set facts:"role=mod, wallet=0xabc" tags:"vip, builder" note:"Trusted helper."`',
-            ephemeral: true
-          });
-          return;
-        }
-
-        if (!managingSelf && !admin) {
-          await interaction.reply({ content: '⛔ Admin only to set memory for other users.', ephemeral: true });
-          return;
-        }
-
-        let tagsBlob = String(tagsBlobRaw || '').trim();
-        if (replaceTagsFlag && tagsBlob && !tagsBlob.startsWith('!')) tagsBlob = '!' + tagsBlob;
-
-        const res = await applyEdits({
-          client,
-          guildId,
-          targetId,
-          actingId,
-          factsBlob,
-          tagsBlobRaw: tagsBlob,
-          noteTextRaw,
-        });
-
-        await interaction.reply({
-          content: res.changed
-            ? `✅ Saved for <@${targetId}> — ${res.summary}${res.failCount ? `\n⚠️ Some items failed: ${res.failCount}/${res.okCount + res.failCount}` : ''}`
-            : '⚠️ No changes detected.',
-          ephemeral: true
-        });
-        return;
-      }
-
       // ===================== VIEW =====================
-      if (!group && sub === 'view') {
+      if (sub === 'view') {
         const target = interaction.options.getUser('user') || interaction.user;
         const targetId = String(target.id);
 
@@ -713,5 +555,3 @@ module.exports = {
     }
   }
 };
-
-
