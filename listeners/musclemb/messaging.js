@@ -34,35 +34,71 @@ function getWebhookAuto(client) {
   return client?.webhookAuto || client?.webhookauto || client?.webhooksAuto || null;
 }
 
+/**
+ * Determines whether we SHOULD prefer webhook identity for this payload.
+ * If username/avatarURL is present, we assume identity matters (pfp/name).
+ */
+function payloadWantsIdentity(payload) {
+  if (!payload || typeof payload !== 'object') return false;
+  if (typeof payload.username === 'string' && payload.username.trim()) return true;
+  if (typeof payload.avatarURL === 'string' && payload.avatarURL.trim()) return true;
+  // Optional internal flag (won't break callers): force webhook identity even w/o fields
+  if (payload.__forceWebhookIdentity === true) return true;
+  return false;
+}
+
+/**
+ * Normalize webhook identity:
+ * - prefer payload username/avatarURL
+ * - fallback to MuscleMB config
+ */
+function resolveIdentity(payload) {
+  const username =
+    (typeof payload?.username === 'string' && payload.username.trim())
+      ? payload.username.trim()
+      : (Config.MUSCLEMB_WEBHOOK_NAME || undefined);
+
+  const avatarURL =
+    (typeof payload?.avatarURL === 'string' && payload.avatarURL.trim())
+      ? payload.avatarURL.trim()
+      : (Config.MUSCLEMB_WEBHOOK_AVATAR || undefined);
+
+  return { username, avatarURL };
+}
+
 async function sendViaWebhookAuto(client, channel, payload) {
   if (!Config.MB_USE_WEBHOOKAUTO) return false;
+
+  // webhookAuto path generally can’t do files reliably; keep your existing rule
   if (payload?.files && Array.isArray(payload.files) && payload.files.length) return false;
 
   const wa = getWebhookAuto(client);
   if (!wa) return false;
 
+  const { username, avatarURL } = resolveIdentity(payload);
+
   const base = {
     content: payload?.content || undefined,
     embeds: payload?.embeds || undefined,
-    username: payload?.username || Config.MUSCLEMB_WEBHOOK_NAME,
-    avatarURL: payload?.avatarURL || (Config.MUSCLEMB_WEBHOOK_AVATAR || undefined),
+    username,
+    avatarURL,
     allowedMentions: payload?.allowedMentions || { parse: [] },
   };
 
-  // ✅ PATCH: your webhookAuto in index.js uses sendViaWebhook(channel, payload, options)
+  // ✅ Preferred method: sendViaWebhook(channel, payload, options)
   if (typeof wa.sendViaWebhook === 'function') {
     try {
       const ok = await wa.sendViaWebhook(
         channel,
         base,
         {
-          name: base.username || Config.MUSCLEMB_WEBHOOK_NAME,
-          avatarURL: base.avatarURL || (Config.MUSCLEMB_WEBHOOK_AVATAR || undefined),
+          name: username || Config.MUSCLEMB_WEBHOOK_NAME,
+          avatarURL: avatarURL || (Config.MUSCLEMB_WEBHOOK_AVATAR || undefined),
         }
       );
       if (ok) return true;
     } catch {
-      // fall through to other candidates
+      // fall through
     }
   }
 
@@ -98,6 +134,7 @@ async function sendViaWebhookAuto(client, channel, payload) {
 }
 
 async function safeSendChannel(client, channel, payload) {
+  // If files, always use normal send
   if (payload?.files && Array.isArray(payload.files) && payload.files.length) {
     try {
       await channel.send(payload);
@@ -108,12 +145,17 @@ async function safeSendChannel(client, channel, payload) {
     }
   }
 
-  const ok = await sendViaWebhookAuto(client, channel, payload);
-  if (ok) {
-    try { markTypingSuppressed(client, channel.id, 9000); } catch {}
-    return true;
+  // ✅ If identity requested OR webhookAuto enabled, try webhook first
+  // Identity requested is important for MB avatar.
+  if (Config.MB_USE_WEBHOOKAUTO) {
+    const ok = await sendViaWebhookAuto(client, channel, payload);
+    if (ok) {
+      try { markTypingSuppressed(client, channel.id, 9000); } catch {}
+      return true;
+    }
   }
 
+  // fallback
   try {
     await channel.send(payload);
     return true;
@@ -124,6 +166,7 @@ async function safeSendChannel(client, channel, payload) {
 }
 
 async function safeReplyMessage(client, message, payload) {
+  // If files, reply normally (webhooks are messy with attachments)
   if (payload?.files && Array.isArray(payload.files) && payload.files.length) {
     try {
       await message.reply(payload);
@@ -140,29 +183,44 @@ async function safeReplyMessage(client, message, payload) {
   }
 
   const wa = getWebhookAuto(client);
-  if (Config.MB_USE_WEBHOOKAUTO && wa) {
+
+  // ✅ NEW RULE:
+  // If webhookAuto exists and either:
+  // - caller wants identity (username/avatarURL present), OR
+  // - config says use webhookAuto for replies,
+  // then route reply through channel webhook path.
+  const wantsIdentity = payloadWantsIdentity(payload);
+  const shouldUseWebhook = Boolean(Config.MB_USE_WEBHOOKAUTO && wa) && (wantsIdentity || Config.MB_USE_WEBHOOKAUTO);
+
+  if (shouldUseWebhook) {
     const prefix = (Config.MB_WEBHOOK_PREFIX_AUTHOR && message?.author?.username)
       ? `↪️ **${message.author.username}**: `
       : '';
 
     const asChannelPayload = { ...payload };
 
+    // Build a visible “reply-ish” prefix for webhook messages
     if (typeof asChannelPayload.content === 'string' && asChannelPayload.content.length) {
       asChannelPayload.content = prefix + asChannelPayload.content;
-    } else if (!asChannelPayload.content && payload?.embeds?.length) {
+    } else if (!asChannelPayload.content && asChannelPayload?.embeds?.length) {
       asChannelPayload.content = prefix.trim() || undefined;
     } else if (!asChannelPayload.content) {
       asChannelPayload.content = prefix.trim() || undefined;
     }
 
+    // ✅ Respect caller identity first, else default to MuscleMB config
+    const { username, avatarURL } = resolveIdentity(asChannelPayload);
+
+    // Never allow pings on webhook replies
     return await safeSendChannel(client, message.channel, {
       ...asChannelPayload,
       allowedMentions: { parse: [] },
-      username: Config.MUSCLEMB_WEBHOOK_NAME,
-      avatarURL: Config.MUSCLEMB_WEBHOOK_AVATAR || undefined,
+      username,
+      avatarURL,
     });
   }
 
+  // fallback to normal reply
   try {
     await message.reply(payload);
     return true;
