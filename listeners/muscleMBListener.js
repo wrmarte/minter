@@ -15,6 +15,7 @@
 // - ✅ PATCH: nicer channel selection for nice pings (most recently active channel)
 // - ✅ PATCH: safer trigger stripping (word-boundary when possible)
 // - ✅ PATCH: prompt ordering (guards earlier; memory & context still used)
+// - ✅ PATCH (NEW): follow-up can be REPLY-ONLY to stop MB replying “to everything”
 // ======================================================
 
 const { EmbedBuilder } = require('discord.js');
@@ -70,6 +71,10 @@ const MB_TYPING_ENABLED = String(process.env.MB_TYPING_ENABLED || '').trim() ===
 // ======================================================
 const MB_FOLLOWUP_ENABLED = String(process.env.MB_FOLLOWUP_ENABLED || '1').trim() === '1';
 const MB_FOLLOWUP_WINDOW_MS = Math.max(10_000, Math.min(180_000, Number(process.env.MB_FOLLOWUP_WINDOW_MS || '60000')));
+
+// ✅ NEW: Reply-only follow-ups (prevents MB replying to everything after one response)
+// - Default ON. Set to 0 to restore old "speak again within window" behavior.
+const MB_FOLLOWUP_REPLY_ONLY = String(process.env.MB_FOLLOWUP_REPLY_ONLY || '1').trim() === '1';
 
 // ======================================================
 // ✅ Cooldown tuning
@@ -714,18 +719,20 @@ module.exports = (client) => {
     // ======================================================
     // ✅ Main AI trigger gate + Follow-up override (PATCHED)
     // - Now more reliable: will fetch referenced message if needed.
+    // - NEW: reply-only option to stop “replying to everything”.
     // ======================================================
     const botMentioned = message.mentions.has(client.user);
     const hasTriggerWord = Config.TRIGGERS.some(trigger => lowered.includes(trigger));
 
-    // Follow-up: check reply-to-bot + recent followup window
+    // Follow-up: check reply-to-bot + (optional) recent followup window
     let isFollowup = false;
     try {
       if (MB_FOLLOWUP_ENABLED) {
         const replied = await isReplyToThisBot(message);
         if (replied) {
           isFollowup = true;
-        } else if (isFollowupRecent(message)) {
+        } else if (!MB_FOLLOWUP_REPLY_ONLY && isFollowupRecent(message)) {
+          // only allow "spoke again within window" if reply-only mode is OFF
           isFollowup = true;
         }
       }
@@ -734,7 +741,7 @@ module.exports = (client) => {
     if (!hasTriggerWord && !botMentioned && !isFollowup) return;
 
     if (MB_FOLLOWUP_DEBUG && isFollowup && !hasTriggerWord && !botMentioned) {
-      logFollowup(`followup accepted guild=${message.guild.id} channel=${message.channel.id} user=${message.author.id}`);
+      logFollowup(`followup accepted replyOnly=${MB_FOLLOWUP_REPLY_ONLY} guild=${message.guild.id} channel=${message.channel.id} user=${message.author.id}`);
     }
 
     if (message.mentions.everyone || message.mentions.roles.size > 0) return;
@@ -879,13 +886,18 @@ module.exports = (client) => {
 
           let arr = null;
           const cached = State.__mbHistoryCacheByChannel.get(channelId);
-          if (cached && (now - Number(cached.ts || 0)) <= MB_GROQ_HISTORY_CACHE_MS && Array.isArray(cached.arr)) {
+
+          const cacheHit = Boolean(
+            cached &&
+            (now - Number(cached.ts || 0)) <= MB_GROQ_HISTORY_CACHE_MS &&
+            Array.isArray(cached.arr)
+          );
+
+          if (cacheHit) {
             arr = cached.arr;
           } else {
             const fetched = await message.channel.messages.fetch({ limit: MB_GROQ_HISTORY_LIMIT }).catch(() => null);
             const values = fetched ? Array.from(fetched.values()) : [];
-
-            // store raw message objects briefly; safe for short cache windows
             arr = values;
             State.__mbHistoryCacheByChannel.set(channelId, { ts: now, arr });
           }
@@ -919,7 +931,7 @@ module.exports = (client) => {
           extraMessages = cleaned.slice(-MB_GROQ_HISTORY_TURNS);
 
           if (MB_GROQ_DEBUG_CONTEXT) {
-            console.log(`[MB_GROQ_CONTEXT] guild=${message.guild.id} channel=${message.channel.id} extraMessages=${extraMessages.length} cache=${Boolean(cached) ? 'hit' : 'miss'}`);
+            console.log(`[MB_GROQ_CONTEXT] guild=${message.guild.id} channel=${message.channel.id} extraMessages=${extraMessages.length} cache=${cacheHit ? 'hit' : 'miss'}`);
           }
         }
       } catch (ctxErr) {
