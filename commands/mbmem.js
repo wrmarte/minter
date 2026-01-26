@@ -9,7 +9,6 @@ const {
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
-  ComponentType,
 } = require('discord.js');
 
 const ProfileStore = require('../listeners/musclemb/profileStore');
@@ -255,7 +254,6 @@ async function buildMemoryCardEmbed({ client, guildId, target, targetId, noteLim
   else notesChunks.forEach((c, i) => embed.addFields({ name: i === 0 ? `Notes (last ${noteLimit})` : `Notes (cont. ${i + 1})`, value: c, inline: false }));
 
   embed.setFooter({ text: 'Admin-curated memory per guild. Chat content is NOT auto-saved.' });
-
   return embed;
 }
 
@@ -360,7 +358,7 @@ module.exports = {
         )
     ),
 
-  // ✅ export applyEdits so global router can call it
+  // ✅ export helpers for global modal router
   applyEdits,
   makeModalId,
   buildEditModal,
@@ -446,16 +444,21 @@ module.exports = {
 
         if (!panelMsg) return;
 
-        const collector = panelMsg.createMessageComponentCollector({
-          componentType: ComponentType.Button,
-          time: 60000,
-        });
+        const endAt = Date.now() + 60000;
 
-        collector.on('collect', async (btn) => {
+        // ✅ safer than collectors (ephemeral-friendly)
+        while (Date.now() < endAt) {
+          const btn = await panelMsg.awaitMessageComponent({
+            time: Math.max(1000, endAt - Date.now()),
+            filter: (i) => i.user?.id === ownerUserId,
+          }).catch(() => null);
+
+          if (!btn) break;
+
           try {
-            if (!btn?.customId || !btn.customId.startsWith('mbmem_btn_')) {
+            if (!btn.customId || !btn.customId.startsWith('mbmem_btn_')) {
               await btn.reply({ content: '⚠️ Unknown button.', ephemeral: true }).catch(() => {});
-              return;
+              continue;
             }
 
             const parts = String(btn.customId).split(':');
@@ -466,82 +469,60 @@ module.exports = {
 
             if (gid !== guildId || tid !== targetId || owner !== ownerUserId) {
               await btn.reply({ content: `⛔ This panel belongs to <@${ownerUserId}>.`, ephemeral: true }).catch(() => {});
-              return;
+              continue;
             }
 
-            if (String(btn.user.id) !== ownerUserId) {
-              await btn.reply({ content: `⛔ Only <@${ownerUserId}> can use these buttons.`, ephemeral: true }).catch(() => {});
-              return;
-            }
-
+            // ✅ EDIT: ACK FAST then show modal (submit handled globally)
             if (kind === 'mbmem_btn_edit') {
-              // ✅ ONLY show modal here. Submit is handled globally (interactionCreate).
+              await btn.deferUpdate().catch(() => {}); // ✅ fast ACK so no "Interaction failed"
               const modalId = makeModalId(guildId, targetId, ownerUserId);
               const modal = buildEditModal({ modalId, targetUsername: target.username });
-              await btn.showModal(modal).catch(async () => {
-                await btn.reply({ content: '⚠️ Could not open modal.', ephemeral: true }).catch(() => {});
-              });
-              return;
+              await btn.showModal(modal).catch(() => {});
+              continue;
             }
 
+            // ✅ OPT: deferReply then editReply
             if (kind === 'mbmem_btn_opt') {
               await btn.deferReply({ ephemeral: true }).catch(() => {});
-              try {
-                const cur = await MemoryStore.getUserState(client, guildId, targetId);
-                const enabled = !(Boolean(cur?.opted_in));
-                const ok = await MemoryStore.setOptIn(client, guildId, targetId, enabled);
-                await btn.editReply({
-                  content: ok
-                    ? `✅ Awareness opt-in for <@${targetId}> is now **${enabled ? 'ON' : 'OFF'}**.`
-                    : '⚠️ Failed to toggle opt-in.',
-                }).catch(() => {});
-              } catch {
-                await btn.editReply({ content: '⚠️ Toggle failed.' }).catch(() => {});
-              }
-              return;
+              const cur = await MemoryStore.getUserState(client, guildId, targetId).catch(() => null);
+              const enabled = !(Boolean(cur?.opted_in));
+              const ok = await MemoryStore.setOptIn(client, guildId, targetId, enabled).catch(() => false);
+              await btn.editReply({
+                content: ok
+                  ? `✅ Awareness opt-in for <@${targetId}> is now **${enabled ? 'ON' : 'OFF'}**.`
+                  : '⚠️ Failed to toggle opt-in.',
+              }).catch(() => {});
+              continue;
             }
 
+            // ✅ VIEW: deferReply then editReply
             if (kind === 'mbmem_btn_view') {
               await btn.deferReply({ ephemeral: true }).catch(() => {});
-              try {
-                const embed2 = await buildMemoryCardEmbed({
-                  client,
-                  guildId,
-                  target,
-                  targetId,
-                  noteLimit: 4,
-                  showMeta: Boolean(admin),
-                  isAdmin: Boolean(admin),
-                });
-                await btn.editReply({ embeds: [embed2] }).catch(() => {});
-              } catch {
-                await btn.editReply({ content: '⚠️ Failed to view card.' }).catch(() => {});
-              }
-              return;
+              const embed2 = await buildMemoryCardEmbed({
+                client,
+                guildId,
+                target,
+                targetId,
+                noteLimit: 4,
+                showMeta: Boolean(admin),
+                isAdmin: Boolean(admin),
+              });
+              await btn.editReply({ embeds: [embed2] }).catch(() => {});
+              continue;
             }
 
             await btn.reply({ content: '⚠️ Unknown action.', ephemeral: true }).catch(() => {});
           } catch (e) {
-            console.warn('⚠️ /mbmem panel button handler error:', e?.message || String(e));
+            console.warn('⚠️ /mbmem panel loop error:', e?.message || String(e));
             try {
-              if (!btn.replied && !btn.deferred) {
+              if (!btn.deferred && !btn.replied) {
                 await btn.reply({ content: '⚠️ Action failed.', ephemeral: true }).catch(() => {});
               }
             } catch {}
           }
-        });
+        }
 
-        collector.on('end', async () => {
-          try {
-            const disabledRow = new ActionRowBuilder().addComponents(
-              ButtonBuilder.from(btnEdit).setDisabled(true),
-              ButtonBuilder.from(btnOpt).setDisabled(true),
-              ButtonBuilder.from(btnView).setDisabled(true),
-            );
-            await interaction.editReply({ components: [disabledRow] }).catch(() => {});
-          } catch {}
-        });
-
+        // Don’t try to edit/disable ephemeral components at end (can fail silently on some versions)
         return;
       }
 
