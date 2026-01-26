@@ -15,7 +15,8 @@
 // - ✅ PATCH: nicer channel selection for nice pings (most recently active channel)
 // - ✅ PATCH: safer trigger stripping (word-boundary when possible)
 // - ✅ PATCH: prompt ordering (guards earlier; memory & context still used)
-// - ✅ PATCH: Typing bubble timing matches response (typing stops -> response posts)
+// - ✅ PATCH: Typing bubble NO LONGER lingers after posting
+//     (Typing only used when final response is sent as bot user; webhook messages don't clear bot typing)
 // ======================================================
 
 const { EmbedBuilder } = require('discord.js');
@@ -50,9 +51,9 @@ const ModelRouter = require('./musclemb/modelRouter');
 const ProfileStore = require('./musclemb/profileStore');
 
 // ===== Optional Groq "awareness" context (Discord message history) =====
-const MB_GROQ_HISTORY_LIMIT = Math.max(0, Math.min(25, Number(process.env.MB_GROQ_HISTORY_LIMIT || '12'))); // fetch this many
-const MB_GROQ_HISTORY_TURNS = Math.max(0, Math.min(16, Number(process.env.MB_GROQ_HISTORY_TURNS || '8'))); // keep this many (after filtering)
-const MB_GROQ_HISTORY_MAX_CHARS = Math.max(120, Math.min(1200, Number(process.env.MB_GROQ_HISTORY_MAX_CHARS || '650'))); // per message
+const MB_GROQ_HISTORY_LIMIT = Math.max(0, Math.min(25, Number(process.env.MB_GROQ_HISTORY_LIMIT || '12')));
+const MB_GROQ_HISTORY_TURNS = Math.max(0, Math.min(16, Number(process.env.MB_GROQ_HISTORY_TURNS || '8')));
+const MB_GROQ_HISTORY_MAX_CHARS = Math.max(120, Math.min(1200, Number(process.env.MB_GROQ_HISTORY_MAX_CHARS || '650')));
 const MB_GROQ_DEBUG_CONTEXT = String(process.env.MB_GROQ_DEBUG_CONTEXT || '').trim() === '1';
 
 // ✅ PATCH: cache channel history fetch to reduce latency / Discord API calls
@@ -64,23 +65,15 @@ const MB_GROQ_HISTORY_CACHE_MS = Math.max(0, Math.min(30_000, Number(process.env
 const MB_TYPING_ENABLED = String(process.env.MB_TYPING_ENABLED || '').trim() === '1';
 
 // ✅ PATCH: typing bubble “human timing”
-// - We start typing immediately, keep it alive, and delay send so the bubble feels real.
-// - After the bubble, the response posts immediately (heartbeat cleared right before send).
 const MB_TYPING_REFRESH_MS = Math.max(2000, Math.min(9500, Number(process.env.MB_TYPING_REFRESH_MS || '8000')));
-
-// How long MB “types” for a reply (computed from reply length)
 const MB_TYPING_BASE_MS = Math.max(0, Math.min(5000, Number(process.env.MB_TYPING_BASE_MS || '650')));
 const MB_TYPING_PER_CHAR_MS = Math.max(0, Math.min(120, Number(process.env.MB_TYPING_PER_CHAR_MS || '28')));
-
-// Clamp typing duration
 const MB_TYPING_MIN_MS = Math.max(0, Math.min(15000, Number(process.env.MB_TYPING_MIN_MS || '900')));
 const MB_TYPING_MAX_MS = Math.max(MB_TYPING_MIN_MS, Math.min(60000, Number(process.env.MB_TYPING_MAX_MS || '9000')));
-
-// Extra randomness so it doesn’t feel robotic
 const MB_TYPING_JITTER_MS = Math.max(0, Math.min(2000, Number(process.env.MB_TYPING_JITTER_MS || '250')));
 
 // ======================================================
-// ✅ FOLLOW-UP MODE (fixes "I replied to MB and it ignored me")
+// ✅ FOLLOW-UP MODE
 // ======================================================
 const MB_FOLLOWUP_ENABLED = String(process.env.MB_FOLLOWUP_ENABLED || '1').trim() === '1';
 const MB_FOLLOWUP_WINDOW_MS = Math.max(10_000, Math.min(180_000, Number(process.env.MB_FOLLOWUP_WINDOW_MS || '60000')));
@@ -96,10 +89,13 @@ const MB_COOLDOWN_MS = Math.max(1500, Math.min(30_000, Number(process.env.MB_COO
 const MB_ACTIVITY_WRITE_MIN_MS = Math.max(5_000, Math.min(10 * 60_000, Number(process.env.MB_ACTIVITY_WRITE_MIN_MS || '60000')));
 
 // ======================================================
-// ✅ PATCH: Map pruning (prevents memory growth over weeks)
+// ✅ PATCH: Map pruning
 // ======================================================
-const MB_PRUNE_EVERY_MS = Math.max(30_000, Math.min(60 * 60_000, Number(process.env.MB_PRUNE_EVERY_MS || '600000'))); // default 10 min
-const MB_ACTIVE_RETENTION_MS = Math.max(60_000, Math.min(30 * 24 * 60 * 60_000, Number(process.env.MB_ACTIVE_RETENTION_MS || String(7 * 24 * 60 * 60_000)))); // default 7 days
+const MB_PRUNE_EVERY_MS = Math.max(30_000, Math.min(60 * 60_000, Number(process.env.MB_PRUNE_EVERY_MS || '600000')));
+const MB_ACTIVE_RETENTION_MS = Math.max(
+  60_000,
+  Math.min(30 * 24 * 60 * 60_000, Number(process.env.MB_ACTIVE_RETENTION_MS || String(7 * 24 * 60 * 60_000)))
+);
 
 // ======================================================
 // Debug toggles
@@ -126,17 +122,14 @@ function clamp(n, a, b) {
   return Math.max(a, Math.min(b, x));
 }
 
-// Computes how long the typing bubble should “feel” for this reply.
 function computeTypingMsForReply(text) {
   const s = String(text || '');
   const len = s.length;
 
-  // Slightly boost typing for punctuation / multi-sentence replies
   const punctBoost =
     (s.match(/[.!?]/g)?.length || 0) * 120 +
     (s.match(/[,;:]/g)?.length || 0) * 60;
 
-  // Cap length influence so long replies don’t delay forever
   const lenCap = Math.min(len, 320);
 
   const jitter = MB_TYPING_JITTER_MS > 0
@@ -390,7 +383,7 @@ module.exports = (client) => {
   }
 
   // ======================================================
-  // ✅ PATCH: prune long-lived maps (prevents slow creep)
+  // ✅ PATCH: prune long-lived maps
   // ======================================================
   setInterval(() => {
     try {
@@ -449,7 +442,7 @@ module.exports = (client) => {
   }, MB_PRUNE_EVERY_MS);
 
   // ======================================================
-  // ✅ PATCH: more reliable "reply to bot" detection
+  // ✅ "reply to bot" detection
   // ======================================================
   async function isReplyToThisBot(message) {
     try {
@@ -485,23 +478,33 @@ module.exports = (client) => {
   }
 
   // ======================================================
-  // ✅ Always reply as MUSCLEMB identity (never MBella relay default)
+  // ✅ Reply helper
+  // IMPORTANT: When typing bubble is used, we FORCE BOT SEND (no webhook),
+  // because webhook messages do NOT clear the bot user's typing indicator.
   // ======================================================
-  async function safeReplyAsMuscleMB(message, payload = {}) {
+  async function safeReplyAsMuscleMB(message, payload = {}, opts = {}) {
     try {
+      const forceBotSend = Boolean(opts.forceBotSend);
+
+      const canWebhookIdentity =
+        !forceBotSend &&
+        Boolean(Config.MB_USE_WEBHOOKAUTO) &&
+        Boolean(client?.webhookAuto) &&
+        typeof client.webhookAuto.sendViaWebhook === 'function';
+
       const finalPayload = {
         ...payload,
         allowedMentions: payload.allowedMentions || { parse: [] },
       };
 
-      const canWebhookIdentity =
-        Boolean(Config.MB_USE_WEBHOOKAUTO) &&
-        Boolean(client?.webhookAuto) &&
-        typeof client.webhookAuto.sendViaWebhook === 'function';
-
+      // Only attach webhook identity when we actually intend to use webhook mode
       if (canWebhookIdentity) {
         finalPayload.username = Config.MUSCLEMB_WEBHOOK_NAME;
         finalPayload.avatarURL = Config.MUSCLEMB_WEBHOOK_AVATAR || undefined;
+      } else {
+        // Ensure we don't accidentally pass webhook fields to normal send helpers
+        delete finalPayload.username;
+        delete finalPayload.avatarURL;
       }
 
       const res = await safeReplyMessage(client, message, finalPayload);
@@ -537,7 +540,7 @@ module.exports = (client) => {
     } catch {}
   });
 
-  /** Periodic nice pings (✅ now can also do awareness pings, opt-in only) */
+  /** Periodic nice pings */
   setInterval(async () => {
     const now = Date.now();
     const byGuild = new Map();
@@ -580,10 +583,7 @@ module.exports = (client) => {
               ...(Boolean(Config.MB_USE_WEBHOOKAUTO) &&
                 Boolean(client?.webhookAuto) &&
                 typeof client.webhookAuto.sendViaWebhook === 'function'
-                ? {
-                  username: Config.MUSCLEMB_WEBHOOK_NAME,
-                  avatarURL: Config.MUSCLEMB_WEBHOOK_AVATAR || undefined,
-                }
+                ? { username: Config.MUSCLEMB_WEBHOOK_NAME, avatarURL: Config.MUSCLEMB_WEBHOOK_AVATAR || undefined }
                 : {}),
             });
 
@@ -617,10 +617,7 @@ module.exports = (client) => {
           ...(Boolean(Config.MB_USE_WEBHOOKAUTO) &&
             Boolean(client?.webhookAuto) &&
             typeof client.webhookAuto.sendViaWebhook === 'function'
-            ? {
-              username: Config.MUSCLEMB_WEBHOOK_NAME,
-              avatarURL: Config.MUSCLEMB_WEBHOOK_AVATAR || undefined,
-            }
+            ? { username: Config.MUSCLEMB_WEBHOOK_NAME, avatarURL: Config.MUSCLEMB_WEBHOOK_AVATAR || undefined }
             : {}),
         });
 
@@ -664,13 +661,8 @@ module.exports = (client) => {
     /** ===== $ADRIAN chart trigger ===== */
     try {
       if (AdrianChart.isTriggered(lowered)) {
-        if (Config.ADRIAN_CHART_DEBUG) {
-          console.log(`[ADRIAN_CHART] triggered by "${message.content}" in guild=${message.guild.id} channel=${message.channel.id}`);
-        }
-
         const allowed = (!Config.ADRIAN_CHART_ADMIN_ONLY) || isOwnerOrAdmin(message);
         if (!allowed) {
-          console.log(`[ADRIAN_CHART] denied (not admin/owner) user=${message.author.id} guild=${message.guild.id}`);
           if (Config.ADRIAN_CHART_DENY_REPLY) {
             await safeReplyMessage(client, message, {
               content: '⛔ Admin/Owner only: $ADRIAN chart.',
@@ -692,7 +684,7 @@ module.exports = (client) => {
         return;
       }
     } catch (e) {
-      console.warn('⚠️ adrian chart trigger failed:', e?.stack || e?.message || String(e));
+      console.warn('⚠️ adrian chart trigger failed:', e?.message || String(e));
     }
 
     if (isTypingSuppressed(client, message.channel.id)) return;
@@ -743,7 +735,6 @@ module.exports = (client) => {
     } catch {}
 
     if (!hasTriggerWord && !botMentioned && !isFollowup) return;
-
     if (MB_FOLLOWUP_DEBUG && isFollowup && !hasTriggerWord && !botMentioned) {
       logFollowup(`followup accepted guild=${message.guild.id} channel=${message.channel.id} user=${message.author.id}`);
     }
@@ -808,16 +799,28 @@ module.exports = (client) => {
     cleanedInput = `${introLine}${cleanedInput}`.trim();
 
     // ======================================================
-    // ✅ PATCH: typing heartbeat + timing (bubble -> post)
+    // ✅ Typing bubble logic
+    // IMPORTANT: We only use typing bubbles when final send is BOT SEND.
+    // If we send via webhook identity, Discord will keep showing the bot typing.
     // ======================================================
+    const forceBotSendForThisReply = MB_TYPING_ENABLED; // if you want typing bubbles, we force bot-send
+
     let typingStarted = false;
     let typingStartMs = 0;
     let typingInterval = null;
+
+    const stopTyping = () => {
+      try { if (typingInterval) clearInterval(typingInterval); } catch {}
+      typingInterval = null;
+    };
 
     const startTyping = () => {
       if (typingStarted) return;
       if (!MB_TYPING_ENABLED) return;
       if (isTypingSuppressed(client, message.channel.id)) return;
+
+      // Only do typing when we will send as bot (so it clears correctly)
+      if (!forceBotSendForThisReply) return;
 
       typingStarted = true;
       typingStartMs = Date.now();
@@ -830,13 +833,7 @@ module.exports = (client) => {
       } catch {}
     };
 
-    const stopTyping = () => {
-      try { if (typingInterval) clearInterval(typingInterval); } catch {}
-      typingInterval = null;
-    };
-
     try {
-      // Start typing right away for responsiveness
       startTyping();
 
       const roastTargets = [...mentionedOthers.values()].map(u => u.username).join(', ');
@@ -897,9 +894,7 @@ module.exports = (client) => {
       if (shouldRoastOthers) temperature = 0.85;
       if (isRoastingBot) temperature = 0.75;
 
-      // ======================================================
-      // ✅ Pass real Discord chat context via extraMessages (cached)
-      // ======================================================
+      // Build extraMessages (cached)
       let extraMessages = [];
       try {
         if (MB_GROQ_HISTORY_LIMIT > 0 && message.channel?.messages?.fetch) {
@@ -974,7 +969,7 @@ module.exports = (client) => {
         if (!routed?.ok) {
           stopTyping();
           const hint = routed?.hint || '⚠️ MB lag spike. One rep at a time—try again in a sec. ⏱️';
-          try { await safeReplyAsMuscleMB(message, { content: hint, allowedMentions: { parse: [] } }); } catch {}
+          try { await safeReplyAsMuscleMB(message, { content: hint }, { forceBotSend: forceBotSendForThisReply }); } catch {}
           return;
         }
 
@@ -992,8 +987,7 @@ module.exports = (client) => {
           try {
             await safeReplyAsMuscleMB(message, {
               content: '⚠️ MB lag spike. One rep at a time—try again in a sec. ⏱️',
-              allowedMentions: { parse: [] }
-            });
+            }, { forceBotSend: forceBotSendForThisReply });
           } catch {}
           return;
         }
@@ -1015,7 +1009,7 @@ module.exports = (client) => {
             hint = '⚠️ MB cloud cramps (server error). One more try soon. ☁️';
           }
           console.error(`❌ Groq HTTP ${groqTry.res.status} on "${groqTry.model}": ${groqTry.bodyText?.slice(0, 400)}`);
-          try { await safeReplyAsMuscleMB(message, { content: hint, allowedMentions: { parse: [] } }); } catch {}
+          try { await safeReplyAsMuscleMB(message, { content: hint }, { forceBotSend: forceBotSendForThisReply }); } catch {}
           return;
         }
 
@@ -1027,10 +1021,7 @@ module.exports = (client) => {
           stopTyping();
           console.error('❌ Groq returned non-JSON/empty:', groqTry.bodyText?.slice(0, 300));
           try {
-            await safeReplyAsMuscleMB(message, {
-              content: '⚠️ MB static noise… say that again or keep it simple. 📻',
-              allowedMentions: { parse: [] }
-            });
+            await safeReplyAsMuscleMB(message, { content: '⚠️ MB static noise… say that again or keep it simple. 📻' }, { forceBotSend: forceBotSendForThisReply });
           } catch {}
           return;
         }
@@ -1041,7 +1032,7 @@ module.exports = (client) => {
           const hint = (message.author.id === Config.BOT_OWNER_ID)
             ? `⚠️ Groq error: ${groqData.error?.message || 'unknown'}. Check model access & payload size.`
             : '⚠️ MB slipped on a banana peel (API error). One sec. 🍌';
-          try { await safeReplyAsMuscleMB(message, { content: hint, allowedMentions: { parse: [] } }); } catch {}
+          try { await safeReplyAsMuscleMB(message, { content: hint }, { forceBotSend: forceBotSendForThisReply }); } catch {}
           return;
         }
 
@@ -1051,7 +1042,7 @@ module.exports = (client) => {
       const aiReplyHuman = humanizeMentions(aiReplyRaw || '', message);
       const aiReply = (aiReplyHuman || '').slice(0, 1800).trim();
 
-      // ✅ PATCH: if typing is on, “finish typing” before posting
+      // “Finish typing” before posting
       if (typingStarted && MB_TYPING_ENABLED) {
         const desiredTypingMs = computeTypingMsForReply(aiReply || cleanedInput);
         const elapsed = Date.now() - typingStartMs;
@@ -1059,7 +1050,7 @@ module.exports = (client) => {
         if (remaining > 0) await sleep(remaining);
       }
 
-      // Stop the heartbeat right before we send (prevents “typing…” lingering)
+      // Stop typing heartbeat BEFORE sending
       stopTyping();
 
       if (aiReply?.length) {
@@ -1081,35 +1072,33 @@ module.exports = (client) => {
 
         const embed = new EmbedBuilder()
           .setColor(embedColor)
+          .setAuthor({
+            name: Config.MUSCLEMB_WEBHOOK_NAME || 'MuscleMB',
+            iconURL: Config.MUSCLEMB_WEBHOOK_AVATAR || undefined,
+          })
           .setDescription(`💬 ${aiReply}`)
           .setFooter({ text: `Mode: ${currentMode} ${footerEmoji}` });
 
         try {
-          await safeReplyAsMuscleMB(message, { embeds: [embed], allowedMentions: { parse: [] } });
+          await safeReplyAsMuscleMB(message, { embeds: [embed] }, { forceBotSend: forceBotSendForThisReply });
         } catch (err) {
           console.warn('❌ MuscleMB embed reply error:', err.message);
-          try { await safeReplyAsMuscleMB(message, { content: aiReply, allowedMentions: { parse: [] } }); } catch {}
+          try { await safeReplyAsMuscleMB(message, { content: aiReply }, { forceBotSend: forceBotSendForThisReply }); } catch {}
         }
       } else {
         try {
           await safeReplyAsMuscleMB(message, {
             content: '💬 (silent set) MB heard you but returned no sauce. Try again with fewer words.',
-            allowedMentions: { parse: [] }
-          });
+          }, { forceBotSend: forceBotSendForThisReply });
         } catch {}
       }
     } catch (err) {
-      try {
-        // Always stop typing on failures
-        // (so you don’t get stuck “typing…” if something throws)
-        // eslint-disable-next-line no-undef
-      } catch {}
+      stopTyping();
       console.error('❌ MuscleMB error:', err?.stack || err?.message || String(err));
       try {
         await safeReplyAsMuscleMB(message, {
           content: '⚠️ MuscleMB pulled a hammy 🦵. Try again soon.',
-          allowedMentions: { parse: [] }
-        });
+        }, { forceBotSend: forceBotSendForThisReply });
       } catch (fallbackErr) {
         console.warn('❌ Fallback send error:', fallbackErr.message);
       }
