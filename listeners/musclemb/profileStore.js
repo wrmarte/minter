@@ -189,6 +189,29 @@ async function getFacts(client, guildId, userId) {
   }
 }
 
+/**
+ * ✅ ULTIMATE helper: set multiple facts (safe parsing handled by caller)
+ * pairs: [{key, value}, ...]
+ */
+async function setFactsBulk(client, guildId, userId, pairs = [], updatedBy = null, maxPairs = 24) {
+  const arr = Array.isArray(pairs) ? pairs : [];
+  const sliced = arr.slice(0, Math.max(0, Math.min(maxPairs, arr.length)));
+
+  let ok = 0;
+  let fail = 0;
+
+  for (const p of sliced) {
+    const k = cleanKey(p?.key);
+    const v = cleanVal(p?.value, 200);
+    if (!k || !v) { fail++; continue; }
+    // eslint-disable-next-line no-await-in-loop
+    const res = await setFact(client, guildId, userId, k, v, updatedBy);
+    if (res) ok++; else fail++;
+  }
+
+  return { ok, fail, total: ok + fail };
+}
+
 // -------------------- NOTES --------------------
 
 async function addNote(client, guildId, userId, noteText, createdBy = null) {
@@ -364,6 +387,37 @@ async function getTags(client, guildId, userId, limit = 20) {
   }
 }
 
+/**
+ * ✅ ULTIMATE helper: add many tags
+ */
+async function addTagsBulk(client, guildId, userId, tags = [], updatedBy = null, maxTags = 30) {
+  const arr = Array.isArray(tags) ? tags : [];
+  const sliced = arr.slice(0, Math.max(0, Math.min(maxTags, arr.length)));
+
+  let ok = 0;
+  let fail = 0;
+
+  for (const raw of sliced) {
+    const t = cleanTag(raw);
+    if (!t) { fail++; continue; }
+    // eslint-disable-next-line no-await-in-loop
+    const res = await addTag(client, guildId, userId, t, updatedBy);
+    if (res) ok++; else fail++;
+  }
+
+  return { ok, fail, total: ok + fail };
+}
+
+/**
+ * ✅ ULTIMATE helper: replace tags (clear + add)
+ * This is what your modal "!" behavior uses.
+ */
+async function replaceTags(client, guildId, userId, tags = [], updatedBy = null, maxTags = 30) {
+  const cleared = await clearTags(client, guildId, userId);
+  const added = await addTagsBulk(client, guildId, userId, tags, updatedBy, maxTags);
+  return { cleared: Boolean(cleared), ...added };
+}
+
 // -------------------- Formatting helpers for prompt injection --------------------
 
 function formatFactsInline(facts, maxKeys = 6) {
@@ -427,6 +481,56 @@ function buildPromptBlock({ displayName = 'User', facts = [], notes = [], tags =
   ].join('\n');
 }
 
+// -------------------- ULTIMATE admin helpers (optional) --------------------
+
+function formatFactMeta(f) {
+  try {
+    const bits = [];
+    if (f?.updatedAt) bits.push(`upd ${String(f.updatedAt)}`);
+    if (f?.updatedBy) bits.push(`by ${String(f.updatedBy)}`);
+    return bits.length ? bits.join(' ') : '';
+  } catch {
+    return '';
+  }
+}
+
+function formatNoteMeta(n) {
+  try {
+    const bits = [];
+    if (n?.createdAt) bits.push(`at ${String(n.createdAt)}`);
+    if (n?.createdBy) bits.push(`by ${String(n.createdBy)}`);
+    return bits.length ? bits.join(' ') : '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * ✅ ULTIMATE: purge a user's profile memory in a guild
+ * (facts + tags + notes). Use ONLY behind admin/owner checks in commands.
+ */
+async function purgeUser(client, guildId, userId) {
+  const pg = client?.pg;
+  if (!pg?.query) return { ok: false };
+
+  await ensureSchema(client);
+
+  try {
+    const gid = String(guildId);
+    const uid = String(userId);
+
+    // delete notes first (no FK but keeps tidy)
+    await pg.query(`DELETE FROM mb_profile_notes WHERE guild_id=$1 AND user_id=$2`, [gid, uid]);
+    await pg.query(`DELETE FROM mb_profile_tags  WHERE guild_id=$1 AND user_id=$2`, [gid, uid]);
+    await pg.query(`DELETE FROM mb_profile_facts WHERE guild_id=$1 AND user_id=$2`, [gid, uid]);
+
+    return { ok: true };
+  } catch (e) {
+    console.warn('⚠️ [MB][profileStore] purgeUser failed:', e?.message || String(e));
+    return { ok: false };
+  }
+}
+
 module.exports = {
   ensureSchema,
 
@@ -434,6 +538,7 @@ module.exports = {
   setFact,
   deleteFact,
   getFacts,
+  setFactsBulk,
 
   // notes
   addNote,
@@ -445,6 +550,8 @@ module.exports = {
   removeTag,
   clearTags,
   getTags,
+  addTagsBulk,
+  replaceTags,
 
   // formatting
   formatFactsInline,
@@ -453,6 +560,10 @@ module.exports = {
 
   // new helper
   buildPromptBlock,
-};
 
+  // ultimate helpers
+  formatFactMeta,
+  formatNoteMeta,
+  purgeUser,
+};
 
