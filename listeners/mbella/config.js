@@ -28,7 +28,7 @@ const GROQ_API_KEY = str(process.env.GROQ_API_KEY, "");
 const GROQ_MODEL_ENV = str(process.env.GROQ_MODEL, "");
 
 // Display
-const MBELLA_NAME = str(process.env.MBELLA_NAME, "MBella");
+const MBELLA_NAME = str(process.env.MBELLA_NAME, "Bella");
 const MBELLA_AVATAR_URL = str(process.env.MBELLA_AVATAR_URL, "");
 
 // Webhook
