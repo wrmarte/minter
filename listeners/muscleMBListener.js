@@ -15,9 +15,7 @@
 // - ✅ PATCH: nicer channel selection for nice pings (most recently active channel)
 // - ✅ PATCH: safer trigger stripping (word-boundary when possible)
 // - ✅ PATCH: prompt ordering (guards earlier; memory & context still used)
-// - ✅ PATCH (NEW): follow-up can be REPLY-ONLY to stop MB replying “to everything”
-// - ✅ PATCH (NEW): reply-to-webhook MuscleMB messages now counts as “reply to bot”
-// - ✅ PATCH (NEW): delayed typing so “Muscle typing…” doesn’t linger forever
+// - ✅ PATCH: Typing bubble timing matches response (typing stops -> response posts)
 // ======================================================
 
 const { EmbedBuilder } = require('discord.js');
@@ -62,35 +60,38 @@ const MB_GROQ_HISTORY_CACHE_MS = Math.max(0, Math.min(30_000, Number(process.env
 
 // ======================================================
 // ✅ Typing indicator control
-// Default OFF to prevent lingering bubble.
 // ======================================================
 const MB_TYPING_ENABLED = String(process.env.MB_TYPING_ENABLED || '').trim() === '1';
 
-// ✅ NEW: delayed typing (prevents the 10s typing bubble for fast replies)
-const MB_TYPING_DELAY_MS = Math.max(0, Math.min(5000, Number(process.env.MB_TYPING_DELAY_MS || '900'))); // default 900ms
+// ✅ PATCH: typing bubble “human timing”
+// - We start typing immediately, keep it alive, and delay send so the bubble feels real.
+// - After the bubble, the response posts immediately (heartbeat cleared right before send).
+const MB_TYPING_REFRESH_MS = Math.max(2000, Math.min(9500, Number(process.env.MB_TYPING_REFRESH_MS || '8000')));
+
+// How long MB “types” for a reply (computed from reply length)
+const MB_TYPING_BASE_MS = Math.max(0, Math.min(5000, Number(process.env.MB_TYPING_BASE_MS || '650')));
+const MB_TYPING_PER_CHAR_MS = Math.max(0, Math.min(120, Number(process.env.MB_TYPING_PER_CHAR_MS || '28')));
+
+// Clamp typing duration
+const MB_TYPING_MIN_MS = Math.max(0, Math.min(15000, Number(process.env.MB_TYPING_MIN_MS || '900')));
+const MB_TYPING_MAX_MS = Math.max(MB_TYPING_MIN_MS, Math.min(60000, Number(process.env.MB_TYPING_MAX_MS || '9000')));
+
+// Extra randomness so it doesn’t feel robotic
+const MB_TYPING_JITTER_MS = Math.max(0, Math.min(2000, Number(process.env.MB_TYPING_JITTER_MS || '250')));
 
 // ======================================================
 // ✅ FOLLOW-UP MODE (fixes "I replied to MB and it ignored me")
-// - If user replies to a MuscleMB message OR speaks again within window,
-//   treat it as continuation even without trigger word/mention.
 // ======================================================
 const MB_FOLLOWUP_ENABLED = String(process.env.MB_FOLLOWUP_ENABLED || '1').trim() === '1';
 const MB_FOLLOWUP_WINDOW_MS = Math.max(10_000, Math.min(180_000, Number(process.env.MB_FOLLOWUP_WINDOW_MS || '60000')));
 
-// ✅ Reply-only follow-ups (prevents MB replying to everything after one response)
-// Default ON. Set to 0 to restore old "spoke again within window" behavior.
-const MB_FOLLOWUP_REPLY_ONLY = String(process.env.MB_FOLLOWUP_REPLY_ONLY || '1').trim() === '1';
-
 // ======================================================
 // ✅ Cooldown tuning
-// - Default was hard 10s. Keep, but allow follow-ups to bypass.
 // ======================================================
 const MB_COOLDOWN_MS = Math.max(1500, Math.min(30_000, Number(process.env.MB_COOLDOWN_MS || '10000')));
 
 // ======================================================
 // ✅ PATCH: DB activity write throttle
-// - Prevents PG spam on busy servers.
-// - Track every message in RAM, but write to DB at most every X ms per user.
 // ======================================================
 const MB_ACTIVITY_WRITE_MIN_MS = Math.max(5_000, Math.min(10 * 60_000, Number(process.env.MB_ACTIVITY_WRITE_MIN_MS || '60000')));
 
@@ -98,10 +99,7 @@ const MB_ACTIVITY_WRITE_MIN_MS = Math.max(5_000, Math.min(10 * 60_000, Number(pr
 // ✅ PATCH: Map pruning (prevents memory growth over weeks)
 // ======================================================
 const MB_PRUNE_EVERY_MS = Math.max(30_000, Math.min(60 * 60_000, Number(process.env.MB_PRUNE_EVERY_MS || '600000'))); // default 10 min
-const MB_ACTIVE_RETENTION_MS = Math.max(
-  60_000,
-  Math.min(30 * 24 * 60 * 60_000, Number(process.env.MB_ACTIVE_RETENTION_MS || String(7 * 24 * 60 * 60_000)))
-); // default 7 days
+const MB_ACTIVE_RETENTION_MS = Math.max(60_000, Math.min(30 * 24 * 60 * 60_000, Number(process.env.MB_ACTIVE_RETENTION_MS || String(7 * 24 * 60 * 60_000)))); // default 7 days
 
 // ======================================================
 // Debug toggles
@@ -115,6 +113,39 @@ function logFollowup(...args) { if (MB_FOLLOWUP_DEBUG) console.log('[MB_FOLLOWUP
 function logProfile(...args) { if (MB_PROFILE_DEBUG) console.log('[MB_PROFILE]', ...args); }
 function logPrune(...args) { if (MB_PRUNE_DEBUG) console.log('[MB_PRUNE]', ...args); }
 function logActivity(...args) { if (MB_ACTIVITY_DEBUG) console.log('[MB_ACTIVITY]', ...args); }
+
+function sleep(ms) {
+  const n = Number(ms || 0);
+  if (!Number.isFinite(n) || n <= 0) return Promise.resolve();
+  return new Promise(resolve => setTimeout(resolve, n));
+}
+
+function clamp(n, a, b) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return a;
+  return Math.max(a, Math.min(b, x));
+}
+
+// Computes how long the typing bubble should “feel” for this reply.
+function computeTypingMsForReply(text) {
+  const s = String(text || '');
+  const len = s.length;
+
+  // Slightly boost typing for punctuation / multi-sentence replies
+  const punctBoost =
+    (s.match(/[.!?]/g)?.length || 0) * 120 +
+    (s.match(/[,;:]/g)?.length || 0) * 60;
+
+  // Cap length influence so long replies don’t delay forever
+  const lenCap = Math.min(len, 320);
+
+  const jitter = MB_TYPING_JITTER_MS > 0
+    ? Math.floor((Math.random() * 2 - 1) * MB_TYPING_JITTER_MS)
+    : 0;
+
+  const raw = MB_TYPING_BASE_MS + (lenCap * MB_TYPING_PER_CHAR_MS) + punctBoost + jitter;
+  return clamp(raw, MB_TYPING_MIN_MS, MB_TYPING_MAX_MS);
+}
 
 // ======================================================
 // ✅ Mention humanizer (shows names but prevents pings)
@@ -186,38 +217,11 @@ function escapeRegExp(s) {
 }
 
 function looksWordish(s) {
-  // If it is mostly letters/numbers/underscore (spaces allowed), we can safely word-boundary it.
   return /^[a-z0-9_\s]+$/i.test(String(s || '').trim());
 }
 
 // ======================================================
-// ✅ PATCH: detect a MuscleMB webhook message
-// IMPORTANT: webhook messages are NOT authored by client.user.id,
-// so reply detection must also accept webhook identity.
-// ======================================================
-function isMuscleWebhookMessage(msg) {
-  try {
-    if (!msg) return false;
-    if (!msg.webhookId) return false;
-
-    const uname = String(msg.author?.username || '').trim().toLowerCase();
-    const target = String(Config.MUSCLEMB_WEBHOOK_NAME || 'MuscleMB').trim().toLowerCase();
-
-    if (uname && target && uname === target) return true;
-
-    // fallback: sometimes embeds can include author name (rare in your build)
-    const embAuthor = String(msg.embeds?.[0]?.author?.name || '').trim().toLowerCase();
-    if (embAuthor && target && embAuthor === target) return true;
-
-    return false;
-  } catch {
-    return false;
-  }
-}
-
-// ======================================================
 // ✅ Build profile memory block to inject into system prompt
-// - Adds owner/admin override for author if opt-in is required
 // ======================================================
 async function buildProfileMemoryBlock(client, message) {
   try {
@@ -233,11 +237,8 @@ async function buildProfileMemoryBlock(client, message) {
 
     const authorId = message.author.id;
 
-    // Optional: require opt-in before using memory (paranoid mode)
     if (Config.MB_PROFILE_REQUIRE_OPTIN) {
       const ok = await MemoryStore.userIsOptedIn(client, guildId, authorId);
-
-      // ✅ Owner/Admin override for *author only*
       const authorIsAdmin = Boolean(isOwnerOrAdmin(message));
       if (!ok && !authorIsAdmin) {
         if (MB_PROFILE_DEBUG) logProfile(`author opted_out guild=${guildId} user=${authorId} (require optin=true)`);
@@ -259,7 +260,6 @@ async function buildProfileMemoryBlock(client, message) {
         : Promise.resolve(null),
     ]);
 
-    // Mentioned user (optional — only if exactly 1 other user mentioned)
     let mentionedBlock = null;
     try {
       const mentionedOthers = (message.mentions?.users || new Map())
@@ -377,13 +377,8 @@ module.exports = (client) => {
   }
   client.__muscleMBListenerAttached = true;
 
-  // Follow-up tracking map (user+channel -> last bot reply ts)
   if (!State.__mbLastReplyByUserChannel) State.__mbLastReplyByUserChannel = new Map();
-
-  // ✅ PATCH: activity write throttle map
   if (!State.__mbLastActivityWriteByUser) State.__mbLastActivityWriteByUser = new Map();
-
-  // ✅ PATCH: history cache map
   if (!State.__mbHistoryCacheByChannel) State.__mbHistoryCacheByChannel = new Map();
 
   function followupKey(message) {
@@ -401,7 +396,6 @@ module.exports = (client) => {
     try {
       const now = Date.now();
 
-      // lastActiveByUser is keyed: guildId:userId
       try {
         const before = State.lastActiveByUser?.size || 0;
         for (const [k, info] of (State.lastActiveByUser || new Map()).entries()) {
@@ -414,7 +408,6 @@ module.exports = (client) => {
         if (MB_PRUNE_DEBUG && before !== after) logPrune(`lastActiveByUser ${before} -> ${after}`);
       } catch {}
 
-      // follow-up map: prune entries older than window + 60s
       try {
         const cutoff = MB_FOLLOWUP_WINDOW_MS + 60_000;
         const before = State.__mbLastReplyByUserChannel?.size || 0;
@@ -428,7 +421,6 @@ module.exports = (client) => {
         if (MB_PRUNE_DEBUG && before !== after) logPrune(`__mbLastReplyByUserChannel ${before} -> ${after}`);
       } catch {}
 
-      // activity throttle map: prune old
       try {
         const cutoff = Math.max(5 * MB_ACTIVITY_WRITE_MIN_MS, 10 * 60_000);
         const before = State.__mbLastActivityWriteByUser?.size || 0;
@@ -442,7 +434,6 @@ module.exports = (client) => {
         if (MB_PRUNE_DEBUG && before !== after) logPrune(`__mbLastActivityWriteByUser ${before} -> ${after}`);
       } catch {}
 
-      // history cache: prune old
       try {
         const before = State.__mbHistoryCacheByChannel?.size || 0;
         for (const [channelId, entry] of (State.__mbHistoryCacheByChannel || new Map()).entries()) {
@@ -459,8 +450,6 @@ module.exports = (client) => {
 
   // ======================================================
   // ✅ PATCH: more reliable "reply to bot" detection
-  // - Tries repliedUser, then cache, then fetch message reference (safe).
-  // - NEW: also accepts replies to MuscleMB webhook messages.
   // ======================================================
   async function isReplyToThisBot(message) {
     try {
@@ -472,23 +461,15 @@ module.exports = (client) => {
       const mid = message?.reference?.messageId;
       if (!mid) return false;
 
-      // cache first
       try {
         const cached = message.channel?.messages?.cache?.get?.(mid);
-        if (cached) {
-          if (cached?.author?.id === client.user.id) return true;
-          if (isMuscleWebhookMessage(cached)) return true;
-        }
+        if (cached?.author?.id === client.user.id) return true;
       } catch {}
 
-      // fetch fallback (only if fetch exists)
       try {
         if (typeof message.channel?.messages?.fetch === 'function') {
           const fetched = await message.channel.messages.fetch(mid).catch(() => null);
-          if (!fetched) return false;
-
           if (fetched?.author?.id === client.user.id) return true;
-          if (isMuscleWebhookMessage(fetched)) return true;
         }
       } catch {}
     } catch {}
@@ -500,13 +481,11 @@ module.exports = (client) => {
     if (!MB_FOLLOWUP_ENABLED) return false;
     const k = followupKey(message);
     const last = State.__mbLastReplyByUserChannel.get(k) || 0;
-    const ok = (Date.now() - last) <= MB_FOLLOWUP_WINDOW_MS;
-    return ok;
+    return (Date.now() - last) <= MB_FOLLOWUP_WINDOW_MS;
   }
 
   // ======================================================
   // ✅ Always reply as MUSCLEMB identity (never MBella relay default)
-  // + record reply timestamp for follow-up mode
   // ======================================================
   async function safeReplyAsMuscleMB(message, payload = {}) {
     try {
@@ -561,7 +540,7 @@ module.exports = (client) => {
   /** Periodic nice pings (✅ now can also do awareness pings, opt-in only) */
   setInterval(async () => {
     const now = Date.now();
-    const byGuild = new Map(); // guildId -> [{channelId, ts}]
+    const byGuild = new Map();
 
     for (const [key, info] of State.lastActiveByUser.entries()) {
       const [guildId] = key.split(':');
@@ -579,7 +558,6 @@ module.exports = (client) => {
       const active = entries.filter(e => now - e.ts <= Config.NICE_ACTIVE_WINDOW_MS);
       if (!active.length) continue;
 
-      // ✅ PATCH: pick most recently active channel, not arbitrary first
       active.sort((a, b) => (b.ts || 0) - (a.ts || 0));
       const preferredChannel = active[0]?.channelId || null;
 
@@ -591,7 +569,6 @@ module.exports = (client) => {
       let mood = { multipliers: {}, tags: [] };
       try { mood = await analyzeChannelMood(channel); } catch {}
 
-      // ✅ awareness ping (opt-in only) sometimes replaces quote
       let didAwareness = false;
       if (Awareness.isEnabled()) {
         try {
@@ -600,7 +577,6 @@ module.exports = (client) => {
             const ok = await safeSendChannel(client, channel, {
               content: awareness.content,
               allowedMentions: awareness.allowedMentions || { parse: [] },
-
               ...(Boolean(Config.MB_USE_WEBHOOKAUTO) &&
                 Boolean(client?.webhookAuto) &&
                 typeof client.webhookAuto.sendViaWebhook === 'function'
@@ -638,7 +614,6 @@ module.exports = (client) => {
         const ok = await safeSendChannel(client, channel, {
           content: outLine,
           allowedMentions: { parse: [] },
-
           ...(Boolean(Config.MB_USE_WEBHOOKAUTO) &&
             Boolean(client?.webhookAuto) &&
             typeof client.webhookAuto.sendViaWebhook === 'function'
@@ -661,8 +636,7 @@ module.exports = (client) => {
   client.on('messageCreate', async (message) => {
     if (message.author.bot || !message.guild) return;
 
-    // ✅ PATCH: throttle DB activity writes to avoid PG spam/lag
-    // Still updates RAM lastActive always.
+    // ✅ Throttle DB activity writes
     try {
       const k = activityKey(message);
       const lastWrite = Number(State.__mbLastActivityWriteByUser.get(k) || 0);
@@ -754,28 +728,24 @@ module.exports = (client) => {
     }
 
     // ======================================================
-    // ✅ Main AI trigger gate + Follow-up override (PATCHED)
+    // ✅ Main AI trigger gate + Follow-up override
     // ======================================================
     const botMentioned = message.mentions.has(client.user);
     const hasTriggerWord = Config.TRIGGERS.some(trigger => lowered.includes(trigger));
 
-    // Follow-up: check reply-to-bot + (optional) recent followup window
     let isFollowup = false;
     try {
       if (MB_FOLLOWUP_ENABLED) {
         const replied = await isReplyToThisBot(message);
-        if (replied) {
-          isFollowup = true;
-        } else if (!MB_FOLLOWUP_REPLY_ONLY && isFollowupRecent(message)) {
-          isFollowup = true;
-        }
+        if (replied) isFollowup = true;
+        else if (isFollowupRecent(message)) isFollowup = true;
       }
     } catch {}
 
     if (!hasTriggerWord && !botMentioned && !isFollowup) return;
 
     if (MB_FOLLOWUP_DEBUG && isFollowup && !hasTriggerWord && !botMentioned) {
-      logFollowup(`followup accepted replyOnly=${MB_FOLLOWUP_REPLY_ONLY} guild=${message.guild.id} channel=${message.channel.id} user=${message.author.id}`);
+      logFollowup(`followup accepted guild=${message.guild.id} channel=${message.channel.id} user=${message.author.id}`);
     }
 
     if (message.mentions.everyone || message.mentions.roles.size > 0) return;
@@ -789,7 +759,6 @@ module.exports = (client) => {
 
     const isOwner = message.author.id === Config.BOT_OWNER_ID;
 
-    // Cooldown: allow follow-ups to bypass
     if (!isFollowup && State.cooldown.has(message.author.id) && !isOwner) return;
     State.cooldown.add(message.author.id);
     setTimeout(() => State.cooldown.delete(message.author.id), MB_COOLDOWN_MS);
@@ -797,7 +766,6 @@ module.exports = (client) => {
     // Clean input
     let cleanedInput = (message.content || '').trim();
 
-    // ✅ PATCH: safer trigger stripping
     if (hasTriggerWord) {
       for (const trigger of Config.TRIGGERS) {
         const t = String(trigger || '').trim();
@@ -839,17 +807,38 @@ module.exports = (client) => {
     if (!cleanedInput) cleanedInput = shouldRoastOthers ? 'Roast these fools.' : 'Speak your alpha.';
     cleanedInput = `${introLine}${cleanedInput}`.trim();
 
-    // ✅ NEW: delayed typing (no more instant 10s typing bubble)
-    let typingTimer = null;
-    try {
-      if (MB_TYPING_ENABLED && !isTypingSuppressed(client, message.channel.id) && MB_TYPING_DELAY_MS >= 0) {
-        typingTimer = setTimeout(() => {
+    // ======================================================
+    // ✅ PATCH: typing heartbeat + timing (bubble -> post)
+    // ======================================================
+    let typingStarted = false;
+    let typingStartMs = 0;
+    let typingInterval = null;
+
+    const startTyping = () => {
+      if (typingStarted) return;
+      if (!MB_TYPING_ENABLED) return;
+      if (isTypingSuppressed(client, message.channel.id)) return;
+
+      typingStarted = true;
+      typingStartMs = Date.now();
+
+      try { message.channel.sendTyping().catch(() => {}); } catch {}
+      try {
+        typingInterval = setInterval(() => {
           try { message.channel.sendTyping().catch(() => {}); } catch {}
-        }, MB_TYPING_DELAY_MS);
-      }
-    } catch {}
+        }, MB_TYPING_REFRESH_MS);
+      } catch {}
+    };
+
+    const stopTyping = () => {
+      try { if (typingInterval) clearInterval(typingInterval); } catch {}
+      typingInterval = null;
+    };
 
     try {
+      // Start typing right away for responsiveness
+      startTyping();
+
       const roastTargets = [...mentionedOthers.values()].map(u => u.username).join(', ');
 
       // Mode from DB
@@ -909,7 +898,7 @@ module.exports = (client) => {
       if (isRoastingBot) temperature = 0.75;
 
       // ======================================================
-      // ✅ Pass real Discord chat context via extraMessages (PATCHED)
+      // ✅ Pass real Discord chat context via extraMessages (cached)
       // ======================================================
       let extraMessages = [];
       try {
@@ -919,14 +908,7 @@ module.exports = (client) => {
 
           let arr = null;
           const cached = State.__mbHistoryCacheByChannel.get(channelId);
-
-          const cacheHit = Boolean(
-            cached &&
-            (now - Number(cached.ts || 0)) <= MB_GROQ_HISTORY_CACHE_MS &&
-            Array.isArray(cached.arr)
-          );
-
-          if (cacheHit) {
+          if (cached && (now - Number(cached.ts || 0)) <= MB_GROQ_HISTORY_CACHE_MS && Array.isArray(cached.arr)) {
             arr = cached.arr;
           } else {
             const fetched = await message.channel.messages.fetch({ limit: MB_GROQ_HISTORY_LIMIT }).catch(() => null);
@@ -964,7 +946,7 @@ module.exports = (client) => {
           extraMessages = cleaned.slice(-MB_GROQ_HISTORY_TURNS);
 
           if (MB_GROQ_DEBUG_CONTEXT) {
-            console.log(`[MB_GROQ_CONTEXT] guild=${message.guild.id} channel=${message.channel.id} extraMessages=${extraMessages.length} cache=${cacheHit ? 'hit' : 'miss'}`);
+            console.log(`[MB_GROQ_CONTEXT] guild=${message.guild.id} channel=${message.channel.id} extraMessages=${extraMessages.length}`);
           }
         }
       } catch (ctxErr) {
@@ -975,7 +957,6 @@ module.exports = (client) => {
       }
 
       const cacheKey = `${message.guild.id}:${message.channel.id}:${message.author.id}`;
-
       const useRouter = ModelRouter.isEnabled();
 
       let aiReplyRaw = null;
@@ -991,6 +972,7 @@ module.exports = (client) => {
         });
 
         if (!routed?.ok) {
+          stopTyping();
           const hint = routed?.hint || '⚠️ MB lag spike. One rep at a time—try again in a sec. ⏱️';
           try { await safeReplyAsMuscleMB(message, { content: hint, allowedMentions: { parse: [] } }); } catch {}
           return;
@@ -1005,6 +987,7 @@ module.exports = (client) => {
         });
 
         if (!groqTry || groqTry.error) {
+          stopTyping();
           console.error('❌ Groq fetch/network error (all models):', groqTry?.error?.message || 'unknown');
           try {
             await safeReplyAsMuscleMB(message, {
@@ -1016,6 +999,7 @@ module.exports = (client) => {
         }
 
         if (!groqTry.res.ok) {
+          stopTyping();
           let hint = '⚠️ MB jammed the reps rack (API). Try again shortly. 🏋️';
           if (groqTry.res.status === 401 || groqTry.res.status === 403) {
             hint = (message.author.id === Config.BOT_OWNER_ID)
@@ -1040,6 +1024,7 @@ module.exports = (client) => {
         })();
 
         if (!groqData) {
+          stopTyping();
           console.error('❌ Groq returned non-JSON/empty:', groqTry.bodyText?.slice(0, 300));
           try {
             await safeReplyAsMuscleMB(message, {
@@ -1051,6 +1036,7 @@ module.exports = (client) => {
         }
 
         if (groqData.error) {
+          stopTyping();
           console.error('❌ Groq API error:', groqData.error);
           const hint = (message.author.id === Config.BOT_OWNER_ID)
             ? `⚠️ Groq error: ${groqData.error?.message || 'unknown'}. Check model access & payload size.`
@@ -1062,12 +1048,19 @@ module.exports = (client) => {
         aiReplyRaw = groqData.choices?.[0]?.message?.content?.trim() || '';
       }
 
-      // ✅ cancel typing timer once we’re ready to respond
-      try { if (typingTimer) clearTimeout(typingTimer); } catch {}
-      typingTimer = null;
-
       const aiReplyHuman = humanizeMentions(aiReplyRaw || '', message);
       const aiReply = (aiReplyHuman || '').slice(0, 1800).trim();
+
+      // ✅ PATCH: if typing is on, “finish typing” before posting
+      if (typingStarted && MB_TYPING_ENABLED) {
+        const desiredTypingMs = computeTypingMsForReply(aiReply || cleanedInput);
+        const elapsed = Date.now() - typingStartMs;
+        const remaining = desiredTypingMs - elapsed;
+        if (remaining > 0) await sleep(remaining);
+      }
+
+      // Stop the heartbeat right before we send (prevents “typing…” lingering)
+      stopTyping();
 
       if (aiReply?.length) {
         const modeColorMap = {
@@ -1106,10 +1099,11 @@ module.exports = (client) => {
         } catch {}
       }
     } catch (err) {
-      // cancel delayed typing if we error
-      try { if (typingTimer) clearTimeout(typingTimer); } catch {}
-      typingTimer = null;
-
+      try {
+        // Always stop typing on failures
+        // (so you don’t get stuck “typing…” if something throws)
+        // eslint-disable-next-line no-undef
+      } catch {}
       console.error('❌ MuscleMB error:', err?.stack || err?.message || String(err));
       try {
         await safeReplyAsMuscleMB(message, {
