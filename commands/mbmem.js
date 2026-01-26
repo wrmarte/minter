@@ -104,9 +104,8 @@ function parseTagsBlob(input, maxTags = 20) {
 }
 
 /**
- * ✅ Modal ID format:
+ * ✅ Modal ID format used for global routing:
  * mbmem_modal:<guildId>:<targetId>:<actorId>:<stamp>
- * This lets a global router (interactionCreate) handle modal submits reliably.
  */
 function makeModalId(guildId, targetId, actorId) {
   const stamp = Date.now().toString(36);
@@ -257,6 +256,81 @@ async function buildMemoryCardEmbed({ client, guildId, target, targetId, noteLim
   return embed;
 }
 
+/**
+ * ✅ Global modal handler (called by interactionCreate router)
+ */
+async function handleModalSubmit(interaction, client) {
+  try {
+    if (!interaction?.isModalSubmit?.()) return false;
+    const cid = String(interaction.customId || '');
+    if (!cid.startsWith('mbmem_modal:')) return false;
+
+    const parts = cid.split(':'); // mbmem_modal:guildId:targetId:actorId:stamp
+    const guildId = parts[1] || '';
+    const targetId = parts[2] || '';
+    const actorId = parts[3] || '';
+
+    if (!guildId || !targetId || !actorId) {
+      await interaction.reply({ content: '⚠️ Invalid modal payload.', ephemeral: true }).catch(() => {});
+      return true;
+    }
+
+    if (String(interaction.guildId || '') !== String(guildId)) {
+      await interaction.reply({ content: '⚠️ Guild mismatch. Re-open /mbmem panel.', ephemeral: true }).catch(() => {});
+      return true;
+    }
+
+    // only the actor who opened the modal can submit it
+    if (String(interaction.user?.id || '') !== String(actorId)) {
+      await interaction.reply({ content: '⛔ This modal is not yours. Re-open /mbmem.', ephemeral: true }).catch(() => {});
+      return true;
+    }
+
+    const admin = isOwnerOrAdmin(interaction);
+    const managingSelf = String(targetId) === String(actorId);
+    if (!managingSelf && !admin) {
+      await interaction.reply({ content: '⛔ Admin only to edit memory for other users.', ephemeral: true }).catch(() => {});
+      return true;
+    }
+
+    const factsBlob = interaction.fields.getTextInputValue('facts') || '';
+    const tagsBlob = interaction.fields.getTextInputValue('tags') || '';
+    const noteText = interaction.fields.getTextInputValue('note') || '';
+
+    await ProfileStore.ensureSchema(client);
+    await MemoryStore.ensureSchema(client);
+
+    const res = await applyEdits({
+      client,
+      guildId,
+      targetId,
+      actingId: actorId,
+      factsBlob,
+      tagsBlobRaw: tagsBlob,
+      noteTextRaw: noteText,
+    });
+
+    await interaction.reply({
+      content: res.changed
+        ? `✅ Saved for <@${targetId}> — ${res.summary}${res.failCount ? `\n⚠️ Some items failed: ${res.failCount}/${res.okCount + res.failCount}` : ''}`
+        : '⚠️ No changes detected. (Fill at least one field.)',
+      ephemeral: true
+    }).catch(() => {});
+
+    return true;
+  } catch (e) {
+    console.error('❌ mbmem handleModalSubmit error:', e?.stack || e?.message || String(e));
+    try {
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply({ content: '⚠️ Failed to process memory modal.' }).catch(() => {});
+      } else {
+        await interaction.reply({ content: '⚠️ Failed to process memory modal.', ephemeral: true }).catch(() => {});
+      }
+    } catch {}
+    return true;
+  }
+}
+
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('mbmem')
@@ -358,10 +432,11 @@ module.exports = {
         )
     ),
 
-  // ✅ export helpers for global modal router
+  // exports used by router
   applyEdits,
   makeModalId,
   buildEditModal,
+  handleModalSubmit,
 
   async execute(interaction, { pg } = {}) {
     try {
@@ -416,73 +491,52 @@ module.exports = {
           )
           .setFooter({ text: 'Tip: In modal, start tags with ! to replace all tags.' });
 
-        const ownerUserId = String(interaction.user.id);
-
         const btnEdit = new ButtonBuilder()
-          .setCustomId(`mbmem_btn_edit:${guildId}:${targetId}:${ownerUserId}`)
+          .setCustomId('mbmem_btn_edit')
           .setLabel('Edit (Modal)')
           .setStyle(ButtonStyle.Primary);
 
         const btnOpt = new ButtonBuilder()
-          .setCustomId(`mbmem_btn_opt:${guildId}:${targetId}:${ownerUserId}`)
+          .setCustomId('mbmem_btn_opt')
           .setLabel('Toggle Opt-in')
           .setStyle(ButtonStyle.Secondary);
 
         const btnView = new ButtonBuilder()
-          .setCustomId(`mbmem_btn_view:${guildId}:${targetId}:${ownerUserId}`)
+          .setCustomId('mbmem_btn_view')
           .setLabel('View Card')
           .setStyle(ButtonStyle.Success);
 
         const row = new ActionRowBuilder().addComponents(btnEdit, btnOpt, btnView);
 
-        const panelMsg = await interaction.reply({
-          embeds: [embed],
-          components: [row],
-          ephemeral,
-          fetchReply: true,
-        }).catch(() => null);
-
+        await interaction.reply({ embeds: [embed], components: [row], ephemeral }).catch(() => {});
+        const panelMsg = await interaction.fetchReply().catch(() => null);
         if (!panelMsg) return;
 
+        const ownerUserId = String(interaction.user.id);
         const endAt = Date.now() + 60000;
 
-        // ✅ safer than collectors (ephemeral-friendly)
         while (Date.now() < endAt) {
           const btn = await panelMsg.awaitMessageComponent({
             time: Math.max(1000, endAt - Date.now()),
-            filter: (i) => i.user?.id === ownerUserId,
+            filter: (i) => String(i.user?.id || '') === ownerUserId,
           }).catch(() => null);
 
           if (!btn) break;
 
           try {
-            if (!btn.customId || !btn.customId.startsWith('mbmem_btn_')) {
-              await btn.reply({ content: '⚠️ Unknown button.', ephemeral: true }).catch(() => {});
-              continue;
-            }
+            const cid = String(btn.customId || '');
 
-            const parts = String(btn.customId).split(':');
-            const kind = parts[0];
-            const gid = parts[1] || '';
-            const tid = parts[2] || '';
-            const owner = parts[3] || '';
-
-            if (gid !== guildId || tid !== targetId || owner !== ownerUserId) {
-              await btn.reply({ content: `⛔ This panel belongs to <@${ownerUserId}>.`, ephemeral: true }).catch(() => {});
-              continue;
-            }
-
-            // ✅ EDIT: ACK FAST then show modal (submit handled globally)
-            if (kind === 'mbmem_btn_edit') {
-              await btn.deferUpdate().catch(() => {}); // ✅ fast ACK so no "Interaction failed"
+            if (cid === 'mbmem_btn_edit') {
+              // ✅ showModal MUST be the first response (no deferUpdate before)
               const modalId = makeModalId(guildId, targetId, ownerUserId);
               const modal = buildEditModal({ modalId, targetUsername: target.username });
-              await btn.showModal(modal).catch(() => {});
+              await btn.showModal(modal).catch(async () => {
+                await btn.reply({ content: '⚠️ Could not open modal.', ephemeral: true }).catch(() => {});
+              });
               continue;
             }
 
-            // ✅ OPT: deferReply then editReply
-            if (kind === 'mbmem_btn_opt') {
+            if (cid === 'mbmem_btn_opt') {
               await btn.deferReply({ ephemeral: true }).catch(() => {});
               const cur = await MemoryStore.getUserState(client, guildId, targetId).catch(() => null);
               const enabled = !(Boolean(cur?.opted_in));
@@ -495,8 +549,7 @@ module.exports = {
               continue;
             }
 
-            // ✅ VIEW: deferReply then editReply
-            if (kind === 'mbmem_btn_view') {
+            if (cid === 'mbmem_btn_view') {
               await btn.deferReply({ ephemeral: true }).catch(() => {});
               const embed2 = await buildMemoryCardEmbed({
                 client,
@@ -522,7 +575,6 @@ module.exports = {
           }
         }
 
-        // Don’t try to edit/disable ephemeral components at end (can fail silently on some versions)
         return;
       }
 
@@ -539,8 +591,6 @@ module.exports = {
 
         const modalId = makeModalId(guildId, targetId, interaction.user.id);
         const modal = buildEditModal({ modalId, targetUsername: target.username });
-
-        // ✅ show modal; submit handled globally
         await interaction.showModal(modal);
         return;
       }
@@ -623,117 +673,6 @@ module.exports = {
         });
 
         await interaction.reply({ embeds: [embed], ephemeral });
-        return;
-      }
-
-      // ===================== EXISTING MANAGEMENT =====================
-      const targetUser = interaction.options.getUser('user') || interaction.user;
-      const targetId = String(targetUser.id);
-      const actingId = String(interaction.user.id);
-      const managingSelf = targetId === actingId;
-
-      const requireAdminIfOther = () => {
-        if (!managingSelf && !admin) return false;
-        return true;
-      };
-
-      if (group === 'fact' && sub === 'set') {
-        if (!requireAdminIfOther()) {
-          await interaction.reply({ content: '⛔ Admin only to edit other users.', ephemeral: true });
-          return;
-        }
-        const key = interaction.options.getString('key', true);
-        const value = interaction.options.getString('value', true);
-
-        const ok = await ProfileStore.setFact(client, guildId, targetId, key, value, actingId);
-        await interaction.reply({ content: ok ? `✅ Fact saved for <@${targetId}>: \`${key}\`` : `⚠️ Failed to save fact.`, ephemeral: true });
-        return;
-      }
-
-      if (group === 'fact' && sub === 'del') {
-        if (!requireAdminIfOther()) {
-          await interaction.reply({ content: '⛔ Admin only to edit other users.', ephemeral: true });
-          return;
-        }
-        const key = interaction.options.getString('key', true);
-
-        const ok = await ProfileStore.deleteFact(client, guildId, targetId, key);
-        await interaction.reply({ content: ok ? `✅ Fact deleted for <@${targetId}>: \`${key}\`` : `⚠️ Failed to delete fact.`, ephemeral: true });
-        return;
-      }
-
-      if (group === 'note' && sub === 'add') {
-        if (!requireAdminIfOther()) {
-          await interaction.reply({ content: '⛔ Admin only to add notes for other users.', ephemeral: true });
-          return;
-        }
-        const text = interaction.options.getString('text', true);
-
-        const ok = await ProfileStore.addNote(client, guildId, targetId, text, actingId);
-        await interaction.reply({ content: ok ? `✅ Note added for <@${targetId}>.` : `⚠️ Failed to add note.`, ephemeral: true });
-        return;
-      }
-
-      if (group === 'note' && sub === 'del') {
-        if (!requireAdminIfOther()) {
-          await interaction.reply({ content: '⛔ Admin only to delete notes for other users.', ephemeral: true });
-          return;
-        }
-        const id = interaction.options.getString('id', true);
-
-        const ok = await ProfileStore.deleteNote(client, guildId, targetId, id);
-        await interaction.reply({ content: ok ? `✅ Note #${id} deleted for <@${targetId}>.` : `⚠️ Failed to delete note.`, ephemeral: true });
-        return;
-      }
-
-      if (group === 'tag' && sub === 'add') {
-        if (!requireAdminIfOther()) {
-          await interaction.reply({ content: '⛔ Admin only to tag other users.', ephemeral: true });
-          return;
-        }
-        const tag = interaction.options.getString('tag', true);
-
-        const ok = await ProfileStore.addTag(client, guildId, targetId, tag, actingId);
-        await interaction.reply({ content: ok ? `✅ Tag added for <@${targetId}>: \`${tag}\`` : `⚠️ Failed to add tag.`, ephemeral: true });
-        return;
-      }
-
-      if (group === 'tag' && sub === 'del') {
-        if (!requireAdminIfOther()) {
-          await interaction.reply({ content: '⛔ Admin only to untag other users.', ephemeral: true });
-          return;
-        }
-        const tag = interaction.options.getString('tag', true);
-
-        const ok = await ProfileStore.removeTag(client, guildId, targetId, tag);
-        await interaction.reply({ content: ok ? `✅ Tag removed for <@${targetId}>: \`${tag}\`` : `⚠️ Failed to remove tag.`, ephemeral: true });
-        return;
-      }
-
-      if (group === 'tag' && sub === 'clear') {
-        if (!requireAdminIfOther()) {
-          await interaction.reply({ content: '⛔ Admin only to clear tags for other users.', ephemeral: true });
-          return;
-        }
-        const ok = await ProfileStore.clearTags(client, guildId, targetId);
-        await interaction.reply({ content: ok ? `✅ Tags cleared for <@${targetId}>.` : `⚠️ Failed to clear tags.`, ephemeral: true });
-        return;
-      }
-
-      if (group === 'optin' && sub === 'set') {
-        const enabled = Boolean(interaction.options.getBoolean('enabled', true));
-        if (!managingSelf && !admin) {
-          await interaction.reply({ content: '⛔ Admin only to set opt-in for other users.', ephemeral: true });
-          return;
-        }
-
-        const ok = await MemoryStore.setOptIn(client, guildId, targetId, enabled);
-        await interaction.reply({
-          content: ok
-            ? `✅ Awareness opt-in for <@${targetId}> is now **${enabled ? 'ON' : 'OFF'}**.`
-            : `⚠️ Failed to set opt-in.`,
-          ephemeral: true
-        });
         return;
       }
 
