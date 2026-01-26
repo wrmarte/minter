@@ -47,6 +47,15 @@ const MB_GROQ_HISTORY_MAX_CHARS = Math.max(120, Math.min(1200, Number(process.en
 const MB_GROQ_DEBUG_CONTEXT = String(process.env.MB_GROQ_DEBUG_CONTEXT || '').trim() === '1';
 
 // ======================================================
+// ✅ Typing indicator control (IMPORTANT)
+// Discord typing pulses linger ~8–10s AFTER the last sendTyping().
+// If you call sendTyping, users may see "still typing" even after reply.
+// Default OFF to prevent that lingering behavior.
+// Set MB_TYPING_ENABLED=1 if you want it back.
+// ======================================================
+const MB_TYPING_ENABLED = String(process.env.MB_TYPING_ENABLED || '').trim() === '1';
+
+// ======================================================
 // ✅ Mention humanizer (shows names but prevents pings)
 // Converts <@123> / <@!123> -> @DisplayName
 // Converts <@&roleId> -> @RoleName
@@ -444,7 +453,9 @@ module.exports = (client) => {
     cleanedInput = `${introLine}${cleanedInput}`.trim();
 
     try {
-      if (!isTypingSuppressed(client, message.channel.id)) {
+      // ✅ IMPORTANT: typing indicator is OFF by default to prevent "still typing" after reply.
+      // Enable only if you accept the lingering typing bubble behavior.
+      if (MB_TYPING_ENABLED && !isTypingSuppressed(client, message.channel.id)) {
         try { await message.channel.sendTyping(); } catch {}
       }
 
@@ -676,9 +687,7 @@ module.exports = (client) => {
           .setDescription(`💬 ${aiReply}`)
           .setFooter({ text: `Mode: ${currentMode} ${footerEmoji}` });
 
-        const delayMs = Math.min(aiReply.length * Config.MB_MS_PER_CHAR, Config.MB_MAX_DELAY_MS);
-        await new Promise(resolve => setTimeout(resolve, delayMs));
-
+        // ✅ PATCH: send immediately (no pre-send artificial delay)
         try {
           // ✅ FORCE MB identity on the actual reply (fixes "Bella relay" problem)
           await safeReplyAsMuscleMB(message, { embeds: [embed], allowedMentions: { parse: [] } });
