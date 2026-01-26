@@ -15,8 +15,10 @@
 // - ✅ PATCH: nicer channel selection for nice pings (most recently active channel)
 // - ✅ PATCH: safer trigger stripping (word-boundary when possible)
 // - ✅ PATCH: prompt ordering (guards earlier; memory & context still used)
-// - ✅ PATCH: Typing bubble NO LONGER lingers after posting
-//     (Typing only used when final response is sent as bot user; webhook messages don't clear bot typing)
+// - ✅ PATCH: Typing bubble is now synced like MBella
+//     - Uses a single placeholder reply ("…") that gets EDITED into the final embed
+//     - Optionally shows typing briefly before placeholder
+//     - No lingering typing bubble after response
 // ======================================================
 
 const { EmbedBuilder } = require('discord.js');
@@ -60,17 +62,22 @@ const MB_GROQ_DEBUG_CONTEXT = String(process.env.MB_GROQ_DEBUG_CONTEXT || '').tr
 const MB_GROQ_HISTORY_CACHE_MS = Math.max(0, Math.min(30_000, Number(process.env.MB_GROQ_HISTORY_CACHE_MS || '7000')));
 
 // ======================================================
-// ✅ Typing indicator control
+// ✅ Typing + Placeholder controls (MBella-style sync)
 // ======================================================
 const MB_TYPING_ENABLED = String(process.env.MB_TYPING_ENABLED || '').trim() === '1';
 
-// ✅ PATCH: typing bubble “human timing”
-const MB_TYPING_REFRESH_MS = Math.max(2000, Math.min(9500, Number(process.env.MB_TYPING_REFRESH_MS || '8000')));
+// sendTyping refresh is no longer needed (we do single-shot typing + placeholder)
 const MB_TYPING_BASE_MS = Math.max(0, Math.min(5000, Number(process.env.MB_TYPING_BASE_MS || '650')));
 const MB_TYPING_PER_CHAR_MS = Math.max(0, Math.min(120, Number(process.env.MB_TYPING_PER_CHAR_MS || '28')));
 const MB_TYPING_MIN_MS = Math.max(0, Math.min(15000, Number(process.env.MB_TYPING_MIN_MS || '900')));
 const MB_TYPING_MAX_MS = Math.max(MB_TYPING_MIN_MS, Math.min(60000, Number(process.env.MB_TYPING_MAX_MS || '9000')));
 const MB_TYPING_JITTER_MS = Math.max(0, Math.min(2000, Number(process.env.MB_TYPING_JITTER_MS || '250')));
+
+// ✅ NEW: placeholder behavior
+const MB_PLACEHOLDER_ENABLED = String(process.env.MB_PLACEHOLDER_ENABLED || '1').trim() === '1';
+// How long after typing starts to drop the placeholder "…" reply.
+// (MBella uses a debounce so you see typing briefly, then the placeholder locks the reply thread.)
+const MB_PLACEHOLDER_DEBOUNCE_MS = Math.max(0, Math.min(8000, Number(process.env.MB_PLACEHOLDER_DEBOUNCE_MS || '700')));
 
 // ======================================================
 // ✅ FOLLOW-UP MODE
@@ -138,6 +145,32 @@ function computeTypingMsForReply(text) {
 
   const raw = MB_TYPING_BASE_MS + (lenCap * MB_TYPING_PER_CHAR_MS) + punctBoost + jitter;
   return clamp(raw, MB_TYPING_MIN_MS, MB_TYPING_MAX_MS);
+}
+
+// ======================================================
+// ✅ MBella-style placeholder helpers (single message edited)
+// ======================================================
+async function ensurePlaceholderReply(message) {
+  try {
+    // Always use a BOT reply so we can edit reliably (webhook edit requires webhook client)
+    const ph = await message.reply({
+      content: '…',
+      allowedMentions: { parse: [], repliedUser: false },
+    });
+    return ph || null;
+  } catch {
+    return null;
+  }
+}
+
+async function editPlaceholder(placeholder, payload) {
+  if (!placeholder) return false;
+  try {
+    await placeholder.edit(payload);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // ======================================================
@@ -479,32 +512,30 @@ module.exports = (client) => {
 
   // ======================================================
   // ✅ Reply helper
-  // IMPORTANT: When typing bubble is used, we FORCE BOT SEND (no webhook),
-  // because webhook messages do NOT clear the bot user's typing indicator.
+  // NOTE: We keep safeReplyMessage for fallbacks,
+  // but the MAIN path is now placeholder+edit (MBella style).
   // ======================================================
   async function safeReplyAsMuscleMB(message, payload = {}, opts = {}) {
     try {
       const forceBotSend = Boolean(opts.forceBotSend);
 
-      const canWebhookIdentity =
-        !forceBotSend &&
-        Boolean(Config.MB_USE_WEBHOOKAUTO) &&
-        Boolean(client?.webhookAuto) &&
-        typeof client.webhookAuto.sendViaWebhook === 'function';
-
       const finalPayload = {
         ...payload,
-        allowedMentions: payload.allowedMentions || { parse: [] },
+        allowedMentions: payload.allowedMentions || { parse: [], repliedUser: false },
       };
 
-      // Only attach webhook identity when we actually intend to use webhook mode
-      if (canWebhookIdentity) {
-        finalPayload.username = Config.MUSCLEMB_WEBHOOK_NAME;
-        finalPayload.avatarURL = Config.MUSCLEMB_WEBHOOK_AVATAR || undefined;
-      } else {
-        // Ensure we don't accidentally pass webhook fields to normal send helpers
-        delete finalPayload.username;
-        delete finalPayload.avatarURL;
+      // If we are forcing bot send, bypass any webhook logic by replying natively.
+      if (forceBotSend) {
+        // message.reply returns a Message we can ignore
+        await message.reply(finalPayload).catch(async () => {
+          // last resort: channel send (still bot)
+          await message.channel.send(finalPayload).catch(() => {});
+        });
+        try {
+          const k = followupKey(message);
+          State.__mbLastReplyByUserChannel.set(k, Date.now());
+        } catch {}
+        return true;
       }
 
       const res = await safeReplyMessage(client, message, finalPayload);
@@ -516,7 +547,7 @@ module.exports = (client) => {
         } catch {}
       }
 
-      return res;
+      return Boolean(res);
     } catch {
       return false;
     }
@@ -799,42 +830,41 @@ module.exports = (client) => {
     cleanedInput = `${introLine}${cleanedInput}`.trim();
 
     // ======================================================
-    // ✅ Typing bubble logic
-    // IMPORTANT: We only use typing bubbles when final send is BOT SEND.
-    // If we send via webhook identity, Discord will keep showing the bot typing.
+    // ✅ Typing + Placeholder (MBella-style)
+    // - Show typing briefly
+    // - Drop a placeholder reply ("…") that gets edited later
+    // - This prevents any typing bubble lingering AFTER the response
     // ======================================================
-    const forceBotSendForThisReply = MB_TYPING_ENABLED; // if you want typing bubbles, we force bot-send
-
-    let typingStarted = false;
     let typingStartMs = 0;
-    let typingInterval = null;
+    let placeholder = null;
+    let placeholderTimer = null;
 
-    const stopTyping = () => {
-      try { if (typingInterval) clearInterval(typingInterval); } catch {}
-      typingInterval = null;
+    const clearPlaceholderTimer = () => {
+      try { if (placeholderTimer) clearTimeout(placeholderTimer); } catch {}
+      placeholderTimer = null;
     };
 
-    const startTyping = () => {
-      if (typingStarted) return;
-      if (!MB_TYPING_ENABLED) return;
-      if (isTypingSuppressed(client, message.channel.id)) return;
+    const schedulePlaceholder = () => {
+      if (!MB_PLACEHOLDER_ENABLED) return;
+      if (placeholder) return;
 
-      // Only do typing when we will send as bot (so it clears correctly)
-      if (!forceBotSendForThisReply) return;
-
-      typingStarted = true;
-      typingStartMs = Date.now();
-
-      try { message.channel.sendTyping().catch(() => {}); } catch {}
-      try {
-        typingInterval = setInterval(() => {
-          try { message.channel.sendTyping().catch(() => {}); } catch {}
-        }, MB_TYPING_REFRESH_MS);
-      } catch {}
+      clearPlaceholderTimer();
+      placeholderTimer = setTimeout(() => {
+        ensurePlaceholderReply(message).then(ph => {
+          if (ph) placeholder = ph;
+        }).catch(() => {});
+      }, MB_PLACEHOLDER_DEBOUNCE_MS);
     };
 
     try {
-      startTyping();
+      // Start typing (single-shot). If we send placeholder later, the typing bubble clears immediately.
+      if (MB_TYPING_ENABLED && !isTypingSuppressed(client, message.channel.id)) {
+        try { await message.channel.sendTyping(); } catch {}
+        typingStartMs = Date.now();
+      }
+
+      // Schedule placeholder (so reply threading is locked, and no lingering typing)
+      schedulePlaceholder();
 
       const roastTargets = [...mentionedOthers.values()].map(u => u.username).join(', ');
 
@@ -966,10 +996,17 @@ module.exports = (client) => {
           cacheKey,
         });
 
+        clearPlaceholderTimer();
+
         if (!routed?.ok) {
-          stopTyping();
           const hint = routed?.hint || '⚠️ MB lag spike. One rep at a time—try again in a sec. ⏱️';
-          try { await safeReplyAsMuscleMB(message, { content: hint }, { forceBotSend: forceBotSendForThisReply }); } catch {}
+          // ensure placeholder exists so reply stays threaded
+          if (!placeholder && MB_PLACEHOLDER_ENABLED) placeholder = await ensurePlaceholderReply(message).catch(() => null);
+          if (placeholder) {
+            await editPlaceholder(placeholder, { content: hint, embeds: [], allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
+          } else {
+            await safeReplyAsMuscleMB(message, { content: hint }, { forceBotSend: true });
+          }
           return;
         }
 
@@ -981,19 +1018,22 @@ module.exports = (client) => {
           cacheKey,
         });
 
+        clearPlaceholderTimer();
+
         if (!groqTry || groqTry.error) {
-          stopTyping();
           console.error('❌ Groq fetch/network error (all models):', groqTry?.error?.message || 'unknown');
-          try {
-            await safeReplyAsMuscleMB(message, {
-              content: '⚠️ MB lag spike. One rep at a time—try again in a sec. ⏱️',
-            }, { forceBotSend: forceBotSendForThisReply });
-          } catch {}
+
+          const hint = '⚠️ MB lag spike. One rep at a time—try again in a sec. ⏱️';
+          if (!placeholder && MB_PLACEHOLDER_ENABLED) placeholder = await ensurePlaceholderReply(message).catch(() => null);
+          if (placeholder) {
+            await editPlaceholder(placeholder, { content: hint, embeds: [], allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
+          } else {
+            await safeReplyAsMuscleMB(message, { content: hint }, { forceBotSend: true });
+          }
           return;
         }
 
         if (!groqTry.res.ok) {
-          stopTyping();
           let hint = '⚠️ MB jammed the reps rack (API). Try again shortly. 🏋️';
           if (groqTry.res.status === 401 || groqTry.res.status === 403) {
             hint = (message.author.id === Config.BOT_OWNER_ID)
@@ -1008,8 +1048,15 @@ module.exports = (client) => {
           } else if (groqTry.res.status >= 500) {
             hint = '⚠️ MB cloud cramps (server error). One more try soon. ☁️';
           }
+
           console.error(`❌ Groq HTTP ${groqTry.res.status} on "${groqTry.model}": ${groqTry.bodyText?.slice(0, 400)}`);
-          try { await safeReplyAsMuscleMB(message, { content: hint }, { forceBotSend: forceBotSendForThisReply }); } catch {}
+
+          if (!placeholder && MB_PLACEHOLDER_ENABLED) placeholder = await ensurePlaceholderReply(message).catch(() => null);
+          if (placeholder) {
+            await editPlaceholder(placeholder, { content: hint, embeds: [], allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
+          } else {
+            await safeReplyAsMuscleMB(message, { content: hint }, { forceBotSend: true });
+          }
           return;
         }
 
@@ -1018,21 +1065,31 @@ module.exports = (client) => {
         })();
 
         if (!groqData) {
-          stopTyping();
           console.error('❌ Groq returned non-JSON/empty:', groqTry.bodyText?.slice(0, 300));
-          try {
-            await safeReplyAsMuscleMB(message, { content: '⚠️ MB static noise… say that again or keep it simple. 📻' }, { forceBotSend: forceBotSendForThisReply });
-          } catch {}
+
+          const hint = '⚠️ MB static noise… say that again or keep it simple. 📻';
+          if (!placeholder && MB_PLACEHOLDER_ENABLED) placeholder = await ensurePlaceholderReply(message).catch(() => null);
+          if (placeholder) {
+            await editPlaceholder(placeholder, { content: hint, embeds: [], allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
+          } else {
+            await safeReplyAsMuscleMB(message, { content: hint }, { forceBotSend: true });
+          }
           return;
         }
 
         if (groqData.error) {
-          stopTyping();
           console.error('❌ Groq API error:', groqData.error);
+
           const hint = (message.author.id === Config.BOT_OWNER_ID)
             ? `⚠️ Groq error: ${groqData.error?.message || 'unknown'}. Check model access & payload size.`
             : '⚠️ MB slipped on a banana peel (API error). One sec. 🍌';
-          try { await safeReplyAsMuscleMB(message, { content: hint }, { forceBotSend: forceBotSendForThisReply }); } catch {}
+
+          if (!placeholder && MB_PLACEHOLDER_ENABLED) placeholder = await ensurePlaceholderReply(message).catch(() => null);
+          if (placeholder) {
+            await editPlaceholder(placeholder, { content: hint, embeds: [], allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
+          } else {
+            await safeReplyAsMuscleMB(message, { content: hint }, { forceBotSend: true });
+          }
           return;
         }
 
@@ -1042,16 +1099,18 @@ module.exports = (client) => {
       const aiReplyHuman = humanizeMentions(aiReplyRaw || '', message);
       const aiReply = (aiReplyHuman || '').slice(0, 1800).trim();
 
-      // “Finish typing” before posting
-      if (typingStarted && MB_TYPING_ENABLED) {
+      // ✅ Ensure placeholder exists (so final result always edits the same reply)
+      if (!placeholder && MB_PLACEHOLDER_ENABLED) {
+        placeholder = await ensurePlaceholderReply(message).catch(() => null);
+      }
+
+      // ✅ Human timing: keep "typing illusion" duration, then post by editing placeholder
+      if (MB_TYPING_ENABLED) {
         const desiredTypingMs = computeTypingMsForReply(aiReply || cleanedInput);
-        const elapsed = Date.now() - typingStartMs;
+        const elapsed = typingStartMs ? (Date.now() - typingStartMs) : 0;
         const remaining = desiredTypingMs - elapsed;
         if (remaining > 0) await sleep(remaining);
       }
-
-      // Stop typing heartbeat BEFORE sending
-      stopTyping();
 
       if (aiReply?.length) {
         const modeColorMap = {
@@ -1079,28 +1138,70 @@ module.exports = (client) => {
           .setDescription(`💬 ${aiReply}`)
           .setFooter({ text: `Mode: ${currentMode} ${footerEmoji}` });
 
-        try {
-          await safeReplyAsMuscleMB(message, { embeds: [embed] }, { forceBotSend: forceBotSendForThisReply });
-        } catch (err) {
-          console.warn('❌ MuscleMB embed reply error:', err.message);
-          try { await safeReplyAsMuscleMB(message, { content: aiReply }, { forceBotSend: forceBotSendForThisReply }); } catch {}
+        if (placeholder) {
+          const ok = await editPlaceholder(placeholder, {
+            content: null,
+            embeds: [embed],
+            allowedMentions: { parse: [], repliedUser: false },
+          });
+
+          if (ok) {
+            try {
+              const k = followupKey(message);
+              State.__mbLastReplyByUserChannel.set(k, Date.now());
+            } catch {}
+            return;
+          }
         }
-      } else {
-        try {
-          await safeReplyAsMuscleMB(message, {
-            content: '💬 (silent set) MB heard you but returned no sauce. Try again with fewer words.',
-          }, { forceBotSend: forceBotSendForThisReply });
-        } catch {}
+
+        // Fallback: normal bot reply
+        await safeReplyAsMuscleMB(message, { embeds: [embed] }, { forceBotSend: true });
+        return;
       }
+
+      // Empty reply fallback
+      const emptyHint = '💬 (silent set) MB heard you but returned no sauce. Try again with fewer words.';
+      if (placeholder) {
+        const ok = await editPlaceholder(placeholder, {
+          content: emptyHint,
+          embeds: [],
+          allowedMentions: { parse: [], repliedUser: false },
+        });
+        if (ok) {
+          try {
+            const k = followupKey(message);
+            State.__mbLastReplyByUserChannel.set(k, Date.now());
+          } catch {}
+          return;
+        }
+      }
+
+      await safeReplyAsMuscleMB(message, { content: emptyHint }, { forceBotSend: true });
     } catch (err) {
-      stopTyping();
+      clearPlaceholderTimer();
       console.error('❌ MuscleMB error:', err?.stack || err?.message || String(err));
+
+      const hint = '⚠️ MuscleMB pulled a hammy 🦵. Try again soon.';
       try {
-        await safeReplyAsMuscleMB(message, {
-          content: '⚠️ MuscleMB pulled a hammy 🦵. Try again soon.',
-        }, { forceBotSend: forceBotSendForThisReply });
+        // If we already have a placeholder, edit it. Else reply normally.
+        if (placeholder) {
+          await editPlaceholder(placeholder, {
+            content: hint,
+            embeds: [],
+            allowedMentions: { parse: [], repliedUser: false },
+          });
+          try {
+            const k = followupKey(message);
+            State.__mbLastReplyByUserChannel.set(k, Date.now());
+          } catch {}
+          return;
+        }
+      } catch {}
+
+      try {
+        await safeReplyAsMuscleMB(message, { content: hint }, { forceBotSend: true });
       } catch (fallbackErr) {
-        console.warn('❌ Fallback send error:', fallbackErr.message);
+        console.warn('❌ Fallback send error:', fallbackErr?.message || fallbackErr);
       }
     }
   });
