@@ -15,7 +15,6 @@
 // - ✅ PATCH: nicer channel selection for nice pings (most recently active channel)
 // - ✅ PATCH: safer trigger stripping (word-boundary when possible)
 // - ✅ PATCH: prompt ordering (guards earlier; memory & context still used)
-// - ✅ PATCH (NEW): Follow-up can be REPLY-ONLY (prevents “replying to everything”)
 // ======================================================
 
 const { EmbedBuilder } = require('discord.js');
@@ -50,49 +49,46 @@ const ModelRouter = require('./musclemb/modelRouter');
 const ProfileStore = require('./musclemb/profileStore');
 
 // ===== Optional Groq "awareness" context (Discord message history) =====
-const MB_GROQ_HISTORY_LIMIT = Math.max(0, Math.min(25, Number(process.env.MB_GROQ_HISTORY_LIMIT || '12')));
-const MB_GROQ_HISTORY_TURNS = Math.max(0, Math.min(16, Number(process.env.MB_GROQ_HISTORY_TURNS || '8')));
-const MB_GROQ_HISTORY_MAX_CHARS = Math.max(120, Math.min(1200, Number(process.env.MB_GROQ_HISTORY_MAX_CHARS || '650')));
+const MB_GROQ_HISTORY_LIMIT = Math.max(0, Math.min(25, Number(process.env.MB_GROQ_HISTORY_LIMIT || '12'))); // fetch this many
+const MB_GROQ_HISTORY_TURNS = Math.max(0, Math.min(16, Number(process.env.MB_GROQ_HISTORY_TURNS || '8'))); // keep this many (after filtering)
+const MB_GROQ_HISTORY_MAX_CHARS = Math.max(120, Math.min(1200, Number(process.env.MB_GROQ_HISTORY_MAX_CHARS || '650'))); // per message
 const MB_GROQ_DEBUG_CONTEXT = String(process.env.MB_GROQ_DEBUG_CONTEXT || '').trim() === '1';
 
-// ✅ Cache channel history fetch to reduce latency / Discord API calls
+// ✅ PATCH: cache channel history fetch to reduce latency / Discord API calls
 const MB_GROQ_HISTORY_CACHE_MS = Math.max(0, Math.min(30_000, Number(process.env.MB_GROQ_HISTORY_CACHE_MS || '7000')));
 
 // ======================================================
-// ✅ Typing indicator control (keep “less” by default)
+// ✅ Typing indicator control
+// Default OFF to prevent lingering bubble.
 // ======================================================
 const MB_TYPING_ENABLED = String(process.env.MB_TYPING_ENABLED || '').trim() === '1';
 
 // ======================================================
-// ✅ FOLLOW-UP MODE
-// - If enabled: replies can continue without trigger
-// - PATCH: optionally REPLY-ONLY (prevents “replying to everything”)
+// ✅ FOLLOW-UP MODE (fixes "I replied to MB and it ignored me")
+// - If user replies to a MuscleMB message OR speaks again within window,
+//   treat it as continuation even without trigger word/mention.
 // ======================================================
 const MB_FOLLOWUP_ENABLED = String(process.env.MB_FOLLOWUP_ENABLED || '1').trim() === '1';
 const MB_FOLLOWUP_WINDOW_MS = Math.max(10_000, Math.min(180_000, Number(process.env.MB_FOLLOWUP_WINDOW_MS || '60000')));
 
-// ✅ NEW: default ON — only treat actual “reply to MB” as follow-up.
-// Set MB_FOLLOWUP_REPLY_ONLY=0 if you want the old “spoke again within window” behavior.
-const MB_FOLLOWUP_REPLY_ONLY = String(process.env.MB_FOLLOWUP_REPLY_ONLY || '1').trim() === '1';
-
 // ======================================================
-// ✅ Cooldown tuning (follow-ups bypass cooldown)
+// ✅ Cooldown tuning
+// - Default was hard 10s. Keep, but allow follow-ups to bypass.
 // ======================================================
 const MB_COOLDOWN_MS = Math.max(1500, Math.min(30_000, Number(process.env.MB_COOLDOWN_MS || '10000')));
 
 // ======================================================
-// ✅ DB activity write throttle
+// ✅ PATCH: DB activity write throttle
+// - Prevents PG spam on busy servers.
+// - Track every message in RAM, but write to DB at most every X ms per user.
 // ======================================================
 const MB_ACTIVITY_WRITE_MIN_MS = Math.max(5_000, Math.min(10 * 60_000, Number(process.env.MB_ACTIVITY_WRITE_MIN_MS || '60000')));
 
 // ======================================================
-// ✅ Map pruning
+// ✅ PATCH: Map pruning (prevents memory growth over weeks)
 // ======================================================
-const MB_PRUNE_EVERY_MS = Math.max(30_000, Math.min(60 * 60_000, Number(process.env.MB_PRUNE_EVERY_MS || '600000')));
-const MB_ACTIVE_RETENTION_MS = Math.max(
-  60_000,
-  Math.min(30 * 24 * 60 * 60_000, Number(process.env.MB_ACTIVE_RETENTION_MS || String(7 * 24 * 60 * 60_000)))
-);
+const MB_PRUNE_EVERY_MS = Math.max(30_000, Math.min(60 * 60_000, Number(process.env.MB_PRUNE_EVERY_MS || '600000'))); // default 10 min
+const MB_ACTIVE_RETENTION_MS = Math.max(60_000, Math.min(30 * 24 * 60 * 60_000, Number(process.env.MB_ACTIVE_RETENTION_MS || String(7 * 24 * 60 * 60_000)))); // default 7 days
 
 // ======================================================
 // Debug toggles
@@ -177,11 +173,13 @@ function escapeRegExp(s) {
 }
 
 function looksWordish(s) {
+  // If it is mostly letters/numbers/underscore (spaces allowed), we can safely word-boundary it.
   return /^[a-z0-9_\s]+$/i.test(String(s || '').trim());
 }
 
 // ======================================================
 // ✅ Build profile memory block to inject into system prompt
+// - Adds owner/admin override for author if opt-in is required
 // ======================================================
 async function buildProfileMemoryBlock(client, message) {
   try {
@@ -197,9 +195,11 @@ async function buildProfileMemoryBlock(client, message) {
 
     const authorId = message.author.id;
 
+    // Optional: require opt-in before using memory (paranoid mode)
     if (Config.MB_PROFILE_REQUIRE_OPTIN) {
       const ok = await MemoryStore.userIsOptedIn(client, guildId, authorId);
 
+      // ✅ Owner/Admin override for *author only*
       const authorIsAdmin = Boolean(isOwnerOrAdmin(message));
       if (!ok && !authorIsAdmin) {
         if (MB_PROFILE_DEBUG) logProfile(`author opted_out guild=${guildId} user=${authorId} (require optin=true)`);
@@ -221,6 +221,7 @@ async function buildProfileMemoryBlock(client, message) {
         : Promise.resolve(null),
     ]);
 
+    // Mentioned user (optional — only if exactly 1 other user mentioned)
     let mentionedBlock = null;
     try {
       const mentionedOthers = (message.mentions?.users || new Map())
@@ -263,6 +264,7 @@ async function buildProfileMemoryBlock(client, message) {
     } catch {}
 
     const parts = [];
+
     const authorName = safeNameFromMessage(message, authorId, message.author?.username || 'User');
 
     const authorSummary = ProfileStore.formatFactsInline(authorFacts, Config.MB_PROFILE_MAX_KEYS);
@@ -337,8 +339,13 @@ module.exports = (client) => {
   }
   client.__muscleMBListenerAttached = true;
 
+  // Follow-up tracking map (user+channel -> last bot reply ts)
   if (!State.__mbLastReplyByUserChannel) State.__mbLastReplyByUserChannel = new Map();
+
+  // ✅ PATCH: activity write throttle map
   if (!State.__mbLastActivityWriteByUser) State.__mbLastActivityWriteByUser = new Map();
+
+  // ✅ PATCH: history cache map
   if (!State.__mbHistoryCacheByChannel) State.__mbHistoryCacheByChannel = new Map();
 
   function followupKey(message) {
@@ -350,12 +357,13 @@ module.exports = (client) => {
   }
 
   // ======================================================
-  // ✅ prune long-lived maps
+  // ✅ PATCH: prune long-lived maps (prevents slow creep)
   // ======================================================
   setInterval(() => {
     try {
       const now = Date.now();
 
+      // lastActiveByUser is keyed: guildId:userId
       try {
         const before = State.lastActiveByUser?.size || 0;
         for (const [k, info] of (State.lastActiveByUser || new Map()).entries()) {
@@ -368,6 +376,7 @@ module.exports = (client) => {
         if (MB_PRUNE_DEBUG && before !== after) logPrune(`lastActiveByUser ${before} -> ${after}`);
       } catch {}
 
+      // follow-up map: prune entries older than window + 60s
       try {
         const cutoff = MB_FOLLOWUP_WINDOW_MS + 60_000;
         const before = State.__mbLastReplyByUserChannel?.size || 0;
@@ -381,6 +390,7 @@ module.exports = (client) => {
         if (MB_PRUNE_DEBUG && before !== after) logPrune(`__mbLastReplyByUserChannel ${before} -> ${after}`);
       } catch {}
 
+      // activity throttle map: prune old
       try {
         const cutoff = Math.max(5 * MB_ACTIVITY_WRITE_MIN_MS, 10 * 60_000);
         const before = State.__mbLastActivityWriteByUser?.size || 0;
@@ -394,6 +404,7 @@ module.exports = (client) => {
         if (MB_PRUNE_DEBUG && before !== after) logPrune(`__mbLastActivityWriteByUser ${before} -> ${after}`);
       } catch {}
 
+      // history cache: prune old
       try {
         const before = State.__mbHistoryCacheByChannel?.size || 0;
         for (const [channelId, entry] of (State.__mbHistoryCacheByChannel || new Map()).entries()) {
@@ -409,7 +420,8 @@ module.exports = (client) => {
   }, MB_PRUNE_EVERY_MS);
 
   // ======================================================
-  // reply-to-bot detection (cache -> fetch)
+  // ✅ PATCH: more reliable "reply to bot" detection
+  // - Tries repliedUser, then cache, then fetch message reference (safe).
   // ======================================================
   async function isReplyToThisBot(message) {
     try {
@@ -421,11 +433,13 @@ module.exports = (client) => {
       const mid = message?.reference?.messageId;
       if (!mid) return false;
 
+      // cache first
       try {
         const cached = message.channel?.messages?.cache?.get?.(mid);
         if (cached?.author?.id === client.user.id) return true;
       } catch {}
 
+      // fetch fallback (only if fetch exists)
       try {
         if (typeof message.channel?.messages?.fetch === 'function') {
           const fetched = await message.channel.messages.fetch(mid).catch(() => null);
@@ -438,13 +452,16 @@ module.exports = (client) => {
   }
 
   function isFollowupRecent(message) {
+    if (!MB_FOLLOWUP_ENABLED) return false;
     const k = followupKey(message);
     const last = State.__mbLastReplyByUserChannel.get(k) || 0;
-    return (Date.now() - last) <= MB_FOLLOWUP_WINDOW_MS;
+    const ok = (Date.now() - last) <= MB_FOLLOWUP_WINDOW_MS;
+    return ok;
   }
 
   // ======================================================
-  // reply as MuscleMB + record follow-up window
+  // ✅ Always reply as MUSCLEMB identity (never MBella relay default)
+  // + record reply timestamp for follow-up mode
   // ======================================================
   async function safeReplyAsMuscleMB(message, payload = {}) {
     try {
@@ -453,6 +470,8 @@ module.exports = (client) => {
         allowedMentions: payload.allowedMentions || { parse: [] },
       };
 
+      // Only attach webhook identity fields if your messaging layer supports webhookAuto sending.
+      // If safeReplyMessage ignores these, no harm; if it validates strictly, this prevents invalid form bodies.
       const canWebhookIdentity =
         Boolean(Config.MB_USE_WEBHOOKAUTO) &&
         Boolean(client?.webhookAuto) &&
@@ -478,7 +497,7 @@ module.exports = (client) => {
     }
   }
 
-  // MBella-post detector
+  /** 🔎 MBella-post detector: suppress MuscleMB in that channel for ~11s */
   client.on('messageCreate', (m) => {
     try {
       if (!m.guild) return;
@@ -496,10 +515,10 @@ module.exports = (client) => {
     } catch {}
   });
 
-  // nice pings + awareness pings
+  /** Periodic nice pings (✅ now can also do awareness pings, opt-in only) */
   setInterval(async () => {
     const now = Date.now();
-    const byGuild = new Map();
+    const byGuild = new Map(); // guildId -> [{channelId, ts}]
 
     for (const [key, info] of State.lastActiveByUser.entries()) {
       const [guildId] = key.split(':');
@@ -517,6 +536,7 @@ module.exports = (client) => {
       const active = entries.filter(e => now - e.ts <= Config.NICE_ACTIVE_WINDOW_MS);
       if (!active.length) continue;
 
+      // ✅ PATCH: pick most recently active channel, not arbitrary first
       active.sort((a, b) => (b.ts || 0) - (a.ts || 0));
       const preferredChannel = active[0]?.channelId || null;
 
@@ -528,6 +548,7 @@ module.exports = (client) => {
       let mood = { multipliers: {}, tags: [] };
       try { mood = await analyzeChannelMood(channel); } catch {}
 
+      // ✅ awareness ping (opt-in only) sometimes replaces quote
       let didAwareness = false;
       if (Awareness.isEnabled()) {
         try {
@@ -536,6 +557,8 @@ module.exports = (client) => {
             const ok = await safeSendChannel(client, channel, {
               content: awareness.content,
               allowedMentions: awareness.allowedMentions || { parse: [] },
+
+              // prefer webhook identity only if your messaging layer supports it
               ...(Boolean(Config.MB_USE_WEBHOOKAUTO) &&
                 Boolean(client?.webhookAuto) &&
                 typeof client.webhookAuto.sendViaWebhook === 'function'
@@ -573,6 +596,7 @@ module.exports = (client) => {
         const ok = await safeSendChannel(client, channel, {
           content: outLine,
           allowedMentions: { parse: [] },
+
           ...(Boolean(Config.MB_USE_WEBHOOKAUTO) &&
             Boolean(client?.webhookAuto) &&
             typeof client.webhookAuto.sendViaWebhook === 'function'
@@ -595,7 +619,8 @@ module.exports = (client) => {
   client.on('messageCreate', async (message) => {
     if (message.author.bot || !message.guild) return;
 
-    // throttle DB writes
+    // ✅ PATCH: throttle DB activity writes to avoid PG spam/lag
+    // Still updates RAM lastActive always.
     try {
       const k = activityKey(message);
       const lastWrite = Number(State.__mbLastActivityWriteByUser.get(k) || 0);
@@ -613,7 +638,6 @@ module.exports = (client) => {
       }
     } catch {}
 
-    // always update RAM activity
     State.lastActiveByUser.set(`${message.guild.id}:${message.author.id}`, {
       ts: Date.now(),
       channelId: message.channel.id,
@@ -621,11 +645,16 @@ module.exports = (client) => {
 
     const lowered = (message.content || '').toLowerCase();
 
-    // chart trigger
+    /** ===== $ADRIAN chart trigger ===== */
     try {
       if (AdrianChart.isTriggered(lowered)) {
+        if (Config.ADRIAN_CHART_DEBUG) {
+          console.log(`[ADRIAN_CHART] triggered by "${message.content}" in guild=${message.guild.id} channel=${message.channel.id}`);
+        }
+
         const allowed = (!Config.ADRIAN_CHART_ADMIN_ONLY) || isOwnerOrAdmin(message);
         if (!allowed) {
+          console.log(`[ADRIAN_CHART] denied (not admin/owner) user=${message.author.id} guild=${message.guild.id}`);
           if (Config.ADRIAN_CHART_DENY_REPLY) {
             await safeReplyMessage(client, message, {
               content: '⛔ Admin/Owner only: $ADRIAN chart.',
@@ -653,7 +682,7 @@ module.exports = (client) => {
     if (isTypingSuppressed(client, message.channel.id)) return;
     if (Config.FEMALE_TRIGGERS.some(t => lowered.includes(t))) return;
 
-    // sweep trigger
+    /** ===== Sweep reader ===== */
     try {
       if (SweepReader.isTriggered(lowered)) {
         const key = `${message.guild.id}:${message.author.id}`;
@@ -683,20 +712,20 @@ module.exports = (client) => {
     }
 
     // ======================================================
-    // AI gate: trigger word / mention / follow-up
+    // ✅ Main AI trigger gate + Follow-up override (PATCHED)
+    // - Now more reliable: will fetch referenced message if needed.
     // ======================================================
     const botMentioned = message.mentions.has(client.user);
     const hasTriggerWord = Config.TRIGGERS.some(trigger => lowered.includes(trigger));
 
+    // Follow-up: check reply-to-bot + recent followup window
     let isFollowup = false;
     try {
       if (MB_FOLLOWUP_ENABLED) {
         const replied = await isReplyToThisBot(message);
-
         if (replied) {
           isFollowup = true;
-        } else if (!MB_FOLLOWUP_REPLY_ONLY && isFollowupRecent(message)) {
-          // ✅ Only allowed if MB_FOLLOWUP_REPLY_ONLY=0
+        } else if (isFollowupRecent(message)) {
           isFollowup = true;
         }
       }
@@ -705,7 +734,7 @@ module.exports = (client) => {
     if (!hasTriggerWord && !botMentioned && !isFollowup) return;
 
     if (MB_FOLLOWUP_DEBUG && isFollowup && !hasTriggerWord && !botMentioned) {
-      logFollowup(`followup accepted replyOnly=${MB_FOLLOWUP_REPLY_ONLY} guild=${message.guild.id} channel=${message.channel.id} user=${message.author.id}`);
+      logFollowup(`followup accepted guild=${message.guild.id} channel=${message.channel.id} user=${message.author.id}`);
     }
 
     if (message.mentions.everyone || message.mentions.roles.size > 0) return;
@@ -719,6 +748,7 @@ module.exports = (client) => {
 
     const isOwner = message.author.id === Config.BOT_OWNER_ID;
 
+    // Cooldown: allow follow-ups to bypass
     if (!isFollowup && State.cooldown.has(message.author.id) && !isOwner) return;
     State.cooldown.add(message.author.id);
     setTimeout(() => State.cooldown.delete(message.author.id), MB_COOLDOWN_MS);
@@ -726,6 +756,9 @@ module.exports = (client) => {
     // Clean input
     let cleanedInput = (message.content || '').trim();
 
+    // ✅ PATCH: safer trigger stripping
+    // - Word-boundary strip for word-like triggers
+    // - Otherwise strip raw string occurrences
     if (hasTriggerWord) {
       for (const trigger of Config.TRIGGERS) {
         const t = String(trigger || '').trim();
@@ -736,11 +769,13 @@ module.exports = (client) => {
             const re = new RegExp(`\\b${escapeRegExp(t)}\\b`, 'ig');
             cleanedInput = cleanedInput.replace(re, '');
           } else {
+            // fallback: remove exact token-ish chunks
             const re2 = new RegExp(escapeRegExp(t), 'ig');
             cleanedInput = cleanedInput.replace(re2, '');
           }
         } catch {}
 
+        // also try literal replaceAll best-effort
         try { cleanedInput = cleanedInput.replaceAll(t, ''); } catch {}
       }
     }
@@ -818,8 +853,10 @@ module.exports = (client) => {
       const softGuard =
         'Be kind by default, avoid insults unless explicitly roasting. No private data. Keep it 1–2 short sentences.';
 
+      // ✅ Inject profile memory block (admin-curated) if enabled
       const profileBlock = await buildProfileMemoryBlock(client, message);
 
+      // ✅ PATCH: prompt ordering — guard early, then memory/context
       const fullSystemPrompt = [systemPrompt, softGuard, profileBlock, recentContext]
         .filter(Boolean)
         .join('\n\n');
@@ -830,7 +867,10 @@ module.exports = (client) => {
       if (shouldRoastOthers) temperature = 0.85;
       if (isRoastingBot) temperature = 0.75;
 
-      // build extraMessages (cached)
+      // ======================================================
+      // ✅ Pass real Discord chat context via extraMessages (PATCHED)
+      // - Uses channel history cache to reduce Discord API calls.
+      // ======================================================
       let extraMessages = [];
       try {
         if (MB_GROQ_HISTORY_LIMIT > 0 && message.channel?.messages?.fetch) {
@@ -843,7 +883,10 @@ module.exports = (client) => {
             arr = cached.arr;
           } else {
             const fetched = await message.channel.messages.fetch({ limit: MB_GROQ_HISTORY_LIMIT }).catch(() => null);
-            arr = fetched ? Array.from(fetched.values()) : [];
+            const values = fetched ? Array.from(fetched.values()) : [];
+
+            // store raw message objects briefly; safe for short cache windows
+            arr = values;
             State.__mbHistoryCacheByChannel.set(channelId, { ts: now, arr });
           }
 
@@ -876,7 +919,7 @@ module.exports = (client) => {
           extraMessages = cleaned.slice(-MB_GROQ_HISTORY_TURNS);
 
           if (MB_GROQ_DEBUG_CONTEXT) {
-            console.log(`[MB_GROQ_CONTEXT] guild=${message.guild.id} channel=${message.channel.id} extraMessages=${extraMessages.length}`);
+            console.log(`[MB_GROQ_CONTEXT] guild=${message.guild.id} channel=${message.channel.id} extraMessages=${extraMessages.length} cache=${Boolean(cached) ? 'hit' : 'miss'}`);
           }
         }
       } catch (ctxErr) {
@@ -889,6 +932,7 @@ module.exports = (client) => {
       const cacheKey = `${message.guild.id}:${message.channel.id}:${message.author.id}`;
 
       const useRouter = ModelRouter.isEnabled();
+
       let aiReplyRaw = null;
 
       if (useRouter) {
@@ -916,6 +960,7 @@ module.exports = (client) => {
         });
 
         if (!groqTry || groqTry.error) {
+          console.error('❌ Groq fetch/network error (all models):', groqTry?.error?.message || 'unknown');
           try {
             await safeReplyAsMuscleMB(message, {
               content: '⚠️ MB lag spike. One rep at a time—try again in a sec. ⏱️',
@@ -927,8 +972,20 @@ module.exports = (client) => {
 
         if (!groqTry.res.ok) {
           let hint = '⚠️ MB jammed the reps rack (API). Try again shortly. 🏋️';
-          if (groqTry.res.status === 429) hint = '⚠️ Rate limited. Short breather—then we rip again. ⏱️';
-          if (groqTry.res.status >= 500) hint = '⚠️ MB cloud cramps (server error). One more try soon. ☁️';
+          if (groqTry.res.status === 401 || groqTry.res.status === 403) {
+            hint = (message.author.id === Config.BOT_OWNER_ID)
+              ? '⚠️ MB auth error with Groq (401/403). Verify GROQ_API_KEY & project permissions.'
+              : '⚠️ MB auth blip. Coach is reloading plates. 🏋️';
+          } else if (groqTry.res.status === 429) {
+            hint = '⚠️ Rate limited. Short breather—then we rip again. ⏱️';
+          } else if (groqTry.res.status === 400 || groqTry.res.status === 404) {
+            hint = (message.author.id === Config.BOT_OWNER_ID)
+              ? `⚠️ Model issue (${groqTry.res.status}). Set GROQ_MODEL in Railway or rely on auto-discovery.`
+              : '⚠️ MB switched plates. One more shot. 🏋️';
+          } else if (groqTry.res.status >= 500) {
+            hint = '⚠️ MB cloud cramps (server error). One more try soon. ☁️';
+          }
+          console.error(`❌ Groq HTTP ${groqTry.res.status} on "${groqTry.model}": ${groqTry.bodyText?.slice(0, 400)}`);
           try { await safeReplyAsMuscleMB(message, { content: hint, allowedMentions: { parse: [] } }); } catch {}
           return;
         }
@@ -937,13 +994,23 @@ module.exports = (client) => {
           try { return JSON.parse(groqTry.bodyText); } catch { return null; }
         })();
 
-        if (!groqData || groqData.error) {
+        if (!groqData) {
+          console.error('❌ Groq returned non-JSON/empty:', groqTry.bodyText?.slice(0, 300));
           try {
             await safeReplyAsMuscleMB(message, {
               content: '⚠️ MB static noise… say that again or keep it simple. 📻',
               allowedMentions: { parse: [] }
             });
           } catch {}
+          return;
+        }
+
+        if (groqData.error) {
+          console.error('❌ Groq API error:', groqData.error);
+          const hint = (message.author.id === Config.BOT_OWNER_ID)
+            ? `⚠️ Groq error: ${groqData.error?.message || 'unknown'}. Check model access & payload size.`
+            : '⚠️ MB slipped on a banana peel (API error). One sec. 🍌';
+          try { await safeReplyAsMuscleMB(message, { content: hint, allowedMentions: { parse: [] } }); } catch {}
           return;
         }
 
@@ -977,7 +1044,8 @@ module.exports = (client) => {
 
         try {
           await safeReplyAsMuscleMB(message, { embeds: [embed], allowedMentions: { parse: [] } });
-        } catch {
+        } catch (err) {
+          console.warn('❌ MuscleMB embed reply error:', err.message);
           try { await safeReplyAsMuscleMB(message, { content: aiReply, allowedMentions: { parse: [] } }); } catch {}
         }
       } else {
@@ -995,8 +1063,9 @@ module.exports = (client) => {
           content: '⚠️ MuscleMB pulled a hammy 🦵. Try again soon.',
           allowedMentions: { parse: [] }
         });
-      } catch {}
+      } catch (fallbackErr) {
+        console.warn('❌ Fallback send error:', fallbackErr.message);
+      }
     }
   });
 };
-
