@@ -15,6 +15,19 @@ const {
 const ProfileStore = require('../listeners/musclemb/profileStore');
 const MemoryStore = require('../listeners/musclemb/memoryStore');
 
+/* ======================================================
+   CONFIG LIMITS (prevents "Invalid string length")
+====================================================== */
+const MBMEM_MAX_FACTS_RENDER = Number(process.env.MBMEM_MAX_FACTS_RENDER || 40);
+const MBMEM_MAX_TAGS_RENDER  = Number(process.env.MBMEM_MAX_TAGS_RENDER  || 40);
+const MBMEM_NOTE_LIMIT_DEFAULT = 4;
+
+// Hard cap any incoming string BEFORE regex/trim to avoid huge allocations
+const MBMEM_HARD_STR_CAP = Number(process.env.MBMEM_HARD_STR_CAP || 6000);
+
+// Chunk max size for embed fields
+const MBMEM_CHUNK_MAX = 900;
+
 function isOwnerOrAdmin(interaction) {
   try {
     const ownerId = String(process.env.BOT_OWNER_ID || '').trim();
@@ -41,32 +54,54 @@ function fmtRelDate(d) {
   }
 }
 
+/**
+ * Safe string normalizer:
+ * - Caps the raw string BEFORE regex
+ * - Replaces whitespace
+ * - Trims and final-length clamps
+ */
 function safeLine(s, max = 160) {
-  const t = String(s || '').replace(/\s+/g, ' ').trim();
+  let t = String(s || '');
+  if (!t) return '';
+  if (t.length > MBMEM_HARD_STR_CAP) t = t.slice(0, MBMEM_HARD_STR_CAP);
+  t = t.replace(/\s+/g, ' ').trim();
   if (!t) return '';
   return t.length > max ? t.slice(0, max - 1) + '…' : t;
 }
 
-function chunk(lines, maxChars = 900) {
+/**
+ * Chunk lines without expensive repeated concatenations.
+ * We track length numerically rather than repeatedly building big intermediate strings.
+ */
+function chunk(lines, maxChars = MBMEM_CHUNK_MAX) {
   const out = [];
-  let buf = '';
-  for (const l of lines) {
-    const add = (buf ? '\n' : '') + l;
-    if ((buf + add).length > maxChars) {
-      if (buf) out.push(buf);
-      buf = l;
+  let buf = [];
+  let len = 0;
+
+  for (const line of lines) {
+    const l = String(line || '');
+    const addLen = (buf.length ? 1 : 0) + l.length; // +1 for newline
+    if (len + addLen > maxChars) {
+      if (buf.length) out.push(buf.join('\n'));
+      buf = [l];
+      len = l.length;
     } else {
-      buf += add;
+      if (buf.length) len += 1; // newline
+      buf.push(l);
+      len += l.length;
     }
   }
-  if (buf) out.push(buf);
+
+  if (buf.length) out.push(buf.join('\n'));
   return out;
 }
 
 // Parse "k=v, k2=v2 | k3=v3" into [{key,value}]
 function parseFactsBlob(input, maxPairs = 12) {
-  const raw = String(input || '').trim();
+  let raw = String(input || '').trim();
   if (!raw) return [];
+
+  if (raw.length > MBMEM_HARD_STR_CAP) raw = raw.slice(0, MBMEM_HARD_STR_CAP);
 
   const parts = raw
     .split(/[\n,|]+/g)
@@ -88,8 +123,11 @@ function parseFactsBlob(input, maxPairs = 12) {
 
 // Parse "tag1, tag2 | tag3" into ["tag1","tag2"...]
 function parseTagsBlob(input, maxTags = 20) {
-  const raw = String(input || '').trim();
+  let raw = String(input || '').trim();
   if (!raw) return [];
+
+  if (raw.length > MBMEM_HARD_STR_CAP) raw = raw.slice(0, MBMEM_HARD_STR_CAP);
+
   const parts = raw
     .split(/[\n,|]+/g)
     .map(s => s.trim())
@@ -109,7 +147,6 @@ function parseTagsBlob(input, maxTags = 20) {
  * mbmem_modal:<guildId>:<targetId>:<actorId>:<stamp>
  */
 function makeModalId(guildId, targetId, actorId) {
-  // Keep it short and safe for customId limits
   const stamp = Date.now().toString(36);
   return `mbmem_modal:${guildId}:${targetId}:${actorId}:${stamp}`;
 }
@@ -163,7 +200,9 @@ async function applyEdits({ client, guildId, targetId, actingId, factsBlob, tags
   }
 
   const tags = parseTagsBlob(tagsBlob, 20);
-  const noteText = String(noteTextRaw || '').trim();
+
+  let noteText = String(noteTextRaw || '').trim();
+  if (noteText.length > MBMEM_HARD_STR_CAP) noteText = noteText.slice(0, MBMEM_HARD_STR_CAP);
 
   const ops = [];
 
@@ -203,11 +242,11 @@ async function applyEdits({ client, guildId, targetId, actingId, factsBlob, tags
   };
 }
 
-async function buildMemoryCardEmbed({ client, guildId, target, targetId, noteLimit = 4, showMeta = false, isAdmin = false }) {
-  const [facts, notes, tags, state] = await Promise.all([
+async function buildMemoryCardEmbed({ client, guildId, target, targetId, noteLimit = MBMEM_NOTE_LIMIT_DEFAULT, showMeta = false, isAdmin = false }) {
+  const [factsRaw, notesRaw, tagsRaw, state] = await Promise.all([
     ProfileStore.getFacts(client, guildId, targetId),
     ProfileStore.getNotes(client, guildId, targetId, noteLimit),
-    ProfileStore.getTags(client, guildId, targetId, 20),
+    ProfileStore.getTags(client, guildId, targetId, 100), // fetch more but render capped
     MemoryStore.getUserState(client, guildId, targetId),
   ]);
 
@@ -215,8 +254,15 @@ async function buildMemoryCardEmbed({ client, guildId, target, targetId, noteLim
   const lastActive = fmtRelMs(state?.last_active_ts);
   const lastPing = fmtRelMs(state?.last_ping_ts);
 
-  const factsLines = (facts || []).length
-    ? (facts || []).map(f => {
+  const facts = Array.isArray(factsRaw) ? factsRaw.slice(0, MBMEM_MAX_FACTS_RENDER) : [];
+  const tags = Array.isArray(tagsRaw) ? tagsRaw.slice(0, MBMEM_MAX_TAGS_RENDER) : [];
+  const notes = Array.isArray(notesRaw) ? notesRaw : [];
+
+  const factsOverflow = Math.max(0, (Array.isArray(factsRaw) ? factsRaw.length : 0) - facts.length);
+  const tagsOverflow  = Math.max(0, (Array.isArray(tagsRaw) ? tagsRaw.length : 0) - tags.length);
+
+  const factsLines = facts.length
+    ? facts.map(f => {
         const meta = showMeta && (f.updatedAt || f.updatedBy)
           ? ` _(upd ${fmtRelDate(f.updatedAt)}${f.updatedBy ? ` by <@${String(f.updatedBy)}>` : ''})_`
           : '';
@@ -224,19 +270,23 @@ async function buildMemoryCardEmbed({ client, guildId, target, targetId, noteLim
       })
     : ['_No facts stored._'];
 
-  const tagsInline = (tags || []).length
-    ? (tags || []).map(t => `\`${safeLine(t.tag, 24)}\``).join(' ')
+  if (factsOverflow > 0) factsLines.push(`_…and **${factsOverflow}** more facts_`);
+
+  const tagsInline = tags.length
+    ? tags.map(t => `\`${safeLine(t.tag, 24)}\``).join(' ')
     : '_No tags._';
 
-  const notesLines = (notes || []).length
-    ? (notes || []).map(n => {
+  const tagsSuffix = tagsOverflow > 0 ? `\n_…and **${tagsOverflow}** more tags_` : '';
+
+  const notesLines = notes.length
+    ? notes.map(n => {
         const meta = showMeta && n.createdBy ? ` _(by <@${String(n.createdBy)}>)_` : '';
         return `• **#${String(n.id)}** ${fmtRelDate(n.createdAt)}${meta} — ${safeLine(n.text, 220)}`;
       })
     : ['_No notes stored._'];
 
-  const factsChunks = chunk(factsLines, 900);
-  const notesChunks = chunk(notesLines, 900);
+  const factsChunks = chunk(factsLines, MBMEM_CHUNK_MAX);
+  const notesChunks = chunk(notesLines, MBMEM_CHUNK_MAX);
 
   const embed = new EmbedBuilder()
     .setColor('#9b59b6')
@@ -246,7 +296,7 @@ async function buildMemoryCardEmbed({ client, guildId, target, targetId, noteLim
       `${isAdmin ? ' • 🛡️ Admin' : ''}\n` +
       `🕒 Last active: ${lastActive} • 🏷️ Last ping: ${lastPing}`
     )
-    .addFields({ name: 'Tags', value: tagsInline, inline: false });
+    .addFields({ name: 'Tags', value: (tagsInline + tagsSuffix).slice(0, 1024), inline: false });
 
   if (factsChunks.length === 1) embed.addFields({ name: 'Facts', value: factsChunks[0], inline: false });
   else factsChunks.forEach((c, i) => embed.addFields({ name: i === 0 ? 'Facts' : `Facts (cont. ${i + 1})`, value: c, inline: false }));
@@ -259,8 +309,7 @@ async function buildMemoryCardEmbed({ client, guildId, target, targetId, noteLim
 }
 
 /**
- * ✅ Global modal handler (optional; router can call this)
- * If you use interactionCreate router, it can call this function directly.
+ * ✅ Global modal handler (optional; your interactionCreate router may call applyEdits directly)
  */
 async function handleModalSubmit(interaction, client) {
   try {
@@ -401,8 +450,8 @@ module.exports = {
         return;
       }
 
-      // ✅ Ensure services can use client.pg
-      if (!client.pg && db?.query) client.pg = db;
+      // Make sure stores can use client.pg
+      if (!client.pg) client.pg = db;
 
       await ProfileStore.ensureSchema(client);
       await MemoryStore.ensureSchema(client);
@@ -442,7 +491,6 @@ module.exports = {
           )
           .setFooter({ text: 'Tip: In modal, start tags with ! to replace all tags.' });
 
-        // ✅ Include panel ownership inside customId (short + safe)
         const ownerUserId = String(interaction.user.id);
         const token = `${guildId}:${targetId}:${ownerUserId}`;
 
@@ -463,17 +511,11 @@ module.exports = {
 
         const row = new ActionRowBuilder().addComponents(btnEdit, btnOpt, btnView);
 
-        // ✅ fetchReply deprecated in newer djs; use withResponse when available, fallback
-        let panelMsg = null;
-        try {
-          const res = await interaction.reply({ embeds: [embed], components: [row], ephemeral, fetchReply: true }).catch(() => null);
-          panelMsg = res || null;
-        } catch {
-          panelMsg = await interaction.fetchReply().catch(() => null);
-        }
+        // ✅ Avoid deprecated fetchReply option
+        await interaction.reply({ embeds: [embed], components: [row], ephemeral }).catch(() => {});
+        const panelMsg = await interaction.fetchReply().catch(() => null);
         if (!panelMsg) return;
 
-        // ✅ Collector is the stable way (no while loop)
         const collector = panelMsg.createMessageComponentCollector({
           componentType: ComponentType.Button,
           time: 60_000,
@@ -482,9 +524,7 @@ module.exports = {
         collector.on('collect', async (btn) => {
           try {
             const cid = String(btn.customId || '');
-
-            // Only allow the original user to use the panel
-            const parts = cid.split(':'); // mbmem_btn_kind:guild:target:owner
+            const parts = cid.split(':');
             const kind = parts[0] || '';
             const gid = parts[1] || '';
             const tid = parts[2] || '';
@@ -501,8 +541,6 @@ module.exports = {
             }
 
             if (kind === 'mbmem_btn_edit') {
-              // ✅ ACK the button interaction before showing modal to avoid any timeout edges
-              // NOTE: showModal itself is the acknowledgement; do NOT deferReply/deferUpdate first.
               const modalId = makeModalId(guildId, targetId, ownerUserId);
               const modal = buildEditModal({ modalId, targetUsername: target.username });
               await btn.showModal(modal).catch(async () => {
@@ -531,7 +569,7 @@ module.exports = {
                 guildId,
                 target,
                 targetId,
-                noteLimit: 4,
+                noteLimit: MBMEM_NOTE_LIMIT_DEFAULT,
                 showMeta: Boolean(admin),
                 isAdmin: Boolean(admin),
               });
@@ -541,7 +579,7 @@ module.exports = {
 
             await btn.reply({ content: '⚠️ Unknown action.', ephemeral: true }).catch(() => {});
           } catch (e) {
-            console.warn('⚠️ /mbmem panel collector error:', e?.message || String(e));
+            console.warn('⚠️ /mbmem panel collector error:', e?.stack || e?.message || String(e));
             try {
               if (!btn.deferred && !btn.replied) {
                 await btn.reply({ content: '⚠️ Action failed.', ephemeral: true }).catch(() => {});
@@ -646,7 +684,7 @@ module.exports = {
         const publicFlag = Boolean(interaction.options.getBoolean('public') || false);
         const ephemeral = publicFlag ? false : true;
 
-        const noteLimit = Math.max(1, Math.min(10, Number(interaction.options.getInteger('notes') || 4)));
+        const noteLimit = Math.max(1, Math.min(10, Number(interaction.options.getInteger('notes') || MBMEM_NOTE_LIMIT_DEFAULT)));
 
         const embed = await buildMemoryCardEmbed({
           client,
@@ -659,30 +697,6 @@ module.exports = {
         });
 
         await interaction.reply({ embeds: [embed], ephemeral });
-        return;
-      }
-
-      // ===================== OPTIN =====================
-      if (group === 'optin' && sub === 'set') {
-        const enabled = Boolean(interaction.options.getBoolean('enabled', true));
-        const target = interaction.options.getUser('user') || interaction.user;
-        const targetId = String(target.id);
-
-        const actingId = String(interaction.user.id);
-        const managingSelf = targetId === actingId;
-
-        if (!managingSelf && !admin) {
-          await interaction.reply({ content: '⛔ Admin only to set opt-in for other users.', ephemeral: true });
-          return;
-        }
-
-        const ok = await MemoryStore.setOptIn(client, guildId, targetId, enabled);
-        await interaction.reply({
-          content: ok
-            ? `✅ Awareness opt-in for <@${targetId}> is now **${enabled ? 'ON' : 'OFF'}**.`
-            : `⚠️ Failed to set opt-in.`,
-          ephemeral: true
-        });
         return;
       }
 
