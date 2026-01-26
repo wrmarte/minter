@@ -1,6 +1,6 @@
 // listeners/muscleMBListener.js
 // ======================================================
-// MuscleMB Listener (TRUE MODULAR VERSION)
+// MuscleMB Listener (TRUE MODULAR VERSION) — PATCHED
 // - Behavior preserved
 // - Logic split into small editable modules
 // - ✅ DB memory + awareness pings + multi-model routing (optional)
@@ -8,6 +8,13 @@
 // - ✅ Injects opt-in + last active snapshot (lightweight)
 // - ✅ Safe attach guard (prevents duplicate event listeners if required twice)
 // - ✅ Profile schema guard (prevents repeated CREATE TABLE checks)
+// - ✅ PATCH: follow-up replies more reliable (fetch referenced message if not cached)
+// - ✅ PATCH: history fetch cache to reduce Discord API calls/latency
+// - ✅ PATCH: throttle DB activity writes (prevents PG spam/lag)
+// - ✅ PATCH: prune long-lived Maps to prevent memory growth
+// - ✅ PATCH: nicer channel selection for nice pings (most recently active channel)
+// - ✅ PATCH: safer trigger stripping (word-boundary when possible)
+// - ✅ PATCH: prompt ordering (guards earlier; memory & context still used)
 // ======================================================
 
 const { EmbedBuilder } = require('discord.js');
@@ -47,6 +54,9 @@ const MB_GROQ_HISTORY_TURNS = Math.max(0, Math.min(16, Number(process.env.MB_GRO
 const MB_GROQ_HISTORY_MAX_CHARS = Math.max(120, Math.min(1200, Number(process.env.MB_GROQ_HISTORY_MAX_CHARS || '650'))); // per message
 const MB_GROQ_DEBUG_CONTEXT = String(process.env.MB_GROQ_DEBUG_CONTEXT || '').trim() === '1';
 
+// ✅ PATCH: cache channel history fetch to reduce latency / Discord API calls
+const MB_GROQ_HISTORY_CACHE_MS = Math.max(0, Math.min(30_000, Number(process.env.MB_GROQ_HISTORY_CACHE_MS || '7000')));
+
 // ======================================================
 // ✅ Typing indicator control
 // Default OFF to prevent lingering bubble.
@@ -68,13 +78,30 @@ const MB_FOLLOWUP_WINDOW_MS = Math.max(10_000, Math.min(180_000, Number(process.
 const MB_COOLDOWN_MS = Math.max(1500, Math.min(30_000, Number(process.env.MB_COOLDOWN_MS || '10000')));
 
 // ======================================================
+// ✅ PATCH: DB activity write throttle
+// - Prevents PG spam on busy servers.
+// - Track every message in RAM, but write to DB at most every X ms per user.
+// ======================================================
+const MB_ACTIVITY_WRITE_MIN_MS = Math.max(5_000, Math.min(10 * 60_000, Number(process.env.MB_ACTIVITY_WRITE_MIN_MS || '60000')));
+
+// ======================================================
+// ✅ PATCH: Map pruning (prevents memory growth over weeks)
+// ======================================================
+const MB_PRUNE_EVERY_MS = Math.max(30_000, Math.min(60 * 60_000, Number(process.env.MB_PRUNE_EVERY_MS || '600000'))); // default 10 min
+const MB_ACTIVE_RETENTION_MS = Math.max(60_000, Math.min(30 * 24 * 60 * 60_000, Number(process.env.MB_ACTIVE_RETENTION_MS || String(7 * 24 * 60 * 60_000)))); // default 7 days
+
+// ======================================================
 // Debug toggles
 // ======================================================
 const MB_PROFILE_DEBUG = String(process.env.MB_PROFILE_DEBUG || (Config.MB_PROFILE_DEBUG ? '1' : '0')).trim() === '1';
 const MB_FOLLOWUP_DEBUG = String(process.env.MB_FOLLOWUP_DEBUG || '0').trim() === '1';
+const MB_PRUNE_DEBUG = String(process.env.MB_PRUNE_DEBUG || '0').trim() === '1';
+const MB_ACTIVITY_DEBUG = String(process.env.MB_ACTIVITY_DEBUG || '0').trim() === '1';
 
 function logFollowup(...args) { if (MB_FOLLOWUP_DEBUG) console.log('[MB_FOLLOWUP]', ...args); }
 function logProfile(...args) { if (MB_PROFILE_DEBUG) console.log('[MB_PROFILE]', ...args); }
+function logPrune(...args) { if (MB_PRUNE_DEBUG) console.log('[MB_PRUNE]', ...args); }
+function logActivity(...args) { if (MB_ACTIVITY_DEBUG) console.log('[MB_ACTIVITY]', ...args); }
 
 // ======================================================
 // ✅ Mention humanizer (shows names but prevents pings)
@@ -139,6 +166,18 @@ function safeNameFromMessage(message, userId, fallback = null) {
 }
 
 // ======================================================
+// ✅ Small helpers
+// ======================================================
+function escapeRegExp(s) {
+  return String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function looksWordish(s) {
+  // If it is mostly letters/numbers/underscore (spaces allowed), we can safely word-boundary it.
+  return /^[a-z0-9_\s]+$/i.test(String(s || '').trim());
+}
+
+// ======================================================
 // ✅ Build profile memory block to inject into system prompt
 // - Adds owner/admin override for author if opt-in is required
 // ======================================================
@@ -160,7 +199,7 @@ async function buildProfileMemoryBlock(client, message) {
     if (Config.MB_PROFILE_REQUIRE_OPTIN) {
       const ok = await MemoryStore.userIsOptedIn(client, guildId, authorId);
 
-      // ✅ Owner/Admin override for *author only* so you can debug / run your bot without needing opt-in toggles
+      // ✅ Owner/Admin override for *author only*
       const authorIsAdmin = Boolean(isOwnerOrAdmin(message));
       if (!ok && !authorIsAdmin) {
         if (MB_PROFILE_DEBUG) logProfile(`author opted_out guild=${guildId} user=${authorId} (require optin=true)`);
@@ -228,7 +267,6 @@ async function buildProfileMemoryBlock(client, message) {
 
     const authorName = safeNameFromMessage(message, authorId, message.author?.username || 'User');
 
-    // ✅ These formatters live in ProfileStore; if they return empty, memory looks "missing"
     const authorSummary = ProfileStore.formatFactsInline(authorFacts, Config.MB_PROFILE_MAX_KEYS);
     const authorNotesTxt = ProfileStore.formatNotesInline(authorNotes, Config.MB_PROFILE_MAX_NOTES);
     const authorTagsTxt = (typeof ProfileStore.formatTagsInline === 'function')
@@ -304,34 +342,117 @@ module.exports = (client) => {
   // Follow-up tracking map (user+channel -> last bot reply ts)
   if (!State.__mbLastReplyByUserChannel) State.__mbLastReplyByUserChannel = new Map();
 
+  // ✅ PATCH: activity write throttle map
+  if (!State.__mbLastActivityWriteByUser) State.__mbLastActivityWriteByUser = new Map();
+
+  // ✅ PATCH: history cache map
+  if (!State.__mbHistoryCacheByChannel) State.__mbHistoryCacheByChannel = new Map();
+
   function followupKey(message) {
     return `${message.guild?.id || 'noguild'}:${message.channel?.id || 'noch'}:${message.author?.id || 'nouser'}`;
   }
 
-  function isReplyToThisBot(message) {
+  function activityKey(message) {
+    return `${message.guild?.id || 'noguild'}:${message.author?.id || 'nouser'}`;
+  }
+
+  // ======================================================
+  // ✅ PATCH: prune long-lived maps (prevents slow creep)
+  // ======================================================
+  setInterval(() => {
     try {
-      // discord.js sets repliedUser when the message is a reply
+      const now = Date.now();
+
+      // lastActiveByUser is keyed: guildId:userId
+      try {
+        const before = State.lastActiveByUser?.size || 0;
+        for (const [k, info] of (State.lastActiveByUser || new Map()).entries()) {
+          const ts = Number(info?.ts || 0);
+          if (!Number.isFinite(ts) || ts <= 0 || (now - ts) > MB_ACTIVE_RETENTION_MS) {
+            State.lastActiveByUser.delete(k);
+          }
+        }
+        const after = State.lastActiveByUser?.size || 0;
+        if (MB_PRUNE_DEBUG && before !== after) logPrune(`lastActiveByUser ${before} -> ${after}`);
+      } catch {}
+
+      // follow-up map: prune entries older than window + 60s
+      try {
+        const cutoff = MB_FOLLOWUP_WINDOW_MS + 60_000;
+        const before = State.__mbLastReplyByUserChannel?.size || 0;
+        for (const [k, ts] of (State.__mbLastReplyByUserChannel || new Map()).entries()) {
+          const n = Number(ts || 0);
+          if (!Number.isFinite(n) || n <= 0 || (now - n) > cutoff) {
+            State.__mbLastReplyByUserChannel.delete(k);
+          }
+        }
+        const after = State.__mbLastReplyByUserChannel?.size || 0;
+        if (MB_PRUNE_DEBUG && before !== after) logPrune(`__mbLastReplyByUserChannel ${before} -> ${after}`);
+      } catch {}
+
+      // activity throttle map: prune old
+      try {
+        const cutoff = Math.max(5 * MB_ACTIVITY_WRITE_MIN_MS, 10 * 60_000);
+        const before = State.__mbLastActivityWriteByUser?.size || 0;
+        for (const [k, ts] of (State.__mbLastActivityWriteByUser || new Map()).entries()) {
+          const n = Number(ts || 0);
+          if (!Number.isFinite(n) || n <= 0 || (now - n) > cutoff) {
+            State.__mbLastActivityWriteByUser.delete(k);
+          }
+        }
+        const after = State.__mbLastActivityWriteByUser?.size || 0;
+        if (MB_PRUNE_DEBUG && before !== after) logPrune(`__mbLastActivityWriteByUser ${before} -> ${after}`);
+      } catch {}
+
+      // history cache: prune old
+      try {
+        const before = State.__mbHistoryCacheByChannel?.size || 0;
+        for (const [channelId, entry] of (State.__mbHistoryCacheByChannel || new Map()).entries()) {
+          const ts = Number(entry?.ts || 0);
+          if (!Number.isFinite(ts) || ts <= 0 || (now - ts) > Math.max(MB_GROQ_HISTORY_CACHE_MS * 3, 15_000)) {
+            State.__mbHistoryCacheByChannel.delete(channelId);
+          }
+        }
+        const after = State.__mbHistoryCacheByChannel?.size || 0;
+        if (MB_PRUNE_DEBUG && before !== after) logPrune(`__mbHistoryCacheByChannel ${before} -> ${after}`);
+      } catch {}
+    } catch {}
+  }, MB_PRUNE_EVERY_MS);
+
+  // ======================================================
+  // ✅ PATCH: more reliable "reply to bot" detection
+  // - Tries repliedUser, then cache, then fetch message reference (safe).
+  // ======================================================
+  async function isReplyToThisBot(message) {
+    try {
       const replied = message?.mentions?.repliedUser;
       if (replied && replied.id === client.user.id) return true;
     } catch {}
-    // fallback: best-effort (some messages won’t have repliedUser hydrated)
+
     try {
-      if (message?.reference?.messageId) {
-        const mid = message.reference.messageId;
+      const mid = message?.reference?.messageId;
+      if (!mid) return false;
+
+      // cache first
+      try {
         const cached = message.channel?.messages?.cache?.get?.(mid);
         if (cached?.author?.id === client.user.id) return true;
-      }
+      } catch {}
+
+      // fetch fallback (only if fetch exists)
+      try {
+        if (typeof message.channel?.messages?.fetch === 'function') {
+          const fetched = await message.channel.messages.fetch(mid).catch(() => null);
+          if (fetched?.author?.id === client.user.id) return true;
+        }
+      } catch {}
     } catch {}
+
     return false;
   }
 
-  function isFollowupMessage(message) {
+  function isFollowupRecent(message) {
     if (!MB_FOLLOWUP_ENABLED) return false;
-
-    // If user directly replied to MuscleMB message → always follow-up
-    if (isReplyToThisBot(message)) return true;
-
-    // If MuscleMB replied recently in this channel to this user → follow-up
     const k = followupKey(message);
     const last = State.__mbLastReplyByUserChannel.get(k) || 0;
     const ok = (Date.now() - last) <= MB_FOLLOWUP_WINDOW_MS;
@@ -347,14 +468,22 @@ module.exports = (client) => {
       const finalPayload = {
         ...payload,
         allowedMentions: payload.allowedMentions || { parse: [] },
-
-        username: Config.MUSCLEMB_WEBHOOK_NAME,
-        avatarURL: Config.MUSCLEMB_WEBHOOK_AVATAR || undefined,
       };
+
+      // Only attach webhook identity fields if your messaging layer supports webhookAuto sending.
+      // If safeReplyMessage ignores these, no harm; if it validates strictly, this prevents invalid form bodies.
+      const canWebhookIdentity =
+        Boolean(Config.MB_USE_WEBHOOKAUTO) &&
+        Boolean(client?.webhookAuto) &&
+        typeof client.webhookAuto.sendViaWebhook === 'function';
+
+      if (canWebhookIdentity) {
+        finalPayload.username = Config.MUSCLEMB_WEBHOOK_NAME;
+        finalPayload.avatarURL = Config.MUSCLEMB_WEBHOOK_AVATAR || undefined;
+      }
 
       const res = await safeReplyMessage(client, message, finalPayload);
 
-      // Record follow-up window on successful send
       if (res) {
         try {
           const k = followupKey(message);
@@ -407,7 +536,10 @@ module.exports = (client) => {
       const active = entries.filter(e => now - e.ts <= Config.NICE_ACTIVE_WINDOW_MS);
       if (!active.length) continue;
 
+      // ✅ PATCH: pick most recently active channel, not arbitrary first
+      active.sort((a, b) => (b.ts || 0) - (a.ts || 0));
       const preferredChannel = active[0]?.channelId || null;
+
       const channel = findSpeakableChannel(guild, preferredChannel);
       if (!channel) continue;
 
@@ -425,8 +557,16 @@ module.exports = (client) => {
             const ok = await safeSendChannel(client, channel, {
               content: awareness.content,
               allowedMentions: awareness.allowedMentions || { parse: [] },
-              username: Config.MUSCLEMB_WEBHOOK_NAME,
-              avatarURL: Config.MUSCLEMB_WEBHOOK_AVATAR || undefined,
+
+              // prefer webhook identity only if your messaging layer supports it
+              ...(Boolean(Config.MB_USE_WEBHOOKAUTO) &&
+                Boolean(client?.webhookAuto) &&
+                typeof client.webhookAuto.sendViaWebhook === 'function'
+                ? {
+                  username: Config.MUSCLEMB_WEBHOOK_NAME,
+                  avatarURL: Config.MUSCLEMB_WEBHOOK_AVATAR || undefined,
+                }
+                : {}),
             });
 
             if (ok) {
@@ -456,8 +596,15 @@ module.exports = (client) => {
         const ok = await safeSendChannel(client, channel, {
           content: outLine,
           allowedMentions: { parse: [] },
-          username: Config.MUSCLEMB_WEBHOOK_NAME,
-          avatarURL: Config.MUSCLEMB_WEBHOOK_AVATAR || undefined,
+
+          ...(Boolean(Config.MB_USE_WEBHOOKAUTO) &&
+            Boolean(client?.webhookAuto) &&
+            typeof client.webhookAuto.sendViaWebhook === 'function'
+            ? {
+              username: Config.MUSCLEMB_WEBHOOK_NAME,
+              avatarURL: Config.MUSCLEMB_WEBHOOK_AVATAR || undefined,
+            }
+            : {}),
         });
 
         if (ok) {
@@ -472,8 +619,24 @@ module.exports = (client) => {
   client.on('messageCreate', async (message) => {
     if (message.author.bot || !message.guild) return;
 
-    // ✅ lightweight memory log (won’t crash if pg missing)
-    try { await MemoryStore.trackActivity(client, message); } catch {}
+    // ✅ PATCH: throttle DB activity writes to avoid PG spam/lag
+    // Still updates RAM lastActive always.
+    try {
+      const k = activityKey(message);
+      const lastWrite = Number(State.__mbLastActivityWriteByUser.get(k) || 0);
+      const now = Date.now();
+      const shouldWrite = !Number.isFinite(lastWrite) || lastWrite <= 0 || (now - lastWrite) >= MB_ACTIVITY_WRITE_MIN_MS;
+
+      if (shouldWrite) {
+        State.__mbLastActivityWriteByUser.set(k, now);
+        try {
+          await MemoryStore.trackActivity(client, message);
+          if (MB_ACTIVITY_DEBUG) logActivity(`wrote activity guild=${message.guild.id} user=${message.author.id}`);
+        } catch {}
+      } else {
+        if (MB_ACTIVITY_DEBUG) logActivity(`skipped activity write (throttle) guild=${message.guild.id} user=${message.author.id}`);
+      }
+    } catch {}
 
     State.lastActiveByUser.set(`${message.guild.id}:${message.author.id}`, {
       ts: Date.now(),
@@ -549,11 +712,24 @@ module.exports = (client) => {
     }
 
     // ======================================================
-    // ✅ Main AI trigger gate + Follow-up override
+    // ✅ Main AI trigger gate + Follow-up override (PATCHED)
+    // - Now more reliable: will fetch referenced message if needed.
     // ======================================================
     const botMentioned = message.mentions.has(client.user);
     const hasTriggerWord = Config.TRIGGERS.some(trigger => lowered.includes(trigger));
-    const isFollowup = isFollowupMessage(message);
+
+    // Follow-up: check reply-to-bot + recent followup window
+    let isFollowup = false;
+    try {
+      if (MB_FOLLOWUP_ENABLED) {
+        const replied = await isReplyToThisBot(message);
+        if (replied) {
+          isFollowup = true;
+        } else if (isFollowupRecent(message)) {
+          isFollowup = true;
+        }
+      }
+    } catch {}
 
     if (!hasTriggerWord && !botMentioned && !isFollowup) return;
 
@@ -572,7 +748,7 @@ module.exports = (client) => {
 
     const isOwner = message.author.id === Config.BOT_OWNER_ID;
 
-    // Cooldown: allow follow-ups to bypass (fixes "I asked again and nothing happened")
+    // Cooldown: allow follow-ups to bypass
     if (!isFollowup && State.cooldown.has(message.author.id) && !isOwner) return;
     State.cooldown.add(message.author.id);
     setTimeout(() => State.cooldown.delete(message.author.id), MB_COOLDOWN_MS);
@@ -580,11 +756,27 @@ module.exports = (client) => {
     // Clean input
     let cleanedInput = (message.content || '').trim();
 
-    // Only strip triggers when they were used (don’t mangle follow-up messages)
+    // ✅ PATCH: safer trigger stripping
+    // - Word-boundary strip for word-like triggers
+    // - Otherwise strip raw string occurrences
     if (hasTriggerWord) {
       for (const trigger of Config.TRIGGERS) {
-        try { cleanedInput = cleanedInput.replaceAll(new RegExp(trigger, 'ig'), ''); } catch {}
-        try { cleanedInput = cleanedInput.replaceAll(trigger, ''); } catch {}
+        const t = String(trigger || '').trim();
+        if (!t) continue;
+
+        try {
+          if (looksWordish(t)) {
+            const re = new RegExp(`\\b${escapeRegExp(t)}\\b`, 'ig');
+            cleanedInput = cleanedInput.replace(re, '');
+          } else {
+            // fallback: remove exact token-ish chunks
+            const re2 = new RegExp(escapeRegExp(t), 'ig');
+            cleanedInput = cleanedInput.replace(re2, '');
+          }
+        } catch {}
+
+        // also try literal replaceAll best-effort
+        try { cleanedInput = cleanedInput.replaceAll(t, ''); } catch {}
       }
     }
 
@@ -664,8 +856,8 @@ module.exports = (client) => {
       // ✅ Inject profile memory block (admin-curated) if enabled
       const profileBlock = await buildProfileMemoryBlock(client, message);
 
-      // Put memory early so the model uses it
-      const fullSystemPrompt = [systemPrompt, profileBlock, recentContext, softGuard]
+      // ✅ PATCH: prompt ordering — guard early, then memory/context
+      const fullSystemPrompt = [systemPrompt, softGuard, profileBlock, recentContext]
         .filter(Boolean)
         .join('\n\n');
 
@@ -676,15 +868,29 @@ module.exports = (client) => {
       if (isRoastingBot) temperature = 0.75;
 
       // ======================================================
-      // ✅ Pass real Discord chat context via extraMessages
+      // ✅ Pass real Discord chat context via extraMessages (PATCHED)
+      // - Uses channel history cache to reduce Discord API calls.
       // ======================================================
       let extraMessages = [];
       try {
         if (MB_GROQ_HISTORY_LIMIT > 0 && message.channel?.messages?.fetch) {
-          const fetched = await message.channel.messages.fetch({ limit: MB_GROQ_HISTORY_LIMIT }).catch(() => null);
-          const arr = fetched ? Array.from(fetched.values()) : [];
+          const channelId = message.channel.id;
+          const now = Date.now();
 
-          const cleaned = arr
+          let arr = null;
+          const cached = State.__mbHistoryCacheByChannel.get(channelId);
+          if (cached && (now - Number(cached.ts || 0)) <= MB_GROQ_HISTORY_CACHE_MS && Array.isArray(cached.arr)) {
+            arr = cached.arr;
+          } else {
+            const fetched = await message.channel.messages.fetch({ limit: MB_GROQ_HISTORY_LIMIT }).catch(() => null);
+            const values = fetched ? Array.from(fetched.values()) : [];
+
+            // store raw message objects briefly; safe for short cache windows
+            arr = values;
+            State.__mbHistoryCacheByChannel.set(channelId, { ts: now, arr });
+          }
+
+          const cleaned = (arr || [])
             .filter(m => m && m.id !== message.id)
             .filter(m => typeof m.content === 'string' && m.content.trim().length > 0)
             .filter(m => (!m.author?.bot) || (m.author.id === client.user.id))
@@ -713,7 +919,7 @@ module.exports = (client) => {
           extraMessages = cleaned.slice(-MB_GROQ_HISTORY_TURNS);
 
           if (MB_GROQ_DEBUG_CONTEXT) {
-            console.log(`[MB_GROQ_CONTEXT] guild=${message.guild.id} channel=${message.channel.id} extraMessages=${extraMessages.length}`);
+            console.log(`[MB_GROQ_CONTEXT] guild=${message.guild.id} channel=${message.channel.id} extraMessages=${extraMessages.length} cache=${Boolean(cached) ? 'hit' : 'miss'}`);
           }
         }
       } catch (ctxErr) {
