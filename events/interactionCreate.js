@@ -38,6 +38,11 @@ const OPENAI_MODEL = (process.env.OPENAI_MODEL || 'gpt-4o-mini').trim();
 module.exports = (client, pg) => {
   const guildNameCache = new Map();
 
+  // ✅ Ensure client.pg exists (many services rely on this)
+  try {
+    if (!client.pg && pg?.query) client.pg = pg;
+  } catch {}
+
   // INTERACTION HANDLER
   client.on('interactionCreate', async interaction => {
     /* ======================================================
@@ -69,15 +74,14 @@ module.exports = (client, pg) => {
 
     /* ======================================================
        ✅ MBMEM: MODAL SUBMIT ROUTER (must be early)
-       - FIXES "Interaction failed" by ACK'ing immediately
        - Handles customId like: mbmem_modal:<guildId>:<targetId>:<actorId>:<stamp>
-       - Calls commands/mbmem.js applyEdits(...)
+       - Prefer command registry (client.commands), fallback to require
        ====================================================== */
     if (interaction.isModalSubmit() && String(interaction.customId || '').startsWith('mbmem_modal:')) {
       const cid = String(interaction.customId || '');
       if (IC_DEBUG) log('[MBMEM] modal submit received:', cid);
 
-      // ✅ ACK FAST (this is the key fix)
+      // ✅ ACK FAST (prevents "Interaction failed")
       await interaction.deferReply({ ephemeral: true }).catch(() => null);
 
       try {
@@ -111,24 +115,33 @@ module.exports = (client, pg) => {
           return;
         }
 
+        // ✅ Ensure DB is reachable (and client.pg set)
         const pgx = client?.pg || pg;
         if (!pgx?.query) {
           await interaction.editReply('⚠️ DB not ready. Try again in a moment.').catch(() => null);
           return;
         }
+        try { if (!client.pg && pgx?.query) client.pg = pgx; } catch {}
 
         const factsBlob = interaction.fields.getTextInputValue('facts') || '';
         const tagsBlobRaw = interaction.fields.getTextInputValue('tags') || '';
         const noteTextRaw = interaction.fields.getTextInputValue('note') || '';
 
-        // ✅ Safe require to avoid crash if path changes
-        let mbmem = null;
-        try {
-          mbmem = require('../commands/mbmem');
-        } catch (e) {
-          mbmem = null;
+        // ✅ Prefer the registered command module (no require cache surprises)
+        let mbmem = interaction.client.commands.get('mbmem');
+
+        // fallback to require if command registry missing for any reason
+        if (!mbmem) {
+          try { mbmem = require('../commands/mbmem'); } catch { mbmem = null; }
         }
 
+        // If command exposes handleModalSubmit, let it run it (cleanest)
+        if (mbmem && typeof mbmem.handleModalSubmit === 'function') {
+          const handled = await mbmem.handleModalSubmit(interaction, client);
+          if (handled) return; // it replied/edited already
+        }
+
+        // Otherwise fallback to applyEdits
         if (!mbmem || typeof mbmem.applyEdits !== 'function') {
           await interaction.editReply('⚠️ MBMEM handler not available (applyEdits missing).').catch(() => null);
           return;
@@ -230,8 +243,6 @@ module.exports = (client, pg) => {
             const chain = (network || 'base').toLowerCase();
             let tokenIds = [];
 
-            // NOTE: This block still uses Reservoir for ETH token IDs. If Reservoir is blocked on Railway,
-            // you may want to swap this later to OpenSea/Moralis too. Not touching here to avoid breaking.
             if (chain === 'eth') {
               try {
                 const resv = await fetch(`https://api.reservoir.tools/tokens/v6?collection=${address}&limit=100&sortBy=floorAskPrice`, { headers: { 'x-api-key': process.env.RESERVOIR_API_KEY } });
@@ -348,8 +359,6 @@ module.exports = (client, pg) => {
 
     /* ======================================================
        ✅ LURKER: BUTTON ROUTER (Buy / Ignore)
-       - Primary: services/lurker/lurkerInteractions.js
-       - Fallback: inline DB markSeen (so it still works even if module missing)
        ====================================================== */
     if (
       interaction.isButton() &&
@@ -362,7 +371,6 @@ module.exports = (client, pg) => {
           if (handled) return;
         }
 
-        // INLINE FALLBACK (no module found)
         const parts = String(interaction.customId).split(':'); // lurker_ignore:ruleId:listingId
         const action = parts[0];
         const ruleId = Number(parts[1]);
@@ -373,7 +381,6 @@ module.exports = (client, pg) => {
           return;
         }
 
-        // Mark seen to prevent repeats
         const pgx = client.pg;
         if (!pgx?.query) {
           await interaction.reply({ content: '⚠️ DB not ready for Lurker.', ephemeral: true }).catch(() => null);
@@ -403,10 +410,10 @@ module.exports = (client, pg) => {
           }
         } catch {}
       }
-      return; // ensure we don’t fall through
+      return;
     }
 
-    // ✅ UntrackMintPlus button router (clickable Untrack buttons)
+    // ✅ UntrackMintPlus button router
     if (interaction.isButton() && interaction.customId.startsWith('untrackmintplus:')) {
       if (IC_DEBUG) log('[UNTRACKMINTPLUS] button:', interaction.customId);
       try {
@@ -426,7 +433,7 @@ module.exports = (client, pg) => {
           }
         } catch {}
       }
-      return; // ensure we don’t fall through to command handler
+      return;
     }
 
     if (interaction.isButton() && interaction.customId === 'test_welcome_button') {
@@ -470,7 +477,6 @@ module.exports = (client, pg) => {
     if (!command) return;
 
     try {
-      /* ✅ NEW: /lurker must receive (interaction, client) (NOT {pg}) */
       if (interaction.commandName === 'lurker') {
         if (IC_DEBUG) log('[LURKER] slash command');
         await command.execute(interaction, client);
@@ -493,9 +499,6 @@ module.exports = (client, pg) => {
 
   // ======================================================
   // ✅ LEGACY MUSCLEMB TEXT TRIGGER (OPTIONAL)
-  // Default OFF. Your true brain is listeners/musclemb.js.
-  // Enable only if you explicitly want this old behavior:
-  //   MUSCLEMB_LEGACY_TEXT_TRIGGER=1
   // ======================================================
   client.on('messageCreate', async (message) => {
     if (!MUSCLEMB_LEGACY_TEXT_TRIGGER) return;
