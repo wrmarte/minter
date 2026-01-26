@@ -9,6 +9,7 @@ const {
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
+  ComponentType,
 } = require('discord.js');
 
 const ProfileStore = require('../listeners/musclemb/profileStore');
@@ -108,6 +109,7 @@ function parseTagsBlob(input, maxTags = 20) {
  * mbmem_modal:<guildId>:<targetId>:<actorId>:<stamp>
  */
 function makeModalId(guildId, targetId, actorId) {
+  // Keep it short and safe for customId limits
   const stamp = Date.now().toString(36);
   return `mbmem_modal:${guildId}:${targetId}:${actorId}:${stamp}`;
 }
@@ -257,7 +259,8 @@ async function buildMemoryCardEmbed({ client, guildId, target, targetId, noteLim
 }
 
 /**
- * ✅ Global modal handler (called by interactionCreate router)
+ * ✅ Global modal handler (optional; router can call this)
+ * If you use interactionCreate router, it can call this function directly.
  */
 async function handleModalSubmit(interaction, client) {
   try {
@@ -280,7 +283,6 @@ async function handleModalSubmit(interaction, client) {
       return true;
     }
 
-    // only the actor who opened the modal can submit it
     if (String(interaction.user?.id || '') !== String(actorId)) {
       await interaction.reply({ content: '⛔ This modal is not yours. Re-open /mbmem.', ephemeral: true }).catch(() => {});
       return true;
@@ -368,60 +370,6 @@ module.exports = {
     )
 
     .addSubcommandGroup(g =>
-      g.setName('fact')
-        .setDescription('Manage facts (key/value)')
-        .addSubcommand(sc =>
-          sc.setName('set')
-            .setDescription('Set a fact: key=value')
-            .addUserOption(o => o.setName('user').setDescription('Target user').setRequired(true))
-            .addStringOption(o => o.setName('key').setDescription('Fact key (ex: role, wallet)').setRequired(true))
-            .addStringOption(o => o.setName('value').setDescription('Fact value').setRequired(true))
-        )
-        .addSubcommand(sc =>
-          sc.setName('del')
-            .setDescription('Delete a fact by key')
-            .addUserOption(o => o.setName('user').setDescription('Target user').setRequired(true))
-            .addStringOption(o => o.setName('key').setDescription('Fact key').setRequired(true))
-        )
-    )
-    .addSubcommandGroup(g =>
-      g.setName('note')
-        .setDescription('Manage notes (timestamped)')
-        .addSubcommand(sc =>
-          sc.setName('add')
-            .setDescription('Add a note')
-            .addUserOption(o => o.setName('user').setDescription('Target user').setRequired(true))
-            .addStringOption(o => o.setName('text').setDescription('Note text').setRequired(true))
-        )
-        .addSubcommand(sc =>
-          sc.setName('del')
-            .setDescription('Delete a note by id')
-            .addUserOption(o => o.setName('user').setDescription('Target user').setRequired(true))
-            .addStringOption(o => o.setName('id').setDescription('Note id (from view)').setRequired(true))
-        )
-    )
-    .addSubcommandGroup(g =>
-      g.setName('tag')
-        .setDescription('Manage tags (labels)')
-        .addSubcommand(sc =>
-          sc.setName('add')
-            .setDescription('Add a tag (vip, whale, builder...)')
-            .addUserOption(o => o.setName('user').setDescription('Target user').setRequired(true))
-            .addStringOption(o => o.setName('tag').setDescription('Tag').setRequired(true))
-        )
-        .addSubcommand(sc =>
-          sc.setName('del')
-            .setDescription('Remove a tag')
-            .addUserOption(o => o.setName('user').setDescription('Target user').setRequired(true))
-            .addStringOption(o => o.setName('tag').setDescription('Tag').setRequired(true))
-        )
-        .addSubcommand(sc =>
-          sc.setName('clear')
-            .setDescription('Clear all tags for a user')
-            .addUserOption(o => o.setName('user').setDescription('Target user').setRequired(true))
-        )
-    )
-    .addSubcommandGroup(g =>
       g.setName('optin')
         .setDescription('Awareness opt-in controls')
         .addSubcommand(sc =>
@@ -452,6 +400,9 @@ module.exports = {
         await interaction.reply({ content: '⚠️ DB not ready. Try again in a moment.', ephemeral: true });
         return;
       }
+
+      // ✅ Ensure services can use client.pg
+      if (!client.pg && db?.query) client.pg = db;
 
       await ProfileStore.ensureSchema(client);
       await MemoryStore.ensureSchema(client);
@@ -491,52 +442,76 @@ module.exports = {
           )
           .setFooter({ text: 'Tip: In modal, start tags with ! to replace all tags.' });
 
+        // ✅ Include panel ownership inside customId (short + safe)
+        const ownerUserId = String(interaction.user.id);
+        const token = `${guildId}:${targetId}:${ownerUserId}`;
+
         const btnEdit = new ButtonBuilder()
-          .setCustomId('mbmem_btn_edit')
+          .setCustomId(`mbmem_btn_edit:${token}`)
           .setLabel('Edit (Modal)')
           .setStyle(ButtonStyle.Primary);
 
         const btnOpt = new ButtonBuilder()
-          .setCustomId('mbmem_btn_opt')
+          .setCustomId(`mbmem_btn_opt:${token}`)
           .setLabel('Toggle Opt-in')
           .setStyle(ButtonStyle.Secondary);
 
         const btnView = new ButtonBuilder()
-          .setCustomId('mbmem_btn_view')
+          .setCustomId(`mbmem_btn_view:${token}`)
           .setLabel('View Card')
           .setStyle(ButtonStyle.Success);
 
         const row = new ActionRowBuilder().addComponents(btnEdit, btnOpt, btnView);
 
-        await interaction.reply({ embeds: [embed], components: [row], ephemeral }).catch(() => {});
-        const panelMsg = await interaction.fetchReply().catch(() => null);
+        // ✅ fetchReply deprecated in newer djs; use withResponse when available, fallback
+        let panelMsg = null;
+        try {
+          const res = await interaction.reply({ embeds: [embed], components: [row], ephemeral, fetchReply: true }).catch(() => null);
+          panelMsg = res || null;
+        } catch {
+          panelMsg = await interaction.fetchReply().catch(() => null);
+        }
         if (!panelMsg) return;
 
-        const ownerUserId = String(interaction.user.id);
-        const endAt = Date.now() + 60000;
+        // ✅ Collector is the stable way (no while loop)
+        const collector = panelMsg.createMessageComponentCollector({
+          componentType: ComponentType.Button,
+          time: 60_000,
+        });
 
-        while (Date.now() < endAt) {
-          const btn = await panelMsg.awaitMessageComponent({
-            time: Math.max(1000, endAt - Date.now()),
-            filter: (i) => String(i.user?.id || '') === ownerUserId,
-          }).catch(() => null);
-
-          if (!btn) break;
-
+        collector.on('collect', async (btn) => {
           try {
             const cid = String(btn.customId || '');
 
-            if (cid === 'mbmem_btn_edit') {
-              // ✅ showModal MUST be the first response (no deferUpdate before)
+            // Only allow the original user to use the panel
+            const parts = cid.split(':'); // mbmem_btn_kind:guild:target:owner
+            const kind = parts[0] || '';
+            const gid = parts[1] || '';
+            const tid = parts[2] || '';
+            const owner = parts[3] || '';
+
+            if (gid !== guildId || tid !== targetId || owner !== ownerUserId) {
+              await btn.reply({ content: `⛔ This panel belongs to <@${ownerUserId}>.`, ephemeral: true }).catch(() => {});
+              return;
+            }
+
+            if (String(btn.user?.id || '') !== ownerUserId) {
+              await btn.reply({ content: `⛔ Only <@${ownerUserId}> can use these buttons.`, ephemeral: true }).catch(() => {});
+              return;
+            }
+
+            if (kind === 'mbmem_btn_edit') {
+              // ✅ ACK the button interaction before showing modal to avoid any timeout edges
+              // NOTE: showModal itself is the acknowledgement; do NOT deferReply/deferUpdate first.
               const modalId = makeModalId(guildId, targetId, ownerUserId);
               const modal = buildEditModal({ modalId, targetUsername: target.username });
               await btn.showModal(modal).catch(async () => {
                 await btn.reply({ content: '⚠️ Could not open modal.', ephemeral: true }).catch(() => {});
               });
-              continue;
+              return;
             }
 
-            if (cid === 'mbmem_btn_opt') {
+            if (kind === 'mbmem_btn_opt') {
               await btn.deferReply({ ephemeral: true }).catch(() => {});
               const cur = await MemoryStore.getUserState(client, guildId, targetId).catch(() => null);
               const enabled = !(Boolean(cur?.opted_in));
@@ -546,10 +521,10 @@ module.exports = {
                   ? `✅ Awareness opt-in for <@${targetId}> is now **${enabled ? 'ON' : 'OFF'}**.`
                   : '⚠️ Failed to toggle opt-in.',
               }).catch(() => {});
-              continue;
+              return;
             }
 
-            if (cid === 'mbmem_btn_view') {
+            if (kind === 'mbmem_btn_view') {
               await btn.deferReply({ ephemeral: true }).catch(() => {});
               const embed2 = await buildMemoryCardEmbed({
                 client,
@@ -561,19 +536,30 @@ module.exports = {
                 isAdmin: Boolean(admin),
               });
               await btn.editReply({ embeds: [embed2] }).catch(() => {});
-              continue;
+              return;
             }
 
             await btn.reply({ content: '⚠️ Unknown action.', ephemeral: true }).catch(() => {});
           } catch (e) {
-            console.warn('⚠️ /mbmem panel loop error:', e?.message || String(e));
+            console.warn('⚠️ /mbmem panel collector error:', e?.message || String(e));
             try {
               if (!btn.deferred && !btn.replied) {
                 await btn.reply({ content: '⚠️ Action failed.', ephemeral: true }).catch(() => {});
               }
             } catch {}
           }
-        }
+        });
+
+        collector.on('end', async () => {
+          try {
+            const disabledRow = new ActionRowBuilder().addComponents(
+              ButtonBuilder.from(btnEdit).setDisabled(true),
+              ButtonBuilder.from(btnOpt).setDisabled(true),
+              ButtonBuilder.from(btnView).setDisabled(true),
+            );
+            await interaction.editReply({ components: [disabledRow] }).catch(() => {});
+          } catch {}
+        });
 
         return;
       }
@@ -676,6 +662,30 @@ module.exports = {
         return;
       }
 
+      // ===================== OPTIN =====================
+      if (group === 'optin' && sub === 'set') {
+        const enabled = Boolean(interaction.options.getBoolean('enabled', true));
+        const target = interaction.options.getUser('user') || interaction.user;
+        const targetId = String(target.id);
+
+        const actingId = String(interaction.user.id);
+        const managingSelf = targetId === actingId;
+
+        if (!managingSelf && !admin) {
+          await interaction.reply({ content: '⛔ Admin only to set opt-in for other users.', ephemeral: true });
+          return;
+        }
+
+        const ok = await MemoryStore.setOptIn(client, guildId, targetId, enabled);
+        await interaction.reply({
+          content: ok
+            ? `✅ Awareness opt-in for <@${targetId}> is now **${enabled ? 'ON' : 'OFF'}**.`
+            : `⚠️ Failed to set opt-in.`,
+          ephemeral: true
+        });
+        return;
+      }
+
       await interaction.reply({ content: '⚠️ Unknown subcommand.', ephemeral: true });
     } catch (e) {
       console.error('❌ /mbmem error:', e?.stack || e?.message || String(e));
@@ -689,4 +699,5 @@ module.exports = {
     }
   }
 };
+
 
