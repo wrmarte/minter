@@ -7,26 +7,40 @@
 // - Used for system prompt injection (never invent)
 // ======================================================
 
+const RESERVED_FACT_KEYS = new Set([
+  'system', 'prompt', 'instruction', 'developer', 'assistant', 'user', 'tool',
+  'token', 'apikey', 'api_key', 'password', 'secret', 'private', 'session',
+  'discord_token', 'bot_token'
+]);
+
 function cleanKey(k) {
   const s = String(k || '').trim().toLowerCase();
   // allow a-z 0-9 _ - .
-  return s.replace(/[^a-z0-9_\-\.]/g, '').slice(0, 32);
+  const out = s.replace(/[^a-z0-9_\-\.]/g, '').slice(0, 32);
+  if (!out) return '';
+  if (RESERVED_FACT_KEYS.has(out)) return '';
+  return out;
 }
 
 function cleanTag(t) {
   const s = String(t || '').trim().toLowerCase();
   // allow a-z 0-9 _ -
-  return s.replace(/[^a-z0-9_\-]/g, '').slice(0, 24);
+  const out = s.replace(/[^a-z0-9_\-]/g, '').slice(0, 24);
+  if (!out) return '';
+  // reject super-generic junk
+  if (out === 'tag' || out === 'test' || out === 'none') return '';
+  return out;
 }
 
 function cleanVal(v, max = 180) {
-  const s = String(v || '').trim();
+  const s = String(v || '').replace(/\s+/g, ' ').trim();
   if (!s) return '';
   return s.length > max ? s.slice(0, max - 1) + '…' : s;
 }
 
-function cleanNote(v, max = 220) {
-  const s = String(v || '').trim();
+function cleanNote(v, max = 240) {
+  // notes can be slightly longer than facts, but keep bounded
+  const s = String(v || '').replace(/\s+/g, ' ').trim();
   if (!s) return '';
   return s.length > max ? s.slice(0, max - 1) + '…' : s;
 }
@@ -82,6 +96,12 @@ async function ensureSchema(client) {
       ON mb_profile_tags (guild_id, user_id, tag);
     `);
 
+    // extra: tiny helper indexes (safe)
+    await pg.query(`
+      CREATE INDEX IF NOT EXISTS mb_profile_facts_guild_user_idx
+      ON mb_profile_facts (guild_id, user_id);
+    `);
+
     client.__mbProfileSchemaReady = true;
     return true;
   } catch (e) {
@@ -90,13 +110,15 @@ async function ensureSchema(client) {
   }
 }
 
+// -------------------- FACTS --------------------
+
 async function setFact(client, guildId, userId, key, value, updatedBy = null) {
   const pg = client?.pg;
   if (!pg?.query) return false;
   if (!guildId || !userId) return false;
 
   const k = cleanKey(key);
-  const v = cleanVal(value);
+  const v = cleanVal(value, 200);
   if (!k || !v) return false;
 
   await ensureSchema(client);
@@ -109,7 +131,7 @@ async function setFact(client, guildId, userId, key, value, updatedBy = null) {
       ON CONFLICT (guild_id, user_id, fact_key)
       DO UPDATE SET fact_value=EXCLUDED.fact_value, updated_by=EXCLUDED.updated_by, updated_at=NOW()
       `,
-      [guildId, userId, k, v, updatedBy]
+      [String(guildId), String(userId), k, v, updatedBy ? String(updatedBy) : null]
     );
     return true;
   } catch (e) {
@@ -130,7 +152,7 @@ async function deleteFact(client, guildId, userId, key) {
   try {
     await pg.query(
       `DELETE FROM mb_profile_facts WHERE guild_id=$1 AND user_id=$2 AND fact_key=$3`,
-      [guildId, userId, k]
+      [String(guildId), String(userId), k]
     );
     return true;
   } catch (e) {
@@ -148,28 +170,32 @@ async function getFacts(client, guildId, userId) {
   try {
     const r = await pg.query(
       `
-      SELECT fact_key, fact_value, updated_at
+      SELECT fact_key, fact_value, updated_at, updated_by
       FROM mb_profile_facts
       WHERE guild_id=$1 AND user_id=$2
       ORDER BY fact_key ASC
       `,
-      [guildId, userId]
+      [String(guildId), String(userId)]
     );
+
     return (r.rows || []).map(x => ({
       key: x.fact_key,
       value: x.fact_value,
       updatedAt: x.updated_at,
+      updatedBy: x.updated_by || null,
     }));
   } catch {
     return [];
   }
 }
 
+// -------------------- NOTES --------------------
+
 async function addNote(client, guildId, userId, noteText, createdBy = null) {
   const pg = client?.pg;
   if (!pg?.query) return false;
 
-  const note = cleanNote(noteText);
+  const note = cleanNote(noteText, 260);
   if (!note) return false;
 
   await ensureSchema(client);
@@ -180,7 +206,7 @@ async function addNote(client, guildId, userId, noteText, createdBy = null) {
       INSERT INTO mb_profile_notes (guild_id, user_id, note_text, created_by, created_at)
       VALUES ($1,$2,$3,$4,NOW())
       `,
-      [guildId, userId, note, createdBy]
+      [String(guildId), String(userId), note, createdBy ? String(createdBy) : null]
     );
     return true;
   } catch (e) {
@@ -195,22 +221,25 @@ async function getNotes(client, guildId, userId, limit = 4) {
 
   await ensureSchema(client);
 
+  const lim = Math.max(1, Math.min(25, Number(limit) || 4));
+
   try {
     const r = await pg.query(
       `
-      SELECT note_id, note_text, created_at
+      SELECT note_id, note_text, created_at, created_by
       FROM mb_profile_notes
       WHERE guild_id=$1 AND user_id=$2
       ORDER BY created_at DESC
       LIMIT $3
       `,
-      [guildId, userId, Math.max(1, Math.min(20, Number(limit) || 4))]
+      [String(guildId), String(userId), lim]
     );
 
     return (r.rows || []).map(x => ({
       id: String(x.note_id),
       text: x.note_text,
       createdAt: x.created_at,
+      createdBy: x.created_by || null,
     }));
   } catch {
     return [];
@@ -229,7 +258,7 @@ async function deleteNote(client, guildId, userId, noteId) {
   try {
     await pg.query(
       `DELETE FROM mb_profile_notes WHERE guild_id=$1 AND user_id=$2 AND note_id=$3`,
-      [guildId, userId, idN]
+      [String(guildId), String(userId), idN]
     );
     return true;
   } catch (e) {
@@ -238,7 +267,8 @@ async function deleteNote(client, guildId, userId, noteId) {
   }
 }
 
-// ✅ TAGS
+// -------------------- TAGS --------------------
+
 async function addTag(client, guildId, userId, tag, updatedBy = null) {
   const pg = client?.pg;
   if (!pg?.query) return false;
@@ -256,7 +286,7 @@ async function addTag(client, guildId, userId, tag, updatedBy = null) {
       ON CONFLICT (guild_id, user_id, tag)
       DO UPDATE SET updated_by=EXCLUDED.updated_by, updated_at=NOW()
       `,
-      [guildId, userId, t, updatedBy]
+      [String(guildId), String(userId), t, updatedBy ? String(updatedBy) : null]
     );
     return true;
   } catch (e) {
@@ -277,7 +307,7 @@ async function removeTag(client, guildId, userId, tag) {
   try {
     await pg.query(
       `DELETE FROM mb_profile_tags WHERE guild_id=$1 AND user_id=$2 AND tag=$3`,
-      [guildId, userId, t]
+      [String(guildId), String(userId), t]
     );
     return true;
   } catch (e) {
@@ -295,7 +325,7 @@ async function clearTags(client, guildId, userId) {
   try {
     await pg.query(
       `DELETE FROM mb_profile_tags WHERE guild_id=$1 AND user_id=$2`,
-      [guildId, userId]
+      [String(guildId), String(userId)]
     );
     return true;
   } catch (e) {
@@ -310,28 +340,32 @@ async function getTags(client, guildId, userId, limit = 20) {
 
   await ensureSchema(client);
 
+  const lim = Math.max(1, Math.min(50, Number(limit) || 20));
+
   try {
     const r = await pg.query(
       `
-      SELECT tag, updated_at
+      SELECT tag, updated_at, updated_by
       FROM mb_profile_tags
       WHERE guild_id=$1 AND user_id=$2
       ORDER BY tag ASC
       LIMIT $3
       `,
-      [guildId, userId, Math.max(1, Math.min(50, Number(limit) || 20))]
+      [String(guildId), String(userId), lim]
     );
 
     return (r.rows || []).map(x => ({
       tag: x.tag,
       updatedAt: x.updated_at,
+      updatedBy: x.updated_by || null,
     }));
   } catch {
     return [];
   }
 }
 
-// ---------- Formatting helpers for prompt injection ----------
+// -------------------- Formatting helpers for prompt injection --------------------
+
 function formatFactsInline(facts, maxKeys = 6) {
   const arr = Array.isArray(facts) ? facts : [];
   const sliced = arr.slice(0, Math.max(1, Math.min(12, Number(maxKeys) || 6)));
@@ -371,6 +405,28 @@ function formatTagsInline(tags, max = 10) {
   return parts.join(', ');
 }
 
+/**
+ * ✅ New: build a single prompt-safe block (short + structured)
+ * Use this in MuscleMBListener buildProfileMemoryBlock if you want.
+ */
+function buildPromptBlock({ displayName = 'User', facts = [], notes = [], tags = [], maxFacts = 6, maxNotes = 3, maxTags = 8 }) {
+  const t = formatTagsInline(tags, maxTags);
+  const f = formatFactsInline(facts, maxFacts);
+  const n = formatNotesInline(notes, maxNotes);
+
+  const parts = [];
+  if (t) parts.push(`tags=[${t}]`);
+  if (f) parts.push(`facts={${f}}`);
+  if (n) parts.push(`notes=${n}`);
+
+  if (!parts.length) return '';
+
+  return [
+    `Trusted Profile (guild-scoped; admin-curated; do not invent):`,
+    `- ${String(displayName || 'User')}: ${parts.join(' • ')}`
+  ].join('\n');
+}
+
 module.exports = {
   ensureSchema,
 
@@ -394,5 +450,9 @@ module.exports = {
   formatFactsInline,
   formatNotesInline,
   formatTagsInline,
+
+  // new helper
+  buildPromptBlock,
 };
+
 
