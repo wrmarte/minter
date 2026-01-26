@@ -101,6 +101,14 @@ const WEBHOOKAUTO_DEBUG = String(process.env.WEBHOOKAUTO_DEBUG || '').trim() ===
 
 console.log('👀 Booting from:', __dirname);
 
+// ✅ Boot warning if legacy listener exists (helps prevent accidental double-load elsewhere)
+try {
+  const legacyPath = path.join(__dirname, 'listeners', 'musclemb.js');
+  if (fs.existsSync(legacyPath)) {
+    console.warn('⚠️ Legacy listener exists: listeners/musclemb.js (make sure it is NOT required anywhere).');
+  }
+} catch {}
+
 // ================= Discord Client =================
 const client = new Client({
   intents: [
@@ -143,8 +151,16 @@ client.sendAsMBella = async (channel, payload = {}) => {
 
     if (ok) return true;
 
-    // Fallback: normal send (will show as bot user, not MBella)
-    await channel.send(payload);
+    // ✅ PATCH: fallback must NOT include webhook-only fields (username/avatarURL)
+    // and must still block pings.
+    const fallbackPayload = {
+      ...payload,
+      allowedMentions: payload.allowedMentions || { parse: [] },
+    };
+    delete fallbackPayload.username;
+    delete fallbackPayload.avatarURL;
+
+    await channel.send(fallbackPayload);
     return true;
   } catch {
     return false;
@@ -528,4 +544,3 @@ async function gracefulShutdown(sig) {
 
 process.once('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.once('SIGINT', () => gracefulShutdown('SIGINT'));
-
