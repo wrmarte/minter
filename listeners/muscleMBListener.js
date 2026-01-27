@@ -19,6 +19,9 @@
 //     - Uses a single placeholder reply ("…") that gets EDITED into the final embed
 //     - Optionally shows typing briefly before placeholder
 //     - No lingering typing bubble after response
+// - ✅ NEW: DB Memory Inspector (admin/owner)
+//     - Type: "mb memory" or "mb profile" (optionally mention a user)
+//     - Prints what DB returns (facts/notes/tags/optin/last_active)
 // ======================================================
 
 const { EmbedBuilder } = require('discord.js');
@@ -66,17 +69,13 @@ const MB_GROQ_HISTORY_CACHE_MS = Math.max(0, Math.min(30_000, Number(process.env
 // ======================================================
 const MB_TYPING_ENABLED = String(process.env.MB_TYPING_ENABLED || '').trim() === '1';
 
-// sendTyping refresh is no longer needed (we do single-shot typing + placeholder)
 const MB_TYPING_BASE_MS = Math.max(0, Math.min(5000, Number(process.env.MB_TYPING_BASE_MS || '650')));
 const MB_TYPING_PER_CHAR_MS = Math.max(0, Math.min(120, Number(process.env.MB_TYPING_PER_CHAR_MS || '28')));
 const MB_TYPING_MIN_MS = Math.max(0, Math.min(15000, Number(process.env.MB_TYPING_MIN_MS || '900')));
 const MB_TYPING_MAX_MS = Math.max(MB_TYPING_MIN_MS, Math.min(60000, Number(process.env.MB_TYPING_MAX_MS || '9000')));
 const MB_TYPING_JITTER_MS = Math.max(0, Math.min(2000, Number(process.env.MB_TYPING_JITTER_MS || '250')));
 
-// ✅ NEW: placeholder behavior
 const MB_PLACEHOLDER_ENABLED = String(process.env.MB_PLACEHOLDER_ENABLED || '1').trim() === '1';
-// How long after typing starts to drop the placeholder "…" reply.
-// (MBella uses a debounce so you see typing briefly, then the placeholder locks the reply thread.)
 const MB_PLACEHOLDER_DEBOUNCE_MS = Math.max(0, Math.min(8000, Number(process.env.MB_PLACEHOLDER_DEBOUNCE_MS || '700')));
 
 // ======================================================
@@ -111,6 +110,13 @@ const MB_PROFILE_DEBUG = String(process.env.MB_PROFILE_DEBUG || (Config.MB_PROFI
 const MB_FOLLOWUP_DEBUG = String(process.env.MB_FOLLOWUP_DEBUG || '0').trim() === '1';
 const MB_PRUNE_DEBUG = String(process.env.MB_PRUNE_DEBUG || '0').trim() === '1';
 const MB_ACTIVITY_DEBUG = String(process.env.MB_ACTIVITY_DEBUG || '0').trim() === '1';
+
+// ✅ NEW: memory inspector triggers (admin only)
+const MB_MEMDEBUG_ENABLED = String(process.env.MB_MEMDEBUG_ENABLED || '1').trim() === '1';
+const MB_MEMDEBUG_TRIGGERS = (process.env.MB_MEMDEBUG_TRIGGERS || 'mb memory,mb profile,mb mem')
+  .split(',')
+  .map(s => s.trim().toLowerCase())
+  .filter(Boolean);
 
 function logFollowup(...args) { if (MB_FOLLOWUP_DEBUG) console.log('[MB_FOLLOWUP]', ...args); }
 function logProfile(...args) { if (MB_PROFILE_DEBUG) console.log('[MB_PROFILE]', ...args); }
@@ -152,7 +158,6 @@ function computeTypingMsForReply(text) {
 // ======================================================
 async function ensurePlaceholderReply(message) {
   try {
-    // Always use a BOT reply so we can edit reliably (webhook edit requires webhook client)
     const ph = await message.reply({
       content: '…',
       allowedMentions: { parse: [], repliedUser: false },
@@ -244,6 +249,43 @@ function escapeRegExp(s) {
 
 function looksWordish(s) {
   return /^[a-z0-9_\s]+$/i.test(String(s || '').trim());
+}
+
+// ======================================================
+// ✅ Schema health check (no SQL console needed)
+// ======================================================
+async function schemaHealthCheck(client) {
+  try {
+    if (!MB_PROFILE_DEBUG) return;
+    if (!client?.pg?.query) return;
+
+    // common table names we expect
+    const candidates = [
+      'mb_user_state',
+      'mb_profile_facts',
+      'mb_profile_notes',
+      'mb_profile_tags',
+      'mb_modes',
+    ];
+
+    const checks = await Promise.all(
+      candidates.map(async (t) => {
+        try {
+          const r = await client.pg.query(`SELECT to_regclass($1) AS reg`, [`public.${t}`]);
+          return { table: t, exists: Boolean(r?.rows?.[0]?.reg) };
+        } catch {
+          return { table: t, exists: null };
+        }
+      })
+    );
+
+    const missing = checks.filter(x => x.exists === false).map(x => x.table);
+    const unknown = checks.filter(x => x.exists == null).map(x => x.table);
+
+    if (missing.length) console.warn(`⚠️ [MB_SCHEMA] missing tables: ${missing.join(', ')}`);
+    if (unknown.length) console.warn(`⚠️ [MB_SCHEMA] unable to verify: ${unknown.join(', ')}`);
+    if (!missing.length && !unknown.length) console.log('✅ [MB_SCHEMA] profile/memory tables detected');
+  } catch {}
 }
 
 // ======================================================
@@ -351,7 +393,10 @@ async function buildProfileMemoryBlock(client, message) {
     }
 
     if (authorLines.length || authorNotesTxt) {
-      parts.push(`Trusted User Memory (admin-curated; use when relevant; never invent):`);
+      parts.push(
+        `Trusted User Memory (admin-curated; use when relevant; never invent). ` +
+        `If relevant, explicitly incorporate these facts naturally in the reply.`
+      );
       if (authorLines.length) parts.push(`- ${authorName}: ${authorLines.join(' | ')}`);
       if (authorNotesTxt) parts.push(`- ${authorName} notes: ${authorNotesTxt}`);
     }
@@ -382,8 +427,21 @@ async function buildProfileMemoryBlock(client, message) {
       if (mNotes) parts.push(`- Mentioned notes: ${mNotes}`);
     }
 
+    // ✅ OPTIONAL: if MemoryStore exposes extra DB memory summaries, include them safely
+    try {
+      if (typeof MemoryStore.buildMemoryBlock === 'function') {
+        const memBlock = await MemoryStore.buildMemoryBlock(client, guildId, authorId).catch(() => '');
+        if (memBlock) parts.push(memBlock);
+      }
+    } catch {}
+
     const block = parts.length ? parts.join('\n') : '';
-    if (MB_PROFILE_DEBUG) logProfile(`block_len=${block.length} guild=${guildId} user=${authorId}`);
+    if (MB_PROFILE_DEBUG) {
+      const factsN = Array.isArray(authorFacts) ? authorFacts.length : 0;
+      const notesN = Array.isArray(authorNotes) ? authorNotes.length : 0;
+      const tagsN = Array.isArray(authorTags) ? authorTags.length : 0;
+      logProfile(`block_len=${block.length} guild=${guildId} user=${authorId} facts=${factsN} notes=${notesN} tags=${tagsN}`);
+    }
     return block;
   } catch (e) {
     if (MB_PROFILE_DEBUG) {
@@ -406,6 +464,12 @@ module.exports = (client) => {
   if (!State.__mbLastReplyByUserChannel) State.__mbLastReplyByUserChannel = new Map();
   if (!State.__mbLastActivityWriteByUser) State.__mbLastActivityWriteByUser = new Map();
   if (!State.__mbHistoryCacheByChannel) State.__mbHistoryCacheByChannel = new Map();
+
+  // ✅ one-time schema verify (debug only)
+  if (!client.__mbSchemaCheckedOnce) {
+    client.__mbSchemaCheckedOnce = true;
+    schemaHealthCheck(client).catch(() => {});
+  }
 
   function followupKey(message) {
     return `${message.guild?.id || 'noguild'}:${message.channel?.id || 'noch'}:${message.author?.id || 'nouser'}`;
@@ -511,9 +575,7 @@ module.exports = (client) => {
   }
 
   // ======================================================
-  // ✅ Reply helper
-  // NOTE: We keep safeReplyMessage for fallbacks,
-  // but the MAIN path is now placeholder+edit (MBella style).
+  // ✅ Reply helper (fallback)
   // ======================================================
   async function safeReplyAsMuscleMB(message, payload = {}, opts = {}) {
     try {
@@ -524,11 +586,8 @@ module.exports = (client) => {
         allowedMentions: payload.allowedMentions || { parse: [], repliedUser: false },
       };
 
-      // If we are forcing bot send, bypass any webhook logic by replying natively.
       if (forceBotSend) {
-        // message.reply returns a Message we can ignore
         await message.reply(finalPayload).catch(async () => {
-          // last resort: channel send (still bot)
           await message.channel.send(finalPayload).catch(() => {});
         });
         try {
@@ -689,6 +748,77 @@ module.exports = (client) => {
 
     const lowered = (message.content || '').toLowerCase();
 
+    // ======================================================
+    // ✅ Admin Memory Inspector (DB proof)
+    // ======================================================
+    try {
+      if (MB_MEMDEBUG_ENABLED && isOwnerOrAdmin(message)) {
+        const trimmed = (message.content || '').trim();
+        const lowerTrimmed = trimmed.toLowerCase();
+
+        const isTrig = MB_MEMDEBUG_TRIGGERS.some(t => lowerTrimmed === t || lowerTrimmed.startsWith(`${t} `));
+        if (isTrig) {
+          // target: mentioned user or self
+          const target = message.mentions?.users?.first?.() || message.author;
+          const guildId = message.guild.id;
+          const userId = target.id;
+
+          // Ensure schema exists once
+          try {
+            if (!client.__mbProfileSchemaReady) {
+              await ProfileStore.ensureSchema(client);
+              client.__mbProfileSchemaReady = true;
+            }
+          } catch {}
+
+          const [facts, notes, tags, state, opted] = await Promise.all([
+            ProfileStore.getFacts(client, guildId, userId).catch(() => []),
+            ProfileStore.getNotes(client, guildId, userId, Config.MB_PROFILE_MAX_NOTES).catch(() => []),
+            (typeof ProfileStore.getTags === 'function')
+              ? ProfileStore.getTags(client, guildId, userId, 20).catch(() => [])
+              : Promise.resolve([]),
+            (typeof MemoryStore.getUserState === 'function')
+              ? MemoryStore.getUserState(client, guildId, userId).catch(() => null)
+              : Promise.resolve(null),
+            (typeof MemoryStore.userIsOptedIn === 'function')
+              ? MemoryStore.userIsOptedIn(client, guildId, userId).catch(() => null)
+              : Promise.resolve(null),
+          ]);
+
+          const name = safeNameFromMessage(message, userId, target.username || 'User');
+          const optin = (opted == null && state?.opted_in != null) ? Boolean(state.opted_in) : (opted == null ? null : Boolean(opted));
+          const lastActive = state?.last_active_ts ? fmtRel(state.last_active_ts) : '';
+
+          const factLine = ProfileStore.formatFactsInline(facts, 12) || '—';
+          const noteLine = ProfileStore.formatNotesInline(notes, 10) || '—';
+          const tagLine = (typeof ProfileStore.formatTagsInline === 'function')
+            ? (ProfileStore.formatTagsInline(tags, 20) || '—')
+            : (Array.isArray(tags) && tags.length ? tags.join(', ') : '—');
+
+          const embed = new EmbedBuilder()
+            .setColor('#2ecc71')
+            .setTitle('🧠 MuscleMB DB Memory Inspector')
+            .setDescription(
+              `Guild: \`${guildId}\`\nUser: **${name}** (\`${userId}\`)\n\n` +
+              `Opt-in: **${optin === null ? 'unknown' : (optin ? 'ON' : 'OFF')}**\n` +
+              `Last Active: ${lastActive || '—'}`
+            )
+            .addFields(
+              { name: 'Facts (profile)', value: String(factLine).slice(0, 1024) },
+              { name: 'Tags (profile)', value: String(tagLine).slice(0, 1024) },
+              { name: 'Notes (profile)', value: String(noteLine).slice(0, 1024) },
+            )
+            .setFooter({
+              text:
+                `If this is empty but you expected data: either tables are empty, opt-in gating is blocking, or schema/table names mismatch.`,
+            });
+
+          await message.reply({ embeds: [embed], allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
+          return;
+        }
+      }
+    } catch {}
+
     /** ===== $ADRIAN chart trigger ===== */
     try {
       if (AdrianChart.isTriggered(lowered)) {
@@ -831,9 +961,6 @@ module.exports = (client) => {
 
     // ======================================================
     // ✅ Typing + Placeholder (MBella-style)
-    // - Show typing briefly
-    // - Drop a placeholder reply ("…") that gets edited later
-    // - This prevents any typing bubble lingering AFTER the response
     // ======================================================
     let typingStartMs = 0;
     let placeholder = null;
@@ -857,13 +984,11 @@ module.exports = (client) => {
     };
 
     try {
-      // Start typing (single-shot). If we send placeholder later, the typing bubble clears immediately.
       if (MB_TYPING_ENABLED && !isTypingSuppressed(client, message.channel.id)) {
         try { await message.channel.sendTyping(); } catch {}
         typingStartMs = Date.now();
       }
 
-      // Schedule placeholder (so reply threading is locked, and no lingering typing)
       schedulePlaceholder();
 
       const roastTargets = [...mentionedOthers.values()].map(u => u.username).join(', ');
@@ -914,7 +1039,12 @@ module.exports = (client) => {
 
       const profileBlock = await buildProfileMemoryBlock(client, message);
 
-      const fullSystemPrompt = [systemPrompt, softGuard, profileBlock, recentContext]
+      const fullSystemPrompt = [
+        systemPrompt,
+        softGuard,
+        profileBlock,
+        recentContext,
+      ]
         .filter(Boolean)
         .join('\n\n');
 
@@ -1000,7 +1130,6 @@ module.exports = (client) => {
 
         if (!routed?.ok) {
           const hint = routed?.hint || '⚠️ MB lag spike. One rep at a time—try again in a sec. ⏱️';
-          // ensure placeholder exists so reply stays threaded
           if (!placeholder && MB_PLACEHOLDER_ENABLED) placeholder = await ensurePlaceholderReply(message).catch(() => null);
           if (placeholder) {
             await editPlaceholder(placeholder, { content: hint, embeds: [], allowedMentions: { parse: [], repliedUser: false } }).catch(() => {});
@@ -1099,12 +1228,10 @@ module.exports = (client) => {
       const aiReplyHuman = humanizeMentions(aiReplyRaw || '', message);
       const aiReply = (aiReplyHuman || '').slice(0, 1800).trim();
 
-      // ✅ Ensure placeholder exists (so final result always edits the same reply)
       if (!placeholder && MB_PLACEHOLDER_ENABLED) {
         placeholder = await ensurePlaceholderReply(message).catch(() => null);
       }
 
-      // ✅ Human timing: keep "typing illusion" duration, then post by editing placeholder
       if (MB_TYPING_ENABLED) {
         const desiredTypingMs = computeTypingMsForReply(aiReply || cleanedInput);
         const elapsed = typingStartMs ? (Date.now() - typingStartMs) : 0;
@@ -1154,12 +1281,10 @@ module.exports = (client) => {
           }
         }
 
-        // Fallback: normal bot reply
         await safeReplyAsMuscleMB(message, { embeds: [embed] }, { forceBotSend: true });
         return;
       }
 
-      // Empty reply fallback
       const emptyHint = '💬 (silent set) MB heard you but returned no sauce. Try again with fewer words.';
       if (placeholder) {
         const ok = await editPlaceholder(placeholder, {
@@ -1183,7 +1308,6 @@ module.exports = (client) => {
 
       const hint = '⚠️ MuscleMB pulled a hammy 🦵. Try again soon.';
       try {
-        // If we already have a placeholder, edit it. Else reply normally.
         if (placeholder) {
           await editPlaceholder(placeholder, {
             content: hint,
@@ -1206,3 +1330,4 @@ module.exports = (client) => {
     }
   });
 };
+
