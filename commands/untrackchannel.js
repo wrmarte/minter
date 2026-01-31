@@ -1,5 +1,63 @@
 const { SlashCommandBuilder, PermissionsBitField } = require('discord.js');
 
+/**
+ * Resolve bot owner IDs safely (supports:
+ * - ENV: BOT_OWNER_ID / BOT_OWNER_IDS
+ * - App owner fetch: user-owned OR team-owned applications
+ * Cached on client.__botOwnerIds
+ */
+async function getBotOwnerIds(client) {
+  try {
+    if (client.__botOwnerIds && Array.isArray(client.__botOwnerIds)) return client.__botOwnerIds;
+
+    // 1) ENV owners (fast path)
+    const envRaw = [
+      process.env.BOT_OWNER_IDS || '',
+      process.env.BOT_OWNER_ID || ''
+    ].filter(Boolean).join(',');
+
+    const envIds = envRaw
+      .split(',')
+      .map(s => String(s || '').trim())
+      .filter(Boolean);
+
+    // 2) Try to fetch application owner/team
+    let appOwnerIds = [];
+    try {
+      const app = await client.application.fetch();
+      const owner = app?.owner;
+
+      // Team-owned application
+      if (owner && owner.members && typeof owner.members.map === 'function') {
+        appOwnerIds = owner.members.map(m => m?.id).filter(Boolean);
+      }
+      // User-owned application
+      else if (owner?.id) {
+        appOwnerIds = [owner.id];
+      }
+    } catch (e) {
+      // ignore fetch errors; rely on env only
+    }
+
+    const merged = Array.from(new Set([...envIds, ...appOwnerIds]));
+    client.__botOwnerIds = merged;
+    return merged;
+  } catch (e) {
+    return [];
+  }
+}
+
+function isAdmin(interaction) {
+  // memberPermissions is safest in discord.js v14
+  const perms = interaction.memberPermissions || interaction.member?.permissions;
+  return Boolean(perms?.has?.(PermissionsBitField.Flags.Administrator));
+}
+
+async function isBotOwner(interaction) {
+  const ownerIds = await getBotOwnerIds(interaction.client);
+  return ownerIds.includes(interaction.user.id);
+}
+
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('untrackchannel')
@@ -16,9 +74,12 @@ module.exports = {
     const name = interaction.options.getString('name');
     const currentChannelId = interaction.channel.id;
 
-    if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+    const admin = isAdmin(interaction);
+    const owner = await isBotOwner(interaction);
+
+    if (!admin && !owner) {
       return interaction.reply({
-        content: '🚫 Admins only.',
+        content: '🚫 Admins or bot owner only.',
         ephemeral: true
       });
     }
@@ -58,6 +119,13 @@ module.exports = {
 
   async autocomplete(interaction) {
     try {
+      // Optional: also restrict autocomplete to Admin/Owner to avoid leaking contract names
+      const admin = isAdmin(interaction);
+      const owner = await isBotOwner(interaction);
+      if (!admin && !owner) {
+        return interaction.respond([]);
+      }
+
       const pg = interaction.client.pg;
       const focused = interaction.options.getFocused();
 
@@ -65,7 +133,7 @@ module.exports = {
       const contracts = res.rows.map(r => r.name);
 
       const filtered = contracts
-        .filter(n => n.toLowerCase().includes(focused.toLowerCase()))
+        .filter(n => n.toLowerCase().includes(String(focused || '').toLowerCase()))
         .slice(0, 25);
 
       console.log('📊 Sending autocomplete choices:', filtered);
@@ -75,7 +143,12 @@ module.exports = {
       );
     } catch (err) {
       console.error('❌ Autocomplete error in /untrackchannel:', err);
-      await interaction.respond([]);
+      try {
+        await interaction.respond([]);
+      } catch (e) {
+        // ignore double-respond errors
+      }
     }
   }
 };
+
