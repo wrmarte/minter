@@ -145,7 +145,10 @@ CREATE INDEX IF NOT EXISTS digest_events_txhash_idx
 // ✅ Cache ensure so we don't run DDL repeatedly (saves DB load)
 let _ensureOk = false;
 let _ensureLastAttemptMs = 0;
-const ENSURE_RETRY_MS = Math.max(60000, Number(process.env.DAILY_DIGEST_ENSURE_RETRY_MS || 10 * 60 * 1000)); // 10m
+const ENSURE_RETRY_MS = Math.max(
+  60000,
+  Number(process.env.DAILY_DIGEST_ENSURE_RETRY_MS || 10 * 60 * 1000)
+); // 10m
 
 async function ensureDigestEventsTable(pg) {
   if (!pg?.query) return false;
@@ -319,7 +322,45 @@ function computeDigestStats(rows) {
   };
 }
 
-/* ===================== EMBED BUILD ===================== */
+/* ===================== EMBED BUILD (ULTIMATE) ===================== */
+
+// Emoji by chain (for compact activity lines)
+function chainEmoji(ch) {
+  const c = String(ch || "").toLowerCase();
+  if (c === "base") return "🟦";
+  if (c === "eth" || c === "ethereum") return "🟧";
+  if (c === "ape" || c === "apechain") return "🐵";
+  return "⬛";
+}
+
+// Small helpers for embed composition
+function clampInt(n, min, max, d) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return d;
+  return Math.max(min, Math.min(max, Math.trunc(x)));
+}
+
+function chunk1024(str) {
+  const s = String(str || "");
+  if (!s) return [];
+  const chunks = s.match(/[\s\S]{1,1024}/g);
+  return chunks || [];
+}
+
+function safeField(embed, name, value, inline = false) {
+  const v = String(value || "").trim();
+  if (!v) return;
+  embed.addFields({ name: String(name || "—").slice(0, 256), value: v.slice(0, 1024), inline: !!inline });
+}
+
+function pickThemeColor(stats) {
+  // Theme shifts with activity — looks “alive”
+  const activity = (stats?.totalNftSales || 0) + (stats?.totalSwaps || 0) + (stats?.totalTokenBuys || 0) + (stats?.totalTokenSells || 0);
+  if (activity >= 40) return 0xff4757; // hot
+  if (activity >= 15) return 0x00b894; // normal
+  if (activity > 0) return 0x1e90ff; // chill
+  return 0x636e72; // quiet
+}
 
 function buildDigestEmbed({ guildName, hours, stats, rows, settings, hadQueryError = false }) {
   const {
@@ -349,15 +390,35 @@ function buildDigestEmbed({ guildName, hours, stats, rows, settings, hadQueryErr
     oldestTs,
   } = stats;
 
+  const tz = settings?.tz ? String(settings.tz) : "";
+  const sched =
+    settings && (settings.hour != null || settings.minute != null || settings.tz)
+      ? `⏰ **${pad2(settings.hour ?? 0)}:${pad2(settings.minute ?? 0)}** ${tz ? `(${tz})` : ""}`
+      : null;
+
+  const windowLine = newestTs && oldestTs
+    ? `🕒 Window: **${hours}h** • ${oldestTs.toISOString().slice(0, 16).replace("T", " ")} → ${newestTs.toISOString().slice(0, 16).replace("T", " ")}`
+    : `🕒 Window: **${hours}h**`;
+
   const chainLine = [...byChain.entries()]
     .sort((a, b) => b[1] - a[1])
     .slice(0, 6)
-    .map(([k, v]) => `${k}:${v}`)
-    .join(" • ");
+    .map(([k, v]) => `${chainEmoji(k)} ${k}:${v}`)
+    .join("  ");
+
+  const volumeLine = `**${fmtEth(totalVolEth, 4)} ETH**${
+    num(totalVolUsd, 0) > 0 ? `  •  ~ **$${fmtMoney(totalVolUsd, 2)}**` : ""
+  }`.trim();
+
+  const breakdownLine = [
+    `📦 NFT: **${fmtEth(nftVolEth, 4)} ETH**${nftVolUsd > 0 ? ` (~$${fmtMoney(nftVolUsd, 2)})` : ""}`,
+    `🔁 Swaps: **${fmtEth(swapVolEth, 4)} ETH**${swapVolUsd > 0 ? ` (~$${fmtMoney(swapVolUsd, 2)})` : ""}`,
+    `🪙 Tokens: **${fmtEth(tokenVolEth, 4)} ETH**${tokenVolUsd > 0 ? ` (~$${fmtMoney(tokenVolUsd, 2)})` : ""}`,
+  ].join("\n");
 
   const activeContract =
     mostActive.contract && mostActive.contract !== "unknown"
-      ? `${labelContract(mostActive.contract)} (${mostActive.count})`
+      ? `${labelContract(mostActive.contract)} • **${mostActive.count}** events`
       : "N/A";
 
   const topNftSaleLine = (() => {
@@ -366,9 +427,9 @@ function buildDigestEmbed({ guildName, hours, stats, rows, settings, hadQueryErr
     const t = topNftSale.token_id != null ? `#${topNftSale.token_id}` : "";
     const eth = fmtEth(topNftSale.amount_eth, 4);
     const usd = num(topNftSale.amount_usd, 0) > 0 ? `$${fmtMoney(topNftSale.amount_usd, 2)}` : "";
-    const chain = topNftSale.chain ? `(${topNftSale.chain})` : "";
-    const who = topNftSale.buyer ? `→ ${padWho(labelWho(topNftSale.buyer), 20)}` : "";
-    return `${cshort} ${t} ${chain} — ${eth} ETH ${usd ? `(${usd})` : ""} ${who}`
+    const chain = topNftSale.chain ? `${chainEmoji(topNftSale.chain)} ${topNftSale.chain}` : "";
+    const who = topNftSale.buyer ? `→ ${padWho(labelWho(topNftSale.buyer), 22)}` : "";
+    return `🏆 ${cshort} ${t} ${chain ? `(${chain})` : ""} — **${eth} ETH** ${usd ? `(${usd})` : ""} ${who}`
       .replace(/\s+/g, " ")
       .trim();
   })();
@@ -378,13 +439,13 @@ function buildDigestEmbed({ guildName, hours, stats, rows, settings, hadQueryErr
     const cshort = labelContract(topSwapRow.contract);
     const eth = num(topSwapRow.amount_eth, 0) > 0 ? `${fmtEth(topSwapRow.amount_eth, 4)} ETH` : "";
     const usd = num(topSwapRow.amount_usd, 0) > 0 ? `$${fmtMoney(topSwapRow.amount_usd, 2)}` : "";
-    const chain = topSwapRow.chain ? `(${topSwapRow.chain})` : "";
+    const chain = topSwapRow.chain ? `${chainEmoji(topSwapRow.chain)} ${topSwapRow.chain}` : "";
     const who = topSwapRow.buyer
-      ? `buyer:${padWho(labelWho(topSwapRow.buyer), 14)}`
+      ? `buyer:${padWho(labelWho(topSwapRow.buyer), 16)}`
       : topSwapRow.seller
-        ? `seller:${padWho(labelWho(topSwapRow.seller), 14)}`
+        ? `seller:${padWho(labelWho(topSwapRow.seller), 16)}`
         : "";
-    return `${cshort} ${chain} — ${eth} ${usd ? `(${usd})` : ""} ${who}`
+    return `💥 ${cshort} ${chain ? `(${chain})` : ""} — ${eth ? `**${eth}**` : ""} ${usd ? `(${usd})` : ""} ${who}`
       .replace(/\s+/g, " ")
       .trim();
   })();
@@ -394,133 +455,158 @@ function buildDigestEmbed({ guildName, hours, stats, rows, settings, hadQueryErr
     const cshort = labelContract(topTokenTradeRow.contract);
     const eth = num(topTokenTradeRow.amount_eth, 0) > 0 ? `${fmtEth(topTokenTradeRow.amount_eth, 4)} ETH` : "";
     const usd = num(topTokenTradeRow.amount_usd, 0) > 0 ? `$${fmtMoney(topTokenTradeRow.amount_usd, 2)}` : "";
-    const chain = topTokenTradeRow.chain ? `(${topTokenTradeRow.chain})` : "";
+    const chain = topTokenTradeRow.chain ? `${chainEmoji(topTokenTradeRow.chain)} ${topTokenTradeRow.chain}` : "";
     const typ = String(topTokenTradeRow.event_type || "").toLowerCase();
-    const tag = typ === "token_buy" ? "BUY" : typ === "token_sell" ? "SELL" : typ.toUpperCase() || "TOKEN";
+    const tag = typ === "token_buy" ? "🟩 BUY" : typ === "token_sell" ? "🟥 SELL" : `🪙 ${typ.toUpperCase() || "TOKEN"}`;
     const who = topTokenTradeRow.buyer
-      ? `buyer:${padWho(labelWho(topTokenTradeRow.buyer), 14)}`
+      ? `buyer:${padWho(labelWho(topTokenTradeRow.buyer), 16)}`
       : topTokenTradeRow.seller
-        ? `seller:${padWho(labelWho(topTokenTradeRow.seller), 14)}`
+        ? `seller:${padWho(labelWho(topTokenTradeRow.seller), 16)}`
         : "";
-    return `${tag} • ${cshort} ${chain} — ${eth} ${usd ? `(${usd})` : ""} ${who}`
+    return `${tag} • ${cshort} ${chain ? `(${chain})` : ""} — ${eth ? `**${eth}**` : ""} ${usd ? `(${usd})` : ""} ${who}`
       .replace(/\s+/g, " ")
       .trim();
   })();
 
-  const volumeLine = `**${fmtEth(totalVolEth, 4)} ETH**${
-    num(totalVolUsd, 0) > 0 ? `\n~ **$${fmtMoney(totalVolUsd, 2)}**` : ""
-  }`.trim();
+  // Leaderboards (top contracts by count)
+  const contractCounts = new Map();
+  for (const r of rows || []) {
+    const c = String(r.contract || "").toLowerCase() || "unknown";
+    contractCounts.set(c, (contractCounts.get(c) || 0) + 1);
+  }
+  const topContracts = [...contractCounts.entries()]
+    .filter(([c]) => c && c !== "unknown")
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, clampInt(process.env.DAILY_DIGEST_TOP_CONTRACTS || 5, 3, 10, 5))
+    .map(([c, n], i) => `**${i + 1}.** ${labelContract(c)} — **${n}**`)
+    .join("\n");
 
-  const breakdownLine = [
-    `NFT: ${fmtEth(nftVolEth, 4)} ETH${nftVolUsd > 0 ? ` (~$${fmtMoney(nftVolUsd, 2)})` : ""}`,
-    `Swaps: ${fmtEth(swapVolEth, 4)} ETH${swapVolUsd > 0 ? ` (~$${fmtMoney(swapVolUsd, 2)})` : ""}`,
-    `Tokens: ${fmtEth(tokenVolEth, 4)} ETH${tokenVolUsd > 0 ? ` (~$${fmtMoney(tokenVolUsd, 2)})` : ""}`,
-  ].join("\n");
+  // Biggest participants (buyers/sellers) by count (simple, reliable)
+  const buyerCounts = new Map();
+  const sellerCounts = new Map();
+  for (const r of rows || []) {
+    const b = (r.buyer || "").toLowerCase();
+    const s = (r.seller || "").toLowerCase();
+    if (b) buyerCounts.set(b, (buyerCounts.get(b) || 0) + 1);
+    if (s) sellerCounts.set(s, (sellerCounts.get(s) || 0) + 1);
+  }
+  const topBuyers = [...buyerCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([a, n], i) => `**${i + 1}.** ${padWho(labelWho(a), 18)} — **${n}**`)
+    .join("\n");
+  const topSellers = [...sellerCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([a, n], i) => `**${i + 1}.** ${padWho(labelWho(a), 18)} — **${n}**`)
+    .join("\n");
 
-  const sched =
-    settings && (settings.hour != null || settings.minute != null || settings.tz)
-      ? `\n⏰ Scheduled: **${pad2(settings.hour ?? 0)}:${pad2(settings.minute ?? 0)}**`
-      : "";
-
-  const embed = new EmbedBuilder()
-    .setColor("#00b894")
-    .setTitle(`📊 Daily Digest — ${safeStr(guildName, 60)}`)
-    .setDescription(`Last **${hours}h** recap.${sched}`.trim())
-    .addFields(
-      { name: "Mints", value: `**${totalMints.toLocaleString()}**`, inline: true },
-      { name: "NFT Sales", value: `**${totalNftSales.toLocaleString()}**`, inline: true },
-      { name: "Swaps", value: `**${totalSwaps.toLocaleString()}**`, inline: true },
-
-      { name: "Token Buys", value: `**${totalTokenBuys.toLocaleString()}**`, inline: true },
-      { name: "Token Sells", value: `**${totalTokenSells.toLocaleString()}**`, inline: true },
-      { name: "Chains", value: chainLine || "N/A", inline: true },
-
-      { name: "Total Volume", value: volumeLine, inline: true },
-      { name: "Breakdown", value: breakdownLine.slice(0, 1024) || "N/A", inline: true },
-      { name: "Most Active", value: activeContract, inline: true },
-
-      { name: "Top NFT Sale", value: topNftSaleLine || "N/A", inline: false },
-      { name: "Top Swap", value: topSwapLine || "N/A", inline: false },
-      { name: "Top Token Trade", value: topTokenTradeLine || "N/A", inline: false }
-    )
-    .setFooter({
-      text: hadQueryError
-        ? "MB Digest • (warning: digest query error)"
-        : "MB Digest • powered by your tracker logs",
-    })
-    .setTimestamp(new Date());
-
-  const recentNftSales = rows
-    .filter(
-      (r) =>
-        String(r.event_type || "").toLowerCase() === "sale" &&
-        r.token_id != null &&
-        String(r.token_id).trim() !== ""
-    )
-    .slice(0, 5)
+  // Recent activity blocks (compact, with emojis and chain icons)
+  const recentNftSales = (rows || [])
+    .filter((r) => String(r.event_type || "").toLowerCase() === "sale" && r.token_id != null && String(r.token_id).trim() !== "")
+    .slice(0, 6)
     .map((r) => {
       const cshort = labelContract(r.contract);
       const tid = r.token_id != null ? `#${r.token_id}` : "";
       const eth = num(r.amount_eth, 0) > 0 ? `${fmtEth(r.amount_eth, 4)} ETH` : "";
       const usd = num(r.amount_usd, 0) > 0 ? `$${fmtMoney(r.amount_usd, 2)}` : "";
-      const chain = r.chain ? `(${r.chain})` : "";
-      const who = r.buyer ? `→ ${padWho(labelWho(r.buyer), 18)}` : "";
-      return `• ${cshort} ${tid} ${chain} ${eth} ${usd ? `(${usd})` : ""} ${who}`.replace(/\s+/g, " ").trim();
-    });
+      const chain = r.chain ? `${chainEmoji(r.chain)}` : "⬛";
+      const who = r.buyer ? `→ ${padWho(labelWho(r.buyer), 16)}` : "";
+      return `• ${chain} ${cshort} ${tid} — ${eth ? `**${eth}**` : ""} ${usd ? `(${usd})` : ""} ${who}`.replace(/\s+/g, " ").trim();
+    })
+    .filter(Boolean);
 
-  if (recentNftSales.length) {
-    embed.addFields({ name: "Recent NFT Sales", value: recentNftSales.join("\n").slice(0, 1024) });
-  }
-
-  const recentSwaps = rows
-    .filter(
-      (r) =>
-        String(r.event_type || "").toLowerCase() === "sale" &&
-        (r.token_id == null || String(r.token_id).trim() === "")
-    )
-    .slice(0, 5)
+  const recentSwaps = (rows || [])
+    .filter((r) => String(r.event_type || "").toLowerCase() === "sale" && (r.token_id == null || String(r.token_id).trim() === ""))
+    .slice(0, 6)
     .map((r) => {
       const cshort = labelContract(r.contract);
       const eth = num(r.amount_eth, 0) > 0 ? `${fmtEth(r.amount_eth, 4)} ETH` : "";
       const usd = num(r.amount_usd, 0) > 0 ? `$${fmtMoney(r.amount_usd, 2)}` : "";
-      const chain = r.chain ? `(${r.chain})` : "";
+      const chain = r.chain ? `${chainEmoji(r.chain)}` : "⬛";
       const who = r.buyer
         ? `buyer:${padWho(labelWho(r.buyer), 14)}`
         : r.seller
           ? `seller:${padWho(labelWho(r.seller), 14)}`
           : "";
-      return `• ${cshort} ${chain} ${eth} ${usd ? `(${usd})` : ""} ${who}`.replace(/\s+/g, " ").trim();
-    });
+      return `• ${chain} ${cshort} — ${eth ? `**${eth}**` : ""} ${usd ? `(${usd})` : ""} ${who}`.replace(/\s+/g, " ").trim();
+    })
+    .filter(Boolean);
 
-  if (recentSwaps.length) {
-    embed.addFields({ name: "Recent Swaps", value: recentSwaps.join("\n").slice(0, 1024) });
-  }
-
-  const recentTokenTrades = rows
+  const recentTokenTrades = (rows || [])
     .filter((r) => {
       const t = String(r.event_type || "").toLowerCase();
       return t === "token_buy" || t === "token_sell";
     })
-    .slice(0, 5)
+    .slice(0, 6)
     .map((r) => {
       const t = String(r.event_type || "").toLowerCase();
-      const tag = t === "token_buy" ? "BUY" : t === "token_sell" ? "SELL" : t.toUpperCase();
+      const tag = t === "token_buy" ? "🟩 BUY" : "🟥 SELL";
       const cshort = labelContract(r.contract);
       const eth = num(r.amount_eth, 0) > 0 ? `${fmtEth(r.amount_eth, 4)} ETH` : "";
       const usd = num(r.amount_usd, 0) > 0 ? `$${fmtMoney(r.amount_usd, 2)}` : "";
-      const chain = r.chain ? `(${r.chain})` : "";
+      const chain = r.chain ? `${chainEmoji(r.chain)}` : "⬛";
       const who = r.buyer
         ? `buyer:${padWho(labelWho(r.buyer), 14)}`
         : r.seller
           ? `seller:${padWho(labelWho(r.seller), 14)}`
           : "";
-      return `• ${tag} ${cshort} ${chain} ${eth} ${usd ? `(${usd})` : ""} ${who}`.replace(/\s+/g, " ").trim();
-    });
+      return `• ${chain} ${tag} ${cshort} — ${eth ? `**${eth}**` : ""} ${usd ? `(${usd})` : ""} ${who}`.replace(/\s+/g, " ").trim();
+    })
+    .filter(Boolean);
 
+  // Embed build (layout optimized to avoid field overflow)
+  const embed = new EmbedBuilder()
+    .setColor(pickThemeColor(stats))
+    .setTitle(`📊 ${hours >= 168 ? "Weekly" : "Daily"} Digest — ${safeStr(guildName, 60)}`)
+    .setDescription(
+      [
+        `**Recap of the last ${hours}h**`,
+        sched ? sched : null,
+        windowLine,
+        hadQueryError ? "⚠️ DB query warning (some data may be missing)" : null,
+      ].filter(Boolean).join("\n")
+    )
+    .setTimestamp(new Date());
+
+  // KPI row (inline)
+  safeField(embed, "🧪 Mints", `**${totalMints.toLocaleString()}**`, true);
+  safeField(embed, "📦 NFT Sales", `**${totalNftSales.toLocaleString()}**`, true);
+  safeField(embed, "🔁 Swaps", `**${totalSwaps.toLocaleString()}**`, true);
+  safeField(embed, "🟩 Token Buys", `**${totalTokenBuys.toLocaleString()}**`, true);
+  safeField(embed, "🟥 Token Sells", `**${totalTokenSells.toLocaleString()}**`, true);
+  safeField(embed, "🌐 Chains", chainLine || "N/A", false);
+
+  // Volume + breakdown
+  safeField(embed, "💰 Total Volume", volumeLine || "N/A", true);
+  safeField(embed, "📌 Breakdown", breakdownLine || "N/A", true);
+  safeField(embed, "⚡ Most Active", activeContract || "N/A", true);
+
+  // Headlines
+  safeField(embed, "🏆 Top NFT Sale", topNftSaleLine || "N/A", false);
+  safeField(embed, "💥 Top Swap", topSwapLine || "N/A", false);
+  safeField(embed, "🪙 Top Token Trade", topTokenTradeLine || "N/A", false);
+
+  // Leaderboards (only add if not empty)
+  if (topContracts) safeField(embed, "🏁 Top Contracts (by activity)", topContracts, false);
+  if (topBuyers) safeField(embed, "🧲 Top Buyers (by count)", topBuyers, true);
+  if (topSellers) safeField(embed, "🧾 Top Sellers (by count)", topSellers, true);
+
+  // Recent activity — chunk into <=1024 automatically
+  if (recentNftSales.length) {
+    const chunks = chunk1024(recentNftSales.join("\n"));
+    chunks.forEach((c, i) => safeField(embed, i === 0 ? "📦 Recent NFT Sales" : "📦 Recent NFT Sales (cont.)", c, false));
+  }
+  if (recentSwaps.length) {
+    const chunks = chunk1024(recentSwaps.join("\n"));
+    chunks.forEach((c, i) => safeField(embed, i === 0 ? "🔁 Recent Swaps" : "🔁 Recent Swaps (cont.)", c, false));
+  }
   if (recentTokenTrades.length) {
-    embed.addFields({ name: "Recent Token Trades", value: recentTokenTrades.join("\n").slice(0, 1024) });
+    const chunks = chunk1024(recentTokenTrades.join("\n"));
+    chunks.forEach((c, i) => safeField(embed, i === 0 ? "🪙 Recent Token Trades" : "🪙 Recent Token Trades (cont.)", c, false));
   }
 
+  // Optional debug block (kept)
   const DIGEST_DEBUG = String(process.env.DAILY_DIGEST_DEBUG || "").trim() === "1";
   if (DIGEST_DEBUG) {
     const typeLine = [...byType.entries()]
@@ -532,18 +618,20 @@ function buildDigestEmbed({ guildName, hours, stats, rows, settings, hadQueryErr
     const newestLine = newestTs ? newestTs.toISOString() : "N/A";
     const oldestLine = oldestTs ? oldestTs.toISOString() : "N/A";
 
-    embed.addFields({
-      name: "Debug",
-      value: [
-        `types: ${typeLine || "N/A"}`,
-        `newest: ${newestLine}`,
-        `oldest: ${oldestLine}`,
-        `rows: ${rows?.length || 0} (cap=${MAX_ROWS})`,
-        `ensure_ok: ${_ensureOk ? "yes" : "no"}`,
-      ].join("\n").slice(0, 1024),
-      inline: false,
-    });
+    safeField(embed, "🧪 Debug", [
+      `types: ${typeLine || "N/A"}`,
+      `newest: ${newestLine}`,
+      `oldest: ${oldestLine}`,
+      `rows: ${rows?.length || 0} (cap=${MAX_ROWS})`,
+      `ensure_ok: ${_ensureOk ? "yes" : "no"}`,
+    ].join("\n").slice(0, 1024), false);
   }
+
+  embed.setFooter({
+    text: hadQueryError
+      ? "MB Digest • warning: digest query error"
+      : "MB Digest • powered by your tracker logs",
+  });
 
   return embed;
 }
@@ -590,3 +678,4 @@ module.exports = {
   computeDigestStats,
   buildDigestEmbed,
 };
+
