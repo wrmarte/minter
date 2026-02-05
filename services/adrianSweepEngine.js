@@ -81,6 +81,11 @@ const SWEEP_INFO_EVERY_MS = Math.max(
   Number(process.env.SWEEP_LOG_INFO_EVERY_MS || 0) // 0 = no rate limit for info unless you set it
 );
 
+// ✅ Optional: mute providerM console.warn spam ONLY during sweep calls
+// This does NOT modify providerM at all.
+// Use: SWEEP_ENGINE_MUTE_PROVIDER_WARN=1
+const MUTE_PROVIDER_WARN = String(process.env.SWEEP_ENGINE_MUTE_PROVIDER_WARN || "0").trim() === "1";
+
 // Internal rate-limit buckets
 const _rl = new Map(); // key -> lastTs
 
@@ -111,6 +116,19 @@ function sweepErr(key, ...args) {
   if (SWEEP_SILENT) return;
   if (!_shouldLog(`err:${key}`, SWEEP_ERROR_EVERY_MS)) return;
   console.error(...args);
+}
+
+// ✅ Mute console.warn temporarily (used to silence providerM warnings for sweep calls only)
+async function withMutedWarn(fn) {
+  if (!MUTE_PROVIDER_WARN) return await fn();
+
+  const origWarn = console.warn;
+  console.warn = () => {};
+  try {
+    return await fn();
+  } finally {
+    console.warn = origWarn;
+  }
 }
 
 /* ======================================================
@@ -181,7 +199,7 @@ async function resolveProvider(chainName) {
 
   // Force providerM to pin one (best effort)
   try {
-    const forced = await safeRpcCall(chainName, (p) => p, 2, 6000);
+    const forced = await withMutedWarn(() => safeRpcCall(chainName, (p) => p, 2, 6000));
     if (forced) return forced;
   } catch {}
 
@@ -201,14 +219,17 @@ function isValidBigIntish(x) {
 ====================================================== */
 async function fetchEngineBalance(chainName) {
   // ✅ Use safeRpcCall correctly: safeRpcCall(chain, (provider)=>...)
-  const balRaw = await safeRpcCall(
-    chainName,
-    async (p) => {
-      const token = new ethers.Contract(ADRIAN_TOKEN_CA, ERC20_ABI, p);
-      return await token.balanceOf(ENGINE_CA);
-    },
-    CALL_RETRIES,
-    CALL_TIMEOUT_MS
+  // ✅ Optional: mute providerM warn spam only during this call
+  const balRaw = await withMutedWarn(() =>
+    safeRpcCall(
+      chainName,
+      async (p) => {
+        const token = new ethers.Contract(ADRIAN_TOKEN_CA, ERC20_ABI, p);
+        return await token.balanceOf(ENGINE_CA);
+      },
+      CALL_RETRIES,
+      CALL_TIMEOUT_MS
+    )
   );
 
   if (!balRaw) return null;
@@ -307,25 +328,29 @@ async function startSweepEngine(client) {
 
   // Fetch decimals/symbol safely (don’t spam; retries small)
   const decimals =
-    (await safeRpcCall(
-      chainName,
-      async (p) => {
-        const token = new ethers.Contract(ADRIAN_TOKEN_CA, ERC20_ABI, p);
-        return Number(await token.decimals());
-      },
-      2,
-      8000
+    (await withMutedWarn(() =>
+      safeRpcCall(
+        chainName,
+        async (p) => {
+          const token = new ethers.Contract(ADRIAN_TOKEN_CA, ERC20_ABI, p);
+          return Number(await token.decimals());
+        },
+        2,
+        8000
+      )
     ).catch(() => 18)) || 18;
 
   const symbol =
-    (await safeRpcCall(
-      chainName,
-      async (p) => {
-        const token = new ethers.Contract(ADRIAN_TOKEN_CA, ERC20_ABI, p);
-        return String(await token.symbol());
-      },
-      2,
-      8000
+    (await withMutedWarn(() =>
+      safeRpcCall(
+        chainName,
+        async (p) => {
+          const token = new ethers.Contract(ADRIAN_TOKEN_CA, ERC20_ABI, p);
+          return String(await token.symbol());
+        },
+        2,
+        8000
+      )
     ).catch(() => "TOKEN")) || "TOKEN";
 
   sweepInfo("tokenLoaded", `🧹 Token loaded → ${symbol} | Decimals: ${decimals} | chain=${chainName}`);
@@ -350,8 +375,10 @@ async function startSweepEngine(client) {
     } catch (err) {
       const msg = err?.message || String(err);
 
-      // ✅ This is your spam line — now rate-limited by SWEEP_LOG_ERROR_EVERY_MS
-      sweepWarn("pollError", "🧹 Sweep poll error:", msg);
+      // ✅ This is your spam line:
+      // - now rate-limited by SWEEP_LOG_ERROR_EVERY_MS
+      // - uses ERROR channel so it still appears when SWEEP_LOG_LEVEL=error
+      sweepErr("pollError", "🧹 Sweep poll error:", msg);
 
       backoffMs = Math.min(120000, Math.max(5000, (backoffMs || 0) * 2 || 5000));
     } finally {
@@ -379,5 +406,3 @@ module.exports = {
   startSweepEngine,
   stopSweepEngine,
 };
-
-
