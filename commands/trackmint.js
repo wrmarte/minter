@@ -1,4 +1,4 @@
-// commands/trackmintplus.js
+// commands/trackmintplus.js  (OK to paste into commands/trackmint.js if that's what runs)
 const { SlashCommandBuilder, PermissionsBitField } = require('discord.js');
 const { ethers } = require('ethers');
 
@@ -11,20 +11,20 @@ try {
 
 const { trackAllContracts } = require('../services/mintRouter');
 
+// Discord "ephemeral" deprecation: use flags where possible
+const EPHEMERAL_FLAG = 1 << 6; // 64
+
 function safeLower(s) {
   return String(s || '').trim().toLowerCase();
 }
-
 function safeTrim(s) {
   return String(s || '').trim();
 }
-
 function normalizeChain(chain) {
   const c = safeLower(chain);
   if (c === 'base' || c === 'eth' || c === 'ape') return c;
   return 'base';
 }
-
 function normalizeToken(tokenSymbolOrAddress) {
   const raw = safeTrim(tokenSymbolOrAddress || '');
   if (!raw) return { resolvedSymbol: 'ETH', tokenAddrOrInput: 'ETH' };
@@ -43,69 +43,63 @@ function normalizeToken(tokenSymbolOrAddress) {
 }
 
 async function ensureWatchlistSchema(pg) {
+  // Create minimal table if missing (legacy-safe: no id required)
   await pg.query(`
     CREATE TABLE IF NOT EXISTS contract_watchlist (
-      id SERIAL PRIMARY KEY,
-      name TEXT NOT NULL,
-      address TEXT NOT NULL,
-      chain TEXT NOT NULL DEFAULT 'base',
-      mint_price NUMERIC NULL,
-      mint_token TEXT NULL,
-      mint_token_symbol TEXT NULL,
-      channel_ids TEXT[] NULL DEFAULT '{}'::text[],
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      name TEXT,
+      address TEXT
     );
   `);
 
+  // Add missing columns if needed (legacy-safe)
   await pg.query(`
     DO $$
     BEGIN
       IF NOT EXISTS (
         SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'contract_watchlist' AND column_name = 'chain'
+        WHERE table_name='contract_watchlist' AND column_name='chain'
       ) THEN
         ALTER TABLE contract_watchlist ADD COLUMN chain TEXT NOT NULL DEFAULT 'base';
       END IF;
 
       IF NOT EXISTS (
         SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'contract_watchlist' AND column_name = 'mint_price'
+        WHERE table_name='contract_watchlist' AND column_name='mint_price'
       ) THEN
         ALTER TABLE contract_watchlist ADD COLUMN mint_price NUMERIC NULL;
       END IF;
 
       IF NOT EXISTS (
         SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'contract_watchlist' AND column_name = 'mint_token'
+        WHERE table_name='contract_watchlist' AND column_name='mint_token'
       ) THEN
         ALTER TABLE contract_watchlist ADD COLUMN mint_token TEXT NULL;
       END IF;
 
       IF NOT EXISTS (
         SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'contract_watchlist' AND column_name = 'mint_token_symbol'
+        WHERE table_name='contract_watchlist' AND column_name='mint_token_symbol'
       ) THEN
         ALTER TABLE contract_watchlist ADD COLUMN mint_token_symbol TEXT NULL;
       END IF;
 
       IF NOT EXISTS (
         SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'contract_watchlist' AND column_name = 'channel_ids'
+        WHERE table_name='contract_watchlist' AND column_name='channel_ids'
       ) THEN
         ALTER TABLE contract_watchlist ADD COLUMN channel_ids TEXT[] NULL DEFAULT '{}'::text[];
       END IF;
 
       IF NOT EXISTS (
         SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'contract_watchlist' AND column_name = 'created_at'
+        WHERE table_name='contract_watchlist' AND column_name='created_at'
       ) THEN
         ALTER TABLE contract_watchlist ADD COLUMN created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
       END IF;
 
       IF NOT EXISTS (
         SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'contract_watchlist' AND column_name = 'updated_at'
+        WHERE table_name='contract_watchlist' AND column_name='updated_at'
       ) THEN
         ALTER TABLE contract_watchlist ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
       END IF;
@@ -125,16 +119,56 @@ async function ensureWatchlistSchema(pg) {
   `);
 }
 
+async function normalizeWatchlist(pg) {
+  // Normalize address + chain, ensure timestamps exist
+  try {
+    await pg.query(`
+      UPDATE contract_watchlist
+      SET
+        address = LOWER(TRIM(address)),
+        chain = LOWER(TRIM(COALESCE(chain, 'base'))),
+        created_at = COALESCE(created_at, NOW()),
+        updated_at = COALESCE(updated_at, NOW())
+      WHERE address IS NOT NULL;
+    `);
+  } catch (e) {
+    console.warn('⚠️ [trackmintplus] normalize failed:', e?.message || e);
+  }
+}
+
+async function dedupeWatchlistByCtid(pg) {
+  // Remove duplicates for (chain,address) using ctid (works without id)
+  try {
+    await pg.query(`
+      WITH ranked AS (
+        SELECT
+          ctid,
+          chain,
+          address,
+          ROW_NUMBER() OVER (
+            PARTITION BY chain, address
+            ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
+          ) AS rn
+        FROM contract_watchlist
+        WHERE chain IS NOT NULL AND address IS NOT NULL
+      )
+      DELETE FROM contract_watchlist w
+      USING ranked r
+      WHERE w.ctid = r.ctid AND r.rn > 1;
+    `);
+  } catch (e) {
+    console.warn('⚠️ [trackmintplus] dedupe delete failed:', e?.message || e);
+  }
+}
+
 async function tryCreateUniqueIndex(pg) {
   try {
     await pg.query(`
       DO $$
       BEGIN
         IF NOT EXISTS (
-          SELECT 1
-          FROM pg_indexes
-          WHERE schemaname = 'public'
-            AND indexname = 'contract_watchlist_chain_address_uq'
+          SELECT 1 FROM pg_indexes
+          WHERE schemaname='public' AND indexname='contract_watchlist_chain_address_uq'
         ) THEN
           CREATE UNIQUE INDEX contract_watchlist_chain_address_uq
             ON contract_watchlist (chain, address);
@@ -148,54 +182,11 @@ async function tryCreateUniqueIndex(pg) {
   }
 }
 
-async function dedupeWatchlist(pg) {
-  // Normalize first
-  try {
-    await pg.query(`
-      UPDATE contract_watchlist
-      SET
-        address = LOWER(TRIM(address)),
-        chain = LOWER(TRIM(COALESCE(chain, 'base'))),
-        updated_at = COALESCE(updated_at, NOW()),
-        created_at = COALESCE(created_at, NOW())
-      WHERE address IS NOT NULL;
-    `);
-  } catch (e) {
-    console.warn('⚠️ [trackmintplus] normalize update failed:', e?.message || e);
-  }
-
-  // Delete duplicates, keeping the newest updated_at (or highest id as fallback)
-  // This does NOT require any unique index.
-  try {
-    await pg.query(`
-      WITH ranked AS (
-        SELECT
-          id,
-          chain,
-          address,
-          ROW_NUMBER() OVER (
-            PARTITION BY chain, address
-            ORDER BY updated_at DESC NULLS LAST, id DESC
-          ) AS rn
-        FROM contract_watchlist
-        WHERE chain IS NOT NULL AND address IS NOT NULL
-      )
-      DELETE FROM contract_watchlist w
-      USING ranked r
-      WHERE w.id = r.id AND r.rn > 1;
-    `);
-  } catch (e) {
-    console.warn('⚠️ [trackmintplus] dedupe delete failed:', e?.message || e);
-  }
-}
-
 async function hasUniqueIndex(pg) {
   try {
     const r = await pg.query(`
-      SELECT 1
-      FROM pg_indexes
-      WHERE schemaname='public'
-        AND indexname='contract_watchlist_chain_address_uq'
+      SELECT 1 FROM pg_indexes
+      WHERE schemaname='public' AND indexname='contract_watchlist_chain_address_uq'
       LIMIT 1;
     `);
     return (r?.rows?.length || 0) > 0;
@@ -204,7 +195,7 @@ async function hasUniqueIndex(pg) {
   }
 }
 
-async function manualUpsert(pg, payload) {
+async function manualUpsertNoId(pg, payload) {
   const {
     name,
     addressLower,
@@ -212,16 +203,16 @@ async function manualUpsert(pg, payload) {
     mint_price,
     mint_token,
     mint_token_symbol,
-    channelId
+    channelId,
   } = payload;
 
-  // Find any existing row for chain/address
+  // Find the row to update using ctid (stable for the duration of a statement)
   const existing = await pg.query(
     `
-    SELECT *
+    SELECT ctid, name, address, chain, mint_price, mint_token, mint_token_symbol, channel_ids
     FROM contract_watchlist
     WHERE chain = $1 AND address = $2
-    ORDER BY updated_at DESC NULLS LAST, id DESC
+    ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
     LIMIT 1
     `,
     [chain, addressLower]
@@ -241,11 +232,12 @@ async function manualUpsert(pg, payload) {
         mint_token_symbol = COALESCE(NULLIF($4,''), mint_token_symbol),
         channel_ids = $5::text[],
         updated_at = NOW()
-      WHERE id = $6
+      WHERE ctid = $6
       RETURNING *;
       `,
-      [name, mint_price, mint_token || '', mint_token_symbol || '', merged, row.id]
+      [name, mint_price, mint_token || '', mint_token_symbol || '', merged, row.ctid]
     );
+
     return upd.rows[0];
   }
 
@@ -292,12 +284,12 @@ module.exports = {
     if (!pg || typeof pg.query !== 'function') {
       return interaction.reply({
         content: '❌ DB not attached to client (`interaction.client.pg` missing). Check your index.js wiring.',
-        ephemeral: true
+        flags: EPHEMERAL_FLAG,
       });
     }
 
     if (!member.permissions.has(PermissionsBitField.Flags.Administrator) && interaction.user.id !== process.env.BOT_OWNER_ID) {
-      return interaction.reply({ content: '❌ Admin only.', ephemeral: true });
+      return interaction.reply({ content: '❌ Admin only.', flags: EPHEMERAL_FLAG });
     }
 
     const nameRaw = options.getString('name');
@@ -310,34 +302,31 @@ module.exports = {
     try {
       address = ethers.getAddress(safeTrim(addrRaw));
     } catch {
-      return interaction.reply({ content: '❌ Invalid contract address.', ephemeral: true });
+      return interaction.reply({ content: '❌ Invalid contract address.', flags: EPHEMERAL_FLAG });
     }
 
     const name = safeTrim(nameRaw);
     const currentChannel = String(channel.id);
     const { resolvedSymbol, tokenAddrOrInput } = normalizeToken(tokenInput);
 
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: EPHEMERAL_FLAG }).catch(() => null);
 
+    // 1) schema
     try {
       await ensureWatchlistSchema(pg);
+      await normalizeWatchlist(pg);
+      await dedupeWatchlistByCtid(pg);
+      await tryCreateUniqueIndex(pg); // may fail if duplicates still exist elsewhere; manual fallback handles it
     } catch (e) {
-      console.error('❌ [trackmintplus] schema ensure failed:', e);
-      return interaction.editReply('⚠️ DB schema migration failed. Check Railway logs for details.');
+      console.error('❌ [trackmintplus] schema/cleanup failed:', e);
+      return interaction.editReply('⚠️ DB schema/cleanup failed. Check logs.').catch(() => null);
     }
-
-    // ✅ Deduplicate existing rows so a unique index can be created
-    await dedupeWatchlist(pg);
-
-    // ✅ Try to create unique index after dedupe
-    await tryCreateUniqueIndex(pg);
 
     const addressLower = address.toLowerCase();
 
-    // ✅ Preferred path: UPSERT if the unique index exists
+    // 2) write
     try {
       const indexOk = await hasUniqueIndex(pg);
-
       let row = null;
 
       if (indexOk) {
@@ -378,8 +367,7 @@ module.exports = {
         );
         row = insertRes?.rows?.[0] || null;
       } else {
-        // ✅ Fallback: manual upsert without needing any constraint
-        row = await manualUpsert(pg, {
+        row = await manualUpsertNoId(pg, {
           name,
           addressLower,
           chain,
@@ -392,9 +380,10 @@ module.exports = {
 
       if (!row) {
         console.warn('⚠️ [trackmintplus] write returned no row');
-        return interaction.editReply('⚠️ DB write happened but returned no row. Check logs.');
+        return interaction.editReply('⚠️ DB write returned no row. Check logs.').catch(() => null);
       }
 
+      // 3) router kick
       try {
         await trackAllContracts(interaction.client, row);
       } catch (e) {
@@ -405,21 +394,21 @@ module.exports = {
 
       return interaction.editReply(
         `✅ Tracking saved in DB.\n` +
-        `• **${row.name}**\n` +
-        `• chain: \`${row.chain}\`\n` +
-        `• address: \`${row.address}\`\n` +
+        `• **${row.name || name}**\n` +
+        `• chain: \`${row.chain || chain}\`\n` +
+        `• address: \`${row.address || addressLower}\`\n` +
         `• mode: **${mode}**\n` +
         `• token: \`${row.mint_token_symbol || resolvedSymbol || 'ETH'}\`\n` +
         `• channels: ${(row.channel_ids || []).length}`
-      );
-    } catch (err) {
-      console.error('❌ [trackmintplus] DB upsert failed message:', err?.message);
-      console.error('❌ [trackmintplus] DB upsert failed full:', err);
+      ).catch(() => null);
 
+    } catch (err) {
+      console.error('❌ [trackmintplus] DB write failed message:', err?.message);
+      console.error('❌ [trackmintplus] DB write failed full:', err);
       return interaction.editReply(
-        `⚠️ DB write failed.\n` +
-        `**Error:** ${String(err?.message || err)}`
-      );
+        `⚠️ DB write failed.\n**Error:** ${String(err?.message || err)}`
+      ).catch(() => null);
     }
   }
 };
+
