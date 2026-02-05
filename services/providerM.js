@@ -11,6 +11,50 @@ const fetch = require('node-fetch');
    - Never throws from public APIs; returns null on failure
 ========================================================= */
 
+/* =========================================================
+   ✅ LOG CONTROL (NO LOGIC CHANGES)
+   - PROVIDERM_LOG_LEVEL: info | warn | error | off   (default: warn)
+   - Per-message rate limits to prevent spam during rate limits / unstable RPCs
+========================================================= */
+const PROVIDERM_LOG_LEVEL = String(process.env.PROVIDERM_LOG_LEVEL || 'warn').trim().toLowerCase();
+const PROVIDERM_SILENT = PROVIDERM_LOG_LEVEL === 'off' || PROVIDERM_LOG_LEVEL === 'silent';
+const PROVIDERM_ERROR_ONLY = PROVIDERM_LOG_LEVEL === 'error';
+const PROVIDERM_WARN_AND_ERROR = PROVIDERM_LOG_LEVEL === 'warn'; // info suppressed
+
+const PROVIDERM_LOG_RPC_ERROR_EVERY_MS = Math.max(0, Number(process.env.PROVIDERM_LOG_RPC_ERROR_EVERY_MS || 60000));
+const PROVIDERM_LOG_RPC_FAILED_EVERY_MS = Math.max(0, Number(process.env.PROVIDERM_LOG_RPC_FAILED_EVERY_MS || 60000));
+const PROVIDERM_LOG_ROTATE_EVERY_MS = Math.max(0, Number(process.env.PROVIDERM_LOG_ROTATE_EVERY_MS || 60000));
+const PROVIDERM_LOG_PIN_EVERY_MS = Math.max(0, Number(process.env.PROVIDERM_LOG_PIN_EVERY_MS || 0)); // 0=no RL
+const PROVIDERM_LOG_OFFLINE_EVERY_MS = Math.max(0, Number(process.env.PROVIDERM_LOG_OFFLINE_EVERY_MS || 60000));
+const PROVIDERM_LOG_DISCOVERY_EVERY_MS = Math.max(0, Number(process.env.PROVIDERM_LOG_DISCOVERY_EVERY_MS || 60000));
+
+const _logRL = new Map(); // key -> lastTs
+function _shouldLog(key, everyMs) {
+  if (!everyMs || everyMs <= 0) return true;
+  const t = Date.now();
+  const last = _logRL.get(key) || 0;
+  if (t - last < everyMs) return false;
+  _logRL.set(key, t);
+  return true;
+}
+function _logInfo(key, everyMs, ...args) {
+  if (PROVIDERM_SILENT) return;
+  if (PROVIDERM_ERROR_ONLY || PROVIDERM_WARN_AND_ERROR) return; // suppress info
+  if (!_shouldLog(`info:${key}`, everyMs)) return;
+  console.log(...args);
+}
+function _logWarn(key, everyMs, ...args) {
+  if (PROVIDERM_SILENT) return;
+  if (PROVIDERM_ERROR_ONLY) return; // suppress warn
+  if (!_shouldLog(`warn:${key}`, everyMs)) return;
+  console.warn(...args);
+}
+function _logError(key, everyMs, ...args) {
+  if (PROVIDERM_SILENT) return;
+  if (!_shouldLog(`err:${key}`, everyMs)) return;
+  console.error(...args);
+}
+
 /* ---------- Static baselines (always included) ---------- */
 const STATIC_RPCS = {
   eth: [
@@ -228,7 +272,9 @@ async function selectHealthy(key) {
       if (ok) {
         ep.failCount = 0; ep.cooldownUntil = 0; ep.lastOkAt = now();
         st.pinnedIdx = idx;
-        console.log(`✅ ${key} initialized/pinned RPC: ${ep.url}`);
+
+        // ✅ pin log (rate-limit optional)
+        _logInfo(`pin:${key}:${ep.url}`, PROVIDERM_LOG_PIN_EVERY_MS, `✅ ${key} initialized/pinned RPC: ${ep.url}`);
         return ep.provider;
       } else {
         ep.failCount += 1;
@@ -239,10 +285,13 @@ async function selectHealthy(key) {
 
     st.pinnedIdx = null;
     st.chainCooldownUntil = now() + 20000;
-    if (now() - st.lastOfflineLogAt > 60000) {
-      console.warn(`⛔ ${key} RPC appears offline. Cooling down 20s.`);
+
+    // ✅ offline log (rate-limited)
+    if (_shouldLog(`offline:${key}`, PROVIDERM_LOG_OFFLINE_EVERY_MS)) {
+      _logWarn(`offline:${key}`, 0, `⛔ ${key} RPC appears offline. Cooling down 20s.`);
       st.lastOfflineLogAt = now();
     }
+
     return null;
   })();
 
@@ -257,7 +306,8 @@ function getProvider(chain = 'base') {
   initChain(key);
   const st = chains[key];
   if (now() < st.chainCooldownUntil) {
-    console.warn(`⚠️ No live provider for "${key}". Returning null (chain cooldown).`);
+    // Keep same behavior; optionally quiet by log level
+    _logWarn(`cooldown:${key}`, PROVIDERM_LOG_RPC_FAILED_EVERY_MS, `⚠️ No live provider for "${key}". Returning null (chain cooldown).`);
     return null;
   }
   if (st.pinnedIdx == null) return null;
@@ -278,7 +328,9 @@ async function rotateProvider(chain = 'base') {
       ep.failCount += 1;
       const backoff = Math.min(30000, (1000 ** Math.min(3, ep.failCount)) * 2);
       ep.cooldownUntil = now() + jitter(backoff);
-      console.warn(`🔁 Rotated RPC for ${key}: ${ep.url} cooling down ~${Math.round(backoff / 1000)}s`);
+
+      // ✅ rotate log (rate-limited)
+      _logWarn(`rotate:${key}:${ep.url}`, PROVIDERM_LOG_ROTATE_EVERY_MS, `🔁 Rotated RPC for ${key}: ${ep.url} cooling down ~${Math.round(backoff / 1000)}s`);
     }
   }
   st.pinnedIdx = null;
@@ -311,7 +363,11 @@ async function safeRpcCall(chain, callFn, retries = 4, perCallTimeoutMs = 6000) 
       return result;
     } catch (err) {
       const msg = err?.info?.responseBody || err?.message || '';
-      console.warn(`⚠️ [${key}] RPC Error: ${err?.message || err?.code || 'UNKNOWN_ERROR'}`);
+
+      // NOTE: We do NOT change any branching/rotation logic here.
+      // Only rate-limit log spam.
+      const emsg = `${err?.message || err?.code || 'UNKNOWN_ERROR'}`;
+      _logWarn(`rpcError:${key}:${emsg}`, PROVIDERM_LOG_RPC_ERROR_EVERY_MS, `⚠️ [${key}] RPC Error: ${emsg}`);
 
       const current = getProvider(key);
       const st = chains[key];
@@ -319,10 +375,11 @@ async function safeRpcCall(chain, callFn, retries = 4, perCallTimeoutMs = 6000) 
         current?._rpcUrl ||
         (st.endpoints[st.pinnedIdx ?? -1] && st.endpoints[st.pinnedIdx ?? -1].url) ||
         'unknown';
-      console.warn(`🔻 RPC failed [${key}]: ${failUrl}`);
+
+      _logWarn(`rpcFailed:${key}:${failUrl}`, PROVIDERM_LOG_RPC_FAILED_EVERY_MS, `🔻 RPC failed [${key}]: ${failUrl}`);
 
       if (key === 'ape' && msg.includes('Batch of more than 3 requests')) {
-        console.warn('⛔ ApeChain batch limit hit — skip batch, no retry');
+        _logWarn(`apeBatch:${key}`, PROVIDERM_LOG_RPC_ERROR_EVERY_MS, '⛔ ApeChain batch limit hit — skip batch, no retry');
         return null;
       }
 
@@ -331,7 +388,7 @@ async function safeRpcCall(chain, callFn, retries = 4, perCallTimeoutMs = 6000) 
     }
   }
 
-  console.error(`❌ All retries failed for ${key}. Returning null.`);
+  _logError(`allFailed:${chain}`, PROVIDERM_LOG_RPC_ERROR_EVERY_MS, `❌ All retries failed for ${key}. Returning null.`);
   return null;
 }
 
@@ -405,12 +462,13 @@ async function refreshRpcPool(key, reason = 'periodic') {
     RPCS[key] = merged;
 
     if (before !== RPCS[key].join(',')) {
-      console.log(`🔄 ${key} RPC list updated (${reason}). Count=${RPCS[key].length}`);
+      // discovery log (rate-limited)
+      _logInfo(`rpcListUpdated:${key}:${reason}`, PROVIDERM_LOG_DISCOVERY_EVERY_MS, `🔄 ${key} RPC list updated (${reason}). Count=${RPCS[key].length}`);
       rebuildChainEndpoints(key);
       selectHealthy(key).catch(() => {});
     }
   } catch (e) {
-    console.warn(`⚠️ ${key} RPC discovery failed (${reason}): ${e.message}`);
+    _logWarn(`rpcDiscoveryFail:${key}:${reason}`, PROVIDERM_LOG_DISCOVERY_EVERY_MS, `⚠️ ${key} RPC discovery failed (${reason}): ${e.message}`);
   }
 }
 
