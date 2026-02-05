@@ -45,7 +45,7 @@ function normalizeToken(tokenSymbolOrAddress) {
 }
 
 async function ensureWatchlistSchema(pg) {
-  // 1) Create table if missing (THIS is the big missing piece in your current command)
+  // 1) Create table if missing
   await pg.query(`
     CREATE TABLE IF NOT EXISTS contract_watchlist (
       id SERIAL PRIMARY KEY,
@@ -65,6 +65,21 @@ async function ensureWatchlistSchema(pg) {
   await pg.query(`
     DO $$
     BEGIN
+      -- Core columns (in case legacy table was created earlier)
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'contract_watchlist' AND column_name = 'name'
+      ) THEN
+        ALTER TABLE contract_watchlist ADD COLUMN name TEXT;
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'contract_watchlist' AND column_name = 'address'
+      ) THEN
+        ALTER TABLE contract_watchlist ADD COLUMN address TEXT;
+      END IF;
+
       IF NOT EXISTS (
         SELECT 1 FROM information_schema.columns
         WHERE table_name = 'contract_watchlist' AND column_name = 'chain'
@@ -98,6 +113,21 @@ async function ensureWatchlistSchema(pg) {
         WHERE table_name = 'contract_watchlist' AND column_name = 'channel_ids'
       ) THEN
         ALTER TABLE contract_watchlist ADD COLUMN channel_ids TEXT[] NULL DEFAULT '{}'::text[];
+      END IF;
+
+      -- ✅ IMPORTANT: legacy tables often missing these
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'contract_watchlist' AND column_name = 'created_at'
+      ) THEN
+        ALTER TABLE contract_watchlist ADD COLUMN created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'contract_watchlist' AND column_name = 'updated_at'
+      ) THEN
+        ALTER TABLE contract_watchlist ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
       END IF;
 
       -- Try to drop NOT NULL constraints if they exist (don’t crash)
@@ -161,7 +191,6 @@ module.exports = {
 
   async execute(interaction) {
     const pg = interaction?.client?.pg;
-
     const { options, channel, member } = interaction;
 
     if (!pg || typeof pg.query !== 'function') {
@@ -208,9 +237,9 @@ module.exports = {
       const insertRes = await pg.query(
         `
         INSERT INTO contract_watchlist
-          (name, address, chain, mint_price, mint_token, mint_token_symbol, channel_ids, updated_at)
+          (name, address, chain, mint_price, mint_token, mint_token_symbol, channel_ids)
         VALUES
-          ($1,   $2,     $3,    $4,         $5,        $6,              $7::text[], NOW())
+          ($1,   $2,     $3,    $4,         $5,        $6,              $7::text[])
         ON CONFLICT (chain, address) DO UPDATE
         SET
           name = EXCLUDED.name,
@@ -267,7 +296,10 @@ module.exports = {
         `• channels: ${(row.channel_ids || []).length}`
       );
     } catch (err) {
-      console.error('❌ [trackmintplus] DB upsert failed:', err);
+      // ✅ Print message clearly so you see the missing column if anything else is off
+      console.error('❌ [trackmintplus] DB upsert failed message:', err?.message);
+      console.error('❌ [trackmintplus] DB upsert failed full:', err);
+
       return interaction.editReply(
         `⚠️ DB write failed.\n` +
         `**Error:** ${String(err?.message || err)}`
