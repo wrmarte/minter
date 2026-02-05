@@ -59,6 +59,61 @@ const CALL_TIMEOUT_MS = Math.max(4000, Number(process.env.SWEEP_ENGINE_CALL_TIME
 const CALL_RETRIES = Math.max(1, Number(process.env.SWEEP_ENGINE_CALL_RETRIES || 4));
 
 /* ======================================================
+   ✅ NEW: LOG CONTROL (ANTI-SPAM)
+====================================================== */
+// SWEEP_LOG_LEVEL: info | warn | error | off
+const SWEEP_LOG_LEVEL = String(process.env.SWEEP_LOG_LEVEL || "info").trim().toLowerCase();
+const SWEEP_SILENT = SWEEP_LOG_LEVEL === "off" || SWEEP_LOG_LEVEL === "silent";
+const SWEEP_ERRORS_ONLY = SWEEP_LOG_LEVEL === "error";
+const SWEEP_WARN_AND_ERROR = SWEEP_LOG_LEVEL === "warn";
+
+// Rate limit noisy messages
+const SWEEP_ERROR_EVERY_MS = Math.max(
+  0,
+  Number(process.env.SWEEP_LOG_ERROR_EVERY_MS || 60000) // 60s default
+);
+const SWEEP_WARN_EVERY_MS = Math.max(
+  0,
+  Number(process.env.SWEEP_LOG_WARN_EVERY_MS || 60000) // 60s default
+);
+const SWEEP_INFO_EVERY_MS = Math.max(
+  0,
+  Number(process.env.SWEEP_LOG_INFO_EVERY_MS || 0) // 0 = no rate limit for info unless you set it
+);
+
+// Internal rate-limit buckets
+const _rl = new Map(); // key -> lastTs
+
+function _shouldLog(key, everyMs) {
+  if (!everyMs || everyMs <= 0) return true;
+  const now = Date.now();
+  const last = _rl.get(key) || 0;
+  if (now - last < everyMs) return false;
+  _rl.set(key, now);
+  return true;
+}
+
+function sweepInfo(key, ...args) {
+  if (SWEEP_SILENT) return;
+  if (SWEEP_ERRORS_ONLY || SWEEP_WARN_AND_ERROR) return; // info suppressed
+  if (!_shouldLog(`info:${key}`, SWEEP_INFO_EVERY_MS)) return;
+  console.log(...args);
+}
+
+function sweepWarn(key, ...args) {
+  if (SWEEP_SILENT) return;
+  if (SWEEP_ERRORS_ONLY) return; // warn suppressed
+  if (!_shouldLog(`warn:${key}`, SWEEP_WARN_EVERY_MS)) return;
+  console.warn(...args);
+}
+
+function sweepErr(key, ...args) {
+  if (SWEEP_SILENT) return;
+  if (!_shouldLog(`err:${key}`, SWEEP_ERROR_EVERY_MS)) return;
+  console.error(...args);
+}
+
+/* ======================================================
    ERC-20 ABI (MINIMAL)
 ====================================================== */
 const ERC20_ABI = [
@@ -79,7 +134,10 @@ let _timer = null;
    HELPERS
 ====================================================== */
 function log(...args) {
-  if (DEBUG) console.log("🧹 [SweepEngine]", ...args);
+  // DEBUG only; still respect SWEEP_LOG_LEVEL + warn/info gating
+  if (!DEBUG) return;
+  // treat debug as "info" class (so it will be hidden by warn/error/off)
+  sweepInfo("debug", "🧹 [SweepEngine]", ...args);
 }
 
 function normalizeChain(v) {
@@ -108,7 +166,7 @@ async function tryAcquireLeaderLock(client) {
     const r = await pg.query("SELECT pg_try_advisory_lock($1) AS ok", [LEADER_LOCK_KEY]);
     return Boolean(r.rows?.[0]?.ok);
   } catch (e) {
-    console.warn("⚠️ [SweepEngine] leader lock check failed:", e?.message || e);
+    sweepWarn("leaderLock", "⚠️ [SweepEngine] leader lock check failed:", e?.message || e);
     return true;
   }
 }
@@ -163,13 +221,13 @@ async function fetchEngineBalance(chainName) {
 async function initSweepPower(client, chainName, decimals) {
   const balRaw = await fetchEngineBalance(chainName);
   if (!balRaw) {
-    console.warn("🧹 Sweep engine init: balance fetch returned null (will retry on next poll)");
+    sweepWarn("initNull", "🧹 Sweep engine init: balance fetch returned null (will retry on next poll)");
     return;
   }
 
   const bal = Number(ethers.formatUnits(balRaw, decimals));
   if (!Number.isFinite(bal)) {
-    console.warn("🧹 Sweep engine init: formatted balance not finite");
+    sweepWarn("initNotFinite", "🧹 Sweep engine init: formatted balance not finite");
     return;
   }
 
@@ -181,7 +239,8 @@ async function initSweepPower(client, chainName, decimals) {
     updatedAt: new Date(),
   };
 
-  console.log(`🧹 Sweep Power initialized → ${bal.toLocaleString()} ADRIAN`);
+  // This is a useful one-time info log
+  sweepInfo("initOk", `🧹 Sweep Power initialized → ${bal.toLocaleString()} ADRIAN`);
 }
 
 /* ======================================================
@@ -222,7 +281,7 @@ async function startSweepEngine(client) {
   _stopped = false;
 
   if (!ENABLED) {
-    console.log("🧹 ADRIAN Sweep Power Engine: disabled by ENABLE_ADRIAN_SWEEP_ENGINE=0");
+    sweepInfo("disabled", "🧹 ADRIAN Sweep Power Engine: disabled by ENABLE_ADRIAN_SWEEP_ENGINE=0");
     return;
   }
 
@@ -230,16 +289,19 @@ async function startSweepEngine(client) {
 
   const leaderOk = await tryAcquireLeaderLock(client);
   if (!leaderOk) {
-    console.log("🧹 ADRIAN Sweep Power Engine: another instance holds leader lock — this instance will not poll.");
+    sweepInfo(
+      "leaderHeld",
+      "🧹 ADRIAN Sweep Power Engine: another instance holds leader lock — this instance will not poll."
+    );
     return;
   }
 
-  console.log("🧹 Starting ADRIAN Sweep Power Engine (BALANCE MODE)");
+  sweepInfo("start", "🧹 Starting ADRIAN Sweep Power Engine (BALANCE MODE)");
 
   try {
     await resolveProvider(chainName);
   } catch (e) {
-    console.warn("🧹 Sweep engine: provider resolve failed:", e?.message || e);
+    sweepWarn("providerResolve", "🧹 Sweep engine: provider resolve failed:", e?.message || e);
     return;
   }
 
@@ -266,13 +328,13 @@ async function startSweepEngine(client) {
       8000
     ).catch(() => "TOKEN")) || "TOKEN";
 
-  console.log(`🧹 Token loaded → ${symbol} | Decimals: ${decimals} | chain=${chainName}`);
+  sweepInfo("tokenLoaded", `🧹 Token loaded → ${symbol} | Decimals: ${decimals} | chain=${chainName}`);
 
   // Always initialize from chain (best effort)
   try {
     await initSweepPower(client, chainName, decimals);
   } catch (e) {
-    console.warn("🧹 Sweep engine init failed:", e?.message || e);
+    sweepWarn("initFail", "🧹 Sweep engine init failed:", e?.message || e);
   }
 
   let backoffMs = 0;
@@ -287,7 +349,9 @@ async function startSweepEngine(client) {
       backoffMs = 0;
     } catch (err) {
       const msg = err?.message || String(err);
-      console.warn("🧹 Sweep poll error:", msg);
+
+      // ✅ This is your spam line — now rate-limited by SWEEP_LOG_ERROR_EVERY_MS
+      sweepWarn("pollError", "🧹 Sweep poll error:", msg);
 
       backoffMs = Math.min(120000, Math.max(5000, (backoffMs || 0) * 2 || 5000));
     } finally {
@@ -315,4 +379,5 @@ module.exports = {
   startSweepEngine,
   stopSweepEngine,
 };
+
 
