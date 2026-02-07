@@ -17,6 +17,8 @@ const fetch = require('node-fetch');
    - Harder null-guards around provider creation/ping
    - More defensive JSON fetch (headers + abort cleanup)
    - Slightly safer URL normalization and list handling
+   - ✅ Smarter ping: quick blockNumber + (optional) getNetwork sanity check
+     (keeps same pin/rotation behavior; just avoids pinning "half-dead" RPCs)
 ========================================================= */
 
 /* =========================================================
@@ -117,6 +119,12 @@ const CHAIN_META = {
 };
 
 const REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6h
+
+/* ---------- Ping tuning (NO logic changes) ---------- */
+const PING_TIMEOUT_MS = Math.max(800, Number(process.env.PROVIDERM_PING_TIMEOUT_MS || 2000));
+const PING_NETWORK_CHECK = String(process.env.PROVIDERM_PING_NETWORK_CHECK || '1').trim() === '1';
+// Keep this small so ping stays cheap
+const PING_NETWORK_TIMEOUT_MS = Math.max(800, Number(process.env.PROVIDERM_PING_NETWORK_TIMEOUT_MS || 1800));
 
 /* ---------- Internal state ---------- */
 const chains = {}; // key -> { endpoints[], pinnedIdx, chainCooldownUntil, lastOfflineLogAt }
@@ -253,11 +261,26 @@ function makeProvider(key, url) {
   }
 }
 
-async function pingProvider(provider, timeoutMs = 2500) {
+/**
+ * ✅ Smarter ping (NO selection logic change):
+ * - Step 1: getBlockNumber with short timeout
+ * - Step 2 (optional): getNetwork sanity check with short timeout
+ *   Helps avoid pinning endpoints that return blockNumber but are "lying"/unstable.
+ */
+async function pingProvider(provider, timeoutMs = PING_TIMEOUT_MS) {
   if (!provider) return false;
   try {
-    const res = await withTimeout(provider.getBlockNumber(), timeoutMs, 'rpc ping timeout');
-    return Number.isInteger(res) && res >= 0;
+    const bn = await withTimeout(provider.getBlockNumber(), timeoutMs, 'rpc ping timeout');
+    const okBn = Number.isInteger(bn) && bn >= 0;
+    if (!okBn) return false;
+
+    if (!PING_NETWORK_CHECK) return true;
+
+    // If staticNetwork was provided, this should be fast; still protect with timeout.
+    // We only require that it returns a plausible chainId.
+    const net = await withTimeout(provider.getNetwork(), PING_NETWORK_TIMEOUT_MS, 'rpc network timeout').catch(() => null);
+    const cid = Number(net?.chainId || 0);
+    return Number.isFinite(cid) && cid > 0;
   } catch {
     return false;
   }
@@ -302,7 +325,7 @@ async function selectHealthy(key) {
         continue;
       }
 
-      const ok = await pingProvider(ep.provider, 2000);
+      const ok = await pingProvider(ep.provider, PING_TIMEOUT_MS);
       if (ok) {
         ep.failCount = 0; ep.cooldownUntil = 0; ep.lastOkAt = now();
         st.pinnedIdx = idx;
@@ -534,11 +557,13 @@ async function refreshRpcPool(key, reason = 'periodic') {
     selectHealthy(key).catch(() => {});
   }
 
-  setInterval(() => {
+  const t = setInterval(() => {
     for (const key of Object.keys(CHAIN_META)) {
       refreshRpcPool(key, 'periodic');
     }
   }, REFRESH_INTERVAL_MS);
+  // ✅ Enhancement: don't keep process alive just because of refresh interval
+  if (t && typeof t.unref === 'function') t.unref();
 })();
 
 /* ---------- Exports ---------- */
@@ -548,3 +573,4 @@ module.exports = {
   safeRpcCall,
   getMaxBatchSize
 };
+
