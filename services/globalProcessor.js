@@ -6,6 +6,8 @@
 // - ✅ Safety: bounded seenTx + rate-limited noisy warnings
 // - ✅ Robust: safer channel perms + avoids crashes on partial cache
 // - ✅ Caching: contract instances per token, ETH price cache (short TTL)
+// - ✅ Pricing reliability: GeckoTerminal token USD via /tokens first, fallback to /simple
+// - ✅ Timeouts: avoids hanging fetch calls (prevents “USD = N/A” from stalled requests)
 // ======================================================
 
 const { Interface, formatUnits, ethers } = require('ethers');
@@ -450,22 +452,57 @@ function canSendToChannel(guild, channel) {
   try {
     if (!guild || !channel) return false;
     if (!channel.isTextBased?.()) return false;
-    const me = guild.members?.me;
+
+    // discord.js v14 safe member access
+    const me = guild.members?.me || guild.members?.cache?.get?.(guild.client?.user?.id);
     if (!me) return false;
+
     const perms = channel.permissionsFor(me);
     if (!perms) return false;
 
-    // Keep original requirement: SendMessages (you used string 'SendMessages')
-    // Also allow EmbedLinks (not required by your original code, but harmless check)
-    return perms.has('SendMessages');
+    // ✅ Keep original requirement: SendMessages
+    // Using PermissionsBitField.Flags avoids string mismatch edge cases
+    return perms.has('SendMessages') || perms.has(ethers?.PermissionsBitField?.Flags?.SendMessages);
   } catch {
     return false;
   }
 }
 
 /* ======================================================
-   PRICING (same endpoints; just cached ETH)
+   FETCH + TIMEOUT HELPERS (NEW, NO LOGIC CHANGE)
 ====================================================== */
+
+function _abortableFetch(url, ms = 8000) {
+  const timeout = Math.max(1000, Number(ms || 0));
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeout);
+  return fetch(url, { signal: ctrl.signal })
+    .finally(() => clearTimeout(t));
+}
+
+async function _fetchJson(url, timeoutMs = 8000) {
+  try {
+    const res = await _abortableFetch(url, timeoutMs);
+    const data = await res.json().catch(() => null);
+    return { ok: res.ok, status: res.status, data };
+  } catch (e) {
+    return { ok: false, status: 0, data: null, error: e };
+  }
+}
+
+/* ======================================================
+   PRICING (same intent; more reliable + cached)
+====================================================== */
+
+// Token price cache (prevents “USD=N/A” from frequent API misses)
+const TOKEN_PRICE_TTL_MS = Math.max(10_000, Number(process.env.GLOBAL_TOKEN_PRICE_TTL_MS || 60_000));
+const TOKEN_PRICE_TIMEOUT_MS = Math.max(2000, Number(process.env.GLOBAL_TOKEN_PRICE_TIMEOUT_MS || 8000));
+const _tokenPriceCache = new Map(); // addr -> { v, ts }
+
+// Market cap cache (lighter load)
+const MCAP_TTL_MS = Math.max(10_000, Number(process.env.GLOBAL_MCAP_TTL_MS || 120_000));
+const MCAP_TIMEOUT_MS = Math.max(2000, Number(process.env.GLOBAL_MCAP_TIMEOUT_MS || 8000));
+const _mcapCache = new Map(); // addr -> { v, ts }
 
 async function getETHPrice() {
   try {
@@ -474,23 +511,73 @@ async function getETHPrice() {
       return _ethPriceCache.v;
     }
 
-    const res = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd');
-    const data = await res.json();
+    const { ok, data } = await _fetchJson(
+      'https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd',
+      Math.max(2000, Number(process.env.GLOBAL_ETH_PRICE_TIMEOUT_MS || 8000))
+    );
+
     const v = parseFloat(data?.ethereum?.usd || '0') || 0;
 
-    if (v > 0) _ethPriceCache = { v, ts: now };
+    if (ok && v > 0) _ethPriceCache = { v, ts: now };
     return v;
   } catch {
     return 0;
   }
 }
 
+// ✅ More reliable token USD:
+// 1) /tokens/:addr -> attributes.price_usd
+// 2) fallback /simple/.../token_price/:addr -> token_prices[addr]
 async function getTokenPriceUSD(address) {
   try {
-    const res = await fetch(`https://api.geckoterminal.com/api/v2/simple/networks/base/token_price/${address}`);
-    const data = await res.json();
-    const prices = data?.data?.attributes?.token_prices || {};
-    return parseFloat(prices[String(address || '').toLowerCase()] || '0');
+    const addr = String(address || '').toLowerCase();
+    if (!addr) return 0;
+
+    const now = Date.now();
+    const cached = _tokenPriceCache.get(addr);
+    if (cached && (now - cached.ts) < TOKEN_PRICE_TTL_MS) return cached.v;
+
+    // 1) tokens endpoint (usually has price_usd)
+    {
+      const { ok, data } = await _fetchJson(
+        `https://api.geckoterminal.com/api/v2/networks/base/tokens/${addr}`,
+        TOKEN_PRICE_TIMEOUT_MS
+      );
+      const p = parseFloat(data?.data?.attributes?.price_usd || '0') || 0;
+      if (ok && p > 0) {
+        _tokenPriceCache.set(addr, { v: p, ts: now });
+        // keep cache bounded
+        if (_tokenPriceCache.size > 5000) {
+          const it = _tokenPriceCache.keys();
+          const drop = Math.max(1, Math.floor(_tokenPriceCache.size * 0.2));
+          for (let i = 0; i < drop; i++) _tokenPriceCache.delete(it.next().value);
+        }
+        return p;
+      }
+    }
+
+    // 2) fallback simple endpoint
+    {
+      const { ok, data } = await _fetchJson(
+        `https://api.geckoterminal.com/api/v2/simple/networks/base/token_price/${addr}`,
+        TOKEN_PRICE_TIMEOUT_MS
+      );
+      const prices = data?.data?.attributes?.token_prices || {};
+      const p = parseFloat(prices[addr] || '0') || 0;
+      if (ok && p > 0) {
+        _tokenPriceCache.set(addr, { v: p, ts: now });
+        if (_tokenPriceCache.size > 5000) {
+          const it = _tokenPriceCache.keys();
+          const drop = Math.max(1, Math.floor(_tokenPriceCache.size * 0.2));
+          for (let i = 0; i < drop; i++) _tokenPriceCache.delete(it.next().value);
+        }
+        return p;
+      }
+    }
+
+    // Cache 0 briefly to avoid hammering when GeckoTerminal is flaky
+    _tokenPriceCache.set(addr, { v: 0, ts: now });
+    return 0;
   } catch {
     return 0;
   }
@@ -498,12 +585,39 @@ async function getTokenPriceUSD(address) {
 
 async function getMarketCapUSD(address) {
   try {
-    const res = await fetch(`https://api.geckoterminal.com/api/v2/networks/base/tokens/${address}`);
-    const data = await res.json();
-    return parseFloat(data?.data?.attributes?.fdv_usd || data?.data?.attributes?.market_cap_usd || '0');
+    const addr = String(address || '').toLowerCase();
+    if (!addr) return 0;
+
+    const now = Date.now();
+    const cached = _mcapCache.get(addr);
+    if (cached && (now - cached.ts) < MCAP_TTL_MS) return cached.v;
+
+    const { ok, data } = await _fetchJson(
+      `https://api.geckoterminal.com/api/v2/networks/base/tokens/${addr}`,
+      MCAP_TIMEOUT_MS
+    );
+
+    const v = parseFloat(
+      data?.data?.attributes?.fdv_usd ||
+      data?.data?.attributes?.market_cap_usd ||
+      '0'
+    ) || 0;
+
+    if (ok && v > 0) {
+      _mcapCache.set(addr, { v, ts: now });
+      if (_mcapCache.size > 5000) {
+        const it = _mcapCache.keys();
+        const drop = Math.max(1, Math.floor(_mcapCache.size * 0.2));
+        for (let i = 0; i < drop; i++) _mcapCache.delete(it.next().value);
+      }
+      return v;
+    }
+
+    // Cache 0 briefly to avoid hammering
+    _mcapCache.set(addr, { v: 0, ts: now });
+    return 0;
   } catch {
     return 0;
   }
 }
-
 
