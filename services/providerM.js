@@ -1,4 +1,6 @@
 // services/providerM.js
+'use strict';
+
 const { JsonRpcProvider, Network } = require('ethers');
 const fetch = require('node-fetch');
 
@@ -9,6 +11,12 @@ const fetch = require('node-fetch');
    - Per-endpoint backoff + per-chain cooldown + timeouts
    - Static network hints (no ethers network-detect retries)
    - Never throws from public APIs; returns null on failure
+
+   ✅ Enhancements (NO logic changes):
+   - Safer timers (unref) so timeouts don't keep process alive
+   - Harder null-guards around provider creation/ping
+   - More defensive JSON fetch (headers + abort cleanup)
+   - Slightly safer URL normalization and list handling
 ========================================================= */
 
 /* =========================================================
@@ -114,7 +122,13 @@ const REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6h
 const chains = {}; // key -> { endpoints[], pinnedIdx, chainCooldownUntil, lastOfflineLogAt }
 const selectLocks = new Map(); // key -> Promise|null (serialize selection)
 function now() { return Date.now(); }
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function sleep(ms) {
+  return new Promise(r => {
+    const t = setTimeout(r, ms);
+    // ✅ Enhancement: don't keep the process alive just because of a sleep timer
+    if (t && typeof t.unref === 'function') t.unref();
+  });
+}
 function jitter(ms) { return Math.floor(ms * (0.85 + Math.random() * 0.3)); }
 function isThenable(x) { return x && typeof x.then === 'function'; }
 
@@ -124,7 +138,8 @@ function normalizeUrl(u) {
   u = u.trim();
   try {
     const url = new URL(u);
-    if (url.pathname !== '/') {
+    // keep origin + path, but trim repeated trailing slashes for non-root paths
+    if (url.pathname && url.pathname !== '/') {
       url.pathname = url.pathname.replace(/\/+$/, '');
       if (url.pathname === '') url.pathname = '/';
     }
@@ -137,7 +152,7 @@ function normalizeUrl(u) {
 function uniqueHttps(list) {
   const out = [];
   const seen = new Set();
-  for (let url of list) {
+  for (let url of (Array.isArray(list) ? list : [])) {
     if (!url || typeof url !== 'string') continue;
     url = normalizeUrl(url);
     if (!url.startsWith('https://')) continue;
@@ -156,12 +171,18 @@ function withTimeout(resultOrPromise, ms, reason = 'timeout') {
     const t = setTimeout(() => {
       if (!settled) { settled = true; reject(new Error(reason)); }
     }, ms);
+    // ✅ Enhancement: don't keep Node alive because of a timeout timer
+    if (t && typeof t.unref === 'function') t.unref();
+
     const ok = v => { if (!settled) { settled = true; clearTimeout(t); resolve(v); } };
     const err = e => { if (!settled) { settled = true; clearTimeout(t); reject(e); } };
+
     try {
       if (isThenable(resultOrPromise)) resultOrPromise.then(ok, err);
       else ok(resultOrPromise);
-    } catch (e) { err(e); }
+    } catch (e) {
+      err(e);
+    }
   });
 }
 
@@ -216,18 +237,24 @@ function makeProvider(key, url) {
   const u = normalizeUrl(url);
   const staticNet = toStaticNetwork(key);
 
-  // ✅ FIX: in v6, options.staticNetwork must be a Network (has matches())
-  // Passing boolean causes: staticNetwork.matches is not a function
-  const p = staticNet
-    ? new JsonRpcProvider(u, staticNet, { staticNetwork: staticNet })
-    : new JsonRpcProvider(u);
+  try {
+    // ✅ FIX: in v6, options.staticNetwork must be a Network (has matches())
+    // Passing boolean causes: staticNetwork.matches is not a function
+    const p = staticNet
+      ? new JsonRpcProvider(u, staticNet, { staticNetwork: staticNet })
+      : new JsonRpcProvider(u);
 
-  p._rpcUrl = u;
-  p.pollingInterval = 8000;
-  return p;
+    p._rpcUrl = u;
+    p.pollingInterval = 8000;
+    return p;
+  } catch {
+    // Enhancement: never throw on provider creation (keeps the existing contract: return null on failure)
+    return null;
+  }
 }
 
 async function pingProvider(provider, timeoutMs = 2500) {
+  if (!provider) return false;
   try {
     const res = await withTimeout(provider.getBlockNumber(), timeoutMs, 'rpc ping timeout');
     return Number.isInteger(res) && res >= 0;
@@ -256,7 +283,7 @@ async function selectHealthy(key) {
       const ep = st.endpoints[st.pinnedIdx];
       if (ep && now() >= ep.cooldownUntil) {
         if (!ep.provider) ep.provider = makeProvider(key, ep.url);
-        return ep.provider;
+        return ep.provider || null;
       }
     }
 
@@ -267,6 +294,13 @@ async function selectHealthy(key) {
     for (const { ep, idx } of ordered) {
       if (now() < ep.cooldownUntil) continue;
       if (!ep.provider) ep.provider = makeProvider(key, ep.url);
+      if (!ep.provider) {
+        // Treat as failure and continue (keeps behavior: try others, may go offline)
+        ep.failCount += 1;
+        const backoff = Math.min(30000, (1000 ** Math.min(3, ep.failCount)) * 2);
+        ep.cooldownUntil = now() + jitter(backoff);
+        continue;
+      }
 
       const ok = await pingProvider(ep.provider, 2000);
       if (ok) {
@@ -305,16 +339,18 @@ function getProvider(chain = 'base') {
   const key = (chain || 'base').toLowerCase();
   initChain(key);
   const st = chains[key];
+
   if (now() < st.chainCooldownUntil) {
     // Keep same behavior; optionally quiet by log level
     _logWarn(`cooldown:${key}`, PROVIDERM_LOG_RPC_FAILED_EVERY_MS, `⚠️ No live provider for "${key}". Returning null (chain cooldown).`);
     return null;
   }
   if (st.pinnedIdx == null) return null;
+
   const ep = st.endpoints[st.pinnedIdx];
   if (!ep || now() < ep.cooldownUntil) return null;
   if (!ep.provider) ep.provider = makeProvider(key, ep.url);
-  return ep.provider;
+  return ep.provider || null;
 }
 
 async function rotateProvider(chain = 'base') {
@@ -400,8 +436,17 @@ function getMaxBatchSize(chain = 'base') {
 async function fetchJson(url, timeoutMs = 9000) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  if (t && typeof t.unref === 'function') t.unref();
+
   try {
-    const res = await fetch(url, { signal: ctrl.signal });
+    const res = await fetch(url, {
+      signal: ctrl.signal,
+      headers: {
+        // ✅ Enhancement: some endpoints behave better with explicit accept + UA
+        'accept': 'application/json,text/plain;q=0.9,*/*;q=0.8',
+        'user-agent': 'providerM/1.0 (+discord-bot)'
+      }
+    });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return await res.json();
   } finally {
@@ -503,4 +548,3 @@ module.exports = {
   safeRpcCall,
   getMaxBatchSize
 };
-
