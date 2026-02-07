@@ -4,22 +4,22 @@
 // - Null-safe provider handling
 // - Small block spans (per-chain defaults) to avoid "no response" + rate limits
 // - Per-chunk retries w/ timeout + adaptive backoff
-// - Uses providerM rotation/pinning (getProvider + rotateProvider)
+// - Uses providerM rotation/pinning (getProvider + rotateProvider + safeRpcCall)
 // ======================================================
 
 const { id } = require("ethers");
-const { getProvider, getMaxBatchSize, rotateProvider, safeRpcCall } = require("./providerM");
+const { getProvider, rotateProvider, safeRpcCall } = require("./providerM");
 
 /* ===================== CONFIG ===================== */
 // Smaller spans = fewer rate limits / fewer "no response" on getLogs
 const SPAN_BASE = Math.max(1, Number(process.env.LOGSCAN_BLOCK_SPAN_BASE || 2)); // default 2
-const SPAN_ETH  = Math.max(1, Number(process.env.LOGSCAN_BLOCK_SPAN_ETH  || 4)); // default 4 (safer than 5)
-const SPAN_APE  = Math.max(1, Number(process.env.LOGSCAN_BLOCK_SPAN_APE  || 2)); // default 2
+const SPAN_ETH = Math.max(1, Number(process.env.LOGSCAN_BLOCK_SPAN_ETH || 4)); // default 4
+const SPAN_APE = Math.max(1, Number(process.env.LOGSCAN_BLOCK_SPAN_APE || 2)); // default 2
 
 // Throttle between calls (ms)
 const DELAY_BASE = Math.max(0, Number(process.env.LOGSCAN_DELAY_MS_BASE || 140));
-const DELAY_ETH  = Math.max(0, Number(process.env.LOGSCAN_DELAY_MS_ETH  || 180));
-const DELAY_APE  = Math.max(0, Number(process.env.LOGSCAN_DELAY_MS_APE  || 350));
+const DELAY_ETH = Math.max(0, Number(process.env.LOGSCAN_DELAY_MS_ETH || 180));
+const DELAY_APE = Math.max(0, Number(process.env.LOGSCAN_DELAY_MS_APE || 350));
 
 // Per-chunk getLogs timeout (ms)
 const LOGS_TIMEOUT_MS = Math.max(4000, Number(process.env.LOGSCAN_GETLOGS_TIMEOUT_MS || 12000));
@@ -29,12 +29,17 @@ const CHUNK_RETRIES = Math.max(0, Number(process.env.LOGSCAN_CHUNK_RETRIES || 2)
 
 // Extra delay when rate-limited (exponential-ish)
 const RATE_LIMIT_BACKOFF_START = Math.max(250, Number(process.env.LOGSCAN_RL_BACKOFF_START_MS || 1000));
-const RATE_LIMIT_BACKOFF_MAX   = Math.max(RATE_LIMIT_BACKOFF_START, Number(process.env.LOGSCAN_RL_BACKOFF_MAX_MS || 60000));
+const RATE_LIMIT_BACKOFF_MAX = Math.max(RATE_LIMIT_BACKOFF_START, Number(process.env.LOGSCAN_RL_BACKOFF_MAX_MS || 60000));
 
 // Optional jitter so multiple instances don’t spike at same time
 const JITTER_MS = Math.max(0, Number(process.env.LOGSCAN_JITTER_MS || 120));
 
-// Debug
+// Adaptive span growth control (safe)
+const SPAN_GROW_EVERY = Math.max(1, Number(process.env.LOGSCAN_SPAN_GROW_EVERY || 8)); // after N consecutive successes
+const SPAN_GROW_MAX_MULT = Math.max(1, Number(process.env.LOGSCAN_SPAN_GROW_MAX_MULT || 4)); // max = defaultSpan * mult
+
+// Log spam control (safe)
+const WARN_EVERY_MS = Math.max(0, Number(process.env.LOGSCAN_WARN_EVERY_MS || 15000)); // 15s per unique key
 const DEBUG = String(process.env.LOGSCAN_DEBUG || "").trim() === "1";
 
 function log(...args) {
@@ -56,6 +61,21 @@ function normalizeAddrs(addresses) {
     .filter(Boolean);
 }
 
+// ---- warn rate limit buckets ----
+const _warnRL = new Map(); // key -> lastMs
+function warnEvery(key, everyMs, line) {
+  const ms = Math.max(0, Number(everyMs || 0));
+  if (!ms) {
+    console.warn(line);
+    return;
+  }
+  const now = Date.now();
+  const last = _warnRL.get(key) || 0;
+  if (now - last < ms) return;
+  _warnRL.set(key, now);
+  console.warn(line);
+}
+
 function isRateLimitMsg(msg) {
   const m = String(msg || "").toLowerCase();
   return (
@@ -63,7 +83,8 @@ function isRateLimitMsg(msg) {
     m.includes("rate limit") ||
     m.includes("too many requests") ||
     m.includes("-32016") || // Base often returns -32016 for RL
-    m.includes("429")
+    m.includes("429") ||
+    m.includes("no backend is currently healthy") // seen on Base sometimes
   );
 }
 
@@ -75,7 +96,9 @@ function isNoResponseMsg(msg) {
     m.includes("timed out") ||
     m.includes("gateway timeout") ||
     m.includes("service unavailable") ||
-    m.includes("bad gateway")
+    m.includes("bad gateway") ||
+    m.includes("aborted") ||
+    m.includes("connection terminated unexpectedly")
   );
 }
 
@@ -99,41 +122,14 @@ function defaultDelayForChain(chain) {
   return DELAY_BASE;
 }
 
-function withTimeout(promise, ms, reason = "rpc call timeout") {
-  return new Promise((resolve, reject) => {
-    let done = false;
-    const t = setTimeout(() => {
-      if (done) return;
-      done = true;
-      reject(new Error(reason));
-    }, ms);
-
-    Promise.resolve(promise)
-      .then((v) => {
-        if (done) return;
-        done = true;
-        clearTimeout(t);
-        resolve(v);
-      })
-      .catch((e) => {
-        if (done) return;
-        done = true;
-        clearTimeout(t);
-        reject(e);
-      });
-  });
-}
-
 // Force providerM to pin/select something for the chain if none pinned yet
 async function ensureProviderPinned(chain) {
   const c = String(chain || "base").toLowerCase();
 
-  // If already pinned, great
   const p0 = getProvider(c);
   if (p0) return true;
 
   // Kick providerM selection by doing a tiny safeRpcCall
-  // NOTE: safeRpcCall returns null on failure; it doesn't throw
   const ok = await safeRpcCall(c, (p) => p.getBlockNumber(), 2, 4000);
   if (ok == null) return false;
 
@@ -157,12 +153,16 @@ async function fetchLogs(addresses, fromBlock, toBlock, chain = "base") {
   const tb = Number(toBlock);
   if (!Number.isFinite(fb) || !Number.isFinite(tb) || tb < fb) return [];
 
-  // getMaxBatchSize() is NOT a block span, but we can use it as a ceiling hint
-  const maxSpanCeiling = Math.max(1, Number(getMaxBatchSize(c) || 1));
-  let span = Math.max(1, Math.min(defaultSpanForChain(c), maxSpanCeiling));
+  // Span starts at per-chain default; grows slowly on success, shrinks quickly on failures
+  const defaultSpan = Math.max(1, defaultSpanForChain(c));
+  const maxSpan = Math.max(defaultSpan, defaultSpan * SPAN_GROW_MAX_MULT);
+  let span = defaultSpan;
 
   // Adaptive rate-limit backoff state (per fetchLogs call)
   let rlBackoff = 0;
+
+  // Success tracking for gradual span growth
+  let successStreak = 0;
 
   // Ensure provider pinned before hammering getLogs
   const pinned = await ensureProviderPinned(c);
@@ -186,12 +186,11 @@ async function fetchLogs(addresses, fromBlock, toBlock, chain = "base") {
 
       let got = null;
       let lastErrMsg = "";
+      let rotatedThisChunk = false;
 
       for (let attempt = 0; attempt <= CHUNK_RETRIES; attempt++) {
-        // Always use latest pinned provider
-        let provider = getProvider(c);
-
         // If provider dropped, try to re-pin
+        let provider = getProvider(c);
         if (!provider) {
           const ok = await ensureProviderPinned(c);
           provider = ok ? getProvider(c) : null;
@@ -199,15 +198,27 @@ async function fetchLogs(addresses, fromBlock, toBlock, chain = "base") {
 
         if (!provider) {
           lastErrMsg = "no provider available";
-          // rotate and backoff
-          try { await rotateProvider(c); } catch {}
+          if (!rotatedThisChunk) {
+            rotatedThisChunk = true;
+            try {
+              await rotateProvider(c);
+            } catch {}
+          }
           await sleep(withJitter(400 + attempt * 250));
           continue;
         }
 
         try {
-          // Direct getLogs with our own timeout so we can detect messages
-          const theseLogs = await withTimeout(provider.getLogs(filter), LOGS_TIMEOUT_MS, "rpc getLogs timeout");
+          // ✅ Use safeRpcCall so providerM handles rotation/timeouts consistently.
+          // Still respects your CHUNK_RETRIES outer loop.
+          const theseLogs =
+            (await safeRpcCall(
+              c,
+              (p) => p.getLogs(filter),
+              1, // keep outer retries authoritative
+              LOGS_TIMEOUT_MS
+            )) || [];
+
           got = Array.isArray(theseLogs) ? theseLogs : [];
           break; // success
         } catch (err) {
@@ -216,41 +227,72 @@ async function fetchLogs(addresses, fromBlock, toBlock, chain = "base") {
 
           // Ape special-case: stop early (don’t spam)
           if (isApeBatchLimit(msg, c)) {
-            console.warn(`🛑 DRPC batch limit hit — ${c} logs skipped: ${start}–${end}`);
+            warnEvery(
+              `apeBatch:${address}`,
+              WARN_EVERY_MS,
+              `🛑 DRPC batch limit hit — ${c} logs skipped: ${start}–${end}`
+            );
             return [];
           }
 
           const rateLimited = isRateLimitMsg(msg);
-          const noResponse  = isNoResponseMsg(msg);
+          const noResponse = isNoResponseMsg(msg);
 
           if (rateLimited) {
-            console.warn(`⏳ [${c}] RATE LIMITED on ${address} ${start}–${end} — rotate + backoff`);
-            // rotate provider immediately
-            try { await rotateProvider(c); } catch {}
+            warnEvery(
+              `rl:${c}:${address}`,
+              WARN_EVERY_MS,
+              `⏳ [${c}] RATE LIMITED on ${address} ${start}–${end} — rotate + backoff`
+            );
+
+            if (!rotatedThisChunk) {
+              rotatedThisChunk = true;
+              try {
+                await rotateProvider(c);
+              } catch {}
+            }
 
             // Increase backoff
             rlBackoff = Math.min(
               RATE_LIMIT_BACKOFF_MAX,
-              Math.max(
-                RATE_LIMIT_BACKOFF_START,
-                rlBackoff ? rlBackoff * 2 : RATE_LIMIT_BACKOFF_START
-              )
+              Math.max(RATE_LIMIT_BACKOFF_START, rlBackoff ? rlBackoff * 2 : RATE_LIMIT_BACKOFF_START)
             );
 
             // Reduce span (down to 1)
             span = Math.max(1, span - 1);
+            successStreak = 0;
           } else if (noResponse) {
-            console.warn(`⚠️ [${c}] NO RESPONSE on ${address} ${start}–${end} — rotate + smaller span`);
-            try { await rotateProvider(c); } catch {}
+            warnEvery(
+              `nr:${c}:${address}`,
+              WARN_EVERY_MS,
+              `⚠️ [${c}] NO RESPONSE on ${address} ${start}–${end} — rotate + smaller span`
+            );
 
-            // Shrink span a bit (helps “no response” a lot)
+            if (!rotatedThisChunk) {
+              rotatedThisChunk = true;
+              try {
+                await rotateProvider(c);
+              } catch {}
+            }
+
+            // Shrink span modestly (helps a lot)
             span = Math.max(1, Math.min(span, 2));
-            // Mild backoff too
             rlBackoff = Math.min(RATE_LIMIT_BACKOFF_MAX, Math.max(rlBackoff, 800));
+            successStreak = 0;
           } else {
-            console.warn(`⚠️ [${c}] getLogs error ${address} ${start}–${end}: ${msg}`);
-            // Rotate once for unknown errors too (best effort)
-            try { await rotateProvider(c); } catch {}
+            warnEvery(
+              `err:${c}:${address}`,
+              WARN_EVERY_MS,
+              `⚠️ [${c}] getLogs error ${address} ${start}–${end}: ${String(msg).slice(0, 180)}`
+            );
+
+            if (!rotatedThisChunk) {
+              rotatedThisChunk = true;
+              try {
+                await rotateProvider(c);
+              } catch {}
+            }
+            successStreak = 0;
           }
 
           // Per-attempt delay
@@ -262,10 +304,22 @@ async function fetchLogs(addresses, fromBlock, toBlock, chain = "base") {
 
       if (!got) {
         // If we never got logs after retries, just move on (don’t hard fail scanners)
-        console.warn(`⚠️ [${c}] logs skipped for ${address} ${start}–${end} (after retries): ${String(lastErrMsg).slice(0, 180)}`);
+        warnEvery(
+          `skipped:${c}:${address}:${start}:${end}`,
+          WARN_EVERY_MS,
+          `⚠️ [${c}] logs skipped for ${address} ${start}–${end} (after retries): ${String(lastErrMsg).slice(0, 180)}`
+        );
       } else {
         // Success reduces backoff gradually
         if (rlBackoff > 0) rlBackoff = Math.max(0, Math.floor(rlBackoff * 0.5));
+
+        // Grow span slowly after a streak of clean chunks
+        successStreak += 1;
+        if (successStreak >= SPAN_GROW_EVERY && span < maxSpan) {
+          span = Math.min(maxSpan, span + 1);
+          successStreak = 0;
+          log(`span grown -> ${span} (chain=${c})`);
+        }
       }
 
       start = end + 1;
