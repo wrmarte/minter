@@ -63,6 +63,13 @@ process.env.PG_POOL_MAX        ??= '5';
 process.env.PG_IDLE_TIMEOUT_MS ??= '30000';
 process.env.PG_CONN_TIMEOUT_MS ??= '10000';
 
+// ✅ NEW: extra PG hardening knobs (safe defaults)
+process.env.PG_KEEPALIVE                ??= '1';
+process.env.PG_KEEPALIVE_DELAY_MS       ??= '10000';
+process.env.PG_QUERY_RETRIES            ??= '2';
+process.env.PG_QUERY_RETRY_BASE_DELAYMS ??= '250';
+process.env.PG_ERROR_LOG_EVERY_MS       ??= '60000';
+
 if (!process.env.DATABASE_URL) {
   console.error('❌ DATABASE_URL is required.');
   process.exit(1);
@@ -171,20 +178,140 @@ if (WEBHOOKAUTO_DEBUG) {
   console.log(`🪝 webhookAuto DEBUG=1 | relayName="${MB_RELAY_WEBHOOK_NAME}" | mbella="${MBELLA_NAME}" | avatar=${MBELLA_AVATAR ? 'set' : 'none'}`);
 }
 
+/* ======================================================
+   ✅ POSTGRES HARDENING (Railway-safe)
+   - keepalive on
+   - connection + idle timeouts
+   - promise-query auto-retry for transient disconnects
+   - rate-limited pool error logs
+====================================================== */
+
+// Simple rate limiter for spammy logs
+const _logRl = new Map(); // key -> lastMs
+function logEvery(key, everyMs, fn) {
+  const ms = Math.max(0, Number(everyMs || 0));
+  if (ms <= 0) return fn();
+  const now = Date.now();
+  const last = _logRl.get(key) || 0;
+  if (now - last < ms) return;
+  _logRl.set(key, now);
+  fn();
+}
+
+function isPgConnDrop(err) {
+  const msg = String(err?.message || '');
+  const code = String(err?.code || '');
+
+  // Message patterns
+  if (
+    msg.includes('Connection terminated unexpectedly') ||
+    msg.includes('Connection terminated due to connection timeout') ||
+    msg.includes('terminating connection due to administrator command') ||
+    msg.includes('server closed the connection unexpectedly') ||
+    msg.includes('ECONNRESET') ||
+    msg.includes('ETIMEDOUT') ||
+    msg.includes('EPIPE') ||
+    msg.includes('socket hang up')
+  ) return true;
+
+  // PG codes that show transient connection failure / overload
+  if (
+    code === '57P01' || // admin_shutdown
+    code === '57P02' || // crash_shutdown
+    code === '57P03' || // cannot_connect_now
+    code === '53300' || // too_many_connections
+    code === '08006' || // connection_failure
+    code === '08001' || // sqlclient_unable_to_establish_sqlconnection
+    code === '08004'    // sqlserver_rejected_establishment_of_sqlconnection
+  ) return true;
+
+  return false;
+}
+
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
+}
+
+function wrapPoolQueryWithRetry(pool, opts = {}) {
+  if (!pool?.query) return pool;
+
+  const originalQuery = pool.query.bind(pool);
+
+  const retries = Math.max(0, Number(opts.retries ?? process.env.PG_QUERY_RETRIES ?? 2));
+  const baseDelayMs = Math.max(50, Number(opts.baseDelayMs ?? process.env.PG_QUERY_RETRY_BASE_DELAYMS ?? 250));
+  const logEveryMs = Math.max(0, Number(opts.logEveryMs ?? process.env.PG_ERROR_LOG_EVERY_MS ?? 60000));
+
+  // Preserve callback-style pg.query(text, params, cb)
+  pool.query = (...args) => {
+    const last = args[args.length - 1];
+    const hasCallback = typeof last === 'function';
+    if (hasCallback) {
+      // Callback mode: do NOT retry (to avoid double-callback bugs)
+      return originalQuery(...args);
+    }
+
+    // Promise mode: retry only on transient connection drops
+    return (async () => {
+      for (let i = 0; i <= retries; i++) {
+        try {
+          return await originalQuery(...args);
+        } catch (err) {
+          const retryable = isPgConnDrop(err);
+          const lastTry = i === retries;
+
+          if (!retryable || lastTry) throw err;
+
+          logEvery('pg_retry_warn', logEveryMs, () => {
+            console.warn(`⚠️ [PG] transient error -> retrying (${i + 1}/${retries})`, err?.message || err);
+          });
+
+          // small linear backoff (keeps app responsive)
+          await sleep(baseDelayMs * (i + 1));
+        }
+      }
+      // unreachable
+      return originalQuery(...args);
+    })();
+  };
+
+  // expose original for rare cases
+  pool.__originalQuery = originalQuery;
+  return pool;
+}
+
 // ================= PostgreSQL =================
 const wantSsl = !/^1|true$/i.test(process.env.PGSSL_DISABLE || '');
-console.log(`📦 PG SSL: ${wantSsl ? 'ON' : 'OFF'} | Pool max=${process.env.PG_POOL_MAX}`);
+const wantKeepAlive = String(process.env.PG_KEEPALIVE || '1').trim() === '1';
+const keepAliveDelay = Number(process.env.PG_KEEPALIVE_DELAY_MS || 10000);
+
+console.log(`📦 PG SSL: ${wantSsl ? 'ON' : 'OFF'} | Pool max=${process.env.PG_POOL_MAX} | keepAlive=${wantKeepAlive ? 'ON' : 'OFF'}`);
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   max: Number(process.env.PG_POOL_MAX),
   idleTimeoutMillis: Number(process.env.PG_IDLE_TIMEOUT_MS),
   connectionTimeoutMillis: Number(process.env.PG_CONN_TIMEOUT_MS),
+
+  // ✅ Keepalive helps reduce “terminated unexpectedly” on some platforms
+  keepAlive: wantKeepAlive,
+  keepAliveInitialDelayMillis: Number.isFinite(keepAliveDelay) ? keepAliveDelay : 10000,
+
+  // pg expects false or ssl object
   ssl: wantSsl ? { rejectUnauthorized: false } : false
 });
 
-pool.on('error', err => {
-  console.error('🛑 PG pool idle client error:', err?.message || err);
+// ✅ rate-limited pool error handler (idle clients dying is common on Railway)
+pool.on('error', (err) => {
+  logEvery('pg_pool_error', Number(process.env.PG_ERROR_LOG_EVERY_MS || 60000), () => {
+    console.error('🛑 PG pool idle client error:', err?.message || err);
+  });
+});
+
+// ✅ auto-retry promise-based queries across the whole bot (no other file changes needed)
+wrapPoolQueryWithRetry(pool, {
+  retries: Number(process.env.PG_QUERY_RETRIES || 2),
+  baseDelayMs: Number(process.env.PG_QUERY_RETRY_BASE_DELAYMS || 250),
+  logEveryMs: Number(process.env.PG_ERROR_LOG_EVERY_MS || 60000),
 });
 
 client.pg = pool;
@@ -337,7 +464,17 @@ const { safeRpcCall } = require('./services/providerM');
 const timers = { globalScan: null, rewardPayout: null };
 let globalScanDelayMs = 15000;
 
+// ✅ NEW: extra guard (prevents weird double scheduling if index gets loaded twice)
+let _globalScanRunning = false;
+
 async function runGlobalScanTick() {
+  if (_globalScanRunning) {
+    // If somehow called twice, don’t overlap.
+    timers.globalScan = setTimeout(runGlobalScanTick, Math.max(5000, globalScanDelayMs));
+    return;
+  }
+  _globalScanRunning = true;
+
   try {
     const provider = await safeRpcCall('base', p => p);
     if (!provider) throw new Error('No base provider');
@@ -347,14 +484,28 @@ async function runGlobalScanTick() {
     globalScanDelayMs = 15000;
   } catch (err) {
     const msg = (err?.message || '').toLowerCase();
+
+    // ✅ If DB is timing out / dropping, back off a bit more gently (reduces cascade)
+    const looksPg =
+      msg.includes('connection terminated') ||
+      msg.includes('timeout') ||
+      msg.includes('pg') ||
+      msg.includes('too many connections');
+
     if (msg.includes('rate')) {
       globalScanDelayMs = Math.min(globalScanDelayMs * 2, 180000);
       console.warn(`⏳ Rate-limited. Backing off to ${globalScanDelayMs}ms`);
+    } else if (looksPg) {
+      globalScanDelayMs = Math.min(Math.max(globalScanDelayMs * 2, 30000), 180000);
+      logEvery('global_scan_pg_err', Number(process.env.PG_ERROR_LOG_EVERY_MS || 60000), () => {
+        console.warn(`🧱 Global scanner DB-ish error. Backing off to ${globalScanDelayMs}ms | ${err?.message || err}`);
+      });
     } else {
       console.error('Global scanner error:', err);
       globalScanDelayMs = Math.min(globalScanDelayMs + 5000, 60000);
     }
   } finally {
+    _globalScanRunning = false;
     timers.globalScan = setTimeout(runGlobalScanTick, globalScanDelayMs);
   }
 }
@@ -544,3 +695,4 @@ async function gracefulShutdown(sig) {
 
 process.once('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.once('SIGINT', () => gracefulShutdown('SIGINT'));
+
