@@ -1,17 +1,126 @@
 const fetch = require('node-fetch');
 
-async function fetchEthUsd() {
-  try {
-    const res = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd');
-    const data = await res.json();
-    const ethUSD = parseFloat(data?.ethereum?.usd || '0');
+/* =========================================================
+   ETH/USD PRICE (CoinGecko) — ENHANCED (NO LOGIC CHANGE)
+   - Adds in-memory cache (TTL) to reduce API calls
+   - Adds failure backoff so repeated failures don’t spam logs
+   - Rate-limits the warning log line
+   - Keeps the same fallback behavior ($3000) when CG fails
+========================================================= */
 
-    if (!ethUSD || isNaN(ethUSD)) throw new Error('Invalid ETH price');
-    return ethUSD;
-  } catch (e) {
-    console.warn(`⚠️ CoinGecko ETH price failed, using fallback: $3000`);
-    return 3000; // 🛑 Fallback ETH price (update as needed)
+// Cache TTL for successful price fetch (ms)
+const ETH_USD_TTL_MS = Math.max(
+  10_000,
+  Number(process.env.ETH_USD_TTL_MS || 120_000) // default 2 minutes
+);
+
+// After a failure, don’t attempt again for this long (ms)
+const ETH_USD_FAIL_BACKOFF_MS = Math.max(
+  5_000,
+  Number(process.env.ETH_USD_FAIL_BACKOFF_MS || 60_000) // default 60 seconds
+);
+
+// Rate-limit the CoinGecko warning log line (ms)
+const ETH_USD_WARN_EVERY_MS = Math.max(
+  0,
+  Number(process.env.ETH_USD_WARN_EVERY_MS || 300_000) // default 5 minutes
+);
+
+// Optional fetch timeout (ms)
+const ETH_USD_FETCH_TIMEOUT_MS = Math.max(
+  2_000,
+  Number(process.env.ETH_USD_FETCH_TIMEOUT_MS || 8_000) // default 8 seconds
+);
+
+// Fallback ETH price (same as before)
+const ETH_USD_FALLBACK = Number(process.env.ETH_USD_FALLBACK || 3000);
+
+let _ethUsdCache = {
+  value: null,       // number
+  fetchedAt: 0,      // ms
+  lastFailAt: 0,     // ms
+  inflight: null,    // Promise<number>|null
+};
+
+let _lastWarnAt = 0;
+function warnRateLimited(msg) {
+  const now = Date.now();
+  if (ETH_USD_WARN_EVERY_MS <= 0 || now - _lastWarnAt >= ETH_USD_WARN_EVERY_MS) {
+    _lastWarnAt = now;
+    console.warn(msg);
   }
+}
+
+function isGoodNumber(n) {
+  return Number.isFinite(n) && n > 0;
+}
+
+async function fetchJsonWithTimeout(url, timeoutMs) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { signal: ctrl.signal });
+    const data = await res.json().catch(() => null);
+    return { ok: res.ok, status: res.status, data };
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function fetchEthUsd() {
+  const now = Date.now();
+
+  // ✅ Serve from cache if fresh
+  if (isGoodNumber(_ethUsdCache.value) && now - _ethUsdCache.fetchedAt <= ETH_USD_TTL_MS) {
+    return _ethUsdCache.value;
+  }
+
+  // ✅ If we recently failed, avoid hammering CoinGecko; use fallback
+  if (_ethUsdCache.lastFailAt && now - _ethUsdCache.lastFailAt < ETH_USD_FAIL_BACKOFF_MS) {
+    return isGoodNumber(_ethUsdCache.value) ? _ethUsdCache.value : ETH_USD_FALLBACK;
+  }
+
+  // ✅ Deduplicate concurrent calls
+  if (_ethUsdCache.inflight) {
+    try {
+      const v = await _ethUsdCache.inflight;
+      if (isGoodNumber(v)) return v;
+    } catch {
+      // fall through to fallback
+    }
+    return isGoodNumber(_ethUsdCache.value) ? _ethUsdCache.value : ETH_USD_FALLBACK;
+  }
+
+  _ethUsdCache.inflight = (async () => {
+    try {
+      const { ok, status, data } = await fetchJsonWithTimeout(
+        'https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd',
+        ETH_USD_FETCH_TIMEOUT_MS
+      );
+
+      const ethUSD = parseFloat(data?.ethereum?.usd || '0');
+      if (!ok || !isGoodNumber(ethUSD)) {
+        throw new Error(`Invalid ETH price (status=${status || 'n/a'} value=${ethUSD || 0})`);
+      }
+
+      _ethUsdCache.value = ethUSD;
+      _ethUsdCache.fetchedAt = Date.now();
+      _ethUsdCache.lastFailAt = 0;
+      return ethUSD;
+    } catch (e) {
+      _ethUsdCache.lastFailAt = Date.now();
+
+      // Keep same message, but rate-limited
+      warnRateLimited(`⚠️ CoinGecko ETH price failed, using fallback: $${ETH_USD_FALLBACK}`);
+
+      // Keep same behavior: return fallback when CG fails
+      return ETH_USD_FALLBACK;
+    } finally {
+      _ethUsdCache.inflight = null;
+    }
+  })();
+
+  return _ethUsdCache.inflight;
 }
 
 async function getRealDexPriceForToken(amount, tokenAddress) {
@@ -65,11 +174,3 @@ async function getEthPriceFromToken(tokenAddress) {
 }
 
 module.exports = { getRealDexPriceForToken, getEthPriceFromToken };
-
-
-
-
-
-
-
-
