@@ -9,12 +9,12 @@ const fetch = require('node-fetch');
  * - Up/down style: 24h change (API) or tick-to-tick since the last poll
  *
  * Extra env for DEX sources:
- *   TICKER_GT_MAP="btc=ethereum:0xPOOL;eth=ethereum:0xPOOL;sol=solana:POOLID;adrian=base:POOLID"
- *   TICKER_DS_MAP="btc=ethereum:0xPAIR;eth=ethereum:0xPAIR;sol=solana:0xPAIR;adrian=base:0xPAIR"
+ *   TICKER_GT_MAP="btc=ethereum:0xPOOL;eth=ethereum:0xPOOL;sol=solana:POOLID;zero=base:POOLID"
+ *   TICKER_DS_MAP="btc=ethereum:0xPAIR;eth=ethereum:0xPAIR;sol=solana:0xPAIR;zero=base:0xPAIR"
  *
  * Optional custom ID maps for centralized sources (so you can add custom tickers if listed there):
- *   TICKER_CG_IDS="ape=apecoin;adrian=some-coingecko-id"
- *   TICKER_CC_IDS="ape=apecoin;adrian=some-coincap-id"
+ *   TICKER_CG_IDS="ape=apecoin;zero=some-coingecko-id"
+ *   TICKER_CC_IDS="ape=apecoin;zero=some-coincap-id"
  */
 
 let timer = null;
@@ -39,7 +39,7 @@ const ACTIVITY_TYPES = { Playing: 0, Streaming: 1, Listening: 2, Watching: 3, Co
 const ACTIVITY_TYPE  = ACTIVITY_TYPES[process.env.TICKER_ACTIVITY_TYPE || 'Watching'] ?? 3;
 
 // ✅ Added adrian to default list
-const RAW_ASSETS = (process.env.TICKER_ASSETS || 'btc,eth,sol,ape,adrian')
+const RAW_ASSETS = (process.env.TICKER_ASSETS || 'btc,eth,sol,ape,zero')
   .split(',')
   .map(s => s.trim().toLowerCase())
   .filter(Boolean);
