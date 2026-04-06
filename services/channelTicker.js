@@ -13,11 +13,11 @@ const fetch = require("node-fetch");
  * ENV (required):
  *   CHANNEL_TICKER_ENABLED=true
  *   CHANNEL_TICKER_CHANNEL_IDS=<voiceChannelId>
- *   CHANNEL_TICKER_ASSET=adrian
+ *   CHANNEL_TICKER_ASSET=zero
  *   CHANNEL_TICKER_INTERVAL_MS=300000
  *
  * GeckoTerminal map:
- *   TICKER_GT_MAP=adrian=base:POOLID
+ *   TICKER_GT_MAP=zero=base:POOLID
  *
  * Optional:
  *   CHANNEL_TICKER_DEBUG=1
@@ -74,7 +74,7 @@ function fmtPriceUSD(n) {
 }
 
 function parseMapEnv(envVal) {
-  // "adrian=base:POOLID;eth=ethereum:0xPOOL"
+  // "zero=base:POOLID;eth=ethereum:0xPOOL"
   const map = Object.create(null);
   if (!envVal) return map;
   for (const part of envVal.split(";")) {
