@@ -34,7 +34,7 @@ const CHANNEL_IDS = (process.env.CHANNEL_TICKER_CHANNEL_IDS || "")
   .map((s) => s.trim())
   .filter(Boolean);
 
-const ASSET = String(process.env.CHANNEL_TICKER_ASSET || "adrian").trim().toLowerCase();
+const ASSET = String(process.env.CHANNEL_TICKER_ASSET || "zero").trim().toLowerCase();
 
 const INTERVAL = Math.max(
   120000, // hard minimum 2 minutes
