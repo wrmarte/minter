@@ -38,7 +38,7 @@ const SOURCE_LIST = (process.env.TICKER_SOURCES || process.env.TICKER_SOURCE || 
 const ACTIVITY_TYPES = { Playing: 0, Streaming: 1, Listening: 2, Watching: 3, Competing: 5 };
 const ACTIVITY_TYPE  = ACTIVITY_TYPES[process.env.TICKER_ACTIVITY_TYPE || 'Watching'] ?? 3;
 
-// ✅ Added adrian to default list
+// ✅ Added zero to default list
 const RAW_ASSETS = (process.env.TICKER_ASSETS || 'btc,eth,sol,ape,zero')
   .split(',')
   .map(s => s.trim().toLowerCase())
@@ -46,7 +46,7 @@ const RAW_ASSETS = (process.env.TICKER_ASSETS || 'btc,eth,sol,ape,zero')
 
 // ---------- ID maps (centralized sources) ----------
 function parseIdMapEnv(envVal) {
-  // "btc=bitcoin;eth=ethereum;adrian=some-id"
+  // "btc=bitcoin;eth=ethereum;zero=some-id"
   const map = Object.create(null);
   if (!envVal) return map;
   for (const part of envVal.split(';')) {
