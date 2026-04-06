@@ -4,9 +4,9 @@ const fetch = require("node-fetch");
 /**
  * Voice Channel Ticker (TREND POP)
  * Format examples:
- *   🟢📈 $ADRIAN $0.00003800 ▲
- *   🔴📉 $ADRIAN $0.00003800 ▼
- *   ⚪📈 $ADRIAN $0.00003800 ↔
+ *   🟢📈 $ZERO $0.00003800 ▲
+ *   🔴📉 $ZERO $0.00003800 ▼
+ *   ⚪📈 $ZERO $0.00003800 ↔
  *
  * Trend is computed tick-to-tick (always works).
  *
